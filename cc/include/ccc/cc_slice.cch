@@ -757,7 +757,13 @@ static inline CCSlice cc__slice_sub_ptr(CCSlice* s, size_t start, size_t end) {
 static inline CCSlice cc__slice_sub_const_ptr(const CCSlice* s, size_t start, size_t end) {
     return s ? cc__slice_sub_value(*s, start, end) : cc_slice_empty();
 }
-static inline CCSlice CCSlice_sub(CCSlice* s, size_t start, size_t end) { return cc__slice_sub_ptr(s, start, end); }
+/* The body, not a call to cc__slice_sub_ptr: through two inline layers,
+ * gcc 13 -O2 loses the subslice's pointer back to the caller's array and
+ * keeps reading the array's initializer past a write through the
+ * subslice. Same value, one layer. */
+static inline CCSlice CCSlice_sub(CCSlice* s, size_t start, size_t end) {
+    return s ? cc__slice_sub_value(*s, start, end) : cc_slice_empty();
+}
 
 static inline bool cc_slice_starts_with(CCSlice* s, CCSlice prefix) {
     const uint8_t *p;

@@ -48,6 +48,13 @@ typedef struct CcLowerer {
                                  * destination pass picks a per-destination variant of one */
     Vec::[CcExprRef] res_dests; /* unwrap targets whose own type is the Result: they take it
                                  * whole. Typed under the walk, before the step rewrites */
+    /* Every short-form `cc_ok(...)` / `cc_err(...)` that a declaration or an
+     * assignment gives a destination, and at the same index the Result that
+     * destination is. Without it the constructor makes the ENCLOSING
+     * function's Result, which the host then refuses to assign. Typed under
+     * the walk, for the same reason `res_dests` is. */
+    CcExprList ctor_sites;
+    Vec::[CcTypeInfoRef] ctor_specs;
     /* Every call a `x.m(...)` became, and at the same index the `m` the site
      * wrote. The callee UFCS resolves to can be an overload name
      * (`cc_nursery_spawn_closure0`) that the program never mentions, so a

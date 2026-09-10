@@ -36,6 +36,8 @@ typedef struct RFn {
     bool nested_unwrap;         /* a `!>` in expression position was seen */
     RHandler* defining;         /* the handler whose body is being lowered, or NULL */
     CcNameList binders;         /* error binders in scope (`!> (e) {`, `@errhandler(E e)`), innermost last */
+    CcNameList rlocals;         /* locals declared with a Result type, in declaration order */
+    CcTypeInfoList rlocal_specs;/* the Result each one holds, parallel to `rlocals` */
     bool dest_body;             /* this function IS a dest body: the frame's `@errhandler` stands
                                  * where this fiber never returns through */
 } RFn;
@@ -103,6 +105,21 @@ static CCSlice rl_ident_name(const CcExpr* e) {
 
 /* ---- what the function returns ------------------------------------------ */
 
+/* The Result a type names: the `T !>(E)` node as written, or a spec name
+ * written out (`CCResult_int_CCError`). NULL when it is not a Result. */
+static CcTypeInfo* rl_result_of_type(CcLowerer* L, CcType* t) {
+    if (!t) return NULL;
+    @switch (t->k) {
+        case .result(r): return rl_ix_result(L, r.value, r.err, r.optional);
+        case .named(nm): {
+            CcIndex* ix = L->ix;
+            CcTypeInfo* ti = ix->type_get(nm.name);
+            return (ti && ti->is_result) ? ti : NULL;
+        }
+        default: return NULL;
+    }
+}
+
 static CcTypeInfo* rl_ret_result(CcLowerer* L, CcType* fn_type) {
     CcType* ret = NULL;
     if (!fn_type) return NULL;
@@ -110,17 +127,7 @@ static CcTypeInfo* rl_ret_result(CcLowerer* L, CcType* fn_type) {
         case .func(ft): ret = ft.ret; break;
         default: return NULL;
     }
-    if (!ret) return NULL;
-    @switch (ret->k) {
-        case .result(r): return rl_ix_result(L, r.value, r.err, r.optional);
-        case .named(nm): {
-            /* `CCResult_int_CCError f(void)`: the spec name written out */
-            CcIndex* ix = L->ix;
-            CcTypeInfo* ti = ix->type_get(nm.name);
-            return (ti && ti->is_result) ? ti : NULL;
-        }
-        default: return NULL;
-    }
+    return rl_result_of_type(L, ret);
 }
 
 /* The Result type a call expression yields, from the callee's declaration;
@@ -142,12 +149,95 @@ static CcTypeInfo* rl_result_of_call(CcLowerer* L, const CcExpr* e) {
     return rl_ret_result(L, sym->type);
 }
 
+/* ---- Result-typed locals -------------------------------------------------- */
+
+/* A local declared `T !>(E) r = f();` and then unwrapped as `r !>`. Its
+ * declaration is the only place the Result is written, so the pass records
+ * one as it lowers past it; a name used before its declaration is not a
+ * name this function can unwrap either. */
+static void rl_note_local(RFn* fn, CcDecl* d) {
+    CcVarDecl v;
+    bool is_var = false;
+    CcTypeInfo* ti;
+    if (!d) return;
+    @switch (d->k) {
+        case .var(vv): v = vv; is_var = true; break;
+        default: break;
+    }
+    if (!is_var || !v.name.len) return;
+    ti = rl_result_of_type(fn->L, v.type);
+    if (!ti) return;
+    {
+        CcNameList* nv = &fn->rlocals;
+        CcTypeInfoList* sv = &fn->rlocal_specs;
+        nv->push(v.name);
+        sv->push(ti);
+    }
+}
+
+/* The Result a name holds, or NULL when this function declared no such
+ * local. Innermost-last: the most recent declaration of a name wins. */
+static CcTypeInfo* rl_local_result(RFn* fn, const CcExpr* e) {
+    CCSlice nm;
+    CcNameList* nv;
+    size_t i;
+    if (!fn || !e) return NULL;
+    nm = rl_ident_name(e);
+    if (!nm.len) return NULL;
+    nv = &fn->rlocals;
+    i = nv->len();
+    while (i--) {
+        CCSlice have = *nv->get_ptr(i);
+        if (cc_slice_eq(&have, nm)) {
+            CcTypeInfoList* sv = &fn->rlocal_specs;
+            return *sv->get_ptr(i);
+        }
+    }
+    return NULL;
+}
+
 /* ---- cc_ok / cc_err ------------------------------------------------------ */
 
+/* The function symbol a call names, when the callee is a plain name. */
+static CcSym* rl_call_sym(CcLowerer* L, const CcExpr* e) {
+    CcExpr* callee = NULL;
+    CCSlice name;
+    CcSym* sym;
+    if (!e) return NULL;
+    @switch (e->k) {
+        case .call(c): callee = c.callee; break;
+        default: return NULL;
+    }
+    if (!callee) return NULL;
+    name = rl_ident_name(callee);
+    if (!name.len) return NULL;
+    sym = rl_ix_sym(L, name);
+    while (sym && sym->kind != CC_SYM_FUNC) sym = sym->same_name;
+    return sym;
+}
+
 /* A `T ?>(E)` return declares that dropping the result is allowed, so a
- * call that drops it is not unhandled. `T !>(E)` does not. */
+ * call that drops it is not unhandled. `T !>(E)` does not.
+ *
+ * A header's `T !>(E)` counts where the site wrote `x.m(...)`, and not
+ * where it wrote the function's own name: the reference lowering scans the
+ * unit's own result-typed declarations for the plain-call form, and checks
+ * the UFCS form at the member. `cc_std_out_write(data);` is accepted there
+ * and `n.spawn(...)` is not, so a lowering that flagged both would reject
+ * programs the other compiles. */
 static bool rl_unhandled_counts(CcLowerer* L, const CcExpr* e) {
-    CcTypeInfo* rt = rl_result_of_call(L, e);
+    CcSym* sym = rl_call_sym(L, e);
+    CcTypeInfo* rt;
+    if (!sym) return false;
+    if (sym->is_header) {
+        CcExprList* sv = &L->ufcs_sites;
+        size_t n = sv->len();
+        size_t i;
+        bool member_site = false;
+        for (i = 0; i < n; i++) if (*sv->get_ptr(i) == e) member_site = true;
+        if (!member_site) return false;
+    }
+    rt = rl_result_of_call(L, e);
     if (!rt) return false;
     return !rt->result_optional;
 }
@@ -179,10 +269,65 @@ static bool rl_is_string(const CcExpr* e) {
     }
 }
 
+/* `cc_ok(...)` / `cc_err(...)` as written. */
+static bool rl_is_ctor_call(const CcExpr* e) {
+    CcExpr* callee = NULL;
+    if (!e) return false;
+    @switch (e->k) {
+        case .call(c): callee = c.callee; break;
+        default: return false;
+    }
+    if (!callee) return false;
+    return rl_is_ident(callee, "cc_ok") || rl_is_ident(callee, "cc_err");
+}
+
+/* Remember the Result a short-form constructor is written into. */
+static void rl_note_ctor(CcLowerer* L, CcExpr* ctor, CcType* dest) {
+    CcTypeInfo* ti;
+    if (!ctor || !dest || !rl_is_ctor_call(ctor)) return;
+    ti = rl_result_of_type(L, dest);
+    if (!ti) return;
+    L->ctor_sites.push(ctor);
+    {
+        CcTypeInfoList* sv = &L->ctor_specs;
+        sv->push(ti);
+    }
+}
+
+/* `CCResult_bool_CCError r = cc_ok(true);`: the declared type is the
+ * destination, and it need not be the Result the function returns. */
+static void rl_note_ctor_decl(CcLowerer* L, CcDecl* d) {
+    CcVarDecl v;
+    bool is_var = false;
+    @switch (d->k) {
+        case .var(vv): v = vv; is_var = true; break;
+        default: return;
+    }
+    if (!is_var || !v.init || v.init->is_list) return;
+    rl_note_ctor(L, v.init->expr, v.type);
+}
+
+/* The Result a `cc_ok` / `cc_err` at this site makes, when its destination
+ * said which; NULL leaves the enclosing function's Result to answer. */
+static CcTypeInfo* rl_ctor_target(CcLowerer* L, const CcExpr* e) {
+    CcExprList* v = &L->ctor_sites;
+    size_t n = v->len();
+    size_t i;
+    if (!e) return NULL;
+    for (i = 0; i < n; i++) {
+        if (*v->get_ptr(i) == e) {
+            CcTypeInfoList* sv = &L->ctor_specs;
+            return *sv->get_ptr(i);
+        }
+    }
+    return NULL;
+}
+
 /* Rewrite one `cc_ok(...)` / `cc_err(...)` call in place. */
 static void rl_ctor(RFn* fn, CcExpr* e, bool is_ok, CcExprList args) {
     CcLowerer* L = fn->L;
-    CcTypeInfo* spec = fn->ret;
+    CcTypeInfo* dest = rl_ctor_target(L, e);
+    CcTypeInfo* spec = dest ? dest : fn->ret;
     size_t n = args.len();
     CcExpr* payload = NULL;
     CCString fname;
@@ -930,6 +1075,7 @@ static CcStmt* rl_scaffold_ex(RFn* fn, CcExpr* uw, CcExpr* target, bool target_r
     }
     if (!inner) return NULL;
     rt = rl_result_of_call(L, inner);
+    if (!rt) rt = rl_local_result(fn, inner);   /* `T !>(E) r = ...; r !>` */
     {
         int mode = rl_unwrap_mode(L, inner, rt, sp);
         if (!mode) return NULL;
@@ -1103,6 +1249,24 @@ static bool rl_is_unwrap(const CcExpr* e) {
     }
 }
 
+/* Does the value this form wraps carry an error at all?
+ *
+ * Only for a callee whose own declaration says so. A name that is a
+ * `#define` as well as a function (`cc_turnstile_create`) is the macro at
+ * the site, and what the macro expands to is not this step's to read, so
+ * the unwrap stands and `__typeof__` hands the question to the host. */
+static bool rl_nothing_to_unwrap(CcLowerer* L, CcExpr* inner) {
+    CCSlice name;
+    CcSym* sym;
+    if (!inner) return false;
+    if (rl_result_of_call(L, inner)) return false;
+    name = rl_call_name(inner);
+    if (!name.len) return false;
+    sym = rl_ix_sym(L, name);
+    if (!sym || sym->kind != CC_SYM_FUNC || !sym->type) return false;
+    return !rl_sym_returns_pointer(sym);
+}
+
 /* ---- statements ---------------------------------------------------------- */
 
 static void rl_block(RFn* fn, CcStmt* block);
@@ -1141,6 +1305,18 @@ static bool rl_decl_unwrap(RFn* fn, CcStmt* s, CcDecl* d, CcStmtList* out) {
             default: break;
         }
         if (plain) init_expr = plain;
+        /* `CCSliceUnique u = cc_adopt(p, n, free) !> @destroy;`
+         *
+         * `cc_adopt` hands back the owner itself, not a Result: there is
+         * nothing to unwrap, and what the form says is that `u` is
+         * destroyed at the end of its scope. Scaffolding an unwrap around
+         * a value that is not one would ask the host to read `.ok` off it. */
+        if (plain && rl_nothing_to_unwrap(L, rl_unwrap_operand(plain))) {
+            v.init->expr = rl_unwrap_operand(plain);
+            d->k = { .var = v };
+            out->push(s);
+            return true;
+        }
     }
     blk = rl_scaffold_ex(fn, init_expr, lw_ident(L, v.name, s->span),
                          v.type != NULL && CcType_is_result(v.type), s->span);
@@ -1223,7 +1399,7 @@ static void rl_stmts(RFn* fn, CcStmtList* list) {
         }
         @switch (s->k) {
             case .errhandler(eh): rl_register_handler(fn, &eh, s->span); handled = true; break;
-            case .decl(ds): handled = rl_decl_unwrap(fn, s, ds.d, &out); break;
+            case .decl(ds): rl_note_local(fn, ds.d); handled = rl_decl_unwrap(fn, s, ds.d, &out); break;
             case .expr(es):
                 handled = rl_expr_stmt_unwrap(fn, s, es.e, &out);
                 if (!handled && L->opts.strict_unhandled && es.e && rl_unhandled_counts(L, es.e)) {
@@ -1438,6 +1614,7 @@ static bool rl_scaffold_expr(RFn* fn, CcExpr* e) {
     }
     if (!inner) return false;
     rt = rl_result_of_call(L, inner);
+    if (!rt) rt = rl_local_result(fn, inner);   /* `T !>(E) r = ...; r !>` */
     {
         int mode = rl_unwrap_mode(L, inner, rt, sp);
         if (!mode) return false;
@@ -1571,6 +1748,8 @@ static void rl_function(CcLowerer* L, CcDecl* d, CcFuncDecl* f) {
     fn.handlers = vec_new::[RHandlerRef](L->arena);
     fn.hoisted = vec_new::[RHandlerRef](L->arena);
     fn.binders = vec_new::[CCSlice](L->arena);
+    fn.rlocals = vec_new::[CCSlice](L->arena);
+    fn.rlocal_specs = vec_new::[CcTypeInfoRef](L->arena);
     fn.dest_body = rl_is_dest_body(L, d);
     /* 1. cc_ok / cc_err */
     memset(&v, 0, sizeof(v));
@@ -1982,7 +2161,9 @@ static void rl_dest_stmt(Walker* w, CcStmt* s, bool enter) {
     CcExpr* e = NULL;
     CcBinary a;
     bool is_assign = false;
+    CcDecl* d = NULL;
     if (!enter) return;
+    if (stmt_is_decl(s, &d) && d) { rl_note_ctor_decl(L, d); return; }
     @switch (s->k) {
         case .expr(es): e = es.e; break;
         default: return;
@@ -1992,7 +2173,12 @@ static void rl_dest_stmt(Walker* w, CcStmt* s, bool enter) {
         case .assign(x): a = x; is_assign = true; break;
         default: break;
     }
-    if (!is_assign || a.op != CC_OP_ASSIGN || !a.a || !rl_is_unwrap(a.b)) return;
+    if (!is_assign || a.op != CC_OP_ASSIGN || !a.a) return;
+    if (!rl_is_unwrap(a.b)) {
+        /* `r = cc_err(CC_ERR_X, "…");`: the destination says which Result */
+        if (rl_is_ctor_call(a.b)) rl_note_ctor(L, a.b, type_of_expr(w, a.a));
+        return;
+    }
     {
         /* Either spelling counts: the written `T !>(E)`, and the canonical
          * `CCResult_T_E` a declaration already read through the index. */

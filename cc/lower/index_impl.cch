@@ -486,6 +486,17 @@ static CCSlice cc__family_prefix(CCSlice family) {
     return family;
 }
 
+/* The family a written spelling names. An instance prefix is a second
+ * spelling of its own family, so `CCVec::[T]` and `Vec::[T]` are one
+ * instance: keeping the family's own name is what makes one factory, one
+ * guard and one handler answer for both. Written the other way round, the
+ * prefix spelling matches no factory, nothing is spliced, and the instance
+ * stays undeclared while looking like a type that needed nothing. */
+static CCSlice cc__family_name(CCSlice written) {
+    if (cc__eqc(written, "CCVec")) return cc__ix_s("Vec");
+    return written;
+}
+
 static CCSlice cc__cat2(CcIndex* ix, CCSlice a, const char* b) {
     CCString sb = cc_string_new();
     sb.push_slice(a, ix->arena);
@@ -529,9 +540,13 @@ static CCSlice cc__canon_enum(CcIndex* ix, CcEnumType en) {
 }
 
 static CCSlice cc__canon_slice(CcIndex* ix, CcSliceType sl) {
-    CCSlice base = CcIndex_canon(ix, sl.elem);
+    CCSlice base;
     CCSlice name;
     CcTypeInfo* info;
+    /* `T[::]` is `T[:]` at another rank: the ranks share one ABI family and
+     * one instance name, so the extra rank names no second instance. */
+    if (sl.elem && sl.elem->k.kind == CcTypeK_slice) return CcIndex_canon(ix, sl.elem);
+    base = CcIndex_canon(ix, sl.elem);
     if (cc__is_char_family(base)) return cc__ix_s(sl.unique ? "CCSliceUnique" : "CCSlice");
     name = cc__cat3(ix, "CCSlice_", cc__mangle(ix, base), "");
     info = CcIndex_type_get(ix, name);
@@ -570,7 +585,7 @@ static CCSlice cc__canon_generic(CcIndex* ix, CcGenericType g) {
     info = CcIndex_type_get(ix, name);
     if (!info->family.len) {
         CcTypeList* targv = &info->targs;
-        info->family = cc__ix_copy(ix, g.family);
+        info->family = cc__ix_copy(ix, cc__family_name(g.family));
         for (i = 0; i < n; i++) { CcType* at2 = *tlist->get_ptr(i); targv->push(at2); }
     }
     cc__type_instantiate(ix, info);
@@ -2443,6 +2458,32 @@ static CCSlice cc__suffix_callee(CcIndex* ix, const CcTypeInfo* info, CCSlice fn
     return fn;
 }
 
+/* A typedef alias is the type it names.
+ *
+ * `typedef Widget ExactAlias;` registers no hooks of its own, so
+ * `ExactAlias a@(7) @destroy;` has to reach Widget's. The aliased type has
+ * already spelled any family suffix against ITS name -- which is the name
+ * the callee carries -- so what is inherited is the resolved callee, not
+ * the registration. Without this the alias looks like a type with no
+ * create and no destroy, which is what a type that wants neither looks
+ * like too. */
+static void cc__inherit_alias_hooks(CcIndex* ix, CcTypeInfo* info) {
+    CcSym* s = info->sym;
+    CCSlice aliased;
+    CcTypeInfo* base;
+    if (!s || s->kind != CC_SYM_TYPE || !s->type || !s->decl) return;
+    if ((int)s->decl->k.kind != (int)CcDeclK_typedef_) return;
+    if (s->type->k.kind != CcTypeK_named) return;
+    aliased = CcIndex_canon(ix, s->type);
+    if (cc__eq(aliased, info->name)) return;
+    base = CcIndex_type_get(ix, aliased);
+    if (!base || base == info) return;
+    info->create_fn = base->create_fn;
+    info->destroy_fn = base->destroy_fn;
+    info->pre_destroy_fn = base->pre_destroy_fn;
+    if (!info->hooks) info->hooks = base->hooks;
+}
+
 static void cc__type_resolve_hooks(CcIndex* ix, CcTypeInfo* info) {
     CcHookReg* r = cc__hook_match(ix, info->name, false);
     CcHookReg* create = NULL;
@@ -2463,6 +2504,7 @@ static void cc__type_resolve_hooks(CcIndex* ix, CcTypeInfo* info) {
     info->create_fn = create ? cc__suffix_callee(ix, info, create->create_fn) : cc_slice_empty();
     info->destroy_fn = destroy ? cc__suffix_callee(ix, info, destroy->destroy_fn) : cc_slice_empty();
     info->pre_destroy_fn = destroy ? cc__suffix_callee(ix, info, destroy->pre_destroy_fn) : cc_slice_empty();
+    if (!create && !destroy) cc__inherit_alias_hooks(ix, info);
 }
 
 /* ---- noreturn ------------------------------------------------------------- */

@@ -45,6 +45,48 @@ static bool sl_type_is_slice(CcType* t) {
     return t && t->k.kind == CcTypeK_slice;
 }
 
+/* The element type of an array type as written. */
+static CcType* sl_array_elem(CcType* t) {
+    if (!t) return NULL;
+    @switch (t->k) {
+        case .array(ar): return ar.elem;
+        default: return NULL;
+    }
+}
+
+/* Does the braced list name fields (`{ .ptr = p, .len = n }`)? Then it
+ * spells the slice struct itself, and the array-and-view form below would
+ * be an array of the element type with the slice's own field names in it. */
+static bool sl_init_names_fields(CcInit* in) {
+    size_t n;
+    size_t i;
+    if (!in || !in->is_list) return false;
+    n = in->items.len();
+    for (i = 0; i < n; i++) {
+        CcInit* it = *in->items.get_ptr(i);
+        CcDesignator* dg;
+        if (!it || !it->designators.len()) continue;
+        dg = it->designators.get_ptr(0);
+        if (dg->field.len) return true;
+    }
+    return false;
+}
+
+/* `char[:] xs[] = { "GET", "POST" }`: every element of the list is a slice,
+ * so a string literal written there carries its own length. Without this
+ * the bytes land in `.ptr` and the pointer lands in `.len`. */
+static void sl_lit_items(CcLowerer* L, CcInit* in) {
+    size_t n;
+    size_t i;
+    if (!in || !in->is_list) return;
+    n = in->items.len();
+    for (i = 0; i < n; i++) {
+        CcInit* it = *in->items.get_ptr(i);
+        if (!it || it->is_list || !it->expr) continue;
+        if (sl_is_string(it->expr)) it->expr = sl_lit_call(L, it->expr);
+    }
+}
+
 /* Is this canonical name one of the slice family? */
 static bool sl_canon_is_slice(CCSlice cn) {
     if (cc_slice_eq_cstr(&cn, "CCSlice")) return true;
@@ -163,13 +205,21 @@ static CcStmt* sl_decl_init(SStep* st, CcDecl* d, CcVarDecl v) {
     CcInit* in = v.init;
     CcSpan sp = d->span;
     CCSlice instance;
-    if (!sl_type_is_slice(v.type) || !in) return NULL;
+    if (!in) return NULL;
+    if (!sl_type_is_slice(v.type)) {
+        /* an array OF slices: the list's elements are the destinations */
+        if (sl_type_is_slice(sl_array_elem(v.type))) sl_lit_items(L, in);
+        return NULL;
+    }
     instance = ix->canon(v.type);
     if (in->expr && sl_is_string(in->expr)) {
         in->expr = sl_lit_call(L, in->expr);
         return NULL;
     }
     if (!in->is_list) return NULL;
+    /* `{ .ptr = ..., .len = ... }` is the slice as written, not an array
+     * to take a view of */
+    if (sl_init_names_fields(in)) return NULL;
     {
         /* the braced list is the array; the slice is a view of it */
         CcType* elem = sl_elem_of(v.type);

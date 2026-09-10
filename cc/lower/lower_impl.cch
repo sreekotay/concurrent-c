@@ -23,6 +23,8 @@ static CcLowerer cc_lowerer_new(CcUnit* u, CcIndex* ix, CcLowerOpts opts, CcDiag
     L.specs = vec_new::[CcTypeInfoRef](u->arena);
     L.sinks = vec_new::[CCSlice](u->arena);
     L.res_dests = vec_new::[CcExprRef](u->arena);
+    L.ctor_sites = vec_new::[CcExprRef](u->arena);
+    L.ctor_specs = vec_new::[CcTypeInfoRef](u->arena);
     L.dest_bodies = vec_new::[CcDeclRef](u->arena);
     L.ufcs_sites = vec_new::[CcExprRef](u->arena);
     L.ufcs_meths = vec_new::[CCSlice](u->arena);
@@ -818,10 +820,242 @@ static void CcLowerer_typeof(CcLowerer* L) {
     }
 }
 
+/* ---- type_of members --------------------------------------------------- */
+
+/* The type `type_of(T)` names, or NULL when the call is not one. */
+static CcType* lw_tof_type_arg(CcExpr* e) {
+    if (!e) return NULL;
+    @switch (e->k) {
+        case .type_arg(ta): return ta.type;
+        default: return NULL;
+    }
+}
+
+static CcType* lw_tof_subject(CcExpr* e) {
+    CcExpr* callee = NULL;
+    CcExprList args;
+    bool have = false;
+    CCSlice nm;
+    if (!e) return NULL;
+    @switch (e->k) {
+        case .call(c): callee = c.callee; args = c.args; have = true; break;
+        default: return NULL;
+    }
+    if (!have || !callee) return NULL;
+    if (!expr_ident(callee, &nm)) return NULL;
+    if (!cc_slice_eq_cstr(&nm, "type_of")) return NULL;
+    if (args.len() != 1) return NULL;
+    {
+        CcExpr* a0 = *args.get_ptr(0);
+        return lw_tof_type_arg(a0);
+    }
+}
+
+/* A C scalar: its kind and its field count are the compiler's to answer.
+ * Every other type's are a registration's, and the runtime registry is
+ * what holds those -- so those two forward rather than guess. */
+static bool lw_tof_scalar(CCSlice n) {
+    static const char* k[16] = {
+        "int", "char", "short", "long", "long long", "float",
+        "double", "long double", "bool", "size_t", "intptr_t",
+        "unsigned int", "unsigned char", "unsigned short",
+        "unsigned long", "unsigned long long"
+    };
+    size_t i;
+    for (i = 0; i < 16; i++) if (cc_slice_eq_cstr(&n, k[i])) return true;
+    return false;
+}
+
+/* `type_of(T).size` and its siblings fold to constant expressions, so a
+ * program may write them where C requires one -- an array dimension, a
+ * `_Static_assert`. Left as written they are a member of a call to
+ * `cc_type_of`, which returns a pointer: the host explains a `.` on a
+ * pointer, about a line that has no pointer in it. */
+static bool lw_tof_visit(CcExpr* e, void* env) {
+    CcLowerer* L = (CcLowerer*)env;
+    CcExpr* base = NULL;
+    CCSlice field = cc_slice_empty();
+    bool arrow = false;
+    CcType* t;
+    CCSlice tn;
+    bool scalar;
+    bool ok = true;
+    CCString out = cc_string_new();
+    @switch (e->k) {
+        case .member(mb): base = mb.a; field = mb.name; arrow = mb.arrow; break;
+        default: return true;
+    }
+    if (arrow || !field.len) return true;
+    t = lw_tof_subject(base);
+    if (!t) return true;
+    tn = L->ix->canon(t);
+    scalar = lw_tof_scalar(tn);
+    if (cc_slice_eq_cstr(&field, "size")) out = @string(`((size_t)sizeof(${tn}))`, L->arena);
+    else if (cc_slice_eq_cstr(&field, "align")) out = @string(`((size_t)_Alignof(${tn}))`, L->arena);
+    else if (cc_slice_eq_cstr(&field, "name")) out = @string(`"${tn}"`, L->arena);
+    else if (cc_slice_eq_cstr(&field, "kind"))
+        out = scalar ? @string(`(CC_TK_PRIMITIVE)`, L->arena)
+                     : @string(`(cc_type_of("${tn}")->kind)`, L->arena);
+    else if (cc_slice_eq_cstr(&field, "nfields"))
+        out = scalar ? @string(`((size_t)0)`, L->arena)
+                     : @string(`((size_t)cc_type_of("${tn}")->nfields)`, L->arena);
+    else ok = false;
+    if (!ok) return true;
+    {
+        CcExpr* rep = lw_text(L, out, e->span);
+        e->k = rep->k;
+    }
+    return false;
+}
+
+static void CcLowerer_typeof_members(CcLowerer* L) {
+    CcVisitor v;
+    memset(&v, 0, sizeof(v));
+    v.expr = lw_tof_visit;
+    v.env = L;
+    CcUnit_walk(L->unit, v);
+}
+
+/* ---- forward typedefs -------------------------------------------------- */
+
+/* The name a `Name*` field type spells; empty when the field is not a
+ * pointer to a named type. */
+static CCSlice lw_ptr_named(CcType* t) {
+    CcType* p = NULL;
+    if (!t) return cc_slice_empty();
+    @switch (t->k) {
+        case .pointer(pt): p = pt.pointee; break;
+        default: return cc_slice_empty();
+    }
+    if (!p) return cc_slice_empty();
+    @switch (p->k) {
+        case .named(nm): return nm.name;
+        default: return cc_slice_empty();
+    }
+}
+
+/* Every name a record body reaches through a pointer. */
+static void lw_fwd_scan(CcType* t, CcNameList* out, int depth) {
+    CcRecordType rc;
+    bool is_rec = false;
+    CcFieldList* fv;
+    size_t n;
+    size_t i;
+    if (!t || depth > 4) return;
+    @switch (t->k) {
+        case .record(x): rc = x; is_rec = true; break;
+        default: break;
+    }
+    if (!is_rec || !rc.is_definition) return;
+    fv = &rc.fields;
+    n = fv->len();
+    for (i = 0; i < n; i++) {
+        CcField* f = fv->get_ptr(i);
+        CCSlice nm = lw_ptr_named(f->type);
+        if (nm.len) { out->push(nm); continue; }
+        lw_fwd_scan(f->type, out, depth + 1);
+    }
+}
+
+/* The tag of a `struct Tag { ... }` / `union Tag { ... }` written as a
+ * definition; empty when the type is not one, or is anonymous. */
+static CCSlice lw_record_tag(CcType* t, bool* is_union) {
+    if (!t) return cc_slice_empty();
+    @switch (t->k) {
+        case .record(rc): {
+            CCSlice tag = rc.tag;
+            bool u = rc.is_union;
+            bool def = rc.is_definition;
+            if (!def) return cc_slice_empty();
+            *is_union = u;
+            return tag;
+        }
+        default: return cc_slice_empty();
+    }
+}
+
+static CcType* lw_decl_type(CcDecl* d) {
+    if (!d) return NULL;
+    @switch (d->k) {
+        case .var(v): return v.type;
+        case .typedef_(td): return td.type;
+        case .tagged(tg): return tg.type;
+        default: return NULL;
+    }
+}
+
+static bool lw_name_seen(CcNameList* v, CCSlice name) {
+    size_t n = v->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CCSlice s = *v->get_ptr(i);
+        if (slice_eq(s, name)) return true;
+    }
+    return false;
+}
+
+/* `typedef struct RtxNode { RtxNode* next; } RtxNode;`
+ *
+ * The typedef name is in scope inside its own body here, and inside the
+ * body of a record declared before it. C has no such rule -- the name is
+ * not a type until the typedef closes -- so a name a record body reaches
+ * through a pointer gets its `typedef struct Tag Name;` first, above the
+ * definitions. C11 allows the definition to repeat the typedef. A tagless
+ * `typedef struct { ... } Name;` has no forward to write, and no body can
+ * reach it before it closes either. */
+static void lw_fwd_typedefs(CcLowerer* L) {
+    CcDeclList* decls = &L->unit->decls;
+    size_t n = decls->len();
+    size_t i;
+    CcNameList pointed = vec_new::[CCSlice](L->arena);
+    CcDeclList with = vec_new::[CcDeclRef](L->arena);
+    CCString text = cc_string_new();
+    size_t at = n;
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *decls->get_ptr(i);
+        lw_fwd_scan(lw_decl_type(d), &pointed, 0);
+    }
+    if (!pointed.len()) return;
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *decls->get_ptr(i);
+        CcTypedefDecl td;
+        bool is_td = false;
+        bool is_union = false;
+        CCSlice tag;
+        @switch (d->k) {
+            case .typedef_(x): td = x; is_td = true; break;
+            default: break;
+        }
+        if (!is_td || !td.name.len) continue;
+        tag = lw_record_tag(td.type, &is_union);
+        if (!tag.len) continue;
+        if (!lw_name_seen(&pointed, td.name)) continue;
+        if (at == n) at = i;
+        cc_string_push_cstr(&text, "typedef ", L->arena);
+        cc_string_push_cstr(&text, is_union ? "union " : "struct ", L->arena);
+        cc_string_push_slice(&text, tag, L->arena);
+        cc_string_push_char(&text, ' ', L->arena);
+        cc_string_push_slice(&text, td.name, L->arena);
+        cc_string_push_cstr(&text, ";\n", L->arena);
+    }
+    if (at == n || !text.len()) return;
+    {
+        CcDecl* anchor = *decls->get_ptr(at);
+        CcDecl* raw = lw_raw_decl(L, text, anchor->span);
+        for (i = 0; i < n; i++) {
+            CcDecl* d = *decls->get_ptr(i);
+            if (i == at) with.push(raw);
+            with.push(d);
+        }
+        *decls = with;
+    }
+}
+
 static void CcLowerer_lower_unit(CcLowerer* L) {
     CcLowerer_comptime(L);  /* first: a value the user asked for at compile time is a constant to every step */
     CcLowerer_own(L);       /* then, before any rewrite: the ownership checks read the program as written */
     CcLowerer_typeof(L);    /* likewise: `type_of(T)` names a type by its spelling, as written */
+    CcLowerer_typeof_members(L);  /* then fold its members: a constant where C wants one */
     CcLowerer_includes(L);
     CcLowerer_deadline(L);  /* before the rest: a deadline body is ordinary statements to every one of them */
     CcLowerer_chan(L);      /* before them: an endpoint is the runtime handle before anything
@@ -842,6 +1076,7 @@ static void CcLowerer_lower_unit(CcLowerer* L) {
     CcLowerer_strswitch(L);/* last but cleanup: the subject it spells is the C it will be */
     CcLowerer_cleanup(L);
     lw_drop_cc_only(L);   /* after the steps: the index reads faces off the unit's declarations */
+    lw_fwd_typedefs(L);   /* after them: the records the steps spliced need forwards too */
     lw_banner(L);
 }
 

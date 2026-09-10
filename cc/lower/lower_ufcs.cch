@@ -267,6 +267,48 @@ static int uf_param_count(CcIndex* ix, CCSlice callee) {
     }
 }
 
+/* Where the receiver goes.
+ *
+ * `x.m(a)` writes the receiver first, and the C twin need not take it
+ * first: `cc_slice_packed_release(CCArena, CCSlicePacked*)` is arena-first.
+ * The receiver goes to the first parameter that names its type, and the
+ * written arguments fill the rest in order -- parameter 0 naming it is the
+ * ordinary case and moves nothing. Only for a declaration whose arity is
+ * exactly the receiver plus what the site wrote: anything else leaves the
+ * positions ambiguous, and a receiver silently passed as somebody else's
+ * argument is a call the host explains about a line the program does not
+ * contain. */
+static size_t uf_recv_slot(Walker* w, CCSlice callee, CCSlice tn, size_t nargs) {
+    CcIndex* ix = w->ix;
+    int np = uf_param_count(ix, callee);
+    size_t i;
+    if (np <= 1 || (size_t)np != nargs + 1 || !tn.len) return 0;
+    for (i = 0; i < (size_t)np; i++) {
+        CcType* p = uf_param_type(ix, callee, i);
+        CcType* base = p;
+        if (!p) return 0;
+        if (p->k.kind == CcTypeK_pointer) {
+            @switch (p->k) {
+                case .pointer(pt): base = pt.pointee; break;
+                default: break;
+            }
+        }
+        if (base && slice_eq(ix->canon(base), tn)) return i;
+    }
+    return 0;
+}
+
+/* The receiver as the parameter at `at` takes it: its address when that
+ * parameter is a pointer, the value itself when it is not. */
+static CcExpr* uf_recv_at(CcLowerer* L, Walker* w, CCSlice callee, size_t at,
+                          CcExpr* recv, bool recv_ptr, CcSpan sp) {
+    CcType* p = uf_param_type(w->ix, callee, at);
+    bool want_ptr = p != NULL && p->k.kind == CcTypeK_pointer;
+    if (want_ptr) return recv_ptr ? recv : cc_expr_unary(CC_OP_ADDR, uf_wrap(L, recv, sp), sp, L->arena);
+    return recv_ptr ? cc_expr_unary(CC_OP_DEREF, uf_wrap(L, recv, sp), sp, L->arena) : recv;
+}
+
+
 /* A candidate whose parameters cannot take this call is not the method.
  * The declared set may hold one named for the argument it does take:
  * the resolved name, then the argument's type in the same snake spelling
@@ -987,22 +1029,27 @@ static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m,
         return;
     }
     if (!uf_targs_lead(w, L, uf, m, sp, &call.args)) return;
-    call.args.push(recv_arg);
     {
         CcExprList* args = &uf.args;
         size_t n = args->len();
         size_t i;
-        size_t base = call.args.len();
+        size_t k = 0;
+        size_t lead = call.args.len();
         CCSlice cn = uf_ident_name_or_empty(call.callee);
-        for (i = 0; i < n; i++) {
-            CcExpr* a = *args->get_ptr(i);
-            CcExpr* ad = cn.len ? uf_arg_addr(w, L, cn, base + i, a) : NULL;
-            if (ad) a = ad;
-            call.args.push(a);
+        size_t slot = (cn.len && !lead) ? uf_recv_slot(w, cn, tn, n) : 0;
+        if (slot) recv_arg = uf_recv_at(L, w, cn, slot, uf.recv, recv_ptr, sp);
+        for (i = 0; i <= n; i++) {
+            if (i == slot) { call.args.push(recv_arg); continue; }
+            {
+                CcExpr* a = *args->get_ptr(k);
+                CcExpr* ad = cn.len ? uf_arg_addr(w, L, cn, lead + i, a) : NULL;
+                if (ad) a = ad;
+                call.args.push(a);
+                k++;
+            }
         }
     }
     e->k = { .call = call };
-    (void)tn;
 }
 
 /* `Type.fn(args)` -> `Type_fn(args)`, when that function is declared. */

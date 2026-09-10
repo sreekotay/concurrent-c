@@ -392,11 +392,31 @@ static bool expr_arrow_member(CcExpr* e, CcExpr** recv, CCSlice* name) {
     }
 }
 
+static CcType* type_of_unwrapped(Walker* w, CcExpr* a);
+static CcType* type_of_unwrapped_err(Walker* w, CcExpr* a);
+
+/* `cc_unwrap(r)` and `cc_unwrap_err(r)` are statement-expression macros:
+ * nothing declares a return type for them, and a receiver written as
+ * `cc_unwrap(r).len()` would have no type at all. What they yield is what
+ * the Result holds. */
+static CcType* type_of_result_macro(Walker* w, CCSlice nm, CcExprList args) {
+    CcExpr* a0;
+    if (args.len() != 1) return NULL;
+    a0 = *args.get_ptr(0);
+    if (cc_slice_eq_cstr(&nm, "cc_unwrap")) return type_of_unwrapped(w, a0);
+    if (cc_slice_eq_cstr(&nm, "cc_unwrap_err")) return type_of_unwrapped_err(w, a0);
+    return NULL;
+}
+
 static CcType* type_of_call(Walker* w, CcCall cl) {
     CcExpr* c = strip_parens_expr(cl.callee);
     CCSlice nm;
     CcExpr* recv;
-    if (expr_ident(c, &nm)) return return_type_of_sym(sym_any(w->ix, nm));
+    if (expr_ident(c, &nm)) {
+        CcType* mt = type_of_result_macro(w, nm, cl.args);
+        if (mt) return mt;
+        return return_type_of_sym(sym_any(w->ix, nm));
+    }
     if (expr_arrow_member(c, &recv, &nm)) {
         /* `p->m(args)`: a method call unless the struct has a field `m` */
         CcType* rt = type_of_expr(w, recv);
@@ -449,6 +469,26 @@ static CcType* type_of_unwrapped(Walker* w, CcExpr* a) {
         if (r.is_ok()) {
             CcTypeInfo* info = r.value();
             if (info->is_result) return info->result_value ? info->result_value : named(w, "void");
+        }
+    }
+    return NULL;
+}
+
+/* The error a Result holds, for `cc_unwrap_err(r)`. */
+static CcType* type_of_unwrapped_err(Walker* w, CcExpr* a) {
+    CcType* t = type_of_expr(w, a);
+    CcType* err = NULL;
+    if (!t) return NULL;
+    @switch (t->k) {
+        case .result(rs): err = rs.err; break;
+        default: break;
+    }
+    if (err) return err;
+    {
+        CcTypeInfo* !>(CcDiag) r = w->ix->type(w->ix->canon(peel(t)));
+        if (r.is_ok()) {
+            CcTypeInfo* info = r.value();
+            if (info->is_result) return info->result_err;
         }
     }
     return NULL;
