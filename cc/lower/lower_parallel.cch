@@ -62,8 +62,8 @@ typedef struct PStep {
     CcType* fn_ret;             /* the enclosing function's return type: a walk records
                                  * a `return` into a cell of it */
     CcStmtList eh_top;          /* the `@errhandler`s the enclosing function carries, in order:
-                                 * a bare `!>` in an arm runs one of those bodies, and an arm
-                                 * that leaves the caller's frame needs its own copy */
+                                 * a bare `!>` in an arm raises into one of them after the
+                                 * join, and the exit cell is typed by what they take */
     bool eh_any;
     bool any;
     /* `#pragma(@parallel) off` regions, as token spans: off_from[i] ..
@@ -524,7 +524,7 @@ static bool pl_arm_exit_stmt(CcStmt* s, void* env) {
             setter = lw_keep(L, &sv);
         }
         {
-            CCString t = @string(`{ int __cc_z = 0; while (!cc_atomic_cas(&${cell}->lock, &__cc_z, 1)) __cc_z = 0; if (cc_atomic_load(&${cell}->xk) != 2) { ${setter} cc_atomic_store(&${cell}->xk, 2); } cc_atomic_store(&${cell}->lock, 0); }`, L->arena);
+            CCString t = @string(`{ int __cc_z = 0; while (!cc_atomic_cas(&${cell}->lock, &__cc_z, 1)) __cc_z = 0; if (cc_atomic_load(&${cell}->xk) < 2) { ${setter} cc_atomic_store(&${cell}->xk, 2); } cc_atomic_store(&${cell}->lock, 0); }`, L->arena);
             lw_push(blk, lw_expr_stmt(L, lw_text(L, t, sp), sp));
         }
     }
@@ -1560,65 +1560,120 @@ static bool pl_reject(CcLowerer* L, CcParallel p, CcSpan sp) {
 
 static CcStmt* pl_unwrap_stmt(CcLowerer* L, CcExpr* call, CcSpan sp);
 
-/* A fresh copy of the `@errhandler`s the enclosing function carries, parsed
- * from the source they were written in.
- *
- * An arm that unwraps runs that body where the `!>` stands, and each arm
- * runs it somewhere else: one on the caller, the rest in thunks of their
- * own. They cannot share the statement -- the exit rewriting below and the
- * results step both edit it in place -- so each arm that needs one parses
- * its own. Returns the statements, empty when there is nothing to copy or
- * the text does not parse back. */
-/* Fresh copies of the `@errhandler`s the enclosing function carries.
- *
- * An arm that unwraps runs one of those bodies where the `!>` stands, and
- * each arm runs it somewhere else: one on the caller, the rest in thunks of
- * their own. They cannot share the statement -- the exit rewriting below and
- * the results step both edit it in place -- so each arm that needs one parses
- * its own out of the tokens the original was lexed from. Copies made that way
- * spell and locate like the source they came from. */
-static CcStmtList pl_eh_fresh(PStep* st) {
+/* An arm whose bare `!>` reaches nothing of its own: it raises through the
+ * join. A block that opens with a handler of its own belongs to that one. */
+static bool pl_arm_raises(CcParallelArm* arm) {
+    if (!arm->serial) return false;
+    if (!pl_has_bare_unwrap(arm->serial)) return false;
+    if (pl_block_has_handler(arm->serial)) return false;
+    return true;
+}
+
+/* The error type the exit cell carries: the one the handlers of the
+ * function take. The join raises the cell into the innermost handler in scope after
+ * the block, so every handler the function carries has to take that one
+ * type, or the arm could not say which of them the cell is for. Empty when
+ * there is none or they disagree, with the diagnostic emitted. */
+static CCSlice pl_eh_type(PStep* st, CcSpan sp) {
     CcLowerer* L = st->L;
-    CcStmtList out = vec_new::[CcStmtRef](L->arena);
-    CcParseOpts po;
-    size_t i;
+    CCSlice canon = cc_slice_empty();
     size_t n = st->eh_top.len();
-    if (!n) return out;
-    po.mode = CC_UNIT_SOURCE;
-    po.known_types = L->ix->known_types();
+    size_t i;
     for (i = 0; i < n; i++) {
         CcStmt* t = *st->eh_top.get_ptr(i);
-        CcStmt* c = cc_parse_stmt_at(L->unit, t->span.first, po, L->ds, L->arena);
-        if (!c) {
-            CcStmtList none = vec_new::[CcStmtRef](L->arena);
-            return none;
+        CcType* et = NULL;
+        CCSlice c;
+        @switch (t->k) {
+            case .errhandler(x): et = x.err_type; break;
+            default: break;
         }
-        out.push(c);
+        if (!et) continue;
+        c = L->ix->canon(et);
+        if (!canon.len) canon = c;
+        else if (!slice_eq(canon, c)) {
+            CCString m = @string(`a bare '!>' in this arm raises after the join into the handler of the function it stands in, and that function declares handlers for both '${canon}' and '${c}'; handle the Result in the arm with '!>(e) { ... }'`, L->arena);
+            lw_error(L, sp, m);
+            return cc_slice_empty();
+        }
     }
-    return out;
+    if (!canon.len) {
+        CCString m = cc_string_new();
+        m.push_cstr("an arm that unwraps needs an @errhandler on the function it stands in", L->arena);
+        lw_error(L, sp, m);
+    }
+    return canon;
+}
+
+/* `@errhandler(E __cc_pe) { <claim>; <leave> }`: the handler an arm that
+ * raises opens with. It is not the handler the function carries and holds
+ * none of that body: it records the error in the exit cell, first arrival winning, and
+ * leaves the arm -- to the join on the caller, out of the thunk elsewhere.
+ * The join then raises what the cell holds into the one handler the
+ * function emits. `cell` is the pointer the arm reaches the cell through. */
+static CcStmt* pl_raise_handler(CcLowerer* L, CCSlice ety, CCSlice cell, CCSlice leave, CcSpan sp) {
+    CcStmt* s = cc__stmt_blank(sp, L->arena);
+    CcStmt* body = lw_block(L, sp);
+    CcErrhandler eh;
+    CCString claim = @string(`{ int __cc_z = 0; while (!cc_atomic_cas(&${cell}->lock, &__cc_z, 1)) __cc_z = 0; if (cc_atomic_load(&${cell}->xk) < 2) { ${cell}->err = __cc_pe; cc_atomic_store(&${cell}->xk, 3); } cc_atomic_store(&${cell}->lock, 0); }`, L->arena);
+    lw_push(body, lw_expr_stmt(L, lw_text(L, claim, sp), sp));
+    if (leave.len) lw_push(body, lw_goto(L, leave, sp));
+    else lw_push(body, cc_stmt_return(lw_text(L, @string(`NULL`, L->arena), sp), sp, L->arena));
+    eh.err_type = cc_type_named(ety, sp, L->arena);
+    eh.binder = cstr_slice("__cc_pe");
+    eh.body = body;
+    { CcStmtK sk = { .errhandler = eh }; s->k = sk; }
+    return s;
+}
+
+/* The handler goes first in the arm block, ahead of the statement that
+ * unwraps. It is added after the exit rewriting has walked the arm, so the
+ * `return` it ends in is its own and not an exit the cell records. */
+static void pl_arm_open_with(CcLowerer* L, CcStmt* body, CcStmt* handler) {
+    CcStmtList* bs = lw_block_stmts(body);
+    CcStmtList joined = vec_new::[CcStmtRef](L->arena);
+    size_t n;
+    size_t i;
+    if (!bs) return;
+    n = bs->len();
+    joined.push(handler);
+    for (i = 0; i < n; i++) {
+        CcStmt* t = *bs->get_ptr(i);
+        joined.push(t);
+    }
+    *bs = joined;
+}
+
+/* `@errhandler((<cell>.err));` after the join: the error an arm recorded,
+ * raised where the block stands, into the handler the function carries. The
+ * delegation spelling is the statement form of `!>`: the handler runs and,
+ * unless it leaves, the statement after the block follows. */
+static CcStmt* pl_raise_after_join(CcLowerer* L, CCSlice cellv, CcSpan sp) {
+    CcStmt* then = lw_block(L, sp);
+    CcStmt* fw = cc__stmt_blank(sp, L->arena);
+    CcErrFwd fe;
+    CCString cnd = @string(`cc_atomic_load(&${cellv}.xk) == 3`, L->arena);
+    fe.err = lw_paren(L, lw_member(L, lw_ident(L, cellv, sp), "err", sp), sp);
+    fe.delegate = true;
+    { CcStmtK sk = { .err_fwd = fe }; fw->k = sk; }
+    lw_push(then, fw);
+    return lw_if(L, lw_text(L, cnd, sp), then, NULL, sp);
 }
 
 /* `e !>;` as an arm, and any arm whose block unwraps.
  *
  * `e !>;` is the statement, not the operand with the unwrap dropped: the
- * handler in scope is where the error goes, and it runs inside the arm. So
- * the arm becomes a block.
+ * handler in scope is where the error goes. So the arm becomes a block.
  *
- * Then any arm block that unwraps carries its own copy of the function's
- * handler, because the arm does not run where the function's own copy
+ * An arm block that unwraps does not run where the handler of the function
  * stands: all but the first run in thunks of their own, and even the first
- * has to leave through the join rather than through the caller's frame. The
- * exit rewriting further down reaches the copy's `return` the way it reaches
- * the arm's own, and the results step, which runs after this one, inlines
- * the body at the `!>`. */
+ * has to leave through the join rather than out of the frame while the arms
+ * behind it run. The handler is emitted once, where the results step puts
+ * it, and the arm reaches it by way of the exit cell: `pl_lower` opens the
+ * arm with a handler that records the error and leaves, and raises the
+ * record after the join. Here the arm is only checked for a handler to
+ * raise into. */
 static bool pl_arm_unfold_unwrap(PStep* st, CcParallelArm* arm) {
     CcLowerer* L = st->L;
-    CcStmtList ehs;
-    CcStmtList body;
-    CcStmtList joined;
-    bool is_ser = false;
-    size_t i;
-    size_t n;
     if (arm->unwrap && arm->expr) {
         CcStmt* ser;
         CcBlock sb;
@@ -1630,45 +1685,13 @@ static bool pl_arm_unfold_unwrap(PStep* st, CcParallelArm* arm) {
         arm->expr = NULL;
         arm->unwrap = false;
     }
-    if (!arm->serial) return true;
-    if (!pl_has_bare_unwrap(arm->serial)) return true;
-    if (pl_block_has_handler(arm->serial)) return true;
+    if (!pl_arm_raises(arm)) return true;
     if (!st->eh_any) {
         CCString m = cc_string_new();
         m.push_cstr("an arm that unwraps needs an @errhandler on the function it stands in", L->arena);
         lw_error(L, arm->span, m);
         return false;
     }
-    ehs = pl_eh_fresh(st);
-    if (!ehs.len()) {
-        CCString m = cc_string_new();
-        m.push_cstr("this function's @errhandler does not parse again for a @parallel arm", L->arena);
-        lw_error(L, arm->span, m);
-        return false;
-    }
-    joined = vec_new::[CcStmtRef](L->arena);
-    {
-        CcStmt* ser = arm->serial;
-        @switch (ser->k) {
-            case .serial(x):
-                body = x.stmts;
-                is_ser = true;
-                n = ehs.len();
-                for (i = 0; i < n; i++) {
-                    CcStmt* t = *ehs.get_ptr(i);
-                    joined.push(t);
-                }
-                n = body.len();
-                for (i = 0; i < n; i++) {
-                    CcStmt* t = *body.get_ptr(i);
-                    joined.push(t);
-                }
-                ser->k.serial.stmts = joined;
-                break;
-            default: break;
-        }
-    }
-    (void)is_ser;
     return true;
 }
 
@@ -1762,7 +1785,9 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
     CCSlice pj_ptr = cc_slice_empty();      /* what the caller's arm claims through */
     CCSlice pj_leave = cc_slice_empty();    /* where a caller-arm exit jumps to */
     CCSlice pj_rty = cc_slice_empty();
+    CCSlice pj_ety = cc_slice_empty();      /* the error the cell carries, when an arm raises */
     bool pj_any = false;
+    bool raise_any = false;
     /* Inert or not, the site is checked as written: `off` says which
      * schedule the arms run on, not which forms are legal. */
     bool inert = pl_par_off_at(st, sp.first);
@@ -1777,7 +1802,7 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
     for (i = 0; i < n; i++) {
         CcParallelArm* arm = armv->get_ptr(i);
         /* an inert arm runs where it stands, so it reaches the handler
-         * this function carries and needs no copy spliced into it */
+         * this function carries and needs no cell to raise through */
         if (!inert && !pl_arm_unfold_unwrap(st, arm)) return;
         if (!pl_arm_ok(L, arm, sp)) return;
     }
@@ -1847,9 +1872,25 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
             return;
         }
         if (pl_arm_first_return(arm->expr, arm->serial, false)) pj_any = true;
+        if (pl_arm_raises(arm)) {
+            if (hspell.len) {
+                /* the arms of a bound block are fibers of the handle: the
+                 * frame has moved on by the time this one errs, and the
+                 * handler it carries is not reachable from a fiber */
+                CCString m = cc_string_new();
+                m.push_cstr("!> in a dest body has no handler inside the body: the arm of a dest-bound @parallel runs after the frame has moved on; handle the Result in the arm with '!>(e) { h.fail(e); return; }' or open the arm with '@errhandler(CCError e) { ... }'", L->arena);
+                lw_error(L, arm->span, m);
+                return;
+            }
+            raise_any = true;
+        }
     }
     if (hspell.len && !pl_dest_caps_ok(st, w, p, hbase, sp)) return;
-    if (pj_any) {
+    if (raise_any) {
+        pj_ety = pl_eh_type(st, sp);
+        if (!pj_ety.len) return;
+    }
+    if (pj_any || raise_any) {
         pj_leave = pl_pj_name(L, id, "_join");
         if (!hspell.len) {
             pj_rty = pl_ret_type(st);
@@ -1875,10 +1916,15 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
         /* the cell stands above every function that fills one, because an
          * arm's environment names it */
         CCSlice rv = pj_rty;
+        CCSlice ev = pj_ety;
         CCString t;
-        if (rv.len) t = @string(`typedef struct { cc_atomic_int lock; cc_atomic_int xk; ${rv} rv; } ${pj_ty};
+        CCString ef = cc_string_new();
+        /* `xk`: 0 nothing yet, 2 an arm returned (`rv`), 3 an arm raised
+         * (`err`); whichever claims first is the exit the block takes */
+        if (ev.len) ef = @string(` ${ev} err;`, L->arena);
+        if (rv.len) t = @string(`typedef struct { cc_atomic_int lock; cc_atomic_int xk; ${rv} rv;${ef} } ${pj_ty};
 `, L->arena);
-        else t = @string(`typedef struct { cc_atomic_int lock; cc_atomic_int xk; } ${pj_ty};
+        else t = @string(`typedef struct { cc_atomic_int lock; cc_atomic_int xk;${ef} } ${pj_ty};
 `, L->arena);
         pl_host(st); st->fwd.push_slice(t.as_slice(), L->arena);
     }
@@ -1975,11 +2021,16 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
         pl_forward(st, id, (uint32_t)i);
         {
             CCSlice pj_cell = cc_slice_empty();
+            CcStmt* ab = pl_serial_body(L, arm->serial);
             CcDecl* th;
             if (pj_ty.len) pj_cell = cstr_slice("__e->__cc_pj_ex");
-            th = pl_thunk_decl(st, id, (uint32_t)i, &caps, arm->expr, pl_serial_body(L, arm->serial),
+            th = pl_thunk_decl(st, id, (uint32_t)i, &caps, arm->expr, ab,
                                out_type, arm->target, hspell.len != 0, pj_cell,
                                pj_rty.len != 0, sp);
+            /* a bare `!>` in the thunk records its error in the cell and
+             * ends the thunk; the join raises it on the caller */
+            if (pl_arm_raises(arm))
+                pl_arm_open_with(L, ab, pl_raise_handler(L, pj_ety, pj_cell, cc_slice_empty(), sp));
             st->made.push(th);
             /* a bound handle makes the arms fibers of a dest */
             if (hspell.len) {
@@ -2012,7 +2063,14 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
          * function, because the arms behind it are still running */
         if (pj_any) pl_arm_exits(L, arm->expr, arm->serial, pj_ptr, pj_leave, pj_rty.len != 0);
         if (arm->serial) {
-            lw_push(blk, pl_serial_body(L, arm->serial));
+            CcStmt* ab = pl_serial_body(L, arm->serial);
+            /* a bare `!>` here records its error in the cell and goes to
+             * the join: the handler it raises into stands on this frame,
+             * but a `return` from it would leave while the arms behind
+             * this one run */
+            if (pl_arm_raises(arm))
+                pl_arm_open_with(L, ab, pl_raise_handler(L, pj_ety, pj_ptr, pj_leave, sp));
+            lw_push(blk, ab);
         } else {
             CcExpr* e0 = arm->expr;
             if (arm->target.len) e0 = lw_assign(L, lw_ident(L, arm->target, sp), e0, sp);
@@ -2033,7 +2091,7 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
             /* an arm that left ended the block, and on this schedule the
              * arms behind it were never started: they do not start now */
             CCSlice cellv = pj_var;
-            CCString c = @string(`cc_atomic_load(&${cellv}.xk) != 2`, L->arena);
+            CCString c = @string(`cc_atomic_load(&${cellv}.xk) < 2`, L->arena);
             order = lw_if(L, lw_text(L, c, sp), order, NULL, sp);
         }
         lw_push(blk, lw_if(L, lw_not(L, lw_ident(L, gname, sp), sp), joins, order, sp));
@@ -2056,6 +2114,7 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
          * one the block leaves through */
         CCSlice cellv = pj_var;
         CCString t;
+        if (pj_ety.len) lw_push(blk, pl_raise_after_join(L, cellv, sp));
         if (pj_rty.len) t = @string(`if (cc_atomic_load(&${cellv}.xk) == 2) return ${cellv}.rv`, L->arena);
         else t = @string(`if (cc_atomic_load(&${cellv}.xk) == 2) return`, L->arena);
         lw_push(blk, lw_expr_stmt(L, lw_text(L, t, sp), sp));
