@@ -172,4 +172,92 @@ static inline uint64_t cc_atomic_u64_fetch_xor(cc_atomic_u64* p, uint64_t v) {
     return cc_atomic_fetch_xor(p, v);
 }
 
+/* UFCS surface for the atomic scalars: `x.load()`, `x.store(v)`,
+ * `x.fetch_add(v)`, `x.cas(&expected, desired)`.
+ *
+ * The operations above are function-like macros, and a macro carries no
+ * parameter types: nothing in one says the receiver goes in by address,
+ * and no name composed from the receiver type resolves to one. These
+ * typed wrappers are that declaration -- one `<type>_<method>` per pair,
+ * first parameter a pointer to the atomic. The ordered variants keep the
+ * macro spelling only; they are written as calls, not as methods. */
+
+static inline int cc_atomic_int_load(cc_atomic_int* p) {
+    return cc_atomic_load(p);
+}
+static inline void cc_atomic_int_store(cc_atomic_int* p, int v) {
+    cc_atomic_store(p, v);
+}
+static inline int cc_atomic_int_fetch_add(cc_atomic_int* p, int v) {
+    return cc_atomic_fetch_add(p, v);
+}
+static inline int cc_atomic_int_cas(cc_atomic_int* p, int* expected, int desired) {
+    return cc_atomic_cas(p, expected, desired) ? 1 : 0;
+}
+
+static inline unsigned int cc_atomic_uint_load(cc_atomic_uint* p) {
+    return cc_atomic_load(p);
+}
+static inline void cc_atomic_uint_store(cc_atomic_uint* p, unsigned int v) {
+    cc_atomic_store(p, v);
+}
+static inline unsigned int cc_atomic_uint_fetch_add(cc_atomic_uint* p, unsigned int v) {
+    return cc_atomic_fetch_add(p, v);
+}
+static inline int cc_atomic_uint_cas(cc_atomic_uint* p, unsigned int* expected, unsigned int desired) {
+    return cc_atomic_cas(p, expected, desired) ? 1 : 0;
+}
+
+static inline size_t cc_atomic_size_load(cc_atomic_size* p) {
+    return cc_atomic_load(p);
+}
+static inline void cc_atomic_size_store(cc_atomic_size* p, size_t v) {
+    cc_atomic_store(p, v);
+}
+static inline size_t cc_atomic_size_fetch_add(cc_atomic_size* p, size_t v) {
+    return cc_atomic_fetch_add(p, v);
+}
+static inline int cc_atomic_size_cas(cc_atomic_size* p, size_t* expected, size_t desired) {
+    return cc_atomic_cas(p, expected, desired) ? 1 : 0;
+}
+
+static inline int64_t cc_atomic_i64_load(cc_atomic_i64* p) {
+    return cc_atomic_load(p);
+}
+static inline void cc_atomic_i64_store(cc_atomic_i64* p, int64_t v) {
+    cc_atomic_store(p, v);
+}
+static inline int64_t cc_atomic_i64_fetch_add(cc_atomic_i64* p, int64_t v) {
+    return cc_atomic_fetch_add(p, v);
+}
+static inline int cc_atomic_i64_cas(cc_atomic_i64* p, int64_t* expected, int64_t desired) {
+    return cc_atomic_cas(p, expected, desired) ? 1 : 0;
+}
+
+static inline uint64_t cc_atomic_u64_load(cc_atomic_u64* p) {
+    return cc_atomic_load(p);
+}
+static inline void cc_atomic_u64_store(cc_atomic_u64* p, uint64_t v) {
+    cc_atomic_store(p, v);
+}
+static inline uint64_t cc_atomic_u64_fetch_add(cc_atomic_u64* p, uint64_t v) {
+    return cc_atomic_fetch_add(p, v);
+}
+static inline int cc_atomic_u64_cas(cc_atomic_u64* p, uint64_t* expected, uint64_t desired) {
+    return cc_atomic_cas(p, expected, desired) ? 1 : 0;
+}
+
+static inline intptr_t cc_atomic_intptr_load(cc_atomic_intptr* p) {
+    return cc_atomic_load(p);
+}
+static inline void cc_atomic_intptr_store(cc_atomic_intptr* p, intptr_t v) {
+    cc_atomic_store(p, v);
+}
+static inline intptr_t cc_atomic_intptr_fetch_add(cc_atomic_intptr* p, intptr_t v) {
+    return cc_atomic_fetch_add(p, v);
+}
+static inline int cc_atomic_intptr_cas(cc_atomic_intptr* p, intptr_t* expected, intptr_t desired) {
+    return cc_atomic_cas(p, expected, desired) ? 1 : 0;
+}
+
 #endif /* CC_ATOMIC_CCH */
