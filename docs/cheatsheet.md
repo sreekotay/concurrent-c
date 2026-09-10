@@ -992,54 +992,31 @@ Jupyter/Colab: `from cc_node import require`).
 #include "leaf.cch"                // local face; nested .cch is fine
 ```
 
-A local `.cch` with a non-`static` file-scope function body, `@errhandler`,
-`?>`, or other impl-only syntax is spliced into the including unit only
-when that unit is a `.ccs` (or an already-spliced impl face). Statement
-`!>` in a `static inline` extracts (header lower rewrites it). `T !>(E)`
-on a declaration does not force a splice, and neither
-does a `.foo(` in an interface header included from a `.ccs`. A
-`@typehooks` / `@typeview` face still extracts to a lowered `.h`; callers
-keep `char[:]` argument wrap and the proto's Result error type from the
-original `.cch`. A quoted interface `.cch` extracts; nested includes
-become their own `.h` (impl-grade nested faces need an owner `.ccs`,
-or a direct include from that `.ccs`). `foo.ccs` owns `foo.cch`,
-`foo_*.cch`, a same-directory `.ccs` that includes the chapter
-(`document.ccs` → `utf8.cch`), and any same-directory face those files
-include (`workspace.cch` → `ui_types.cch`). A `.ccs` include wins over
-a face-includer. Those faces extract as decls in every other TU. One
-include in one TU is extract or splice, not both. The owner splices
-the bodies after the extracted parent include. The including TU's
-`#include "foo.cch"` stays in source order so types declared above it
-are in scope. Nested quoted includes
-inside the extracted face hoist only when that face defines a name this
-face uses, and they land after this face's definitions of names the
-included face uses (`RtxBuf` before `ui_types.h`). A consumer leaf
-included last (`nav.cch` after `RtxDoc`) stays put. Those includes
-rewrite to the lowered `.h` path.
+A quoted `.cch` is a face. An interface face (declarations, types,
+`static inline` helpers; `T !>(E)` on a declaration, statement `!>` inside
+a `static inline`, and method-call UFCS are all interface-grade) extracts
+to a lowered `.h`. An implementation face — a file-scope function body that
+is not `static inline`, file-scope data, or impl-only syntax at file scope —
+is a module (draft, not implemented): one translation unit, `<face>_cch.c`,
+one object, one lowered `<face>.h`. A unit joins it with
+`#pragma(@module) "face"` at file start (`.cch` or `.ccs`; a program can be
+a member). `static` at file scope is module-private and shared by every
+member; a non-`static` definition is exported under its C name and declared
+in the `.h` (`extern` for data). Any unit that includes the face gets the
+`.h` and, through its link marker, the object. Membership is declared,
+never inferred. The including TU's `#include "foo.cch"` stays in source
+order so types declared above it are in scope.
 
 An object-like `#define FLAG` immediately before `#include "foo.cch"`
 stays in this TU; `#ifdef FLAG` inside the extracted `.h` is host cpp,
-including function bodies under that `#ifdef`. File-scope functions in
-a `.cch` live in the owner TU; other TUs see decls of non-`static`
-functions. File-scope `static` on a function stays `static` in the
-owner splice and is omitted from the extract. An unowned impl-grade
-face whose file-scope functions are all `static` splices a private copy
-per TU. A non-`static` function on an unowned face may appear in one TU;
-a second TU needs those functions `static` or an owner `.ccs`.
-`#pragma(@per_tu)` is optional and requires all file-scope functions
-`static`. A file-scope data definition becomes
-`extern` in the extract; `static` data stays in the extract and is not
-repeated in an owner include-graph splice.
-A pointer type in a declaration (`Tag *name` in a parameter, file-scope
-declarator, or struct field) that the face does not already name as a
-type is not a guessed `typedef struct Tag Tag`; if exactly one
-same-directory face defines the name and that face can extract, the
-extract includes that face. If none does, and exactly one face in the
-including unit's include graph does, extract includes that face. A
-multiply in a function body is not a pointer type. `CC_MAP_DECL_*` /
-`CC_DECL_SLICE_SPEC` / `CC_DECL_RESULT_SPEC` name the type they bind.
-Two definers with different owners, or none (and the including unit
-does not define it), is an error. Same-owner chapters (`foo.cch` / `foo_priv.cch`) count as
-one; extract includes the stem. An impl-grade unowned parent is left to the including unit (already
-spliced). Nested includes inside an extracted `.h` are relative to that
-`.h`, not an absolute path.
+including function bodies under that `#ifdef`. A pointer type in a
+declaration (`Tag *name` in a parameter, file-scope declarator, or struct
+field) that the face does not already name as a type is not a guessed
+`typedef struct Tag Tag`; if exactly one same-directory face defines the
+name, the extract includes that face; if none does and exactly one face in
+the including unit's include graph does, the extract includes that face.
+`CC_MAP_DECL_*` / `CC_DECL_SLICE_SPEC` / `CC_DECL_RESULT_SPEC` name the
+type they bind. Two definers in different modules, or none (and the
+including unit does not define it), is an error. Members of one module
+count as one definer. Nested includes inside an extracted `.h` are relative
+to that `.h`, not an absolute path.

@@ -327,6 +327,19 @@ differential report.
   and the four cleanup documents. Nothing merges to the default branch
   as the shipped lowerer before this gate passes.
 
+- **M9 Modules.** The face is the translation unit (spec §1.7, §1.8):
+  an implementation `.cch` and the units that declare membership in it
+  lower into one `<face>_cch.c`, compile once, and are linked into every
+  program whose include closure reaches the `.h`'s link marker. This is
+  driver work that serves both lowerers, so it may land before M8. It
+  deletes owner discovery, the splice ledger, the link-set audit with its
+  fixed caps, the per-TU private copy and `#pragma(@per_tu)`; the clean
+  lowerer gains a unit mode for `.cch`. `real_projects/staticd` is the
+  first member set (five faces sharing module-private state with the
+  program). Gate: every `quote_cch_*` and `cch_face_*` row keeps its
+  meaning — `two_splice` becomes a smoke, since two includers of one face
+  is the normal case.
+
 M0 and M1 carry no risk to the shipping compiler and are where work
 starts.
 

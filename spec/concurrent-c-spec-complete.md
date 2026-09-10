@@ -16,7 +16,7 @@ This specification defines:
 - Lowering to C
 - Script entry (`.shcc`) and the script library partner to the stdlib (§9.5)
 - Translation-unit headers (`#!ccc ccs|cch`, OS shebang for scripts) (§1.7)
-- File-start `#pragma(@prelude) off` / `#pragma(@linenumbers) off` / `#pragma(@per_tu)` (§1.8)
+- File-start `#pragma(@prelude) off` / `#pragma(@linenumbers) off` / `#pragma(@module) "name"` (§1.8)
 
 The lowering is part of this specification, not an implementation detail. Two conforming implementations must produce lowerings with identical observable behavior. Implementations may emit or inspect the lowered form via `--emit-c-only` (writes lowered C to `out/<stem>.c`) or `--emit-c-inspect` (writes the merged translation unit).
 
@@ -232,75 +232,67 @@ pin-era lowerer never sees the magic line. Quoted `#include` of project
 faces still resolves from the original unit's directory (the `#line` path),
 not the cache directory. An included `.ccs` / `.cch` face with a unit
 header is stripped the same way — the bang is not a preprocessor directive.
-A local `.cch` that needs the including unit's pipeline — a non-`static`
-file-scope function definition, `@string`, `@errhandler`, `?>`, and the
-like — is spliced into that unit when the include is written in a `.ccs`
-or inside an already-spliced face. `T !>(E)` on a declaration is result-type
-syntax and does not by itself force a splice. Statement `!>` / `!>(e) {`
-in extractable text (`static inline` helpers) is rewritten in the lowered
-`.h` and does not force a splice. Method-call UFCS in an interface
-header does not force a splice from a `.ccs`. A quoted interface `.cch`
-extracts to a lowered `.h`. The extracted `.h` is host-cc input. A
-member call in an extracted inline that names a declared `Type_method`
-(same face, an included face, or the face that included this one) lowers
-to that call; a field peel is not rewritten to the outer type's method.
-A leftover member call in the `.h` is an error. The
-lowerer still opens the original face from the quote directory (same)
-roots as quoted `#include`) and harvests fields, type views, and
-typehooks — the same original-face read used for `<ccc/…>`. A rewritten
-`#include` of that `.h` is not an ordinary C header for that harvest.
-Nested local includes inside that header
-extract to their own `.h`; they do not splice into the including unit.
-An impl-grade nested face without an owner `.ccs` is an error — move
-the bodies to an owner `.ccs`, or include the face from that `.ccs`.
-The owner is the same-stem sibling (`foo.cch` → `foo.ccs`), a chapter
-face with that prefix (`piece_tree_rb.cch` → `piece_tree.ccs`), a
-same-directory `.ccs` that includes the chapter (`document.ccs`
-includes `utf8.cch`), or a same-directory face included from an owned
-face (`workspace.cch` includes `ui_types.cch` → `workspace.ccs`). When
-both a `.ccs` include and a face-includer exist, the `.ccs` include is
-the owner. Other units extract decls and the owner unit splices the
-bodies after the extracted parent include so names that face defines
-are in scope. One include in one translation unit is either an
-extracted `#include` of the lowered `.h` or a splice of the chapter
-body, not both. A textual include guard does not apply to a splice.
-A file-scope function body has one definition — the owner TU.
-File-scope `static` on a function stays `static`: the owner splice
-keeps the keyword and the body, and the extracted `.h` omits that
-function. A file-scope function without `static` has one definition
-in the owner TU; other TUs see a declaration in the extract. A file-scope data definition (`int xs[] = {1,2}`) becomes
-`extern int xs[];` in the extract; the owner splice keeps the
-initializer. `static` data stays `static` in the extract and is not
-repeated in an owner include-graph splice.
-`#ifdef` / `#if` in an extracted face stay
-in the lowered `.h`; an object-like `#define` in this unit before the
-include is host cpp and selects those arms, including function bodies
-that sit under `#ifdef`. A pointer type in a declaration — a parameter,
-file-scope declarator, or struct field (`Tag *name`) — that the face does
-not already name as a type is not forwarded as `typedef struct Tag Tag` —
-that invents a tagged struct and conflicts with an anonymous
-`typedef struct { … } Tag` or an integer alias already in the unit.
-A multiply in a function body (`d * 100ull`) is not a pointer type.
-`CC_MAP_DECL_ARENA` / `CC_MAP_DECL_UFCS` / `CC_ARRAY_MAP_DECL` /
-`CC_DECL_SLICE_SPEC` / `CC_DECL_RESULT_SPEC` name the type they bind.
-If exactly one same-directory face defines the name and that face
-can extract (not impl-grade without an owner), the extract includes
-that face. If no same-directory face defines it, and exactly one
-face in the including unit's include graph does, extract includes
-that face. Chapter faces of one owner that share the name
-(`piece_tree.cch` and `piece_tree_priv.cch`) are that one face; extract
-includes the stem. Two faces with different owners is an error.
-No same-directory face and no type of that name in the
-including unit is an error. An impl-grade unowned parent already spliced into this
-unit is not extracted from the leaf. Nested quoted includes in an
-extracted `.h` use a path relative to that `.h` (same directory is
-the basename). Nested quoted includes hoist
-only when the included face defines a name this face uses and does
-not define, and they insert after this face's definitions of names
-the included face uses (`RtxBuf` before `ui_types.h`). A consumer
-leaf included last stays in source order. The including unit's `#include` of the face stays
-in source order. Nested local includes inside a spliced face are
-processed the same way.
+
+**Faces and modules.** *Status: draft — not implemented.*
+
+A quoted `#include "x.cch"` names a face: a header the program owns. A face
+has one of two grades, decided by its own text. An interface face carries
+declarations, types and `static inline` helpers; `T !>(E)` on a
+declaration, statement `!>` / `!>(e) {` inside a `static inline` body, and
+method-call UFCS are interface-grade. It extracts to a lowered `.h`, which
+is host-cc input; a leftover member call in that `.h` is an error. A face
+with a file-scope function definition that is not `static inline`, a
+file-scope data definition, or `@string`, `@errhandler`, `?>` or other
+unit-pipeline syntax at file scope is an implementation face.
+
+An implementation face is a module. A module is one translation unit: its
+members lower into one C file, `<face>_cch.c`, compile into one object, and
+present one lowered header, `<face>.h`. The face is the module's public
+surface. A unit joins a module by declaring membership at file start
+(§1.8): `#pragma(@module) "x"` names the face `x.cch` in the unit's
+directory. A member is a `.cch` or a `.ccs`; a program whose main unit
+declares membership is that module, and the module's object is the
+program's. A face with no members is a module of one. Membership is
+declared, never inferred from includes, directory layout or file names; a
+unit belongs to at most one module, and a face that includes another face
+includes it as any unit does.
+
+`static` at file scope in any member is module-private: one definition,
+shared by every member, visible to no unit outside the module; the lowered
+`.h` omits it. A file-scope function or data definition without `static` is
+exported under its C name: the module defines it once and the lowered `.h`
+declares it (`extern` for data). A unit outside the module that includes
+the face receives the declarations and the object: the lowered `.h` carries
+a link marker naming `<face>_cch.c`, and the implementation compiles that
+file once per configuration and adds its object to the link of every
+program whose include closure reaches the marker. A marker whose file
+cannot be found is an error. A quoted include of a member from a unit
+outside its module is an error: include the face. Two modules that export
+one name are a duplicate definition.
+
+The lowered `.h` keeps `#ifdef` / `#if` arms; an object-like `#define` in
+the including unit before the include is host cpp and selects those arms,
+including function bodies that sit under `#ifdef`. A pointer type in a
+declaration — a parameter, file-scope declarator, or struct field
+(`Tag *name`) — that the face does not already name as a type is not
+forwarded as `typedef struct Tag Tag`: that invents a tagged struct and
+conflicts with an anonymous `typedef struct { … } Tag` or an integer alias
+already in the unit. A multiply in a function body (`d * 100ull`) is not a
+pointer type. `CC_MAP_DECL_ARENA` / `CC_MAP_DECL_UFCS` / `CC_ARRAY_MAP_DECL`
+/ `CC_DECL_SLICE_SPEC` / `CC_DECL_RESULT_SPEC` name the type they bind. If
+exactly one same-directory face defines the name, the extract includes that
+face. If no same-directory face defines it, and exactly one face in the
+including unit's include graph does, the extract includes that face.
+Members of one module that define the name are that module; the extract
+includes the face. Two definers in different modules is an error. No
+same-directory face and no type of that name in the including unit is an
+error. Nested quoted includes in an extracted `.h` use a path relative to
+that `.h` (same directory is the basename). Nested quoted includes hoist
+only when the included face defines a name this face uses and does not
+define, and they insert after this face's definitions of names the included
+face uses (`RtxBuf` before `ui_types.h`). A consumer leaf included last
+stays in source order. The including unit's `#include` of the face stays in
+source order.
 
 ### 1.8 File-start pragmas
 
@@ -310,7 +302,7 @@ begin with:
 ```
 #pragma(@prelude) off
 #pragma(@linenumbers) off
-#pragma(@per_tu)
+#pragma(@module) "name"
 ```
 
 File-start means after the header and after leading blank lines and comments.
@@ -328,16 +320,10 @@ it does not affect compilation.
 `--no-line` on the `ccc` command line has the same effect and overrides the
 pragma when both are present.
 
-An unowned impl-grade face whose file-scope functions are all `static`
-may splice into every translation unit as a private copy. A second splice
-of an unowned face that has a non-`static` file-scope function is an
-error — make those functions `static`, or give the face an owner `.ccs`.
-Extract of an owned face whose owner `.ccs` is not in the link set is an
-error.
-
-`#pragma(@per_tu)` is optional. Presence (no `off`) requires every
-file-scope function on that face to be `static`, even when only one
-translation unit includes it.
+`#pragma(@module) "name"` declares the unit a member of the module whose
+face is `name.cch` in the unit's directory (§1.7). *Status: draft — not
+implemented.* The operand is the face's basename without its suffix. A unit
+names at most one module; a name whose face does not exist is an error.
 
 ---
 
@@ -428,7 +414,7 @@ bugs.
 | `#pragma(@parallel) off` / `on` | Static denial: `@parallel` lowers sequentially (§8.11.8)  | `#pragma(@parallel) off`                   |
 | `#pragma(@prelude) off` | No automatic prolog (§1.8) | `#pragma(@prelude) off` |
 | `#pragma(@linenumbers) off` | Omit `#line` / `CC_LN` from emit (§1.8) | `#pragma(@linenumbers) off` |
-| `#pragma(@per_tu)` | Optional: require all file-scope fns `static` (§1.8) | `#pragma(@per_tu)` |
+| `#pragma(@module) "name"` | This unit is a member of module `name` (§1.7, §1.8) | `#pragma(@module) "staticd"` |
 
 **Call-site annotation forms** (see §8.2 for precedence):
 
