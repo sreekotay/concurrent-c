@@ -1,0 +1,3 @@
+The shadow lowerer lets the `break` reach the host compiler
+(`break statement not within loop or switch`) instead of refusing it as a
+jump out of a dest body (spec 8.11, dest bodies).

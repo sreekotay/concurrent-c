@@ -1,0 +1,50 @@
+/*
+ * Admit after cancel fails with CC_ERR_CANCELLED. On the frame the
+ * dest-attach unwraps into the enclosing @errhandler; inside a dest body
+ * the refused admit ends the fiber.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+
+static int frame_admit(void) {
+    @errhandler(CCError e) {
+        return e.kind == CC_ERR_CANCELLED ? 7 : 1;
+    }
+    cc_atomic_int sum = 0;
+    CCParallel h = @parallel spawn { @serial { cc_sleep_ms(5); } } !>;
+    h.cancel() !>;
+    @parallel(h) { sum.fetch_add(1); }
+    h.wait() !>;
+    return 2;
+}
+
+static int body_admit(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    cc_atomic_int sum = 0;
+    CCParallel h = @parallel spawn {
+        @serial {
+            @errhandler(CCError e) { (void)e; return; }
+            h.cancel() !>;
+            @parallel(h) { sum.fetch_add(100); }
+            sum.fetch_add(1);
+        }
+    } !>;
+    h.wait() !>;
+    return sum.load();
+}
+
+int main(void) {
+    int r;
+    r = frame_admit();
+    if (r != 7) {
+        eprintln(@string(`FAIL frame admit r=${r}`, @scratch));
+        return 1;
+    }
+    r = body_admit();
+    if (r != 0) {
+        eprintln(@string(`FAIL body admit sum=${r}`, @scratch));
+        return 1;
+    }
+    println("parallel_dest_admit_cancel_smoke: OK");
+    return 0;
+}

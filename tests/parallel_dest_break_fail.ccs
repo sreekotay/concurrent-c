@@ -1,0 +1,17 @@
+/* A `break` that no loop inside the arm owns leaves a dest body, which is
+ * a fiber of the dest: ill-formed. `return;` ends the fiber. */
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    int a = 0;
+    CCParallel h = @parallel spawn {
+        @serial {
+            if (a == 0)
+                break;
+            a = 1;
+        }
+    } !>;
+    h.wait() !>;
+    return a;
+}

@@ -45,6 +45,9 @@ typedef struct PBind {
     CcStmt* at;
     CCSlice name;
     CcType* type;
+    bool destroy;               /* `!> @destroy` on the bind: the hook goes on the declaration,
+                                 * and the cleanup step arms it after the block that fills it */
+    CcStmt* destroy_body;
 } PBind;
 typedef PBind* PBindRef;
 typedef Vec::[PBindRef] PBindList;
@@ -65,6 +68,11 @@ typedef struct PStep {
                                  * a bare `!>` in an arm raises into one of them after the
                                  * join, and the exit cell is typed by what they take */
     bool eh_any;
+    int dest_depth;             /* how many dest bodies the walk is inside: the arms of a bound
+                                 * construct and the body of an attach, lowered before they move */
+    size_t eh_in_scope;         /* the `@errhandler`s in scope at the statement the walk is on:
+                                 * every one declared above it in a block still open */
+    Vec::[size_t] eh_marks;     /* `eh_in_scope` as it was on entering each open statement */
     bool any;
     /* `#pragma(@parallel) off` regions, as token spans: off_from[i] ..
      * off_to[i]. A site inside one is inert -- its arms and its iterations
@@ -1346,8 +1354,114 @@ static bool pl_byval_expr(CcExpr* e, void* env) {
     return true;
 }
 
+/* The labels a body declares, so a `goto` to one of them is a jump that
+ * stays inside it. */
+static bool pl_label_stmt(CcStmt* s, void* env) {
+    CcNameList* names = (CcNameList*)env;
+    @switch (s->k) {
+        case .label(x): names->push(x.name); break;
+        default: break;
+    }
+    return true;
+}
+
+/* The first statement that leaves a dest body: a `break` or `continue` that
+ * no loop or switch inside the body owns, or a `goto` to a label the body
+ * does not declare. A dest body is a fiber, and the only way out of it is
+ * `return;` -- the frame that wrote it has moved on, so there is nothing
+ * outside it for a jump to reach. Walked with a depth, as `pl_for_exits`
+ * is: a loop the body opened owns its own `break`. */
+static CcStmt* pl_dest_body_leaves(CcStmt* s, int depth, CcNameList* labels) {
+    CcStmtList* bs;
+    size_t n;
+    size_t i;
+    int inner = depth;
+    bool opens = false;
+    bool leaves = false;
+    bool is_goto = false;
+    CcGoto gt;
+    CcStmt* a = NULL;
+    CcStmt* b = NULL;
+    if (!s) return NULL;
+    @switch (s->k) {
+        case .break_: leaves = depth == 0; break;
+        case .continue_: leaves = depth == 0; break;
+        case .goto_(g): gt = g; is_goto = true; break;
+        case .for_(x): opens = true; a = x.body; break;
+        case .while_(x): opens = true; a = x.body; break;
+        case .do_(x): opens = true; a = x.body; break;
+        case .switch_(x): opens = true; a = x.body; break;
+        case .if_(x): a = x.then; b = x.els; break;
+        case .label(x): a = x.inner; break;
+        default: break;
+    }
+    if (is_goto) {
+        /* a computed `goto *e` names no label the body could declare */
+        size_t nl = labels->len();
+        size_t li;
+        bool known = false;
+        CCSlice want = gt.label;
+        for (li = 0; li < nl; li++) {
+            CCSlice nm = *labels->get_ptr(li);
+            if (want.len && slice_eq(nm, want)) known = true;
+        }
+        leaves = !known;
+    }
+    if (leaves) return s;
+    if (opens) inner = depth + 1;
+    bs = lw_block_stmts(s);
+    if (bs) {
+        n = bs->len();
+        for (i = 0; i < n; i++) {
+            CcStmt* k = *bs->get_ptr(i);
+            CcStmt* hit = pl_dest_body_leaves(k, inner, labels);
+            if (hit) return hit;
+        }
+        return NULL;
+    }
+    if (a) {
+        CcStmt* hit = pl_dest_body_leaves(a, inner, labels);
+        if (hit) return hit;
+    }
+    if (b) return pl_dest_body_leaves(b, inner, labels);
+    return NULL;
+}
+
+/* Whether a dest body -- an arm of a bound construct, the body of an attach
+ * -- ends only by running out or by `return;`. Says so at the statement
+ * that leaves it otherwise. */
+static bool pl_dest_body_stays(PStep* st, CcStmt* body) {
+    CcLowerer* L = st->L;
+    CcNameList labels = vec_new::[CCSlice](L->arena);
+    CcVisitor v;
+    CcStmt* hit;
+    bool is_goto = false;
+    bool is_cont = false;
+    if (!body) return true;
+    memset(&v, 0, sizeof(v));
+    v.stmt = pl_label_stmt;
+    v.env = &labels;
+    CcStmt_walk(body, v);
+    hit = pl_dest_body_leaves(body, 0, &labels);
+    if (!hit) return true;
+    @switch (hit->k) {
+        case .goto_: is_goto = true; break;
+        case .continue_: is_cont = true; break;
+        default: break;
+    }
+    {
+        CCString m = cc_string_new();
+        if (is_goto) m.push_cstr("'goto' to a label outside a dest body: the body is a fiber of the dest and the frame that wrote it has moved on; write 'return;' to end the fiber, or put the label inside the body", L->arena);
+        else if (is_cont) m.push_cstr("'continue' leaves a dest body: the body is a fiber of the dest, not an iteration of a loop outside it; write 'return;' to end the fiber", L->arena);
+        else m.push_cstr("'break' leaves a dest body: the body is a fiber of the dest, not a loop outside it; write 'return;' to end the fiber", L->arena);
+        lw_error(L, hit->span, m);
+    }
+    return false;
+}
+
 static bool pl_dest_body_ok(PStep* st, CcStmt* body, PCapList* caps, CcSpan sp) {
     CcLowerer* L = st->L;
+    if (!pl_dest_body_stays(st, body)) return false;
     {
         CcVisitor v;
         CcStmt* at = NULL;
@@ -1500,6 +1614,44 @@ static bool pl_tail_waits(CcExpr* tail) {
     v.env = &hit;
     CcExpr_walk(tail, v);
     return hit;
+}
+
+/* `} !> @destroy [{ D }]` after the block: the hook the bind carries. */
+typedef struct PTailDestroy { bool hit; CcStmt* body; } PTailDestroy;
+
+static bool pl_tail_destroy_expr(CcExpr* e, void* env) {
+    PTailDestroy* td = (PTailDestroy*)env;
+    @switch (e->k) {
+        case .unwrap_destroy(ud): td->hit = true; td->body = ud.destroy_body; break;
+        default: break;
+    }
+    return true;
+}
+
+static bool pl_tail_destroys(CcExpr* tail, CcStmt** body) {
+    CcVisitor v;
+    PTailDestroy td;
+    if (!tail) return false;
+    memset(&td, 0, sizeof(td));
+    memset(&v, 0, sizeof(v));
+    v.expr = pl_tail_destroy_expr;
+    v.env = &td;
+    CcExpr_walk(tail, v);
+    if (body) *body = td.body;
+    return td.hit;
+}
+
+/* The handle a site declares: hoisted above the block, into the list the
+ * block sits in, with the `@destroy` the tail wrote on the declaration. */
+static PBind* pl_bind_new(PStep* st, CcStmt* s, CcParallel p, CcSpan sp) {
+    CcLowerer* L = st->L;
+    PBind* b = cc_arena_alloc(L->arena, sizeof(PBind), _Alignof(PBind));
+    memset(b, 0, sizeof(*b));
+    b->at = s;
+    b->name = p.bind;
+    b->type = p.bind_type ? p.bind_type : cc_type_named(cstr_slice("CCParallel"), sp, L->arena);
+    b->destroy = pl_tail_destroys(p.tail, &b->destroy_body);
+    return b;
 }
 
 /* An arm that waits on the very handle the block is filling. The arms run
@@ -1805,11 +1957,7 @@ static void pl_lower_inert(PStep* st, CcStmt* s, CcParallel p) {
     if (hdeclared) {
         /* the handle outlives the block, so its declaration is hoisted
          * above it, into the list the block sits in */
-        PBind* b = cc_arena_alloc(L->arena, sizeof(PBind), _Alignof(PBind));
-        memset(b, 0, sizeof(*b));
-        b->at = s;
-        b->name = p.bind;
-        b->type = p.bind_type ? p.bind_type : cc_type_named(cstr_slice("CCParallel"), sp, L->arena);
+        PBind* b = pl_bind_new(st, s, p, sp);
         st->binds.push(b);
     }
     s->k = blk->k;
@@ -1823,6 +1971,7 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
     Vec::[CcParallelArm]* armv = &p.arms;
     size_t n = armv->len();
     size_t i;
+    size_t first = 1;           /* the first arm the runtime is offered; 0 when none stays on the caller */
     uint32_t id;
     CcStmt* blk;
     CCSlice hspell;
@@ -1876,6 +2025,14 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
             lw_error(L, sp, m);
             return;
         }
+        if (!p.bind.len && pl_tail_destroys(p.tail, NULL)) {
+            /* the hook goes on a declaration, and an assignment join has
+             * none of its own to carry it */
+            CCString m = cc_string_new();
+            m.push_cstr("'!> @destroy' on an assignment join has no declaration to attach the hook to; write 'CCParallel h = @parallel { ... } !> @destroy;'", L->arena);
+            lw_error(L, sp, m);
+            return;
+        }
         if (held && !waits) {
             CcParallelArm* a0 = armv->get_ptr(0);
             CCSlice hb = cc_slice_empty();
@@ -1889,6 +2046,10 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
                 lw_error(L, sp, m);
                 return;
             }
+            /* a dest-live one-arm construct has no kick: that arm is the
+             * worker, spawned and attached, and the dest is live on the
+             * caller from the binding on (spec 8.11.1) */
+            if (n == 1) first = 0;
             if (p.bind.len) hb = p.bind;
             else (void)pl_base_name(p.target, &hb);
             for (i = 0; i < n; i++) {
@@ -1910,6 +2071,20 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
     id = st->next_id++;
     blk = lw_block(L, sp);
     hspell = pl_handle_spell(L, p, &hdeclared, &hbase);
+    /* An arm that leaves for a thunk is gone by the time the walk reaches
+     * the statement, so whatever `@parallel` it holds is lowered here,
+     * first. The arms of a bound construct are dest bodies, the caller-run
+     * first one included: an attach inside one ends the fiber on a refused
+     * admit, and no jump leaves one. */
+    for (i = 0; i < n; i++) {
+        CcParallelArm* arm = armv->get_ptr(i);
+        if (!arm->serial) continue;
+        if (i < first && !hspell.len) continue;
+        if (hspell.len) st->dest_depth++;
+        tw_stmt(w, arm->serial);
+        if (hspell.len) st->dest_depth--;
+        if (hspell.len && !pl_dest_body_stays(st, pl_serial_body(L, arm->serial))) return;
+    }
     for (i = 0; i < n; i++) {
         CcParallelArm* arm = armv->get_ptr(i);
         CcStmt* valued = pl_arm_first_return(arm->expr, arm->serial, true);
@@ -1941,7 +2116,9 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
         pj_ety = pl_eh_type(st, sp);
         if (!pj_ety.len) return;
     }
-    if (pj_any || raise_any) {
+    if ((pj_any || raise_any) && first == 1) {
+        /* an exit needs the join only where an arm runs on the caller: a
+         * spawned worker with no kick leaves its thunk and nothing else */
         pj_leave = pl_pj_name(L, id, "_join");
         if (!hspell.len) {
             pj_rty = pl_ret_type(st);
@@ -2002,8 +2179,9 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
         lw_push(blk, lw_expr_stmt(L, lw_call2(L, cstr_slice("cc_parallel_deny_enter"),
                                               lw_ident(L, cstr_slice("__cc_pt"), sp), who, sp), sp));
     }
-    /* every arm but the first is offered to the runtime */
-    for (i = 1; i < n; i++) {
+    /* every arm but the first is offered to the runtime -- the first too,
+     * when it is the one worker of a dest-live construct */
+    for (i = first; i < n; i++) {
         CcParallelArm* arm = armv->get_ptr(i);
         PScan sc;
         PCapList caps;
@@ -2104,11 +2282,13 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
         lw_push(fire, lw_expr_stmt(L, lw_call2(L, cstr_slice("cc_parallel_deny_enter"),
                                                lw_ident(L, cstr_slice("__cc_pt"), sp),
                                                lw_text(L, @string(`NULL`, L->arena), sp), sp), sp));
-        for (i = 1; i < n; i++) pl_fire_stmts(L, fire, id, (uint32_t)i, hspell, false, sp);
+        for (i = first; i < n; i++) pl_fire_stmts(L, fire, id, (uint32_t)i, hspell, false, sp);
         lw_push(blk, lw_if(L, lw_not(L, lw_ident(L, gname, sp), sp), fire, NULL, sp));
     }
-    /* the first arm stays here */
-    {
+    /* the first arm stays here -- unless it is the one worker of a
+     * dest-live construct, which has no kick: that arm was spawned and
+     * attached above, and the caller goes on past the binding */
+    if (first == 1) {
         CcParallelArm* arm = armv->get_ptr(0);
         /* it reads the caller's own names, so its exit is spelled as
          * written -- and it leaves through the join, not out of the
@@ -2133,12 +2313,12 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
     if (gated) {
         CcStmt* joins = lw_block(L, sp);
         CcStmt* order = lw_block(L, sp);
-        for (i = 1; i < n; i++) pl_join_stmts(L, joins, id, (uint32_t)i, false, sp);
+        for (i = first; i < n; i++) pl_join_stmts(L, joins, id, (uint32_t)i, false, sp);
         lw_push(joins, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_deny_leave"),
                                                 lw_ident(L, cstr_slice("__cc_pt"), sp), sp), sp));
         /* nothing was denied on this schedule, so no note: the arms simply
          * run after the first, in the order they were written */
-        for (i = 1; i < n; i++) pl_inline_call(L, order, id, (uint32_t)i, sp);
+        for (i = first; i < n; i++) pl_inline_call(L, order, id, (uint32_t)i, sp);
         if (pj_ty.len) {
             /* an arm that left ended the block, and on this schedule the
              * arms behind it were never started: they do not start now */
@@ -2149,16 +2329,12 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
         lw_push(blk, lw_if(L, lw_not(L, lw_ident(L, gname, sp), sp), joins, order, sp));
     } else if (!hspell.len) {
         /* the block joins before it ends; a bound handle joins later */
-        for (i = 1; i < n; i++) pl_join_stmts(L, blk, id, (uint32_t)i, p.spawn, sp);
+        for (i = first; i < n; i++) pl_join_stmts(L, blk, id, (uint32_t)i, p.spawn, sp);
         lw_push(blk, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_deny_leave"),
                                               lw_ident(L, cstr_slice("__cc_pt"), sp), sp), sp));
     } else if (hdeclared) {
         /* the block declares it, so it is hoisted above the block */
-        PBind* b = cc_arena_alloc(L->arena, sizeof(PBind), _Alignof(PBind));
-        memset(b, 0, sizeof(*b));
-        b->at = s;
-        b->name = p.bind;
-        b->type = p.bind_type ? p.bind_type : cc_type_named(cstr_slice("CCParallel"), sp, L->arena);
+        PBind* b = pl_bind_new(st, s, p, sp);
         st->binds.push(b);
     }
     if (pj_ty.len) {
@@ -2196,6 +2372,49 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
  *
  * The captures are the bound shape: a copy taken when the arm starts,
  * except the handle itself, which is the caller's own. */
+static CcExpr* pl_admit_call(CcLowerer* L, CCSlice bind, CcSpan sp) {
+    return lw_call1(L, cstr_slice("cc_parallel_admit_ok"),
+                    cc_expr_unary(CC_OP_ADDR, lw_paren(L, lw_ident(L, bind, sp), sp), sp, L->arena), sp);
+}
+
+/* `cc_parallel_admit_ok(&h)` before the admit: a dest that was cancelled
+ * takes no more work, and the refusal is `CC_ERR_CANCELLED`. On the frame
+ * it is the unwrap the site was written as, into the enclosing handler.
+ * Inside a dest body it is a seam, not a user `!>`: the fiber ends. */
+static void pl_admit_gate(PStep* st, CcStmt* blk, CCSlice bind, CcSpan sp) {
+    CcLowerer* L = st->L;
+    if (st->dest_depth > 0) {
+        CcType* t = cc__type_blank(sp, L->arena);
+        CcTypeofType tf;
+        CcStmt* then = lw_block(L, sp);
+        CCSlice adm = cstr_slice("__cc_adm");
+        tf.expr = pl_admit_call(L, bind, sp);
+        tf.type = NULL;
+        { CcTypeK tk = { .typeof_ = tf }; t->k = tk; }
+        lw_push(blk, lw_decl_stmt(L, t, adm, pl_admit_call(L, bind, sp), sp));
+        lw_push(then, cc_stmt_return(NULL, sp, L->arena));
+        lw_push(blk, lw_if(L, lw_not(L, lw_member(L, lw_ident(L, adm, sp), "ok", sp), sp), then, NULL, sp));
+        return;
+    }
+    if (st->eh_in_scope == 0) {
+        /* no handler above the site: the refusal is reported and the
+         * process exits, the default the shadow lowerer gives this seam */
+        CcType* t = cc__type_blank(sp, L->arena);
+        CcTypeofType tf;
+        CcStmt* then = lw_block(L, sp);
+        CCSlice adm = cstr_slice("__cc_adm");
+        CcExpr* err = lw_member(L, lw_member(L, lw_ident(L, adm, sp), "u", sp), "error", sp);
+        tf.expr = pl_admit_call(L, bind, sp);
+        tf.type = NULL;
+        { CcTypeK tk = { .typeof_ = tf }; t->k = tk; }
+        lw_push(blk, lw_decl_stmt(L, t, adm, pl_admit_call(L, bind, sp), sp));
+        lw_push(then, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_error_exit"), err, sp), sp));
+        lw_push(blk, lw_if(L, lw_not(L, lw_member(L, lw_ident(L, adm, sp), "ok", sp), sp), then, NULL, sp));
+        return;
+    }
+    lw_push(blk, pl_unwrap_stmt(L, pl_admit_call(L, bind, sp), sp));
+}
+
 static void pl_dest(PStep* st, CcStmt* s, CcParallelDest pd) {
     CcLowerer* L = st->L;
     Walker* w = st->w;
@@ -2231,6 +2450,11 @@ static void pl_dest(PStep* st, CcStmt* s, CcParallelDest pd) {
             bs->push(one);
         }
     }
+    /* the body leaves for the thunk before the walk reaches the statement:
+     * whatever `@parallel` it holds is lowered here, first, as a dest body */
+    st->dest_depth++;
+    tw_stmt(w, body);
+    st->dest_depth--;
     memset(&sc, 0, sizeof(sc));
     sc.st = st;
     sc.w = w;
@@ -2269,6 +2493,7 @@ static void pl_dest(PStep* st, CcStmt* s, CcParallelDest pd) {
         dv->push(th);
     }
     blk = lw_block(L, sp);
+    pl_admit_gate(st, blk, bind, sp);
     pl_spawn_stmts(L, blk, id, 0, &caps, cc_slice_empty(), bind, sp);
     s->k = blk->k;
     st->any = true;
@@ -2468,7 +2693,10 @@ static void pl_for_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
         CcStmt* then = lw_block(L, sp);
         CCString rv = @string(`${cell}.rv`, L->arena);
         CCString cond = @string(`cc_atomic_load(&${cell}.xk) == 2`, L->arena);
-        if (fn_void) lw_push(then, cc_stmt_return(NULL, sp, L->arena));
+        /* inside a dest body the walk stands in a fiber, and the value a
+         * `return` there could carry is refused above it: ending the fiber
+         * is the whole of the exit */
+        if (fn_void || st->dest_depth > 0) lw_push(then, cc_stmt_return(NULL, sp, L->arena));
         else lw_push(then, cc_stmt_return(lw_text(L, rv, sp), sp, L->arena));
         lw_push(blk, lw_if(L, lw_text(L, cond, sp), then, NULL, sp));
     }
@@ -3843,6 +4071,8 @@ static void pl_on_decl(Walker* w, CcDecl* d) {
     st->at_decl = d;
     st->eh_top = vec_new::[CcStmtRef](st->L->arena);
     st->eh_any = false;
+    st->eh_in_scope = 0;
+    st->eh_marks = vec_new::[size_t](st->L->arena);
     @switch (d->k) {
         case .func(x): f = x; is_fn = true; break;
         default: break;
@@ -3884,15 +4114,32 @@ static void pl_on_stmt(Walker* w, CcStmt* s, bool enter) {
     CcParallel p;
     CcParallelDest pd;
     CcParallelFor pf;
-    int shape = 0;              /* 1 arms, 2 dest, 3 for, 4 stage */
-    if (!enter) return;
+    int shape = 0;              /* 1 arms, 2 dest, 3 for, 4 stage, 5 errhandler */
     @switch (s->k) {
         case .parallel(x): p = x; shape = 1; break;
         case .parallel_dest(x): pd = x; shape = 2; break;
         case .parallel_for(x): pf = x; shape = 3; break;
         case .stage: shape = 4; break;
+        case .errhandler: shape = 5; break;
         default: break;
     }
+    if (!enter) {
+        /* leaving a statement drops the handlers declared inside it; a
+         * handler itself stays in scope for the statements after it */
+        Vec::[size_t]* marks = &st->eh_marks;
+        size_t nm = marks->len();
+        if (nm) {
+            size_t m = *marks->get_ptr(nm - 1);
+            marks->truncate(nm - 1);
+            if (shape != 5) st->eh_in_scope = m;
+        }
+        return;
+    }
+    {
+        Vec::[size_t]* marks = &st->eh_marks;
+        marks->push(st->eh_in_scope);
+    }
+    if (shape == 5) st->eh_in_scope++;
     if (shape == 1) pl_lower(st, s, p);
     else if (shape == 2) pl_dest(st, s, pd);
     else if (shape == 3) pl_for(st, s, pf);
@@ -3942,7 +4189,34 @@ static void pl_declare_binds(PStep* st, CcStmtList* list) {
     for (i = 0; i < n; i++) {
         CcStmt* s = *list->get_ptr(i);
         PBind* b = pl_bind_at(st, s);
-        if (b) out.push(lw_decl_stmt(L, b->type, b->name, NULL, s->span));
+        if (b) {
+            CcStmt* ds = lw_decl_stmt(L, b->type, b->name, NULL, s->span);
+            if (b->destroy) {
+                /* `!> @destroy` on the bind: the declaration carries the
+                 * hook, and the cleanup step, seeing a bare declaration
+                 * followed by the block that fills it, arms the hook after
+                 * that block -- the same shape `T x = e !> @destroy` leaves */
+                CcDecl* d = NULL;
+                CcVarDecl v;
+                bool is_var = false;
+                @switch (ds->k) {
+                    case .decl(x): d = x.d; break;
+                    default: break;
+                }
+                if (d) {
+                    @switch (d->k) {
+                        case .var(x): v = x; is_var = true; break;
+                        default: break;
+                    }
+                }
+                if (is_var) {
+                    v.destroy = true;
+                    v.destroy_body = b->destroy_body;
+                    { CcDeclK dk = { .var = v }; d->k = dk; }
+                }
+            }
+            out.push(ds);
+        }
         pl_declare_in(st, s);
         out.push(s);
     }
