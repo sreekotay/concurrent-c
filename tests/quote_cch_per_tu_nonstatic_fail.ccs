@@ -1,3 +1,6 @@
+/* `#pragma(@per_tu)` is not a file-start pragma (spec 1.8): a face with
+ * a non-static body is a module, and there is no private-copy form to
+ * ask for. The line is refused where it stands. */
 #include "unowned_faces/per_tu_nonstatic.cch"
 
 int main(void) {

@@ -1,0 +1,1 @@
+M9 (spec 1.8): #pragma(@per_tu) is still recognised, and the row is refused for the non-static body instead of for the pragma

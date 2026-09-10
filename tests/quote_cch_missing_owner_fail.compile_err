@@ -1,1 +1,0 @@
-tests/quote_cch_destatic_mod.cch:23:5: error: face: 'destatic_pub' is a non-static body; owner is quote_cch_destatic_mod.ccs

@@ -1,1 +1,2 @@
-tests/unowned_faces/per_tu_nonstatic.cch:8:5: error: face: 'per_tu_pub' is a non-static body
+per_tu_nonstatic.cch:1:
+#pragma(@per_tu)

@@ -1,0 +1,9 @@
+/* A program includes an implementation face and calls its exported
+ * `destatic_pub` (spec 1.7). The face is a module of one: its bodies live
+ * in the module object, and the lowered `.h` this unit gets carries the
+ * link marker that puts that object on the program's link line. No other
+ * unit has to be in the link set for that to hold. */
+#include "quote_cch_destatic_mod.cch"
+int main(void) {
+    return destatic_pub() == 7 ? 0 : 1;
+}

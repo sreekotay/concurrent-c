@@ -1,4 +1,6 @@
-/* All-static unowned face: two TUs splice arena private copy (no pragma). */
+/* An all-static face with no members is a module of one (spec 1.7):
+ * its bodies lower into per_tu_cch.c, compile once, and both programs
+ * link that object. Neither program carries a copy of the static. */
 CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
 
 CCCommand emit_a = cc_command(arena, @slice("./cc/bin/ccc"));
@@ -19,8 +21,8 @@ grep_static.arg("-q");
 grep_static.arg("static int per_tu_val");
 grep_static.arg("out/quote_cch_per_tu_a.c");
 rc = grep_static.status() !>;
-if (rc != 0) {
-    "per_tu emit dropped static".println();
+if (rc == 0) {
+    "the module-private body was copied into the program TU".println();
     return 1;
 }
 
@@ -30,14 +32,14 @@ build.arg("--no-cache");
 build.arg("tests/quote_cch_per_tu_a_mod.ccs");
 build.arg("tests/quote_cch_per_tu_b_mod.ccs");
 build.arg("-o");
-build.arg("out/quote_cch_per_tu_smoke");
+build.arg("out/quote_cch_module_of_one_smoke");
 build.inherit_stdio();
 rc = build.status() !>;
 if (rc != 0) {
     "build failed".println();
     return 1;
 }
-CCCommand run = cc_command(arena, @slice("out/quote_cch_per_tu_smoke"));
+CCCommand run = cc_command(arena, @slice("out/quote_cch_module_of_one_smoke"));
 run.inherit_stdio();
 rc = run.status() !>;
 if (rc != 0) {

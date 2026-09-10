@@ -1,0 +1,1 @@
+M9 (spec 1.7, modules): an all-static face is spliced as a private copy into every including unit today; the module of one that compiles once and links into both programs is not implemented

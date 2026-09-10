@@ -249,10 +249,13 @@ An implementation face is a module. A module is one translation unit: its
 members lower into one C file, `<face>_cch.c`, compile into one object, and
 present one lowered header, `<face>.h`. The face is the module's public
 surface. A unit joins a module by declaring membership at file start
-(§1.8): `#pragma(@module) "x"` names the face `x.cch` in the unit's
-directory. A member is a `.cch` or a `.ccs`; a program whose main unit
-declares membership is that module, and the module's object is the
-program's. A face with no members is a module of one. Membership is
+(§1.8): `#pragma(@module) "x"` names the module `x`, whose public face is
+`x.cch` in the unit's directory when that file exists. A member is a
+`.cch` or a `.ccs`; a program whose main unit declares membership is that
+module, and the module's object is the program's. A module with a program
+and no face is the program: it has no lowered header and no unit outside
+it includes it. A face with no members is a module of one; a module with
+neither a face nor a program is an error. Membership is
 declared, never inferred from includes, directory layout or file names; a
 unit belongs to at most one module, and a face that includes another face
 includes it as any unit does.
@@ -320,10 +323,10 @@ it does not affect compilation.
 `--no-line` on the `ccc` command line has the same effect and overrides the
 pragma when both are present.
 
-`#pragma(@module) "name"` declares the unit a member of the module whose
-face is `name.cch` in the unit's directory (§1.7). *Status: draft — not
-implemented.* The operand is the face's basename without its suffix. A unit
-names at most one module; a name whose face does not exist is an error.
+`#pragma(@module) "name"` declares the unit a member of module `name`
+(§1.7). *Status: draft — not implemented.* The operand is a name; the
+module's public face, when it has one, is `name.cch` in the unit's
+directory. A unit names at most one module.
 
 ---
 
