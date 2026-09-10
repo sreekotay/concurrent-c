@@ -382,11 +382,37 @@ int cc_file_start_pragmas(const char* src, size_t n,
         } else if (rest >= 9 && memcmp(q, "(@per_tu)", 9) == 0) {
             which = 3;
             q += 9;
+        } else if (rest >= 11 && memcmp(q, "(@parallel)", 11) == 0) {
+            /* Steers the lowering, not this scan: recognised here so a
+               `#pragma(@parallel) off` at the top of a file does not end
+               the scan and take the pragmas below it with it, and so a
+               misspelled operand is named rather than ignored. */
+            which = 4;
+            q += 11;
         } else {
             break;
         }
         while (*q == ' ' || *q == '\t') q++;
-        if (which == 3) {
+        if (which == 4) {
+            size_t olen = 0;
+            if (q[0] == 'o' && q[1] == 'f' && q[2] == 'f') olen = 3;
+            else if (q[0] == 'o' && q[1] == 'n') olen = 2;
+            if (olen == 0) {
+                return cc__seterr(err, err_cap,
+                                  "#pragma(@parallel) takes 'off' or 'on'");
+            }
+            q += olen;
+            if (*q && *q != '\n' && *q != '\r' && *q != ' ' && *q != '\t') {
+                return cc__seterr(err, err_cap,
+                                  "#pragma(@parallel) takes 'off' or 'on'");
+            }
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q && *q != '\n' && *q != '\r' &&
+                !(*q == '/' && q[1] == '/')) {
+                return cc__seterr(err, err_cap,
+                                  "#pragma(@parallel) takes 'off' or 'on'");
+            }
+        } else if (which == 3) {
             if (*q && *q != '\n' && *q != '\r' &&
                 !(*q == '/' && q[1] == '/')) {
                 return cc__seterr(err, err_cap,

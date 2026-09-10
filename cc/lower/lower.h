@@ -17,7 +17,6 @@
 
 typedef struct CcLowerOpts {
     int line_directives;      /* honour #pragma(@linenumbers) */
-    int parallel_off;         /* #pragma(@parallel) off */
     int per_tu;               /* #pragma(@per_tu) */
     const char *unit_path;    /* spelling used in cc_rt_diag_record_unwrap_site(path, "line") */
 } CcLowerOpts;

@@ -510,7 +510,6 @@ static bool load_lowered(Loaded* L, const char* path, CcNameList known, CCArena 
     ix->add_unit(L->unit, opts.mode == CC_UNIT_HEADER);
     if (L->ds.has_errors()) return true;   /* parse errors: print nothing but the diagnostics */
     lo.line_directives = true;
-    lo.parallel_off = false;
     lo.per_tu = false;
     if (g_schema_variants) {
         bool sv_ok = false;

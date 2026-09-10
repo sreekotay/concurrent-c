@@ -66,7 +66,82 @@ typedef struct PStep {
                                  * that leaves the caller's frame needs its own copy */
     bool eh_any;
     bool any;
+    /* `#pragma(@parallel) off` regions, as token spans: off_from[i] ..
+     * off_to[i]. A site inside one is inert -- its arms and its iterations
+     * run in source order on the caller frame. */
+    Vec::[uint32_t] off_from;
+    Vec::[uint32_t] off_to;
 } PStep;
+
+/* ---- `#pragma(@parallel) off` ------------------------------------------- */
+
+/* `#pragma(@parallel) off` / `... on`, as the preprocessor token spells it. */
+static bool pl_pragma_par(CCSlice text, bool* is_off, bool* is_on) {
+    const char* p = text.ptr;
+    size_t n = text.len;
+    size_t i = 0;
+    size_t k;
+    static const char* head = "#pragma(@parallel)";
+    size_t hn = 18;
+    while (i < n && (p[i] == ' ' || p[i] == '\t')) i++;
+    if (n - i < hn) return false;
+    for (k = 0; k < hn; k++)
+        if (p[i + k] != head[k]) return false;
+    i += hn;
+    while (i < n && (p[i] == ' ' || p[i] == '\t')) i++;
+    if (n - i >= 3 && p[i] == 'o' && p[i + 1] == 'f' && p[i + 2] == 'f') { *is_off = true; return true; }
+    if (n - i >= 2 && p[i] == 'o' && p[i + 1] == 'n') { *is_on = true; return true; }
+    return false;
+}
+
+/* The `#pragma(@parallel) off` regions of the unit, read off the token tape.
+ * The pragma is one preprocessor token whether it stands at file scope or
+ * between two statements, so one scan covers both placements and the
+ * question a site asks is the same either way: was the toggle nearest above
+ * me `off`? A region runs to the matching `on`, or to the end of the file. */
+static void pl_read_par_off(PStep* st) {
+    CcUnit* u = st->L->unit;
+    CcTape* tp = &u->tape;
+    Vec::[CcToken]* toks = &tp->toks;
+    size_t n = toks->len();
+    size_t i;
+    bool off = false;
+    for (i = 0; i < n; i++) {
+        const CcToken* t = toks->get_ptr(i);
+        CCSlice tx = t->text;
+        bool is_off = false;
+        bool is_on = false;
+        if (t->kind != CC_TK_PP) continue;
+        if (!pl_pragma_par(tx, &is_off, &is_on)) continue;
+        if (is_off && !off) {
+            Vec::[uint32_t]* fv = &st->off_from;
+            off = true;
+            fv->push((uint32_t)i);
+        } else if (is_on && off) {
+            Vec::[uint32_t]* tv = &st->off_to;
+            off = false;
+            tv->push((uint32_t)i);
+        }
+    }
+    if (off) {
+        Vec::[uint32_t]* tv = &st->off_to;
+        tv->push((uint32_t)(n ? n - 1 : 0));
+    }
+}
+
+static bool pl_par_off_at(PStep* st, uint32_t tok) {
+    Vec::[uint32_t]* fv = &st->off_from;
+    Vec::[uint32_t]* tv = &st->off_to;
+    size_t n = fv->len();
+    size_t i;
+    if (tv->len() < n) n = tv->len();
+    for (i = 0; i < n; i++) {
+        uint32_t a = *fv->get_ptr(i);
+        uint32_t b = *tv->get_ptr(i);
+        if (tok >= a && tok <= b) return true;
+    }
+    return false;
+}
 
 static CCSlice pl_name(CcLowerer* L, uint32_t id, uint32_t k, const char* suffix) {
     CCString s = @string(`__cc_par_${id}_${k}${suffix}`, L->arena);
@@ -1593,6 +1668,66 @@ static bool pl_arm_ok(CcLowerer* L, CcParallelArm* arm, CcSpan sp) {
     return true;
 }
 
+/* `@parallel { arms } [tail]` under `#pragma(@parallel) off`: the arms run
+ * where the block stands, in the order they were written, on the frame the
+ * caller already has. Nothing is spawned, nothing is denied, and a gate --
+ * `(pred)` or `seq (cond)` -- is not evaluated at all: this schedule is the
+ * one it would have chosen, so asking it costs a call nothing reads.
+ *
+ * A site that binds a handle still plants one, so `h.fail(e)` and
+ * `h.cancel()` inside an arm behave and a later `h.wait()` reports what
+ * they recorded. It is joined where the block ends, because by then every
+ * arm has finished: `h.live()` is false from the next statement on.
+ *
+ * The tail goes with the statement it was written on. There is no task to
+ * wait for, so there is nothing for `!>.wait()!>` to join. */
+static void pl_lower_inert(PStep* st, CcStmt* s, CcParallel p) {
+    CcLowerer* L = st->L;
+    CcSpan sp = s->span;
+    Vec::[CcParallelArm]* armv = &p.arms;
+    size_t n = armv->len();
+    size_t i;
+    CcStmt* blk = lw_block(L, sp);
+    bool hdeclared = false;
+    CCSlice hbase = cc_slice_empty();
+    CCSlice hspell = pl_handle_spell(L, p, &hdeclared, &hbase);
+    if (hspell.len)
+        lw_push(blk, lw_expr_stmt(L, lw_assign(L, lw_ident(L, hspell, sp),
+                                               lw_call0(L, cstr_slice("cc_parallel_dest"), sp), sp), sp));
+    for (i = 0; i < n; i++) {
+        CcParallelArm* arm = armv->get_ptr(i);
+        if (arm->serial) {
+            lw_push(blk, pl_serial_body(L, arm->serial));
+        } else if (arm->unwrap) {
+            /* the arm stands on the frame the caller has, so its `!>`
+             * reaches the handler this function already carries: no copy */
+            lw_push(blk, pl_unwrap_stmt(L, arm->expr, arm->span));
+        } else {
+            CcExpr* e0 = arm->expr;
+            if (arm->target.len) e0 = lw_assign(L, lw_ident(L, arm->target, sp), e0, sp);
+            lw_push(blk, lw_expr_stmt(L, e0, sp));
+        }
+    }
+    if (hspell.len) {
+        /* parenthesised because the handle may be written `*hp`, and the
+         * member would otherwise bind before the dereference */
+        CCString j = @string(`(${hspell}).joined = 1`, L->arena);
+        lw_push(blk, lw_expr_stmt(L, lw_text(L, j, sp), sp));
+    }
+    if (hdeclared) {
+        /* the handle outlives the block, so its declaration is hoisted
+         * above it, into the list the block sits in */
+        PBind* b = cc_arena_alloc(L->arena, sizeof(PBind), _Alignof(PBind));
+        memset(b, 0, sizeof(*b));
+        b->at = s;
+        b->name = p.bind;
+        b->type = p.bind_type ? p.bind_type : cc_type_named(cstr_slice("CCParallel"), sp, L->arena);
+        st->binds.push(b);
+    }
+    s->k = blk->k;
+    st->any = true;
+}
+
 static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
     CcLowerer* L = st->L;
     Walker* w = st->w;
@@ -1614,6 +1749,9 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
     CCSlice pj_leave = cc_slice_empty();    /* where a caller-arm exit jumps to */
     CCSlice pj_rty = cc_slice_empty();
     bool pj_any = false;
+    /* Inert or not, the site is checked as written: `off` says which
+     * schedule the arms run on, not which forms are legal. */
+    bool inert = pl_par_off_at(st, sp.first);
     if (pl_reject(L, p, sp)) return;
     if (!n) {
         /* an empty block would run and join nothing, which is what the
@@ -1624,7 +1762,9 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
     }
     for (i = 0; i < n; i++) {
         CcParallelArm* arm = armv->get_ptr(i);
-        if (!pl_arm_unfold_unwrap(st, arm)) return;
+        /* an inert arm runs where it stands, so it reaches the handler
+         * this function carries and needs no copy spliced into it */
+        if (!inert && !pl_arm_unfold_unwrap(st, arm)) return;
         if (!pl_arm_ok(L, arm, sp)) return;
     }
     {
@@ -1672,6 +1812,10 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
                 return;
             }
         }
+    }
+    if (inert) {
+        pl_lower_inert(st, s, p);
+        return;
     }
     id = st->next_id++;
     blk = lw_block(L, sp);
@@ -2407,6 +2551,106 @@ static void pl_pw_stage_lower(PStep* st, uint32_t id, uint32_t k, CcStmt* s,
         dis_pass->push(c);
     }
     s->k = blk->k;
+}
+
+/* `@stage (gate, phase, ticket) { body }` in an inert walk: the turn is
+ * taken and passed on the frame the caller has, against a turnstile that
+ * nothing entered. No pool stands behind the ticket, so there is no cancel
+ * to test and no flag for an exit to read -- the iterations already run in
+ * ticket order, which is what the stage was ordering them into.
+ *
+ * The `wait` and the `pass` are still made: they are what the page wrote,
+ * and dropping them would make an over-subscribed gate look like one that
+ * simply let every ticket through. */
+static void pl_stage_inert(PStep* st, CcStmt* s) {
+    CcLowerer* L = st->L;
+    CcSpan sp = s->span;
+    CcExpr* gate = NULL;
+    CcExprList args;
+    CcStmtList stmts;
+    CcStmt* blk;
+    CcStmt* inner;
+    CcStmtList* into;
+    int gform;
+    bool face;
+    size_t i;
+    size_t n;
+    if (!pl_stage_parts(s, &gate, &args, &stmts)) return;
+    gform = pl_stage_gate_form(st->w, gate);
+    face = pl_stage_is_face(gform);
+    blk = lw_block(L, sp);
+    {
+        CcExpr* ga = pl_stage_addr(L, gform, gate, sp);
+        CcExpr* c = pl_stage_call(L, face ? "cc_turnstile_stage_wait" : "cc_turnstile_wait", ga, &args, sp);
+        lw_push(blk, pl_unwrap_stmt(L, c, sp));
+    }
+    inner = lw_block(L, sp);
+    into = lw_block_stmts(inner);
+    n = stmts.len();
+    for (i = 0; i < n; i++) {
+        CcStmt* q = *stmts.get_ptr(i);
+        into->push(q);
+    }
+    lw_push(blk, inner);
+    {
+        CcExpr* ga = pl_stage_addr(L, gform, gate, sp);
+        CcExpr* c = pl_stage_call(L, face ? "cc_turnstile_stage_pass" : "cc_turnstile_pass", ga, &args, sp);
+        lw_push(blk, pl_unwrap_stmt(L, c, sp));
+    }
+    s->k = blk->k;
+}
+
+/* `@parallel [wait (gate)] for (i in lo..hi) [worker (w)] { body }` under
+ * `#pragma(@parallel) off`: the linear program the walk stands for. One
+ * loop, on the frame the caller has, over the range as written.
+ *
+ * Nothing is spawned, so nothing is denied and no nursery is opened; the
+ * turnstile a `wait (gate)` names is never entered, and the `@stage`s of
+ * the walk order tickets that are already in order. `worker (w)` binds 0:
+ * one runner ran every ticket, and it is the caller.
+ *
+ * `break`, `continue` and `return` in the body are plain C here, and the
+ * `!>.wait()!>` tail goes with the statement -- there is no handle to
+ * join. A `!>` inside the body reaches the handler this function carries,
+ * the same as any other statement of it. */
+static void pl_for_inert(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
+    CcLowerer* L = st->L;
+    CcSpan sp = s->span;
+    CcStmt* blk = lw_block(L, sp);
+    CcStmt* body = pf.loop.body;
+    CCSlice nm = pf.loop.bind;
+    CCSlice wk = pf.worker;
+    CCString lo = lw_spell_expr(L, rg.lo);
+    CCString hi = lw_spell_expr(L, rg.hi);
+    CCSlice los = lw_keep(L, &lo);
+    CCSlice his = lw_keep(L, &hi);
+    CCString init = @string(`${nm} = (int)(${los})`, L->arena);
+    CCString cond = @string(`${nm} < (int)(${his})`, L->arena);
+    CCString step = @string(`${nm}++`, L->arena);
+    CcType* ity = cc_type_named(cstr_slice("int"), sp, L->arena);
+    if (!body) body = lw_block(L, sp);
+    if (pf.wait) {
+        CcStmtList* bs = lw_block_stmts(body);
+        if (bs) {
+            size_t n = bs->len();
+            size_t i;
+            for (i = 0; i < n; i++) {
+                CcStmt* q = *bs->get_ptr(i);
+                if (pl_stage_owned(st, q)) pl_stage_inert(st, q);
+            }
+        }
+    }
+    /* the binder belongs to the loop: the body reads the names in scope
+     * directly, and this one shadows nothing the site had to capture */
+    lw_push(blk, lw_decl_stmt(L, ity, nm, NULL, sp));
+    if (wk.len) {
+        CcType* wty = cc_type_named(cstr_slice("int"), sp, L->arena);
+        CCString z = @string(`0`, L->arena);
+        lw_push(blk, lw_decl_stmt(L, wty, wk, lw_text(L, z, sp), sp));
+    }
+    lw_push(blk, pl_pw_for(L, init, cond, step, body, sp));
+    s->k = blk->k;
+    st->any = true;
 }
 
 /* What a `@stage` of a walked body may name. The gate is the turnstile the
@@ -3323,7 +3567,8 @@ static void pl_for(PStep* st, CcStmt* s, CcParallelFor pf) {
             s->k = gone->k;
             return;
         }
-        pl_for_lower(st, s, pf, rg);
+        if (pl_par_off_at(st, sp.first)) pl_for_inert(st, s, pf, rg);
+        else pl_for_lower(st, s, pf, rg);
         return;
     }
     if (pf.pred) {
@@ -3398,7 +3643,8 @@ static void pl_for(PStep* st, CcStmt* s, CcParallelFor pf) {
             s->k = gone->k;
             return;
         }
-        pl_pw_lower(st, s, pf, rg);
+        if (pl_par_off_at(st, sp.first)) pl_for_inert(st, s, pf, rg);
+        else pl_pw_lower(st, s, pf, rg);
     }
 }
 
@@ -3527,6 +3773,9 @@ static void CcLowerer_parallel(CcLowerer* L) {
     st.fwd = cc_string_new();
     st.binds = vec_new::[PBindRef](L->arena);
     st.stages = vec_new::[CcStmtRef](L->arena);
+    st.off_from = vec_new::[uint32_t](L->arena);
+    st.off_to = vec_new::[uint32_t](L->arena);
+    pl_read_par_off(&st);
     memset(&w, 0, sizeof(w));
     w.arena = L->arena;
     w.ix = L->ix;
