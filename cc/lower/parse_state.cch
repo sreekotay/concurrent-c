@@ -1,4 +1,4 @@
-#pragma(@per_tu)
+#pragma(@module) "lower"
 /* Parser state shared by every section of the parser: the token cursor,
  * keywords, the typedef-name scope stack, diagnostics, recovery,
  * preprocessor lines and attributes. Sections 2 to 5 (types,

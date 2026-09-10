@@ -1,4 +1,4 @@
-#pragma(@per_tu)
+#pragma(@module) "lower"
 /* Clean lowerer, step: scope-exit cleanup. `@defer stmt;`, `@defer(ok|err)`,
  * named `@defer n: stmt;` with `@cancel_defer n;`, and `T x = e @destroy
  * [{ D }];` lower to per-site reach flags and cleanup runs at every exit
@@ -672,7 +672,7 @@ static void cl_function(CcLowerer* L, CcDecl* d, CcFuncDecl* f) {
     cl_stmts(&fn, body, 3);
 }
 
-static void CcLowerer_cleanup(CcLowerer* L) {
+void CcLowerer_cleanup(CcLowerer* L) {
     CcDeclList* decls = &L->unit->decls;
     size_t n = decls->len();
     size_t i;

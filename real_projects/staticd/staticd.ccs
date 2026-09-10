@@ -1,3 +1,4 @@
+#pragma(@module) "staticd"
 /*
  * staticd — Concurrent-C static HTTP/1.1 + WebSocket (specimen).
  *

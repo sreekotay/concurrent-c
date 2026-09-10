@@ -1,4 +1,4 @@
-#pragma(@per_tu)
+#pragma(@module) "lower"
 /* Parser section 4: statements.
  *
  * C statements, the Concurrent-C statement forms (`@defer`, `@errhandler`,

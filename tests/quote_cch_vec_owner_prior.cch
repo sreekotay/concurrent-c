@@ -1,8 +1,10 @@
+#pragma(@module) "vec_owner_doc"
 #ifndef TESTS_QUOTE_CCH_VEC_OWNER_PRIOR_CCH
 #define TESTS_QUOTE_CCH_VEC_OWNER_PRIOR_CCH
 
-/* Prior chapter: impl-grade so the owner TU splices it (utf8.cch).
- * Those typedefs must not hide the next face as a factory prerequisite. */
+/* Prior chapter: a member of the program module, so the program splices
+ * it (utf8.cch). Those typedefs must not hide the next face as a factory
+ * prerequisite. */
 typedef struct QuoteOwnerPrior {
     int x;
 } QuoteOwnerPrior;

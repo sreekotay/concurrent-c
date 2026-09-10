@@ -1,4 +1,4 @@
-#pragma(@per_tu)
+#pragma(@module) "lower"
 /* Clean lowerer, step: closures. `(params) => body` becomes three C
  * functions and a struct: an environment holding what the body reads from
  * the enclosing scope, a `_make` that fills it, and an `_entry` the
@@ -1598,7 +1598,7 @@ static void kl_collect_unit(KStep* st) {
     }
 }
 
-static void CcLowerer_closures(CcLowerer* L) {
+void CcLowerer_closures(CcLowerer* L) {
     Walker w;
     KStep st;
     memset(&st, 0, sizeof(st));

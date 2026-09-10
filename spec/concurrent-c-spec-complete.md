@@ -233,7 +233,7 @@ faces still resolves from the original unit's directory (the `#line` path),
 not the cache directory. An included `.ccs` / `.cch` face with a unit
 header is stripped the same way — the bang is not a preprocessor directive.
 
-**Faces and modules.** *Status: draft — not implemented.*
+**Faces and modules.**
 
 A quoted `#include "x.cch"` names a face: a header the program owns. A face
 has one of two grades, decided by its own text. An interface face carries
@@ -324,7 +324,7 @@ it does not affect compilation.
 pragma when both are present.
 
 `#pragma(@module) "name"` declares the unit a member of module `name`
-(§1.7). *Status: draft — not implemented.* The operand is a name; the
+(§1.7). The operand is a name; the
 module's public face, when it has one, is `name.cch` in the unit's
 directory. A unit names at most one module.
 

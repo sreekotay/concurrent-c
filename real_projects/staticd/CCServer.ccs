@@ -1,6 +1,9 @@
 #!ccc ccs
+#pragma(@module) "CCServer"
 /*
- * Owner of CCServer.cch. Page includes the header (decls) and links this unit.
+ * Member of module CCServer (spec 1.7): CCServer.cch includes this unit
+ * and the module lowers once; a page includes the face and links its
+ * object.
  *
  * `srv.serve(stop, (io) => [cfg, sessions] { … })` plants dests, waits,
  * accepts, fills, borrow-invokes `on_app` with `CCIoSess*` (many fibers,

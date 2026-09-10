@@ -1,6 +1,8 @@
 #!ccc ccs
+#pragma(@module) "CCServer"
 /*
- * Dest waiter bodies. Host #ifdef picks backend.
+ * Dest waiter bodies, a member of module CCServer (spec 1.7). Host #ifdef
+ * picks backend.
  * Default: kqueue (BSD/Darwin), epoll (Linux), else poll.
  * Override: -DCC_SERVER_WAIT_POLL=1 / _KQUEUE=1 / _EPOLL=1.
  *
@@ -26,23 +28,28 @@
 #include "CCServer.cch"
 #include "CCServerPoll.cch"
 
-typedef Table::[int, CCConnRow] CCConnTable;
-
-static CCConnTable cc_tape_conns(CCTape* w) {
-    return w ? (CCConnTable)(void*)w->conns : NULL;
+/* The table is spelled at each use, not through a file-scope alias: a
+ * typedef of a Table instance in a member would be extracted into the
+ * module .h, where no instance backs it. */
+static Table::[int, CCConnRow] cc_tape_conns(CCTape* w) {
+    return w ? (Table::[int, CCConnRow])(void*)w->conns : NULL;
 }
-static void cc_tape_set_conns(CCTape* w, CCConnTable t) {
+static void cc_tape_set_conns(CCTape* w, Table::[int, CCConnRow] t) {
     if (w) w->conns = (struct CCTapeConns*)(void*)t;
 }
-static int cc_conn_table_insert(CCConnTable map, int id, CCConnRow row) {
+/* Takes the tape, not the table: a prototype of a function with a
+ * CCConnRow parameter is hoisted next to the row type, ahead of the
+ * table alias, in the module unit. */
+static int cc_conn_table_insert(CCTape* w, int id, CCConnRow row) {
+    Table::[int, CCConnRow] map = cc_tape_conns(w);
     if (!map) return -1;
     return map->insert(id, row);
 }
-static int cc_conn_table_del(CCConnTable map, int id) {
+static int cc_conn_table_del(Table::[int, CCConnRow] map, int id) {
     if (!map) return 0;
     return map->del(id) ? 1 : 0;
 }
-static void cc_conn_table_destroy(CCConnTable map) {
+static void cc_conn_table_destroy(Table::[int, CCConnRow] map) {
     if (map) map->destroy();
 }
 
@@ -146,12 +153,12 @@ int cc_tape_interest(CCIoSess* io, int want_out_extra, int* want_in,
 }
 
 size_t cc_tape_nconns(CCTape* w) {
-    CCConnTable t = w ? (CCConnTable)w->conns : NULL;
+    Table::[int, CCConnRow] t = w ? (Table::[int, CCConnRow])w->conns : NULL;
     return t ? t->len() : 0;
 }
 
 CCConnRow* cc_tape_row(CCTape* w, int id) {
-    CCConnTable t;
+    Table::[int, CCConnRow] t;
     uint32_t di1;
     if (!w || !(t = cc_tape_conns(w)) || id <= 0) return NULL;
     di1 = cc_tape_id_di_get(w, id);
@@ -160,10 +167,10 @@ CCConnRow* cc_tape_row(CCTape* w, int id) {
 }
 
 CCConnRow* cc_tape_dense_at(CCTape* w, size_t di, int* out_id) {
-    CCConnTable t;
+    Table::[int, CCConnRow] t;
     int* idp;
     CCConnRow* row;
-    if (!w || !(t = (CCConnTable)w->conns)) return NULL;
+    if (!w || !(t = (Table::[int, CCConnRow])w->conns)) return NULL;
     if (di >= t->len()) return NULL;
     idp = t->key_ptr(di);
     row = t->at_ptr(di);
@@ -399,7 +406,7 @@ __attribute__((used)) static const char cc_wait_backend_tag[] =
 #endif
 
 int cc_tape_open(CCTape* w, CCServer* srv, CCArena a) {
-    CCConnTable conns;
+    Table::[int, CCConnRow] conns;
     Vec::[CCWaitHit] hits@(a) @detach;
     Vec::[int] id_free@(a) @detach;
     Vec::[uint32_t] id_di@(a) @detach;
@@ -486,7 +493,7 @@ void cc_tape_close(CCTape* w) {
         w->backend_fd = -1;
     }
     if (w->conns) {
-        CCConnTable t = cc_tape_conns(w);
+        Table::[int, CCConnRow] t = cc_tape_conns(w);
         cc_conn_table_destroy(t);
         w->conns = NULL;
     }
@@ -680,7 +687,7 @@ void !>(WaitFail) cc_tape_arm(CCTape* w, int id, CCIoSess* io) {
 }
 
 int cc_tape_watch(CCTape* w, CCIoSess* io) {
-    CCConnTable t;
+    Table::[int, CCConnRow] t;
     CCConnRow row;
     int id;
     size_t di_before;
@@ -700,7 +707,7 @@ int cc_tape_watch(CCTape* w, CCIoSess* io) {
         .step_busy = 0,
     };
     di_before = t->len();
-    if (cc_conn_table_insert(t, id, row) != 0) {
+    if (cc_conn_table_insert(w, id, row) != 0) {
         cc_tape_recycle_id(w, id);
         return 0;
     }
@@ -746,7 +753,7 @@ static void cc_tape_unwatch_row(CCTape* w, CCConnRow* r) {
 }
 
 int cc_tape_drop_id(CCTape* w, int id) {
-    CCConnTable t;
+    Table::[int, CCConnRow] t;
     CCConnRow* r;
     uint32_t di1;
     size_t di, last;

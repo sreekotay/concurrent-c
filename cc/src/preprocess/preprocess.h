@@ -176,11 +176,6 @@ char* cc_preprocess_comptime_source(const char* input_path);
 // rewrite was needed. Caller must free(). After the call,
 // cc_local_header_lower_failed() is set if any include could not be
 // lowered — treat that as a hard error, even when the return is NULL.
-/* Link-set face check (quoted `.cch` graph, including nested umbrellas):
- * unowned owner-bound face, extract whose owner `.ccs` is not in
- * `ccs_paths`, `#pragma(@per_tu)` with a non-static body, or 2+ unowned
- * splices of one face. 0 ok, -1 error. */
-int cc_check_link_set_faces(const char* const* ccs_paths, int n);
 /* Rewrite quoted local `.cch` includes of `ccs_path` so on-disk `.h`
  * files exist before TU workers. Uses the `.ccs` as rewrite root (same
  * as emit). 0 ok, -1 if a local header could not be lowered. */
@@ -189,15 +184,35 @@ int cc_prefetch_lower_ccs_includes(const char* ccs_path);
 char* cc_rewrite_local_cch_includes_to_lowered_headers(const char* src,
                                                        size_t input_len,
                                                        const char* input_path);
-/* Splice the implementation `.cch` faces `input_path` owns into `src`,
- * for a lowerer that resolves `.cch` includes itself: same grade and
- * owner rules as the rewrite above, and no include rewritten to a `.h`.
- * NULL when no include changed; check cc_local_header_lower_failed()
- * for a face that refused (a `#pragma(@per_tu)` face with a non-static
- * body), which is an error even when the return is NULL. */
-char* cc_splice_owned_cch_impl(const char* src, size_t input_len,
+/* Splice the members of the module `input_path` roots into `src` (spec
+ * 1.7), for a lowerer that resolves `.cch` includes itself: the same
+ * membership rule as the rewrite above, and no include rewritten to a
+ * `.h`. NULL when no include changed; check cc_local_header_lower_failed()
+ * for a refusal (a member included from outside its module, an
+ * ill-formed pragma), which is an error even when the return is NULL. */
+char* cc_splice_module_members(const char* src, size_t input_len,
                                const char* input_path);
 int cc_local_header_lower_failed(void);
+/* The key `<face>_cch.c` is produced under: the face, every quoted `.cch`
+ * it reaches, the toolchain and the lowerer. */
+uint64_t cc_face_module_key(const char* abs_face);
+/* Every module face in the quoted include closure of `unit_path`, with
+ * the text of its module unit (a `#line` to the face, members spliced):
+ * `fn` gets the face and that text; a non-zero return stops the walk.
+ * 0, or -1 when a face refused or `fn` did. */
+typedef int (*cc_module_face_fn)(const char* face_abs, const char* text,
+                                 size_t n, void* env);
+int cc_module_faces_of_unit(const char* unit_path, cc_module_face_fn fn, void* env);
+
+/* The staged copy of a module face for a lowering that starts from a
+ * file: the includes of the unit as its prologue, a `#line` to the face,
+ * the text after its unit header. With `members` the text is the module unit,
+ * members spliced; without, the face alone, for a driver run that splices
+ * them itself. With `faces_first` the quoted faces of the unit are in the
+ * prologue too, which the clean lowerer needs and the shadow lowerer does
+ * not take. malloc'd, or NULL after a diagnostic. */
+char* cc_module_stage_text(const char* abs_face, int members, int faces_first,
+                           size_t* out_len);
 /* Expand the function-like `#define`s of `src` whose bodies carry a
  * lifetime attribute (`@destroy` / `@detach`), and only those.
  *

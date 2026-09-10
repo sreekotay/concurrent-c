@@ -1,4 +1,4 @@
-#pragma(@per_tu)
+#pragma(@module) "lower"
 /* Forward declarations across the parser's sections. The sections are
  * mutually recursive (a declaration holds a function body; an expression
  * holds a cast type); each file includes this one and defines its half.
@@ -10,15 +10,6 @@
 #ifndef CC_LOWER_PARSE_FWD_CCH
 #define CC_LOWER_PARSE_FWD_CCH
 #include "parse_state.cch"
-
-/* Keeps this face impl-grade, a TU-private leaf like the sections that
- * include it: a face of prototypes alone is lowered standalone as an
- * interface header, which refuses the per-TU faces it includes. Never
- * called. */
-static CCString cc__parse_fwd_impl_marker(P* p) {
-    CCString s = @string(`fwd`, p->arena);
-    return s;
-}
 
 /* parse_types.cch */
 static CcType* parse_type_name(P* p);                                  /* a type-name (abstract declarator allowed) */

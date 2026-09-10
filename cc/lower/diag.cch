@@ -50,16 +50,16 @@ typedef struct CcDiag {
     CcDiagNote* notes;  /* located notes, in the order they were attached */
 } CcDiag;
 /* d.with_len(n): the same diagnostic underlining n bytes. */
-static CcDiag CcDiag_with_len(CcDiag d, uint32_t len);
+CcDiag CcDiag_with_len(CcDiag d, uint32_t len);
 
 /* Constructors. The message is a template into `a`. */
-static CcDiag CcDiag_error(CcLoc at, CCSlice msg);
-static CcDiag CcDiag_warning(CcLoc at, CCSlice msg);
-static CcDiag CcDiag_note(CcLoc at, CCSlice msg);
+CcDiag CcDiag_error(CcLoc at, CCSlice msg);
+CcDiag CcDiag_warning(CcLoc at, CCSlice msg);
+CcDiag CcDiag_note(CcLoc at, CCSlice msg);
 /* d.with_note(note): same diagnostic with a note attached. */
-static CcDiag CcDiag_with_note(CcDiag d, CCSlice note);
+CcDiag CcDiag_with_note(CcDiag d, CCSlice note);
 /* d.with_note_at(at, msg, a): a note the reader can go and look at. */
-static CcDiag CcDiag_with_note_at(CcDiag d, CcLoc at, CCSlice msg, CCArena a);
+CcDiag CcDiag_with_note_at(CcDiag d, CcLoc at, CCSlice msg, CCArena a);
 
 /* The sink. */
 typedef struct CcDiags {
@@ -68,11 +68,11 @@ typedef struct CcDiags {
     CCArena arena;      /* owns items and the strings pushed through push_fmt */
 } CcDiags;
 
-static CcDiags CcDiags_new(CCArena a);
+CcDiags CcDiags_new(CCArena a);
 /* ds.push(d): record; counts errors. */
-static void CcDiags_push(CcDiags* ds, CcDiag d);
+void CcDiags_push(CcDiags* ds, CcDiag d);
 /* ds.has_errors() */
-static bool CcDiags_has_errors(const CcDiags* ds);
+bool CcDiags_has_errors(const CcDiags* ds);
 /* ds.print(out, source): sorted by (path, line, col); `source` returns the
  * text of a path for the caret snippet, or an empty slice when unknown.
  *
@@ -84,7 +84,7 @@ static bool CcDiags_has_errors(const CcDiags* ds);
  * file that is not the one the error is on -- the closer the two files, the
  * more convincing the wrong answer. */
 typedef CCSlice (*CcSourceFn)(CCSlice path, void* ctx, bool* physical);
-static void CcDiags_print(const CcDiags* ds, FILE* out, CcSourceFn source, void* ctx);
+void CcDiags_print(const CcDiags* ds, FILE* out, CcSourceFn source, void* ctx);
 
 @typeview Read on CcDiags { r: *; };
 

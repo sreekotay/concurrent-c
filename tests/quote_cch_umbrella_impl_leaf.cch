@@ -1,9 +1,8 @@
 #ifndef TESTS_QUOTE_CCH_UMBRELLA_IMPL_LEAF_CCH
 #define TESTS_QUOTE_CCH_UMBRELLA_IMPL_LEAF_CCH
 
-/* Interface umbrella: no statement-level CC. The impl leaf is included
- * from the `.ccs` (header-library splice), not nested here — a nested
- * impl face without a sibling `.ccs` does not dump into the includer. */
+/* Interface umbrella: no statement-level CC. The impl leaf is a member of
+ * the program and included from the `.ccs`, not nested here. */
 static int umbrella_decl_only(void) { return 40; }
 
 #endif

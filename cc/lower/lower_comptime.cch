@@ -1,4 +1,4 @@
-#pragma(@per_tu)
+#pragma(@module) "lower"
 /* Clean lowerer, step: `@comptime(expr)` in value position.
  *
  * The expression runs at compile time and what stands in its place is the

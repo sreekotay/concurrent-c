@@ -1,4 +1,4 @@
-#pragma(@per_tu)
+#pragma(@module) "lower"
 /* Clean lowerer, step: `@create`. `T x = @create(args);` calls whatever
  * the type registered as its `.create` hook, so the constructor is named
  * by the type's own declaration and never by the lowerer. The declared
@@ -325,7 +325,7 @@ static bool nc_leftover(CcExpr* e, void* env) {
     return true;
 }
 
-static void CcLowerer_create(CcLowerer* L) {
+void CcLowerer_create(CcLowerer* L) {
     Walker w;
     NStep st;
     CcVisitor v;

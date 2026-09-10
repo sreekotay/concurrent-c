@@ -1,4 +1,3 @@
-#pragma(@per_tu)
 /* The compile-time seam.
  *
  * Running compile-time code needs a C compiler, so the executor stays what

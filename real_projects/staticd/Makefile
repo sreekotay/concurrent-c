@@ -42,10 +42,10 @@ $(OUT_DIR)/staticd: staticd.ccs staticd_ws.cch \
 		| $(OUT_DIR) ensure-tls-runtime
 ifeq ($(CC_ENABLE_TLS),1)
 	CFLAGS="-DCC_ENABLE_TLS -I$(BEARSSL_INC) $(EXTRA_CFLAGS) $${CFLAGS:-}" \
-		$(CCC) -O -o $@ staticd.ccs CCServer.ccs CCServerPoll.ccs --release
+		$(CCC) -O -o $@ staticd.ccs --release
 else
 	CFLAGS="$(EXTRA_CFLAGS) $${CFLAGS:-}" \
-		$(CCC) -O -o $@ staticd.ccs CCServer.ccs CCServerPoll.ccs --release
+		$(CCC) -O -o $@ staticd.ccs --release
 endif
 
 staticd: $(OUT_DIR)/staticd

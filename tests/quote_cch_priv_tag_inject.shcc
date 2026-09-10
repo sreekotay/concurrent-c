@@ -1,5 +1,5 @@
-/* Same-owner stem + _priv both define PrivTag. Extract of the leaf
- * includes the stem, not an error and not the _priv chapter. */
+/* A face and its _priv member both define PrivTag (one module). Extract
+ * of the leaf includes the face, not an error and not the _priv member. */
 CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
 
 CCCommand emit = cc_command(arena, @slice("./cc/bin/ccc"));

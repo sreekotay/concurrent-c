@@ -1,4 +1,4 @@
-#pragma(@per_tu)
+#pragma(@module) "lower"
 /* Results: `T!>(E)` types, cc_ok / cc_err, the `!>` and `?>` forms,
  * @errhandler and @err. The shapes are in LOWERING.md.
  *
@@ -2241,7 +2241,7 @@ static bool rl_dest_is_result(CcLowerer* L, CcExpr* target) {
     return false;
 }
 
-static void CcLowerer_results(CcLowerer* L) {
+void CcLowerer_results(CcLowerer* L) {
     CcDeclList* decls = &L->unit->decls;
     size_t n = decls->len();
     size_t i;

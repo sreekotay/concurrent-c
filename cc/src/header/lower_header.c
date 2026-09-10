@@ -689,8 +689,17 @@ static char* cc__strip_comptime_blocks_header(const char* src, size_t n) {
                 size_t lparen = 0, rparen = 0;
                 if (cc_match_ident_kw(src, n, p, "if") ||
                     cc_match_ident_kw(src, n, p, "for")) {
-                    i++;
-                    continue;
+                    /* Left in place it reaches the host compiler as a stray
+                     * `@` with nothing naming this header. */
+                    size_t line = 1;
+                    for (size_t k = 0; k < i; k++) if (src[k] == '\n') line++;
+                    fprintf(stderr,
+                            "cc: error: '@comptime %s' at line %zu of this header "
+                            "is not lowered into a .h: the header subset harvests "
+                            "@comptime blocks and functions only\n",
+                            cc_match_ident_kw(src, n, p, "if") ? "if" : "for", line);
+                    free(out);
+                    return (char*)-1;
                 }
                 for (size_t q = p; q < n; q++) {
                     if (src[q] == ';' || src[q] == '{') break;
@@ -739,7 +748,7 @@ static char* cc__strip_comptime_blocks_header(const char* src, size_t n) {
                         "of this header; no @comptime block in it can be "
                         "stripped\n", line);
                 free(out);
-                return NULL;
+                return (char*)-1;
             }
             for (size_t k = i; k <= body_r; ++k) {
                 if (out[k] != '\n') out[k] = ' ';
@@ -858,6 +867,7 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
        into including CC TUs (see cc_harvest_header_comptime_functions /
        cc_harvest_local_header_comptime_blocks). */
     buf0 = cc__strip_comptime_blocks_header(cur, cur_len);
+    if (buf0 == (char*)-1) { free(buf_ded); return NULL; } /* diagnosed */
     if (buf0) {
         cur = buf0;
         cur_len = strlen(buf0);

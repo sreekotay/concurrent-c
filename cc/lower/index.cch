@@ -230,36 +230,36 @@ typedef struct CcIndex {
     uint32_t n_expansion_errors;    /* parse errors inside expansions (not reported as diagnostics) */
 } CcIndex;
 
-static CcIndex* cc_index_new(Vec::[CCSlice] include_dirs, CCSlice quote_dir, CcDiags* ds, CCArena a);
+CcIndex* cc_index_new(Vec::[CCSlice] include_dirs, CCSlice quote_dir, CcDiags* ds, CCArena a);
 
 /* ix.add_unit(u, is_header): declarations only for headers. */
-static void CcIndex_add_unit(CcIndex* ix, CcUnit* u, bool is_header);
+void CcIndex_add_unit(CcIndex* ix, CcUnit* u, bool is_header);
 /* ix.load_includes(u, opts): resolve the `#include` lines naming `.cch`
  * files, parse each once, add them. System headers are not read: C names
  * the lowerer does not reason about stay C. A `.cch` that cannot be found
  * or read is an error at the include line. */
-static void CcIndex_load_includes(CcIndex* ix, CcUnit* u, CcParseOpts opts);
+void CcIndex_load_includes(CcIndex* ix, CcUnit* u, CcParseOpts opts);
 /* Same, from a lexed file that is not parsed yet: lets the driver load the
  * headers of a unit before parsing the unit itself, so the parser sees
  * every typedef name from the headers. */
-static void CcIndex_preload_includes(CcIndex* ix, const CcTape* tape, CcParseOpts opts);
+void CcIndex_preload_includes(CcIndex* ix, const CcTape* tape, CcParseOpts opts);
 /* ix.peer_face(dir, name): the `.cch` in `dir` that declares `name`, or an
  * empty slice when none does. */
-static CCSlice CcIndex_peer_face(CcIndex* ix, CCSlice dir, CCSlice name);
+CCSlice CcIndex_peer_face(CcIndex* ix, CCSlice dir, CCSlice name);
 /* ix.known_types(): every typedef name the index knows, for CcParseOpts.known_types. */
-static Vec::[CCSlice] CcIndex_known_types(CcIndex* ix);
+Vec::[CCSlice] CcIndex_known_types(CcIndex* ix);
 
 /* Lookups. A miss is a Result error carrying the position-less reason;
  * the caller attaches the use site. */
-static CcSym*      !>(CcDiag) CcIndex_sym(CcIndex* ix, CCSlice name);
-static CcTypeInfo* !>(CcDiag) CcIndex_type(CcIndex* ix, CCSlice canonical);
+CcSym*      !>(CcDiag) CcIndex_sym(CcIndex* ix, CCSlice name);
+CcTypeInfo* !>(CcDiag) CcIndex_type(CcIndex* ix, CCSlice canonical);
 /* ix.type_get(canonical): the type info, created on first use (with its
  * hooks, family instantiation and registrations resolved). */
-static CcTypeInfo* CcIndex_type_get(CcIndex* ix, CCSlice canonical);
+CcTypeInfo* CcIndex_type_get(CcIndex* ix, CCSlice canonical);
 /* ix.canon(t): canonical spelling of a type node, into the index arena:
  * "int", "unsigned long", "struct Foo", "CCString", "CCResult_int_CCError",
  * "Map_int_int", "CCSlice" for char[:]. */
-static CCSlice CcIndex_canon(CcIndex* ix, const CcType* t);
+CCSlice CcIndex_canon(CcIndex* ix, const CcType* t);
 /* How the receiver is written at the call site, for the bare-name tier.
  * CC_RECV_PTR: the receiver expression is a pointer; CC_RECV_CONST: what it
  * names is const. */
@@ -267,28 +267,28 @@ static CCSlice CcIndex_canon(CcIndex* ix, const CcType* t);
 #define CC_RECV_CONST 2u
 /* ix.method_recv(recv, name, shape, a): the method, or an error whose message
  * lists what was tried and what the type has, ready for the use site. */
-static CcMethod* !>(CcDiag) CcIndex_method_recv(CcIndex* ix, CcTypeInfo* recv, CCSlice method, unsigned recv_shape, CCArena a);
+CcMethod* !>(CcDiag) CcIndex_method_recv(CcIndex* ix, CcTypeInfo* recv, CCSlice method, unsigned recv_shape, CCArena a);
 /* ix.methods_of(info): every method the type has, from every source, for
  * dumps and for the candidates list. */
-static CcMethodList CcIndex_methods_of(CcIndex* ix, CcTypeInfo* info);
+CcMethodList CcIndex_methods_of(CcIndex* ix, CcTypeInfo* info);
 /* ix.result(value, err, optional): register the spec and return its info;
  * the printer emits every entry not declared by a header, once. */
-static CcTypeInfo* CcIndex_result(CcIndex* ix, CcType* value, CcType* err, bool optional);
+CcTypeInfo* CcIndex_result(CcIndex* ix, CcType* value, CcType* err, bool optional);
 /* ix.arena_param(f): which parameter of `f` is its arena (attribute on the
  * declaration, or the trailing CCArena parameter); -1 when none. */
-static int CcIndex_arena_param(CcIndex* ix, CcSym* f);
+int CcIndex_arena_param(CcIndex* ix, CcSym* f);
 /* ix.expand_call(u, sp): expand a function-like macro invocation
  * `NAME(args)` spanning `sp` in `u` with its `#define`; an empty slice when
  * NAME is not a known function-like macro. Lets a caller learn what a
  * statement-level macro (`cc_arena_stack(a, n)`) declares. */
-static CCSlice CcIndex_expand_call(CcIndex* ix, const CcUnit* u, CcSpan sp);
+CCSlice CcIndex_expand_call(CcIndex* ix, const CcUnit* u, CcSpan sp);
 /* ix.snake(type_name): `cc_<snake>` spelling: "CCJsVal" -> "cc_js_val", "RedisConn" -> "redis_conn". */
-static CCSlice CcIndex_snake(CcIndex* ix, CCSlice type_name);
+CCSlice CcIndex_snake(CcIndex* ix, CCSlice type_name);
 /* s.loc(): logical location of a symbol's declaration. */
-static CcLoc CcSym_loc(const CcSym* s);
+CcLoc CcSym_loc(const CcSym* s);
 /* s.noreturn(): does a call to this function never return (`_Noreturn`,
  * `noreturn` attribute, a macro that spells one)? */
-static bool CcSym_noreturn(const CcSym* s);
+bool CcSym_noreturn(const CcSym* s);
 
 @typeview Read on CcIndex { r: *; };
 

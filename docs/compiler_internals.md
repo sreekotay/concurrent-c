@@ -89,7 +89,7 @@ folds it. Same-second, same-size edits are the test
 
 | Cache | Key |
 |---|---|
-| Lowered local headers (`out/include/**/*.h`, `$TMPDIR/cc-lowered-<uid>/`) | `<h>.key` sidecar: header bytes, owner `.ccs` bytes, every quoted `.cch` it includes transitively, toolchain |
+| Lowered local headers (`out/include/**/*.h`, `$TMPDIR/cc-lowered-<uid>/`) and module units (`<face>_cch.c` beside the `.h`) | `<h>.key` sidecar: face bytes, every quoted `.cch` it includes transitively (its members among them), toolchain; the `<face>_cch.c.key` adds the lowerer that produced it (`cc_face_module_key`, `preprocess.c:18450`) |
 | Include expansion (`~/.cache/concurrent-c/incexp`) | input bytes, host cc, `.ccc-bin`, repo root, toolchain; deps sidecar holds a content hash per expanded file |
 | Driver TU emit (`out/.cc-build/<build>__<target>__<unit>.meta`) | source bytes, `cc_depends`, transitive `.cch` bytes, `.ccc-bin` and `shadow_lower` bytes, version, flags, env, consts |
 | Driver object (`.obj` meta) | emit key (raw C: source bytes), target, flags, env, host fingerprint, plus the `.d` check |
@@ -447,10 +447,9 @@ silent-degradation paths, in the sense `CLAUDE.md` uses:
 1. `cc__strip_generic_factory_blocks_header` (`lower_header.c:641-644`)
    returns `NULL` on an unbalanced brace, which the caller reads as "no
    factory blocks"; every factory body leaks into the `.h`. No diagnostic.
-2. `cc__strip_comptime_blocks_header` now diagnoses the unbalanced block
-   (`:730-742`) but still returns `NULL`, and `cc_lower_header` (`:1106`)
-   propagates only the write error, so the tool prints the message and
-   exits 0 with the `@comptime` blocks intact.
+2. `cc__strip_comptime_blocks_header` (`lower_header.c:657`) diagnoses an
+   unbalanced block, or a `@comptime for` / `@comptime if` it cannot
+   harvest, at its line and the lowering fails; this one is closed.
 3. `cc_lower_header` (`:1136`) writes the raw `.cch` bytes as the `.h`
    whenever lowering produced nothing, conflating "nothing to rewrite"
    with "every pass bailed".
@@ -460,6 +459,35 @@ silent-degradation paths, in the sense `CLAUDE.md` uses:
 The outside-repo-root lowering no-op from `CLAUDE.md` is fixed
 (`preprocess.c:15154-15180`, with a temp-directory fallback and a failure
 flag checked by three callers).
+
+**Modules** (spec §1.7, §1.8). A face with bodies is a module, and the
+driver owns the mechanism for both lowerers. `cc_file_start_pragmas`
+(`cccportable.c:369`) reads `#pragma(@module) "name"` and refuses
+`#pragma(@per_tu)` at its line. `cc__module_ctx_of_root`
+(`preprocess.c:15792`) sets the module context from the rewrite root: a
+`.cch` is the face of the module its stem names, a `.ccs` with the pragma
+is a program module unless `name.cch` sits beside it, in which case it is a
+member and is refused as a unit. `cc__member_include_class`
+(`preprocess.c:15914`) classifies every quoted include as a member (spliced in
+place, declared members only), a face (its lowered `.h`), or a refusal at
+the site. The grade of a face is the grade of its module unit, face plus
+members (`cc__local_cch_is_impl_grade`, `preprocess.c:15636`); `@comptime`
+blocks and functions and generic factories are compile-time items that do
+not grade (`cc__cch_comptime_only_item_end`, `preprocess.c:15407`). The module
+`.h` is the extract of that unit: bodies stripped to prototypes, `static`
+functions and data omitted, exported data `extern`, member includes placed
+ahead of the members, one link marker on line 1
+(`cc__lower_local_cch_header_in`, `preprocess.c:18553`; on the clean path
+`lower_header_with`, `cclower.ccs:593`, with the stages `--modules` names).
+At link time the driver collects markers from every emitted C and every
+`.h` it reaches (`cc__collect_link_markers_text`, `cc_main.c:4633`), stages
+the unit (`cc_module_stage_text`, `preprocess.c:19470`: the includes of the
+unit as prologue, a `#line` to the face, the text), lowers it in a
+child `ccc --emit-c-only` run of the lowerer in use to `<face>_cch.c`
+beside the `.h` (`cc__ensure_module_c`, `cc_main.c:4765`), compiles it per
+host-flag variant (`cc__ensure_module_obj`, `cc_main.c:4850`) and puts the
+object on the link line (`cc__module_objects`, `cc_main.c:4909`). A marker
+the driver cannot satisfy is an error.
 
 ---
 

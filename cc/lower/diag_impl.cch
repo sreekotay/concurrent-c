@@ -1,4 +1,4 @@
-#pragma(@per_tu)
+#pragma(@module) "lower"
 /* Diagnostics: bodies for diag.cch. Included by the unit that owns the
  * sink (a tool `.ccs`), after the face. */
 #ifndef CC_LOWER_DIAG_IMPL_CCH
@@ -24,17 +24,17 @@ static CcDiag cc__diag_make(CcSeverity sev, CcLoc at, CCSlice msg) {
     return d;
 }
 
-static CcDiag CcDiag_with_len(CcDiag d, uint32_t len) { d.len = len; return d; }
-static CcDiag CcDiag_error(CcLoc at, CCSlice msg) { return cc__diag_make(CC_SEV_ERROR, at, msg); }
-static CcDiag CcDiag_warning(CcLoc at, CCSlice msg) { return cc__diag_make(CC_SEV_WARNING, at, msg); }
-static CcDiag CcDiag_note(CcLoc at, CCSlice msg) { return cc__diag_make(CC_SEV_NOTE, at, msg); }
+CcDiag CcDiag_with_len(CcDiag d, uint32_t len) { d.len = len; return d; }
+CcDiag CcDiag_error(CcLoc at, CCSlice msg) { return cc__diag_make(CC_SEV_ERROR, at, msg); }
+CcDiag CcDiag_warning(CcLoc at, CCSlice msg) { return cc__diag_make(CC_SEV_WARNING, at, msg); }
+CcDiag CcDiag_note(CcLoc at, CCSlice msg) { return cc__diag_make(CC_SEV_NOTE, at, msg); }
 
-static CcDiag CcDiag_with_note(CcDiag d, CCSlice note) {
+CcDiag CcDiag_with_note(CcDiag d, CCSlice note) {
     d.note = note;
     return d;
 }
 
-static CcDiag CcDiag_with_note_at(CcDiag d, CcLoc at, CCSlice msg, CCArena a) {
+CcDiag CcDiag_with_note_at(CcDiag d, CcLoc at, CCSlice msg, CCArena a) {
     CcDiagNote* n = cc_arena_alloc(a, sizeof(CcDiagNote), _Alignof(CcDiagNote));
     if (!n) return d;
     n->at = at;
@@ -53,7 +53,7 @@ static CcDiag CcDiag_with_note_at(CcDiag d, CcLoc at, CCSlice msg, CCArena a) {
 
 /* ---- sink ------------------------------------------------------------ */
 
-static CcDiags CcDiags_new(CCArena a) {
+CcDiags CcDiags_new(CCArena a) {
     CcDiags ds;
     ds.items = vec_new::[CcDiag](a);
     ds.n_errors = 0;
@@ -61,7 +61,7 @@ static CcDiags CcDiags_new(CCArena a) {
     return ds;
 }
 
-static void CcDiags_push(CcDiags* ds, CcDiag d) {
+void CcDiags_push(CcDiags* ds, CcDiag d) {
     if (ds->items.push(d) != 0) {
         size_t n_items = ds->items.len();
         fprintf(stderr, "cc: out of memory: diagnostic sink (%zu messages)\n", n_items);
@@ -70,7 +70,7 @@ static void CcDiags_push(CcDiags* ds, CcDiag d) {
     if (d.sev == CC_SEV_ERROR) ds->n_errors++;
 }
 
-static bool CcDiags_has_errors(const CcDiags* ds) { return ds->n_errors > 0; }
+bool CcDiags_has_errors(const CcDiags* ds) { return ds->n_errors > 0; }
 
 /* ---- print ----------------------------------------------------------- */
 
@@ -157,7 +157,7 @@ static void cc__print_snippet(FILE* out, CcSourceFn source, void* ctx,
     }
 }
 
-static void CcDiags_print(const CcDiags* ds, FILE* out, CcSourceFn source, void* ctx) {
+void CcDiags_print(const CcDiags* ds, FILE* out, CcSourceFn source, void* ctx) {
     CcDiags* sink = (CcDiags*)ds;   /* the vec accessors take a mutable receiver */
     uint32_t n = (uint32_t)sink->items.len();
     if (n == 0) return;

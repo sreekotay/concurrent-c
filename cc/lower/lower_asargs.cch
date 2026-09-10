@@ -1,4 +1,4 @@
-#pragma(@per_tu)
+#pragma(@module) "lower"
 /* Clean lowerer, step: `as:` coercion at a call.
  *
  * `@typeview on T { as: f; }` says a `T` is an `f` wherever one is wanted:
@@ -203,7 +203,7 @@ static void as_call(Walker* w, CcExpr* e, CcCall cl) {
     }
 }
 
-static void CcLowerer_asargs(CcLowerer* L) {
+void CcLowerer_asargs(CcLowerer* L) {
     Walker w;
     AsStep st;
     memset(&st, 0, sizeof(st));

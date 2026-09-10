@@ -1,10 +1,10 @@
+#pragma(@module) "staticd"
 /*
  * Mechanical HTTP/1.1 helpers for staticd: date tape, one Range, header CI.
  * Policy (403, MIME, encode) stays in staticd.ccs.
  *
  * Include after <ccc/std/prelude.cch>.
  */
-#pragma(@per_tu)
 #ifndef STATICD_HTTP_CCH
 #define STATICD_HTTP_CCH
 

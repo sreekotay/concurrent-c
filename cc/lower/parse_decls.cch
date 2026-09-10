@@ -1,4 +1,4 @@
-#pragma(@per_tu)
+#pragma(@module) "lower"
 /* Parser section 5: declarations and the unit. One declaration at a time
  * into a CcDeclList (`int a, b;` pushes two), the Concurrent-C declaration
  * forms (@typehooks, @typeview, @variant, @grammar, CC_GENERIC_FACTORY,
@@ -1351,7 +1351,7 @@ static void parse_unit(P* p) {
     }
 }
 
-static CcUnit* cc_parse_unit(CCSlice path, CCSlice src, CcParseOpts opts, CcDiags* ds, CCArena a) {
+CcUnit* cc_parse_unit(CCSlice path, CCSlice src, CcParseOpts opts, CcDiags* ds, CCArena a) {
     CcUnit* u = cc_arena_alloc(a, sizeof(CcUnit), _Alignof(CcUnit));
     P p;
     memset(u, 0, sizeof(*u));
@@ -1365,7 +1365,7 @@ static CcUnit* cc_parse_unit(CCSlice path, CCSlice src, CcParseOpts opts, CcDiag
     return u;
 }
 
-static CcStmt* cc_parse_stmt_at(CcUnit* u, uint32_t first, CcParseOpts opts, CcDiags* ds, CCArena a) {
+CcStmt* cc_parse_stmt_at(CcUnit* u, uint32_t first, CcParseOpts opts, CcDiags* ds, CCArena a) {
     P p = parser_new(u, opts, ds, a);
     if (first >= p.n) return NULL;
     p.i = first;

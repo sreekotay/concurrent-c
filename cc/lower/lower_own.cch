@@ -1,4 +1,4 @@
-#pragma(@per_tu)
+#pragma(@module) "lower"
 /* Clean lowerer, step: ownership and borrow safety.
  *
  * An arena hands out borrows. A borrow is not an owner: freeing one, or
@@ -1526,7 +1526,7 @@ static void own_top_decl(Own* O, CcDecl* d) {
     }
 }
 
-static void CcLowerer_own(CcLowerer* L) {
+void CcLowerer_own(CcLowerer* L) {
     Own O;
     CcDeclList* decls = &L->unit->decls;
     size_t n = decls->len();

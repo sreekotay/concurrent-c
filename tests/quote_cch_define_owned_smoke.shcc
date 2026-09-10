@@ -1,11 +1,12 @@
-/* Guest + owner: CFG_ON selects the static helper in the extract. */
+/* CFG_ON before the include selects the `#ifdef` arm of the module
+ * face in the extract: the arms are `static inline` bodies, which the
+ * .h carries (spec 1.7). */
 CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
 
 CCCommand build = cc_command(arena, @slice("./cc/bin/ccc"));
 build.arg("build");
 build.arg("--no-cache");
 build.arg("tests/quote_cch_define_owned_guest_mod.ccs");
-build.arg("tests/quote_cch_define_owned_mod.ccs");
 build.arg("-o");
 build.arg("out/quote_cch_define_owned_smoke");
 build.inherit_stdio();

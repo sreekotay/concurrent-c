@@ -1,4 +1,4 @@
-#pragma(@per_tu)
+#pragma(@module) "lower"
 /* Clean lowerer, step: `@parallel`. The arms of
  * `@parallel { a = f(); b = g(); }` may run at the same time: the first
  * stays on the caller, and each of the others becomes a thunk the runtime

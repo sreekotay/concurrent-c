@@ -9,22 +9,11 @@
  * The default include directory is cc/include (run from the repository
  * root). Diagnostics from the index and the parser print to stderr.
  * Output is byte-identical to out/cc/bin/ccindex (the C11 reference). */
-#include "lex_impl.cch"
-#include "diag_impl.cch"
-#include "ast_impl.cch"
-#include "parse_state.cch"
-#include "parse_fwd.cch"
-#include "parse_exprs.cch"
-#include "parse_stmts.cch"
-#include "parse_types.cch"
-#include "parse_decls.cch"
-#include "parse_walk.cch"
-#include "index_impl.cch"
+#include "lower.cch"
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "typing.cch"
 
 #define SL(s) (int)(s).len, (const char*)(s).ptr
 

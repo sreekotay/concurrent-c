@@ -1,1 +1,0 @@
-M9 (spec 1.7, modules): a non-static body reached through an umbrella is refused today as having no owner .ccs; the leaf as a module of one is not implemented

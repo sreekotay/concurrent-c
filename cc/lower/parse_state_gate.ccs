@@ -1,7 +1,5 @@
 /* Gate: the parser state face lowers; scopes and keywords behave. */
-#include "lex_impl.cch"
-#include "diag_impl.cch"
-#include "parse_state.cch"
+#include "lower.cch"
 #include <stdio.h>
 
 int main(void) {

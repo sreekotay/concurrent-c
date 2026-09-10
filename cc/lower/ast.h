@@ -489,7 +489,7 @@ struct CcDecl {
     CcExpr *cond;
     CcDeclList then_decls, else_decls;
     /* PRAGMA_CC */
-    CcName pragma_name;        /* "parallel", "prelude", "linenumbers", "per_tu" */
+    CcName pragma_name;        /* "parallel", "prelude", "linenumbers", "module" */
     CcName pragma_value;       /* "off" / "on" / NULL */
     /* PP */
     uint32_t tok;              /* the CC_TK_PP token */

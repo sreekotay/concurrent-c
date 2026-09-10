@@ -1,4 +1,4 @@
-#pragma(@per_tu)
+#pragma(@module) "lower"
 /* Clean lowerer, step: deadline scopes. `@with_deadline(d) { ... }` runs
  * its body under a clock: the scope is built from the deadline the site
  * names, pushed as the current one for the body, and the previous one is
@@ -70,7 +70,7 @@ static void dl_on_stmt(Walker* w, CcStmt* s, bool enter) {
     if (hit) dl_stmt(st, s, wd);
 }
 
-static void CcLowerer_deadline(CcLowerer* L) {
+void CcLowerer_deadline(CcLowerer* L) {
     Walker w;
     DStep st;
     memset(&st, 0, sizeof(st));

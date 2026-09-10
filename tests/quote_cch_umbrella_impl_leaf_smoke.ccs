@@ -1,5 +1,7 @@
-/* Quoted interface `.cch` extracts. Impl-grade leaf splices only when
- * this `.ccs` includes it directly — not through the umbrella. */
+/* Quoted interface `.cch` extracts. The impl-grade leaf is a member of
+ * this program module and splices where this `.ccs` includes it — the
+ * umbrella does not include it. */
+#pragma(@module) "umbrella_impl_leaf"
 #include <stdio.h>
 #include "quote_cch_umbrella_impl_leaf.cch"
 #include "quote_cch_umbrella_impl_leaf_impl.cch"

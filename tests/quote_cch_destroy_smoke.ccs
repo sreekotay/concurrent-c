@@ -1,5 +1,7 @@
 /* Quoted local `.cch` with `create_buffer(...) @destroy` — pins statement
- * `@destroy` on a helper inside a quoted header (impl-grade splice). */
+ * `@destroy` on a helper inside a quoted header. The header is a member of
+ * this program module (spec 1.7): its text splices into the program. */
+#pragma(@module) "destroy_smoke"
 #include <ccc/std/prelude.cch>
 #include <assert.h>
 #include <stdio.h>

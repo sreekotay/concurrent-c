@@ -5,9 +5,11 @@
  *   CCServer  — listen, tls mats, dest, stop, live / worker ratchet
  *   CCIoAct   — wait | wait_out | close (how a socket step finishes)
  *
- * `serve` lives in CCServer.ccs (this header's owner): workers / wait /
- * grow, borrow-invoke one closure with `CCIoSess*`. Tape interest is
- * CCServerPoll.cch / .ccs. Dest-per-conn is `ln.serve`.
+ * `serve` lives in CCServer.ccs, a member of this module (spec 1.7):
+ * workers / wait / grow, borrow-invoke one closure with `CCIoSess*`. Tape
+ * interest is CCServerPoll.cch / .ccs, members too. Dest-per-conn is
+ * `ln.serve`. The module lowers once to CCServer_cch.c; a page includes
+ * this face and links that object.
  *
  * Page sees: init / close / listen / load_tls / serve / start_n /
  * workers_max / tls / tls_fails / step_steals; on io: try_write / window /
@@ -29,13 +31,16 @@
  * Deadlines: absolute `time_t` on the session (`deadline`); 0 = none.
  * Dest reaps expired rows on the 50ms wait wake.
  *
- * Caller includes <ccc/std/net.cch>, <ccc/std/tls.cch>, <ccc/std/signal.cch>,
- * <ccc/cc_atomic.cch>. Certs are process mats (`cc_tls_server_load`)
- * before dest wraps TLS.
+ * Certs are process mats (`cc_tls_server_load`) before dest wraps TLS.
  */
 #ifndef CC_SERVER_CCH
 #define CC_SERVER_CCH
 
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_atomic.cch>
+#include <ccc/std/net.cch>
+#include <ccc/std/tls.cch>
+#include <ccc/std/signal.cch>
 #include <fcntl.h>
 #include <unistd.h>
 #include <stdint.h>
@@ -88,16 +93,28 @@ typedef struct CCServer {
     CCParallel app;
 } CCServer;
 
+int cc_fd_nonblock(int fd);
+int cc_server_stopped(CCServer* srv);
+
+/* Defined in CCServer.ccs — send() / cc_tls_try_write, never parks. */
+size_t !>(CCIoError) io_sess_try_write(CCIoSess* io, char[:] data);
+
+/* 1 if TLS record layer still has outbound ciphertext (not app cursor). */
+int io_sess_pending_out(CCIoSess* io);
+
+/* Body in CCServer.ccs — keeps TLS pending_out out of the published face. */
+void io_sess_apply(CCIoSess* io, CCIoAct a);
+
+/* The waiter, a member (spec 1.7), ahead of every body in the unit: its
+ * table alias is defined before any prototype the lowering hoists could
+ * name it. */
+#include "CCServerPoll.ccs"
+
 int cc_fd_nonblock(int fd) {
     int fl = fcntl(fd, F_GETFL, 0);
     if (fl < 0) return -1;
     return fcntl(fd, F_SETFL, fl | O_NONBLOCK);
 }
-
-int cc_server_stopped(CCServer* srv);
-
-/* Defined in CCServer.ccs — send() / cc_tls_try_write, never parks. */
-size_t !>(CCIoError) io_sess_try_write(CCIoSess* io, char[:] data);
 
 void io_sess_consume(CCIoSess* io, size_t n) {
     if (!io->read_ptr) return;
@@ -128,12 +145,6 @@ void io_sess_touch(CCIoSess* io, time_t now, int secs) {
     }
     io->deadline = now + (time_t)secs;
 }
-
-/* 1 if TLS record layer still has outbound ciphertext (not app cursor). */
-int io_sess_pending_out(CCIoSess* io);
-
-/* Body in CCServer.ccs — keeps TLS pending_out out of the published face. */
-void io_sess_apply(CCIoSess* io, CCIoAct a);
 
 void cc_server_init(CCServer* srv, int workers_max) {
     *srv = (CCServer){
@@ -193,5 +204,8 @@ void cc_server_close(CCServer* srv) {
 /* Borrow-invoke on_app(io) per ready window; drop once after join. */
 void !>(CCError) cc_server_serve(CCServer* srv, CCSignal* stop,
                                  CCClosure1 on_app);
+
+/* The other member: serve, after the bodies it calls. */
+#include "CCServer.ccs"
 
 #endif /* CC_SERVER_CCH */

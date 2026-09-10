@@ -10,13 +10,19 @@
  * never a node left for the host compiler to trip over silently. Steps
  * after an erroring step still run so a file reports every error it has;
  * the driver refuses to print C when the sink has errors. */
+/* The unit of module `lower` starts here: what every member relies on
+ * from the standard library opens the unit, ahead of the guard, so it
+ * precedes the declarations the lowering hoists after the opening
+ * includes. */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/vec.cch>
+#include <ccc/std/map.cch>
 #ifndef CC_LOWER_LOWER_CCH
 #define CC_LOWER_LOWER_CCH
 #include "index.cch"
 
 typedef struct CcLowerOpts {
     bool line_directives;       /* #pragma(@linenumbers) */
-    bool per_tu;                /* #pragma(@per_tu) */
     bool strict_unhandled;      /* a bare call to a Result function is an error (CC_STRICT_RESULT_UNWRAP, default on) */
     CCSlice repo_root;          /* quoted `.cch` includes become `<rel.h>` relative to it; empty: left as written */
     CCSlice schema_variants;    /* tagged unions a `@grammar(schema)` declared: one line each, name then arms */
@@ -68,31 +74,49 @@ typedef struct CcLowerer {
     bool factories_ok;          /* and the binding worked */
 } CcLowerer;
 
-static CcLowerer cc_lowerer_new(CcUnit* u, CcIndex* ix, CcLowerOpts opts, CcDiags* ds);
+CcLowerer cc_lowerer_new(CcUnit* u, CcIndex* ix, CcLowerOpts opts, CcDiags* ds);
 
 /* L.lower_unit(): the whole pipeline, in order. Each step is callable alone. */
-static void CcLowerer_lower_unit(CcLowerer* L);
-static void CcLowerer_results(CcLowerer* L);      /* Result types, cc_ok/cc_err, !> ?> forms, @errhandler, @err */
-static void CcLowerer_cleanup(CcLowerer* L);      /* @defer, @cancel_defer, @destroy: scope-exit runs and soft returns */
-static void CcLowerer_includes(CcLowerer* L);
-static void CcLowerer_own(CcLowerer* L);          /* arena borrows, channel-send stability, unique-slice moves */
-static void CcLowerer_generics(CcLowerer* L);     /* `Vec::[T]` -> `CCVec_T` and the factory expansion spliced once */
-static void CcLowerer_slices(CcLowerer* L);       /* `T[:]` values: string literals, braced lists, `@slice(...)` */
-static void CcLowerer_slice_args(CcLowerer* L);   /* arguments a slice parameter accepts, after UFCS built the call */
-static void CcLowerer_strings(CcLowerer* L);      /* `@string(`...`)`: the pushes that build it */
-static void CcLowerer_asargs(CcLowerer* L);       /* an argument read through the faces of an `as:` path */
-static void CcLowerer_strswitch(CcLowerer* L);    /* `case "lit":` on a slice subject: an ordinal and an integer switch */
-static void CcLowerer_closures(CcLowerer* L);     /* `(p) => body`: the environment, the entry, the make */
-static void CcLowerer_create(CcLowerer* L);       /* `@create(...)`: the type's own .create hook */
-static void CcLowerer_forin(CcLowerer* L);        /* `@for (x in xs)`: the extent the type declares */
-static void CcLowerer_deadline(CcLowerer* L);  /* `@with_deadline(d) { }`: the scope pushed for the body */
+void CcLowerer_lower_unit(CcLowerer* L);
+void CcLowerer_results(CcLowerer* L);      /* Result types, cc_ok/cc_err, !> ?> forms, @errhandler, @err */
+void CcLowerer_cleanup(CcLowerer* L);      /* @defer, @cancel_defer, @destroy: scope-exit runs and soft returns */
+void CcLowerer_includes(CcLowerer* L);
+void CcLowerer_own(CcLowerer* L);          /* arena borrows, channel-send stability, unique-slice moves */
+void CcLowerer_generics(CcLowerer* L);     /* `Vec::[T]` -> `CCVec_T` and the factory expansion spliced once */
+void CcLowerer_slices(CcLowerer* L);       /* `T[:]` values: string literals, braced lists, `@slice(...)` */
+void CcLowerer_slice_args(CcLowerer* L);   /* arguments a slice parameter accepts, after UFCS built the call */
+void CcLowerer_strings(CcLowerer* L);      /* `@string(`...`)`: the pushes that build it */
+void CcLowerer_asargs(CcLowerer* L);       /* an argument read through the faces of an `as:` path */
+void CcLowerer_strswitch(CcLowerer* L);    /* `case "lit":` on a slice subject: an ordinal and an integer switch */
+void CcLowerer_closures(CcLowerer* L);     /* `(p) => body`: the environment, the entry, the make */
+void CcLowerer_create(CcLowerer* L);       /* `@create(...)`: the type's own .create hook */
+void CcLowerer_forin(CcLowerer* L);        /* `@for (x in xs)`: the extent the type declares */
+void CcLowerer_deadline(CcLowerer* L);  /* `@with_deadline(d) { }`: the scope pushed for the body */
 static void CcLowerer_parallel(CcLowerer* L);  /* `@parallel { arms }`: a thunk per arm, spawned and joined in the block */
-static void CcLowerer_async(CcLowerer* L);     /* `@async Ret f(...)`: the frame, the body, the poll, the factory; `@await e` */
-static void CcLowerer_chan(CcLowerer* L);         /* channel endpoints, the pair that creates them, typed sends */
-static void CcLowerer_variants(CcLowerer* L);     /* variant declarations, construction, checked switch, protected projection */
-static void CcLowerer_ufcs(CcLowerer* L);         /* `x.m(args)` -> the resolved `callee(&x, args)`; `Type.fn(args)` -> `Type_fn(args)` */     /* `#include "x.cch"` -> `#include <rel/x.h>`, the header recorded for lowering */
+void CcLowerer_async(CcLowerer* L);     /* `@async Ret f(...)`: the frame, the body, the poll, the factory; `@await e` */
+void CcLowerer_chan(CcLowerer* L);         /* channel endpoints, the pair that creates them, typed sends */
+void CcLowerer_variants(CcLowerer* L);     /* variant declarations, construction, checked switch, protected projection */
+void CcLowerer_ufcs(CcLowerer* L);         /* `x.m(args)` -> the resolved `callee(&x, args)`; `Type.fn(args)` -> `Type_fn(args)` */     /* `#include "x.cch"` -> `#include <rel/x.h>`, the header recorded for lowering */
 
 /* Helpers shared by the steps. */
-static uint32_t CcLowerer_temp_id(CcLowerer* L);                          /* the next N */
+uint32_t CcLowerer_temp_id(CcLowerer* L);                          /* the next N */
+
+/* The members of module `lower` (spec 1.7). A tool includes this face and
+ * links the one object the members lower into; what a tool calls is the
+ * exported surface the faces above declare. */
+#include "lex_impl.cch"
+#include "diag_impl.cch"
+#include "ast_impl.cch"
+#include "parse_state.cch"
+#include "parse_fwd.cch"
+#include "parse_exprs.cch"
+#include "parse_stmts.cch"
+#include "parse_types.cch"
+#include "parse_decls.cch"
+#include "parse_walk.cch"
+#include "print_impl.cch"
+#include "index_impl.cch"
+#include "typing.cch"
+#include "lower_impl.cch"
 
 #endif

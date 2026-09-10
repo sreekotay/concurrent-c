@@ -1,8 +1,8 @@
+#pragma(@module) "staticd"
 /*
  * WebSocket tape: SHA-1 + base64 for the 101, unmasked server frames,
  * masked client frames. Policy (echo / close) stays in staticd.ccs.
  */
-#pragma(@per_tu)
 #ifndef STATICD_WS_CCH
 #define STATICD_WS_CCH
 

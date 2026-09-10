@@ -15,6 +15,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <signal.h>
+#include <stdarg.h>
 
 #include "build/build.h"
 #include "build/host_cc_profile.h"
@@ -908,8 +909,10 @@ static int cc__finish_emit_c(const char* orig_in, const char* out_path,
     if (orig_in && orig_in[0]) {
         raw = cc__read_all_file(orig_in, &n);
         if (raw) {
-            if (cc_file_start_pragmas(raw, n, &po, &lo, NULL, perr, sizeof(perr)) != 0) {
-                fprintf(stderr, "%s: %s\n", orig_in, perr);
+            int perr_line = 0;
+            if (cc_file_start_pragmas(raw, n, &po, &lo, NULL, 0, perr, sizeof(perr),
+                                      &perr_line) != 0) {
+                fprintf(stderr, "%s:%d: error: %s\n", orig_in, perr_line, perr);
                 free(raw);
                 return -1;
             }
@@ -921,8 +924,11 @@ static int cc__finish_emit_c(const char* orig_in, const char* out_path,
         fprintf(stderr, "cc: cannot polish emitted C %s\n", out_path);
         return -1;
     }
+    /* A module product beside its lowered `.h` sits under the toolchain's
+     * lowered root, which is a build product wherever the caller's cwd is. */
     if (emit_c_only && !no_line &&
-        !cc_path_under_dir(out_path, g_out_root)) {
+        !cc_path_under_dir(out_path, g_out_root) &&
+        !cc_path_under_dir(out_path, g_cc_lowered_include)) {
         fprintf(stderr,
                 "cc: warning: #line still on for %s (not under out/); "
                 "pass --no-line so vendored C does not embed author paths\n",
@@ -3253,6 +3259,7 @@ typedef struct {
     int state; // 0=unseen, 1=building, 2=done
     size_t obj_count;
     char** obj_paths;  // heap-allocated array of heap-allocated strings
+    char** c_paths;    // the emitted C behind each object, same shape
     uint64_t* obj_keys; // heap-allocated
 } CCTargetObjCache;
 
@@ -3333,8 +3340,9 @@ static int cc__build_one_target_objs(int idx,
     caches[idx].obj_count = 0;
     if (!caches[idx].obj_paths) {
         caches[idx].obj_paths = (char**)calloc(128, sizeof(char*));
+        caches[idx].c_paths = (char**)calloc(128, sizeof(char*));
         caches[idx].obj_keys = (uint64_t*)calloc(128, sizeof(uint64_t));
-        if (!caches[idx].obj_paths || !caches[idx].obj_keys) return -1;
+        if (!caches[idx].obj_paths || !caches[idx].c_paths || !caches[idx].obj_keys) return -1;
     }
 
     for (size_t si = 0; si < t->src_count; ++si) {
@@ -3478,6 +3486,7 @@ static int cc__build_one_target_objs(int idx,
             cc__prof_span_arg(obj_reused ? "tu_obj_reuse" : "tu_obj", src_abs, t_obj);
 
             caches[idx].obj_paths[caches[idx].obj_count] = strdup(o_out);
+            caches[idx].c_paths[caches[idx].obj_count] = strdup(c_for_compile);
             caches[idx].obj_keys[caches[idx].obj_count] = obj_key;
             caches[idx].obj_count++;
         }
@@ -3495,7 +3504,8 @@ static int cc__write_target_job_manifest(const char* o_dir, const CCTargetObjCac
     if (!f) return -1;
     for (i = 0; i < cache->obj_count; ++i) {
         if (!cache->obj_paths[i]) continue;
-        fprintf(f, "%llu\t%s\n", (unsigned long long)cache->obj_keys[i], cache->obj_paths[i]);
+        fprintf(f, "%llu\t%s\t%s\n", (unsigned long long)cache->obj_keys[i], cache->obj_paths[i],
+                cache->c_paths && cache->c_paths[i] ? cache->c_paths[i] : "-");
     }
     fclose(f);
     return 0;
@@ -3515,8 +3525,9 @@ static int cc__read_target_job_manifest(const char* o_dir, CCTargetObjCache* cac
     }
     if (!cache->obj_paths) {
         cache->obj_paths = (char**)calloc(128, sizeof(char*));
+        cache->c_paths = (char**)calloc(128, sizeof(char*));
         cache->obj_keys = (uint64_t*)calloc(128, sizeof(uint64_t));
-        if (!cache->obj_paths || !cache->obj_keys) {
+        if (!cache->obj_paths || !cache->c_paths || !cache->obj_keys) {
             fclose(f);
             return -1;
         }
@@ -3525,8 +3536,16 @@ static int cc__read_target_job_manifest(const char* o_dir, CCTargetObjCache* cac
     while (fgets(line, sizeof(line), f) && cache->obj_count < 128) {
         unsigned long long key = 0;
         char obj[PATH_MAX];
-        if (sscanf(line, "%llu\t%1023s", &key, obj) != 2) continue;
+        char cpath[PATH_MAX];
+        /* A manifest without the C column predates module objects; the
+         * link would not know which modules that object needs. Rebuilt. */
+        if (sscanf(line, "%llu\t%1023s\t%1023s", &key, obj, cpath) != 3) {
+            fclose(f);
+            fprintf(stderr, "cc: stale object manifest %s (no C column); rerun without the cache\n", path);
+            return -1;
+        }
         cache->obj_paths[cache->obj_count] = strdup(obj);
+        cache->c_paths[cache->obj_count] = strcmp(cpath, "-") == 0 ? NULL : strdup(cpath);
         cache->obj_keys[cache->obj_count] = (uint64_t)key;
         cache->obj_count++;
     }
@@ -3795,6 +3814,7 @@ static int cc__gather_obj_closure(int idx,
                                  const CCTargetObjCache* caches,
                                  unsigned char* vis,
                                  const char** out_paths,
+                                 const char** out_c_paths,
                                  uint64_t* out_keys,
                                  size_t* io_count,
                                  size_t cap) {
@@ -3805,12 +3825,13 @@ static int cc__gather_obj_closure(int idx,
     for (size_t di = 0; di < t->dep_count; ++di) {
         int d = cc__find_target_idx(targets, target_count, t->deps[di]);
         if (d < 0) return -3;
-        int r = cc__gather_obj_closure(d, targets, target_count, caches, vis, out_paths, out_keys, io_count, cap);
+        int r = cc__gather_obj_closure(d, targets, target_count, caches, vis, out_paths, out_c_paths, out_keys, io_count, cap);
         if (r != 0) return r;
     }
     for (size_t oi = 0; oi < caches[idx].obj_count; ++oi) {
         if (*io_count >= cap) return -4;
         out_paths[*io_count] = caches[idx].obj_paths[oi];
+        if (out_c_paths) out_c_paths[*io_count] = caches[idx].c_paths ? caches[idx].c_paths[oi] : NULL;
         if (out_keys) out_keys[*io_count] = caches[idx].obj_keys[oi];
         (*io_count)++;
     }
@@ -3955,8 +3976,18 @@ static uint64_t g_clean_src_key = 0;
 static char g_clean_quote_dir[PATH_MAX];
 
 static int cc__set_lowerer_name(const char* v) {
-    if (!v || !v[0] || strcmp(v, "shadow") == 0 || strcmp(v, "native") == 0) { g_lowerer_clean = 0; return 0; }
-    if (strcmp(v, "clean") == 0) { g_lowerer_clean = 1; return 0; }
+    /* The environment carries the choice to the child runs that lower a
+     * module unit, and to the key of the C they produce. */
+    if (!v || !v[0] || strcmp(v, "shadow") == 0 || strcmp(v, "native") == 0) {
+        g_lowerer_clean = 0;
+        setenv("CC_LOWERER", "shadow", 1);
+        return 0;
+    }
+    if (strcmp(v, "clean") == 0) {
+        g_lowerer_clean = 1;
+        setenv("CC_LOWERER", "clean", 1);
+        return 0;
+    }
     fprintf(stderr, "cc: --lowerer must be clean or shadow (got %s)\n", v);
     return -1;
 }
@@ -3964,6 +3995,14 @@ static int cc__set_lowerer_name(const char* v) {
 static int cc__find_clean_tool(const char* name, char* dst, size_t cap) {
     char shadow[PATH_MAX];
     char dir[PATH_MAX];
+    /* The lowerer under test: the self-hosting gate names the generation
+     * it built, and the driver runs it as it would the one in out/. */
+    const char* under_test = strcmp(name, "cclower_cc") == 0 ? getenv("CC_CLEAN_TOOL") : NULL;
+    if (under_test && under_test[0]) {
+        if ((size_t)snprintf(dst, cap, "%s", under_test) < cap && access(dst, X_OK) == 0) return 0;
+        fprintf(stderr, "cc: CC_CLEAN_TOOL=%s is not an executable\n", under_test);
+        return -1;
+    }
     if (g_repo_root[0]) {
         if ((size_t)snprintf(dst, cap, "%s/out/cc/bin/%s", g_repo_root, name) < cap && access(dst, X_OK) == 0) return 0;
         if ((size_t)snprintf(dst, cap, "%s/bin/%s", g_repo_root, name) < cap && access(dst, X_OK) == 0) return 0;
@@ -4082,6 +4121,25 @@ static int cc__clean_known_types(char* dst, size_t cap) {
  * see, since it resolves those itself. */
 /* Append harvested text (which this takes ownership of) to a buffer. A
  * NULL harvest is "nothing to add", not a failure. */
+/* Append to a heap string that grows as needed; exits on exhaustion. */
+static void cc__strbuf_cat(char** buf, size_t* len, size_t* cap, const char* add) {
+    size_t add_len = strlen(add);
+    if (*len + add_len + 1 > *cap) {
+        size_t ncap = *cap ? *cap * 2 : 256;
+        char* grown;
+        while (ncap < *len + add_len + 1) ncap *= 2;
+        grown = (char*)realloc(*buf, ncap);
+        if (!grown) {
+            fprintf(stderr, "cc: out of memory\n");
+            exit(1);
+        }
+        *buf = grown;
+        *cap = ncap;
+    }
+    memcpy(*buf + *len, add, add_len + 1);
+    *len += add_len;
+}
+
 static int cc__append_harvest(char** buf, size_t* len, char* add) {
     size_t add_len;
     char* grown;
@@ -4180,18 +4238,18 @@ static int cc__materialize_comptime_for_clean(const char* in_path, char* out_ccs
         free(buf);
         return -1;
     }
-    /* An implementation `.cch` this unit owns defines its bodies here.
+    /* The members of the module this unit roots define their bodies here.
      *
-     * The unit that owns a face compiles it; every other unit gets the
-     * extracted declarations and calls into this one. The shadow path
-     * splices the face where the include stood, in the same pass that
-     * turns the other includes into lowered `.h` — and the clean lowerer
-     * resolves those includes itself, so only the splice is handed over.
-     * Without it a face's definitions land in no translation unit at all
-     * and the link is what says so. The face's own text goes in, so its
-     * `@`-forms lower with the unit that owns them. */
+     * A module is one translation unit (spec 1.7): the root and the
+     * units that declare membership in it. The shadow path splices each
+     * member where its include stood, in the same pass that turns the
+     * other includes into lowered `.h` — and the clean lowerer resolves
+     * those includes itself, so only the splice is handed over. Without
+     * it a member's definitions land in no translation unit at all and
+     * the link is what says so. The member's own text goes in, so its
+     * `@`-forms lower with the unit. */
     {
-        char* spliced = cc_splice_owned_cch_impl(buf, len, in_path);
+        char* spliced = cc_splice_module_members(buf, len, in_path);
         if (cc_local_header_lower_failed()) {
             free(spliced);
             free(buf);
@@ -4393,8 +4451,600 @@ static int cc__splice_comptime_into_clean(const char* c_path, const char* orig_p
 }
 
 /* Lower `in_path` to C with the clean lowerer into `c_out`. */
+/* A path composed for the module machinery; truncation is a refusal,
+ * never a file with a shorter name. */
+static int cc__fmt_path(char* out, size_t cap, const char* fmt, ...) {
+    va_list ap;
+    int n;
+    va_start(ap, fmt);
+    n = vsnprintf(out, cap, fmt, ap);
+    va_end(ap);
+    if (n < 0 || (size_t)n >= cap) {
+        fprintf(stderr, "cc: path too long (%s)\n", fmt);
+        return -1;
+    }
+    return 0;
+}
+
+/* ---- module objects (spec 1.7) -------------------------------------------
+ *
+ * The lowered `.h` of a module face opens with a `cc:link` marker naming
+ * `<face>_cch.c`. Before a link, the include closure of every emitted C is walked for
+ * those markers; each names a face whose module unit is lowered once to
+ * `<face>_cch.c` beside that `.h`, compiled once per host configuration,
+ * and put on the link line. A marker naming a face this driver cannot
+ * produce is an error at the marker, never a missing symbol at link. */
+
+typedef struct {
+    char** v;
+    size_t n;
+    size_t cap;
+} CCPathList;
+
+static int cc__pathlist_has(const CCPathList* l, const char* s) {
+    size_t i;
+    for (i = 0; i < l->n; i++)
+        if (strcmp(l->v[i], s) == 0) return 1;
+    return 0;
+}
+
+/* 1 added, 0 already present, -1 out of memory. */
+static int cc__pathlist_add(CCPathList* l, const char* s) {
+    if (cc__pathlist_has(l, s)) return 0;
+    if (l->n == l->cap) {
+        size_t cap = l->cap ? l->cap * 2 : 16;
+        char** nv = (char**)realloc(l->v, cap * sizeof(*nv));
+        if (!nv) return -1;
+        l->v = nv;
+        l->cap = cap;
+    }
+    l->v[l->n] = strdup(s);
+    if (!l->v[l->n]) return -1;
+    l->n++;
+    return 1;
+}
+
+static void cc__pathlist_free(CCPathList* l) {
+    size_t i;
+    for (i = 0; i < l->n; i++) free(l->v[i]);
+    free(l->v);
+    l->v = NULL;
+    l->n = l->cap = 0;
+}
+
+typedef struct {
+    char face[PATH_MAX];   /* the `.cch` the marker names */
+    char c_path[PATH_MAX]; /* `<face>_cch.c`, beside the `.h` that carried the marker */
+} CCModuleRef;
+
+typedef struct {
+    CCModuleRef* v;
+    size_t n;
+    size_t cap;
+} CCModuleRefs;
+
+static int cc__modrefs_add(CCModuleRefs* l, const char* face, const char* c_path) {
+    size_t i;
+    for (i = 0; i < l->n; i++)
+        if (strcmp(l->v[i].face, face) == 0) return 0;
+    if (l->n == l->cap) {
+        size_t cap = l->cap ? l->cap * 2 : 8;
+        CCModuleRef* nv = (CCModuleRef*)realloc(l->v, cap * sizeof(*nv));
+        if (!nv) return -1;
+        l->v = nv;
+        l->cap = cap;
+    }
+    if (cc__fmt_path(l->v[l->n].face, PATH_MAX, "%s", face) != 0 ||
+        cc__fmt_path(l->v[l->n].c_path, PATH_MAX, "%s", c_path) != 0)
+        return -1;
+    l->n++;
+    return 1;
+}
+
+/* dirname into a buffer, through the checked formatter. */
+static void cc__module_dir_of(const char* path, char* out, size_t cap) {
+    const char* slash = path ? strrchr(path, '/') : NULL;
+    if (!out || cap == 0) return;
+    out[0] = 0;
+    if (!path) return;
+    if (!slash) {
+        (void)cc__fmt_path(out, cap, ".");
+        return;
+    }
+    if (slash == path) {
+        (void)cc__fmt_path(out, cap, "/");
+        return;
+    }
+    if (cc__fmt_path(out, cap, "%.*s", (int)(slash - path), path) != 0) out[0] = 0;
+}
+
+/* The roots lowered headers live under: the reference lowerer's and the
+ * clean lowerer's. An include that resolves under neither is host C and
+ * carries no marker. */
+static void cc__lowered_h_roots(char roots[2][PATH_MAX]) {
+    roots[0][0] = roots[1][0] = 0;
+    if (g_cc_lowered_include[0] && !realpath(g_cc_lowered_include, roots[0]) &&
+        cc__fmt_path(roots[0], PATH_MAX, "%s", g_cc_lowered_include) != 0)
+        roots[0][0] = 0;
+    {
+        char clean[PATH_MAX];
+        if (cc__fmt_path(clean, sizeof(clean), "%s/.cc-build/clean", g_out_root) != 0 ||
+            !realpath(clean, roots[1]))
+            roots[1][0] = 0;
+    }
+    /* The compile of a clean-lowered unit searches its own root first; so
+     * does this walk, or a face lowered by both would be read from the
+     * other root and its module C written beside the wrong `.h`. */
+    if (g_lowerer_clean) {
+        char t[PATH_MAX];
+        memcpy(t, roots[0], sizeof(t));
+        memcpy(roots[0], roots[1], sizeof(t));
+        memcpy(roots[1], t, sizeof(t));
+    }
+}
+
+static int cc__path_under_root(const char* abs, const char* root) {
+    size_t n = strlen(root);
+    return root[0] && strncmp(abs, root, n) == 0 && abs[n] == '/';
+}
+
+/* The marker of a lowered `.h`, when it opens with one: the face it
+ * names and the `<face>_cch.c` beside the `.h`. */
+static int cc__marker_of_h(const char* h_abs, char* face, size_t fcap,
+                           char* c_path, size_t ccap) {
+    FILE* f = fopen(h_abs, "rb");
+    char head[1024];
+    size_t got;
+    char* at;
+    char* end;
+    char name[PATH_MAX];
+    size_t n;
+    const char* base;
+    char hdir[PATH_MAX];
+    if (!f) return 0;
+    got = fread(head, 1, sizeof(head) - 1, f);
+    fclose(f);
+    head[got] = 0;
+    at = strstr(head, "/*cc:link ");
+    if (!at || at != head) return 0;
+    at += strlen("/*cc:link ");
+    end = strstr(at, "*/");
+    if (!end || (size_t)(end - at) >= sizeof(name)) return 0;
+    memcpy(name, at, (size_t)(end - at));
+    name[end - at] = 0;
+    n = strlen(name);
+    if (n < 7 || strcmp(name + n - 6, "_cch.c") != 0) return 0;
+    if (name[0] == '/') {
+        if (cc__fmt_path(face, fcap, "%.*s.cch", (int)(n - 6), name) != 0) return 0;
+    } else if (cc__fmt_path(face, fcap, "%s/%.*s.cch", g_repo_root, (int)(n - 6), name) != 0) {
+        return 0;
+    }
+    base = strrchr(name, '/');
+    base = base ? base + 1 : name;
+    cc__module_dir_of(h_abs, hdir, sizeof(hdir));
+    if (cc__fmt_path(c_path, ccap, "%s/%s", hdir[0] ? hdir : ".", base) != 0) return 0;
+    return 1;
+}
+
+static int cc__collect_link_markers_file(const char* file_abs, CCPathList* visited,
+                                         CCModuleRefs* mods);
+
+/* Every lowered `.h` the text of `file_abs` includes, transitively:
+ * quoted includes resolve beside the file or absolutely, angled ones
+ * under the lowered-header roots. The standard headers never carry a
+ * marker and are not read. */
+static int cc__collect_link_markers_text(const char* text, size_t n, const char* file_abs,
+                                         CCPathList* visited, CCModuleRefs* mods) {
+    char roots[2][PATH_MAX];
+    char dir[PATH_MAX];
+    size_t i = 0;
+    cc__lowered_h_roots(roots);
+    cc__module_dir_of(file_abs, dir, sizeof(dir));
+    while (i < n) {
+        size_t line_end = i, p = i;
+        while (line_end < n && text[line_end] != '\n') line_end++;
+        while (p < line_end && (text[p] == ' ' || text[p] == '\t')) p++;
+        if (p < line_end && text[p] == '#') {
+            p++;
+            while (p < line_end && (text[p] == ' ' || text[p] == '\t')) p++;
+            if (p + 7 <= line_end && memcmp(text + p, "include", 7) == 0) {
+                char open, close;
+                p += 7;
+                while (p < line_end && (text[p] == ' ' || text[p] == '\t')) p++;
+                open = p < line_end ? text[p] : 0;
+                close = open == '"' ? '"' : (open == '<' ? '>' : 0);
+                if (close) {
+                    size_t s = ++p;
+                    char rel[PATH_MAX];
+                    char cand[PATH_MAX];
+                    char abs[PATH_MAX];
+                    int hit = 0;
+                    int r;
+                    while (p < line_end && text[p] != close) p++;
+                    if (p < line_end && p > s && p - s < sizeof(rel) &&
+                        p - s > 2 && memcmp(text + p - 2, ".h", 2) == 0 &&
+                        strncmp(text + s, "ccc/", 4) != 0) {
+                        memcpy(rel, text + s, p - s);
+                        rel[p - s] = 0;
+                        if (open == '"') {
+                            int ok = rel[0] == '/'
+                                         ? cc__fmt_path(cand, sizeof(cand), "%s", rel) == 0
+                                         : cc__fmt_path(cand, sizeof(cand), "%s/%s",
+                                                        dir[0] ? dir : ".", rel) == 0;
+                            hit = ok && realpath(cand, abs) != NULL;
+                        } else {
+                            for (r = 0; r < 2 && !hit; r++) {
+                                if (!roots[r][0]) continue;
+                                hit = cc__fmt_path(cand, sizeof(cand), "%s/%s", roots[r], rel) == 0 &&
+                                      realpath(cand, abs) != NULL;
+                            }
+                        }
+                        if (hit && (cc__path_under_root(abs, roots[0]) ||
+                                    cc__path_under_root(abs, roots[1]))) {
+                            if (cc__collect_link_markers_file(abs, visited, mods) != 0)
+                                return -1;
+                        }
+                    }
+                }
+            }
+        }
+        i = (line_end < n) ? line_end + 1 : line_end;
+    }
+    return 0;
+}
+
+static int cc__collect_link_markers_file(const char* file_abs, CCPathList* visited,
+                                         CCModuleRefs* mods) {
+    char* text;
+    size_t n = 0;
+    char face[PATH_MAX];
+    char c_path[PATH_MAX];
+    int added = cc__pathlist_add(visited, file_abs);
+    int rc;
+    if (added < 0) return -1;
+    if (added == 0) return 0;
+    if (cc__marker_of_h(file_abs, face, sizeof(face), c_path, sizeof(c_path)) &&
+        cc__modrefs_add(mods, face, c_path) < 0)
+        return -1;
+    text = cc__read_all_file(file_abs, &n);
+    if (!text) {
+        fprintf(stderr, "cc: cannot read %s while collecting link markers\n", file_abs);
+        return -1;
+    }
+    rc = cc__collect_link_markers_text(text, n, file_abs, visited, mods);
+    free(text);
+    return rc;
+}
+
+/* The directory a unit was written in: named by a `#line` on its first
+ * line when the unit is a stage copy, else its own. */
+static void cc__unit_origin_dir(const char* path, char* out, size_t cap) {
+    FILE* f = fopen(path, "rb");
+    char line[PATH_MAX + 64];
+    cc__module_dir_of(path, out, cap);
+    if (!f) return;
+    if (fgets(line, sizeof(line), f)) {
+        char* q = NULL;
+        if (strncmp(line, "#line ", 6) == 0) q = strchr(line, '"');
+        if (q) {
+            char* e = strchr(q + 1, '"');
+            if (e) {
+                *e = 0;
+                cc__module_dir_of(q + 1, out, cap);
+            }
+        }
+    }
+    fclose(f);
+}
+
+/* The module unit staged for lowering: a `#line` to the face, then the
+ * text of the face with its unit header left off. Its members are
+ * spliced in by the lowering, which reads the face as the root. */
+static int cc__stage_module_unit(const char* face, uint64_t key, char* out, size_t cap) {
+    char dir[PATH_MAX];
+    char stem[128];
+    size_t n = 0;
+    char* blob = cc_module_stage_text(face, 0, g_lowerer_clean, &n);
+    if (!blob) return -1;
+    if (cc__fmt_path(dir, sizeof(dir), "%s/modules", g_cache_root) != 0 ||
+        cc__mkdir_p(dir) != 0) {
+        free(blob);
+        return -1;
+    }
+    cc__stem_from_path(face, stem, sizeof(stem));
+    if (cc__fmt_path(out, cap, "%s/%s_cch.%016llx.ccs", dir, stem, (unsigned long long)key) != 0 ||
+        cc__install_wrap_file(out, blob, n) != 0) {
+        free(blob);
+        return -1;
+    }
+    free(blob);
+    return 0;
+}
+
+/* `<face>_cch.c`: lowered by this driver, as a unit, in a child process
+ * so the lowering of the program in progress is undisturbed. Keyed like
+ * the `.h` (`<c>.key`); a stale or absent product is re-lowered under a
+ * lock, so parallel builds of two programs sharing a module agree. */
+static int cc__ensure_module_c(const CCBuildOptions* opt, const char* face, const char* c_path) {
+    uint64_t key = cc_face_module_key(face);
+    char key_path[PATH_MAX];
+    char lock_path[PATH_MAX];
+    char stage[PATH_MAX];
+    char cdir[PATH_MAX];
+    char cc_flags_arg[2200];
+    char target_arg[300];
+    char sysroot_arg[300];
+    uint64_t prev = 0;
+    int lock_fd;
+    int rc = 0;
+    if (access(face, R_OK) != 0) {
+        fprintf(stderr, "cc: error: link marker names %s, which cannot be read\n", face);
+        return -1;
+    }
+    if (cc__fmt_path(key_path, sizeof(key_path), "%s.key", c_path) != 0 ||
+        cc__fmt_path(lock_path, sizeof(lock_path), "%s.lock", c_path) != 0)
+        return -1;
+    if (file_exists(c_path) && cc__read_u64_file(key_path, &prev) == 0 && prev == key)
+        return 0;
+    cc__module_dir_of(c_path, cdir, sizeof(cdir));
+    if (cdir[0] && cc__mkdir_p(cdir) != 0) return -1;
+    lock_fd = open(lock_path, O_CREAT | O_RDWR, 0644);
+    if (lock_fd >= 0) flock(lock_fd, LOCK_EX);
+    if (file_exists(c_path) && cc__read_u64_file(key_path, &prev) == 0 && prev == key) {
+        if (lock_fd >= 0) { flock(lock_fd, LOCK_UN); close(lock_fd); }
+        return 0;
+    }
+    unlink(key_path);
+    if (cc__stage_module_unit(face, key, stage, sizeof(stage)) != 0) rc = -1;
+    if (rc == 0) {
+        char* argv[24];
+        int argc = 0;
+        long long t0 = cc__now_ms();
+        argv[argc++] = g_ccc_path;
+        argv[argc++] = (char*)"--emit-c-only";
+        argv[argc++] = (char*)"--no-cache";
+        if (g_lowerer_clean) argv[argc++] = (char*)"--lowerer=clean";
+        if (g_no_line) argv[argc++] = (char*)"--no-line";
+        if (opt->opt_release) argv[argc++] = (char*)"--release";
+        if (opt->opt_debug) argv[argc++] = (char*)"--debug";
+        if (opt->cc_flags && opt->cc_flags[0]) {
+            argv[argc++] = (char*)"--cc-flags";
+            if (cc__fmt_path(cc_flags_arg, sizeof(cc_flags_arg), "%s", opt->cc_flags) != 0) rc = -1;
+            argv[argc++] = cc_flags_arg;
+        }
+        if (opt->target_flag && opt->target_flag[0]) {
+            argv[argc++] = (char*)"--target";
+            if (cc__fmt_path(target_arg, sizeof(target_arg), "%s", opt->target_flag) != 0) rc = -1;
+            argv[argc++] = target_arg;
+        }
+        if (opt->sysroot_flag && opt->sysroot_flag[0]) {
+            argv[argc++] = (char*)"--sysroot";
+            if (cc__fmt_path(sysroot_arg, sizeof(sysroot_arg), "%s", opt->sysroot_flag) != 0) rc = -1;
+            argv[argc++] = sysroot_arg;
+        }
+        argv[argc++] = stage;
+        argv[argc++] = (char*)"-o";
+        argv[argc++] = (char*)c_path;
+        argv[argc] = NULL;
+        if (opt->verbose) {
+            int i;
+            fprintf(stderr, "cc: module:");
+            for (i = 0; argv[i]; i++) fprintf(stderr, " %s", argv[i]);
+            fprintf(stderr, "\n");
+        }
+        if (rc != 0) {
+            /* an argument did not fit: reported by the formatter */
+        } else if (cc__run_argv(argv) != 0) {
+            fprintf(stderr, "cc: error: cannot lower module %s to %s\n", face, c_path);
+            unlink(c_path);
+            rc = -1;
+        } else {
+            (void)cc__write_u64_file(key_path, key);
+        }
+        cc__prof_span_arg("module_c", face, t0);
+    }
+    if (lock_fd >= 0) { flock(lock_fd, LOCK_UN); close(lock_fd); }
+    return rc;
+}
+
+/* The object of `<face>_cch.c` for this host configuration: one file per
+ * (module unit, flags) under the cache, its name carrying both keys so a
+ * change in either is a new path on the link line. */
+static int cc__ensure_module_obj(const CCBuildOptions* opt, const char* face, const char* c_path,
+                                 const char* target_part, const char* sysroot_part,
+                                 char* obj, size_t cap) {
+    uint64_t ckey = cc_face_module_key(face);
+    uint64_t vh = 1469598103934665603ULL;
+    char dir[PATH_MAX];
+    char dep[PATH_MAX];
+    char lock_path[PATH_MAX];
+    char face_dir[PATH_MAX];
+    char stem[128];
+    int lock_fd;
+    int rc = 0;
+    vh = cc__fnv1a64_str(vh, target_part ? target_part : "");
+    vh = cc__fnv1a64_str(vh, sysroot_part ? sysroot_part : "");
+    vh = cc__fnv1a64_str(vh, opt->cc_flags ? opt->cc_flags : "");
+    vh = cc__fnv1a64_str(vh, getenv("CFLAGS"));
+    vh = cc__fnv1a64_str(vh, getenv("CPPFLAGS"));
+    vh = cc__fnv1a64_str(vh, g_host_fp);
+    vh = cc__fnv1a64_str(vh, pick_cc_bin(opt->cc_bin_override));
+    vh = cc__fnv1a64_i64(vh, opt->opt_release);
+    vh = cc__fnv1a64_i64(vh, opt->opt_debug);
+    if (cc__fmt_path(dir, sizeof(dir), "%s/modules",
+                     g_host_obj_root[0] ? g_host_obj_root : g_cache_root) != 0 ||
+        cc__mkdir_p(dir) != 0)
+        return -1;
+    cc__stem_from_path(face, stem, sizeof(stem));
+    if (cc__fmt_path(obj, cap, "%s/%s_cch-%016llx-%016llx.o", dir, stem,
+                     (unsigned long long)ckey, (unsigned long long)vh) != 0 ||
+        cc__fmt_path(dep, sizeof(dep), "%s.d", obj) != 0 ||
+        cc__fmt_path(lock_path, sizeof(lock_path), "%s.lock", obj) != 0)
+        return -1;
+    if (file_exists(obj)) return 0;
+    lock_fd = open(lock_path, O_CREAT | O_RDWR, 0644);
+    if (lock_fd >= 0) flock(lock_fd, LOCK_EX);
+    if (!file_exists(obj)) {
+        long long t0 = cc__now_ms();
+        /* The lead include: the clean root, where the lowered headers the
+         * module C names live, else the directory of the face. */
+        if (g_lowerer_clean) {
+            if (cc__fmt_path(face_dir, sizeof(face_dir), "%s/.cc-build/clean", g_out_root) != 0)
+                face_dir[0] = 0;
+        } else {
+            cc__module_dir_of(face, face_dir, sizeof(face_dir));
+        }
+        if (cc__compile_c_to_obj(opt, c_path, obj, dep, face_dir, target_part, sysroot_part) != 0) {
+            unlink(obj);
+            rc = -1;
+        }
+        cc__prof_span_arg("module_obj", face, t0);
+    }
+    if (lock_fd >= 0) { flock(lock_fd, LOCK_UN); close(lock_fd); }
+    return rc;
+}
+
+/* The objects of every module the given C texts reach, deduplicated,
+ * appended to `objs`. `c_paths` are emitted C files; `texts` (with
+ * `text_paths` naming where each was written) are rewritten units not yet
+ * on disk. Either may be empty. A module reaching another module through
+ * its own `.h` closure is walked in turn. */
+static int cc__module_objects(const CCBuildOptions* opt,
+                              const char* const* c_paths, size_t nc,
+                              const char* const* texts, const size_t* text_lens,
+                              const char* const* text_paths, size_t nt,
+                              const char* target_part, const char* sysroot_part,
+                              CCPathList* objs) {
+    CCPathList visited;
+    CCModuleRefs mods;
+    size_t i;
+    int rc = 0;
+    memset(&visited, 0, sizeof(visited));
+    memset(&mods, 0, sizeof(mods));
+    for (i = 0; i < nc && rc == 0; i++) {
+        char* text;
+        size_t n = 0;
+        if (!c_paths[i] || !c_paths[i][0]) continue;
+        text = cc__read_all_file(c_paths[i], &n);
+        if (!text) {
+            fprintf(stderr, "cc: cannot read %s while collecting link markers\n", c_paths[i]);
+            rc = -1;
+            break;
+        }
+        rc = cc__collect_link_markers_text(text, n, c_paths[i], &visited, &mods);
+        free(text);
+    }
+    for (i = 0; i < nt && rc == 0; i++)
+        rc = cc__collect_link_markers_text(texts[i], text_lens[i], text_paths[i], &visited, &mods);
+    /* `mods` grows while it is walked: a module unit reaches other modules. */
+    for (i = 0; i < mods.n && rc == 0; i++) {
+        char face[PATH_MAX];
+        char c_path[PATH_MAX];
+        char obj[PATH_MAX];
+        memcpy(face, mods.v[i].face, sizeof(face));
+        memcpy(c_path, mods.v[i].c_path, sizeof(c_path));
+        if (cc__ensure_module_c(opt, face, c_path) != 0) { rc = -1; break; }
+        rc = cc__collect_link_markers_file(c_path, &visited, &mods);
+        if (rc != 0) break;
+        if (cc__ensure_module_obj(opt, face, c_path, target_part, sysroot_part, obj, sizeof(obj)) != 0) {
+            rc = -1;
+            break;
+        }
+        if (cc__pathlist_add(objs, obj) < 0) rc = -1;
+    }
+    cc__pathlist_free(&visited);
+    free(mods.v);
+    return rc;
+}
+
+/* The module objects a unit needs, found from its own text: the quoted
+ * includes rewritten to lowered `.h` by this driver, which is what the
+ * lowering of the unit will do again, from the same cache. For the
+ * single-unit link the reference lowerer performs itself. */
+static int cc__module_objects_for_unit(const CCBuildOptions* opt, const char* in_path,
+                                       const char* target_part, const char* sysroot_part,
+                                       CCPathList* objs) {
+    char* raw;
+    size_t n = 0;
+    char* rewritten;
+    const char* text;
+    size_t text_len;
+    int rc;
+    raw = cc__read_all_file(in_path, &n);
+    if (!raw) {
+        fprintf(stderr, "cc: cannot read %s\n", in_path);
+        return -1;
+    }
+    cc_reset_included_cch_sources();
+    rewritten = cc_rewrite_local_cch_includes_to_lowered_headers(raw, n, in_path);
+    if (cc_local_header_lower_failed()) {
+        free(rewritten);
+        free(raw);
+        return -1;
+    }
+    text = rewritten ? rewritten : raw;
+    text_len = strlen(text);
+    rc = cc__module_objects(opt, NULL, 0, &text, &text_len, &in_path, 1,
+                            target_part, sysroot_part, objs);
+    free(rewritten);
+    free(raw);
+    return rc;
+}
+
+/* The module faces a unit reaches, each staged as its module unit for
+ * the clean lowerer to read in place of the face (spec 1.7): a face on
+ * disk is not its module, and the `.h` is extracted from the whole. One
+ * line per module in `modules_path`: the face, a tab, the stage. */
+typedef struct {
+    FILE* list;
+    const char* dir;
+    int failed;
+} CCModuleStageEnv;
+
+static int cc__stage_one_module_for_clean(const char* face_abs, const char* text, size_t n,
+                                          void* envp) {
+    CCModuleStageEnv* env = (CCModuleStageEnv*)envp;
+    char stage[PATH_MAX];
+    char stage_dir[PATH_MAX];
+    const char* rel = face_abs;
+    size_t rl;
+    if (g_repo_root[0] && strncmp(face_abs, g_repo_root, strlen(g_repo_root)) == 0 &&
+        face_abs[strlen(g_repo_root)] == '/')
+        rel = face_abs + strlen(g_repo_root) + 1;
+    rl = strlen(rel);
+    if (rl >= 4) rl -= 4;
+    if (cc__fmt_path(stage, sizeof(stage), "%s/%.*s.module.cch", env->dir, (int)rl, rel) != 0)
+        return -1;
+    cc__module_dir_of(stage, stage_dir, sizeof(stage_dir));
+    if (stage_dir[0] && cc__mkdir_p(stage_dir) != 0) return -1;
+    if (cc__install_wrap_file(stage, text, n) != 0) return -1;
+    fprintf(env->list, "%s\t%s\n", face_abs, stage);
+    return 0;
+}
+
+static int cc__write_module_stages_for_clean(const char* unit_path, const char* dir,
+                                             const char* modules_path) {
+    CCModuleStageEnv env;
+    int rc;
+    env.list = fopen(modules_path, "w");
+    env.dir = dir;
+    env.failed = 0;
+    if (!env.list) {
+        fprintf(stderr, "cc: cannot write %s\n", modules_path);
+        return -1;
+    }
+    rc = cc_module_faces_of_unit(unit_path, cc__stage_one_module_for_clean, &env);
+    fclose(env.list);
+    if (rc != 0) {
+        fprintf(stderr, "cc: cannot stage the modules of %s for the clean lowerer\n", unit_path);
+        return -1;
+    }
+    return 0;
+}
+
 static int cc__run_clean_lowerer(const char* in_path, const char* c_out,
-                                 const char* quote_dir, int no_line) {
+                                 const char* quote_dir, int no_line,
+                                 const char* modules_path) {
     char tool[PATH_MAX], known[PATH_MAX], incdir[PATH_MAX], hroot[PATH_MAX];
     char schema[PATH_MAX];
     char insts[PATH_MAX];
@@ -4440,6 +5090,10 @@ static int cc__run_clean_lowerer(const char* in_path, const char* c_out,
     if (quote_dir && quote_dir[0]) {
         argv[argc++] = (char*)"--quote-dir";
         argv[argc++] = (char*)quote_dir;
+    }
+    if (modules_path && modules_path[0]) {
+        argv[argc++] = (char*)"--modules";
+        argv[argc++] = (char*)modules_path;
     }
     argv[argc++] = (char*)"-o";
     argv[argc++] = (char*)c_out;
@@ -4753,7 +5407,7 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
     char shadow[PATH_MAX];
     char cc_flags_buf[2048];
     char cc_flags_arg[2200];
-    char ld_flags_arg[2048];
+    char* ld_flags_arg = NULL;
     char shcc_wrap[PATH_MAX];
     char unit_wrap[PATH_MAX];
     char orig_in[PATH_MAX];
@@ -4988,10 +5642,41 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
                  cc_flags_buf);
         argv[argc++] = cc_flags_arg;
     }
-    if (opt->ld_flags && opt->ld_flags[0]) {
-        snprintf(ld_flags_arg, sizeof(ld_flags_arg), "--ld-flags=%s",
-                 opt->ld_flags);
-        argv[argc++] = ld_flags_arg;
+    /* The link happens inside shadow_lower. The module objects the unit
+     * reaches are found here first, from the same lowered headers the
+     * lowering will hit in the cache, and ride on the link flags ahead
+     * of the flags given on the command line: an archive named there
+     * resolves only what the objects before it reference. */
+    {
+        size_t ln = 0, lcap = 0;
+        size_t out_n = out_path ? strlen(out_path) : 0;
+        int emit_c = (out_n >= 2 && out_path[out_n - 2] == '.' &&
+                      out_path[out_n - 1] == 'c');
+        if (!emit_c && opt->mode == CC_MODE_LINK) {
+            CCPathList mods;
+            const char* target_part =
+                (opt->target_flag && opt->target_flag[0]) ? opt->target_flag : NULL;
+            const char* sysroot_part =
+                (opt->sysroot_flag && opt->sysroot_flag[0]) ? opt->sysroot_flag : NULL;
+            long long t_mod = cc__now_ms();
+            memset(&mods, 0, sizeof(mods));
+            if (cc__module_objects_for_unit(opt, opt->in_path, target_part, sysroot_part,
+                                            &mods) != 0) {
+                cc__pathlist_free(&mods);
+                return -1;
+            }
+            for (size_t mi = 0; mi < mods.n; ++mi) {
+                cc__strbuf_cat(&ld_flags_arg, &ln, &lcap, ln ? " " : "--ld-flags=");
+                cc__strbuf_cat(&ld_flags_arg, &ln, &lcap, mods.v[mi]);
+            }
+            cc__pathlist_free(&mods);
+            cc__prof_span("module_objects", t_mod);
+        }
+        if (opt->ld_flags && opt->ld_flags[0]) {
+            cc__strbuf_cat(&ld_flags_arg, &ln, &lcap, ln ? " " : "--ld-flags=");
+            cc__strbuf_cat(&ld_flags_arg, &ln, &lcap, opt->ld_flags);
+        }
+        if (ld_flags_arg) argv[argc++] = ld_flags_arg;
     }
     argv[argc++] = (char*)opt->in_path;
     argv[argc++] = (char*)"-o";
@@ -5006,6 +5691,7 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
     pid = fork();
     if (pid < 0) {
         fprintf(stderr, "cc: fork failed for shadow_lower\n");
+        free(ld_flags_arg);
         return -1;
     }
     if (pid == 0) {
@@ -5019,6 +5705,7 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
         execv(shadow, argv);
         _exit(127);
     }
+    free(ld_flags_arg);
     if (waitpid(pid, &status, 0) < 0) return -1;
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
         if (WIFSIGNALED(status))
@@ -5073,15 +5760,6 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
                 fprintf(stderr, "cc: the clean lowerer does not lower header units yet (%s)\n", opt->in_path);
                 return -1;
             }
-            /* What this link set can define. A face whose owner `.ccs` is
-             * not being linked leaves its callers with declarations and no
-             * definition; the audit says so at the body, where the answer
-             * is, rather than leaving `ld` to name a mangled symbol. */
-            if (opt->mode == CC_MODE_LINK && opt->bin_out_path) {
-                const char* one[1];
-                one[0] = opt->in_path;
-                if (cc_check_link_set_faces(one, 1) != 0) return 1;
-            }
             /* A pin names the toolchain the unit is written against. The
              * clean lowerer ships no bootstrap seeds of its own, so it can
              * honour a pin only when the pin resolves to the running
@@ -5124,7 +5802,8 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             /* a stage lives in the cache, so quoted includes still resolve
              * against the directory the user wrote the unit in */
             int clean_no_line = 0;
-            cc__dir_of_path(opt->in_path, clean_qdir, sizeof(clean_qdir));
+            char clean_modules[PATH_MAX];
+            cc__unit_origin_dir(opt->in_path, clean_qdir, sizeof(clean_qdir));
             /* recorded for the host compile: by then `in_path` is the emitted
              * C, and a quoted include still names a file beside the unit */
             snprintf(g_clean_quote_dir, sizeof(g_clean_quote_dir), "%s", clean_qdir);
@@ -5142,8 +5821,10 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
                 char perr[192];
                 int po = 0;
                 if (raw) {
-                    if (cc_file_start_pragmas(raw, rn, &po, &clean_no_line, NULL, perr, sizeof(perr)) != 0) {
-                        fprintf(stderr, "%s: %s\n", opt->in_path, perr);
+                    int perr_line = 0;
+                    if (cc_file_start_pragmas(raw, rn, &po, &clean_no_line, NULL, 0, perr,
+                                              sizeof(perr), &perr_line) != 0) {
+                        fprintf(stderr, "%s:%d: error: %s\n", opt->in_path, perr_line, perr);
                         free(raw);
                         return -1;
                     }
@@ -5172,7 +5853,11 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             (void)cc__mkdir_p(dir);
             snprintf(clean_c, sizeof(clean_c), "%s/%s.%016llx.c", dir, stem,
                      (unsigned long long)cc__fold_file_content(1469598103934665603ULL, opt->in_path));
-            if (cc__run_clean_lowerer(opt->in_path, clean_c, clean_qdir, clean_no_line) != 0) return -1;
+            if (cc__fmt_path(clean_modules, sizeof(clean_modules), "%s/%s.%016llx.modules", dir, stem,
+                             (unsigned long long)cc__fold_file_content(1469598103934665603ULL, opt->in_path)) != 0)
+                return -1;
+            if (cc__write_module_stages_for_clean(clean_orig, dir, clean_modules) != 0) return -1;
+            if (cc__run_clean_lowerer(opt->in_path, clean_c, clean_qdir, clean_no_line, clean_modules) != 0) return -1;
             if (cc__splice_comptime_into_clean(clean_c, clean_orig) != 0) return -1;
             if (opt->mode == CC_MODE_EMIT_C) {
                 if (cc__materialize_host_c(clean_c, opt->c_out_path) != 0) return -1;
@@ -5188,9 +5873,6 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         if (uk == CC_UNIT_KIND_CCS || uk == CC_UNIT_KIND_SHCC ||
             uk == CC_UNIT_KIND_CCH) {
         if (opt->mode == CC_MODE_LINK && opt->bin_out_path) {
-            const char* one[1];
-            one[0] = opt->in_path;
-            if (cc_check_link_set_faces(one, 1) != 0) return 1;
             if (summary_out) {
                 memset(summary_out, 0, sizeof(*summary_out));
                 summary_out->bin_out_path = opt->bin_out_path;
@@ -5523,6 +6205,29 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
     if (opt && !opt->opt_debug && !link_is_tcc) link_extra = "-Wl,--gc-sections";
 #endif
 
+    /* The module objects this unit reaches through its lowered headers. */
+    static char module_objs[4096];
+    module_objs[0] = '\0';
+    {
+        CCPathList mods;
+        const char* one_c[1];
+        memset(&mods, 0, sizeof(mods));
+        one_c[0] = opt->c_out_path;
+        if (cc__module_objects(opt, one_c, 1, NULL, NULL, NULL, 0, target_part, sysroot_part, &mods) != 0) {
+            cc__pathlist_free(&mods);
+            return -1;
+        }
+        for (size_t mi = 0; mi < mods.n; ++mi) {
+            if (strlen(module_objs) + strlen(mods.v[mi]) + 2 >= sizeof(module_objs)) {
+                fprintf(stderr, "cc: too many module objects on the link line\n");
+                cc__pathlist_free(&mods);
+                return -1;
+            }
+            if (module_objs[0]) strcat(module_objs, " ");
+            strcat(module_objs, mods.v[mi]);
+        }
+        cc__pathlist_free(&mods);
+    }
     char link_meta_path[PATH_MAX];
     cc__cache_key_paths(NULL, 0, link_meta_path, sizeof(link_meta_path), stem);
     uint64_t link_key = 0;
@@ -5544,6 +6249,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         h = cc__fnv1a64_str(h, ldflags_env);
         h = cc__fnv1a64_str(h, final_ld_flags);
         h = cc__fnv1a64_str(h, link_extra);
+        h = cc__fnv1a64_str(h, module_objs);
         h = cc__fnv1a64_str(h, target_part);
         h = cc__fnv1a64_str(h, sysroot_part);
         h = cc__fnv1a64_str(h, g_host_fp);
@@ -5553,7 +6259,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             if (summary_out) { summary_out->reuse_link = 1; summary_out->did_link = 0; }
         } else {
             /* Put -l libs after objects so GNU ld resolves them (macOS ld is laxer). */
-            snprintf(link_cmd, sizeof(link_cmd), "%s %s %s %s %s %s %s %s %s %s -o %s",
+            snprintf(link_cmd, sizeof(link_cmd), "%s %s %s %s %s %s %s %s %s %s %s -o %s",
                      cc_bin,
                      ccflags_env ? ccflags_env : "",
                      opt->cc_flags ? opt->cc_flags : "",
@@ -5561,6 +6267,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
                      sysroot_part,
                      link_extra,
                      opt->obj_out_path,
+                     module_objs,
                      have_runtime ? runtime_obj : "",
                      ldflags_env ? ldflags_env : "",
                      final_ld_flags ? final_ld_flags : "",
@@ -5586,7 +6293,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             if (summary_out) { summary_out->reuse_link = 0; summary_out->did_link = 1; }
         }
     } else {
-        snprintf(link_cmd, sizeof(link_cmd), "%s %s %s %s %s %s %s %s %s %s -o %s",
+        snprintf(link_cmd, sizeof(link_cmd), "%s %s %s %s %s %s %s %s %s %s %s -o %s",
                  cc_bin,
                  ccflags_env ? ccflags_env : "",
                  opt->cc_flags ? opt->cc_flags : "",
@@ -5594,6 +6301,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
                  sysroot_part,
                  link_extra,
                  opt->obj_out_path,
+                 module_objs,
                  have_runtime ? runtime_obj : "",
                  ldflags_env ? ldflags_env : "",
                  final_ld_flags ? final_ld_flags : "",
@@ -6152,8 +6860,11 @@ static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
     return 0;
 }
 
+/* `c_paths` name the emitted C behind each object (NULL for an object
+ * with none): their include closures decide which module objects join. */
 static int cc__link_many(const CCBuildOptions* opt,
                          const char* const* obj_paths,
+                         const char* const* c_paths,
                          size_t obj_count,
                          const char* runtime_obj,
                          const char* target_part,
@@ -6163,6 +6874,14 @@ static int cc__link_many(const CCBuildOptions* opt,
     const char* ldflags_env = getenv("LDFLAGS");
     int is_tcc = cc__is_tcc(cc_bin);
     char cmd[4096];
+    CCPathList mod_objs;
+    memset(&mod_objs, 0, sizeof(mod_objs));
+    if (c_paths &&
+        cc__module_objects(opt, c_paths, obj_count, NULL, NULL, NULL, 0,
+                           target_part, sysroot_part, &mod_objs) != 0) {
+        cc__pathlist_free(&mod_objs);
+        return -1;
+    }
     snprintf(cmd, sizeof(cmd), "%s %s %s %s %s",
              cc_bin,
              target_part ? target_part : "",
@@ -6182,6 +6901,11 @@ static int cc__link_many(const CCBuildOptions* opt,
         strncat(cmd, " ", sizeof(cmd) - strlen(cmd) - 1);
         strncat(cmd, obj_paths[i], sizeof(cmd) - strlen(cmd) - 1);
     }
+    for (size_t i = 0; i < mod_objs.n; ++i) {
+        strncat(cmd, " ", sizeof(cmd) - strlen(cmd) - 1);
+        strncat(cmd, mod_objs.v[i], sizeof(cmd) - strlen(cmd) - 1);
+    }
+    cc__pathlist_free(&mod_objs);
     if (runtime_obj && runtime_obj[0]) {
         strncat(cmd, " ", sizeof(cmd) - strlen(cmd) - 1);
         strncat(cmd, runtime_obj, sizeof(cmd) - strlen(cmd) - 1);
@@ -7088,7 +7812,6 @@ static int run_build_mode(int argc, char** argv) {
             int nprefetch = 0;
             {
                 char abs_ccs[128][PATH_MAX];
-                const char* ptrs[128];
                 int nc = 0;
                 unsigned char needed[64];
                 unsigned char walk[64];
@@ -7110,18 +7833,12 @@ static int run_build_mode(int argc, char** argv) {
                                 continue;
                             cc__join_path(build_dir, s, abs_ccs[nc],
                                           sizeof(abs_ccs[nc]));
-                            ptrs[nc] = abs_ccs[nc];
                             snprintf(prefetch_ccs[nc], PATH_MAX, "%s",
                                      abs_ccs[nc]);
                             nc++;
                         }
                     }
                     nprefetch = nc;
-                    if (nc > 0 && cc_check_link_set_faces(ptrs, nc) != 0) {
-                        cc_build_free_targets(targets, target_count, def_name);
-                        free(targets);
-                        goto parse_fail;
-                    }
                 }
             }
             /* Overlap --release runtime.o with TU emit. Workers emit .c and
@@ -7250,11 +7967,12 @@ static int run_build_mode(int argc, char** argv) {
 
             // Gather objects for link (dep closure + chosen).
             const char* obj_paths[256];
+            const char* obj_c_paths[256];
             uint64_t obj_keys[256];
             size_t obj_count = 0;
             unsigned char vis[64];
             memset(vis, 0, sizeof(vis));
-            int gr = cc__gather_obj_closure(chosen_idx, targets, target_count, caches, vis, obj_paths, obj_keys, &obj_count, 256);
+            int gr = cc__gather_obj_closure(chosen_idx, targets, target_count, caches, vis, obj_paths, obj_c_paths, obj_keys, &obj_count, 256);
             if (gr != 0) {
                 fprintf(stderr, "cc: failed to gather dep objects (err=%d)\n", gr);
                 cc_build_free_targets(targets, target_count, def_name);
@@ -7324,7 +8042,7 @@ static int run_build_mode(int argc, char** argv) {
                 if (file_exists(user_out) && cc__read_u64_file(link_meta_path, &prev) == 0 && prev == h) {
                     link_reused = 1;
                 } else {
-                    if (cc__link_many(&base_opt, obj_paths, obj_count, runtime_path, chosen_target_part, chosen_sysroot_part, user_out) != 0) {
+                    if (cc__link_many(&base_opt, obj_paths, obj_c_paths, obj_count, runtime_path, chosen_target_part, chosen_sysroot_part, user_out) != 0) {
                         cc_build_free_targets(targets, target_count, def_name);
                 free(targets);
                         goto parse_fail;
@@ -7332,7 +8050,7 @@ static int run_build_mode(int argc, char** argv) {
                     (void)cc__write_u64_file(link_meta_path, h);
                 }
             } else {
-                if (cc__link_many(&base_opt, obj_paths, obj_count, runtime_path, chosen_target_part, chosen_sysroot_part, user_out) != 0) {
+                if (cc__link_many(&base_opt, obj_paths, obj_c_paths, obj_count, runtime_path, chosen_target_part, chosen_sysroot_part, user_out) != 0) {
                     cc_build_free_targets(targets, target_count, def_name);
                 free(targets);
                     goto parse_fail;
@@ -7476,10 +8194,6 @@ static int run_build_mode(int argc, char** argv) {
         int emit_reused = 0, emit_built = 0;
         int obj_reused = 0, obj_built = 0;
 
-        if (mode == CC_MODE_LINK &&
-            cc_check_link_set_faces((const char* const*)inputs, input_count) != 0)
-            goto parse_fail;
-
         char used[64][128]; size_t used_count = 0;
         const char* obj_paths[64];
         char obj_bufs[64][PATH_MAX];
@@ -7620,6 +8334,8 @@ static int run_build_mode(int argc, char** argv) {
 
         // Link all objects
         char collected_ld[2048];
+        const char* link_c_paths[64];
+        for (int i = 0; i < input_count; ++i) link_c_paths[i] = c_bufs[i];
         cc__collect_multi_link_flags(ld_flags, inputs, c_bufs, src_dir_bufs,
                                     input_count, collected_ld, sizeof(collected_ld));
         base_opt.ld_flags = collected_ld[0] ? collected_ld : ld_flags;
@@ -7657,11 +8373,11 @@ static int run_build_mode(int argc, char** argv) {
             if (file_exists(user_out) && cc__read_u64_file(link_meta_path, &prev) == 0 && prev == h) {
                 link_reused = 1;
             } else {
-                if (cc__link_many(&base_opt, obj_paths, (size_t)input_count, runtime_path, target_part, sysroot_part, user_out) != 0) goto parse_fail;
+                if (cc__link_many(&base_opt, obj_paths, link_c_paths, (size_t)input_count, runtime_path, target_part, sysroot_part, user_out) != 0) goto parse_fail;
                 (void)cc__write_u64_file(link_meta_path, h);
             }
         } else {
-            if (cc__link_many(&base_opt, obj_paths, (size_t)input_count, runtime_path, target_part, sysroot_part, user_out) != 0) goto parse_fail;
+            if (cc__link_many(&base_opt, obj_paths, link_c_paths, (size_t)input_count, runtime_path, target_part, sysroot_part, user_out) != 0) goto parse_fail;
         }
 
         if (summary) {
@@ -9101,10 +9817,6 @@ int main(int argc, char **argv) {
             fprintf(stderr, "cc: linking multiple inputs requires -o <output>\n");
             return 1;
         }
-        if (mode == CC_MODE_LINK &&
-            cc_check_link_set_faces(inputs, input_count) != 0)
-            return 1;
-
         CCConstBinding bindings[128];
         size_t binding_count = 0;
         CCBuildOptions base_opt = {
@@ -9214,9 +9926,13 @@ int main(int argc, char **argv) {
             for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
             return 1;
         }
-        if (cc__link_many(&base_opt, obj_paths, (size_t)input_count, runtime_path, target_part, sysroot_part, user_out) != 0) {
-            for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
-            return 1;
+        {
+            const char* link_c_paths[64];
+            for (int i = 0; i < input_count; ++i) link_c_paths[i] = c_bufs[i];
+            if (cc__link_many(&base_opt, obj_paths, link_c_paths, (size_t)input_count, runtime_path, target_part, sysroot_part, user_out) != 0) {
+                for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
+                return 1;
+            }
         }
         for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
         return 0;

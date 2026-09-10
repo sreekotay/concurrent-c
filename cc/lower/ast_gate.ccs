@@ -1,7 +1,5 @@
 /* Gate: the AST support layer builds and the closed switches name every arm. */
-#include "lex_impl.cch"
-#include "diag_impl.cch"
-#include "ast_impl.cch"
+#include "lower.cch"
 #include <stdio.h>
 
 int main(void) {

@@ -1,4 +1,4 @@
-#pragma(@per_tu)
+#pragma(@module) "lower"
 /* Clean lowerer, step: generic instances. `Vec::[T]` in a type position is
  * its instance name (`CCVec_int`); `snake(Family)_member::[args](call-args)`
  * is `<Instance>_member(call-args)`; and every instance the unit mentions
@@ -1646,7 +1646,7 @@ static void gn_member_generic_pass(CcLowerer* L) {
     tw_unit(&w);
 }
 
-static void CcLowerer_generics(CcLowerer* L) {
+void CcLowerer_generics(CcLowerer* L) {
     GStep st;
     CcVisitor v;
     CcIndex* ix = L->ix;

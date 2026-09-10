@@ -1,4 +1,4 @@
-#pragma(@per_tu)
+#pragma(@module) "lower"
 /* Clean lowerer, step: string templates. `@string(`...`, arena)` builds a
  * CCString by pushing each piece in order, so it is a sequence of
  * statements and is written where statements go: the initializer of a
@@ -980,7 +980,7 @@ static void sr_stack_stmt(Walker* w, CcStmt* s, bool enter) {
     CcStmt_walk(s, v);
 }
 
-static void CcLowerer_strings(CcLowerer* L) {
+void CcLowerer_strings(CcLowerer* L) {
     Walker w;
     TStep st;
     CcVisitor v;

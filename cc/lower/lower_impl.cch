@@ -1,4 +1,4 @@
-#pragma(@per_tu)
+#pragma(@module) "lower"
 /* Lowering: the pipeline and the node builders the steps share. Every
  * builder takes the span of the construct it stands in for. */
 #ifndef CC_LOWER_LOWER_IMPL_CCH
@@ -10,7 +10,7 @@
 #include "index_impl.cch"
 #include <string.h>
 
-static CcLowerer cc_lowerer_new(CcUnit* u, CcIndex* ix, CcLowerOpts opts, CcDiags* ds) {
+CcLowerer cc_lowerer_new(CcUnit* u, CcIndex* ix, CcLowerOpts opts, CcDiags* ds) {
     CcLowerer L;
     memset(&L, 0, sizeof(L));
     L.arena = u->arena;
@@ -31,7 +31,7 @@ static CcLowerer cc_lowerer_new(CcUnit* u, CcIndex* ix, CcLowerOpts opts, CcDiag
     return L;
 }
 
-static uint32_t CcLowerer_temp_id(CcLowerer* L) { return L->next_temp++; }
+uint32_t CcLowerer_temp_id(CcLowerer* L) { return L->next_temp++; }
 
 /* A TU-only construct so the extractor sees an implementation header
  * (without one, a header of plain C bodies is taken for an interface and
@@ -696,7 +696,7 @@ static bool lw_is_sched_include(CCSlice p) {
     return false;
 }
 
-static void CcLowerer_includes(CcLowerer* L) {
+void CcLowerer_includes(CcLowerer* L) {
     CcIndex* ix = L->ix;
     CcIncludeRefList refs;
     size_t n;
@@ -1123,7 +1123,7 @@ static void lw_fwd_typedefs(CcLowerer* L) {
     }
 }
 
-static void CcLowerer_lower_unit(CcLowerer* L) {
+void CcLowerer_lower_unit(CcLowerer* L) {
     CcLowerer_comptime(L);  /* first: a value the user asked for at compile time is a constant to every step */
     CcLowerer_own(L);       /* then, before any rewrite: the ownership checks read the program as written */
     CcLowerer_typeof(L);    /* likewise: `type_of(T)` names a type by its spelling, as written */

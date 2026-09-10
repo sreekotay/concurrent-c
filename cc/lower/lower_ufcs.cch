@@ -1,4 +1,4 @@
-#pragma(@per_tu)
+#pragma(@module) "lower"
 /* Clean lowerer, step: UFCS. `x.m(args)` and `p->m(args)` become the call
  * the index resolves for the receiver's type, `callee(<recv>, args)`, with
  * the receiver passed to fit the callee's first parameter: by address when
@@ -3048,7 +3048,7 @@ static void uf_cast_pass(CcLowerer* L) {
     tw_unit(&w);
 }
 
-static void CcLowerer_ufcs(CcLowerer* L) {
+void CcLowerer_ufcs(CcLowerer* L) {
     Walker w;
     UStep st;
     CcVisitor v;

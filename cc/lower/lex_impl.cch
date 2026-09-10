@@ -1,4 +1,4 @@
-#pragma(@per_tu)
+#pragma(@module) "lower"
 /* Lexer: bodies for lex.cch. Included by the unit that owns the tape (a
  * tool `.ccs`), after the face and after diag_impl.cch.
  *
@@ -120,7 +120,7 @@ static void cc__tape_phys(const CcTape* t, uint32_t off, uint32_t* line, uint32_
 
 /* User coordinates of byte `off` (off <= src.len). Tools use this for a
  * position that is not a token; diagnostics on tokens go through tape.loc(i). */
-static CcLoc cc__tape_loc_of(const CcTape* t, uint32_t off) {
+CcLoc cc__tape_loc_of(const CcTape* t, uint32_t off) {
     uint32_t pline, pcol;
     if (off > (uint32_t)t->src.len) {
         fprintf(stderr, "cc: tape: offset %u past end of %.*s (%u bytes)\n", (unsigned)off,
@@ -339,7 +339,7 @@ static const char* const cc__punct_texts[] = {
 _Static_assert(CC_P__COUNT == (size_t)CC_P_DOLLAR + 1, "punct text table matches CcPunct");
 
 /* Text of a punctuator; "" for CC_P_NONE, NULL out of range. */
-static const char* cc__punct_text(CcPunct p) {
+const char* cc__punct_text(CcPunct p) {
     if ((unsigned)p >= CC_P__COUNT) return NULL;
     return cc__punct_texts[p];
 }
@@ -587,7 +587,7 @@ static void cc__lex_one(CcLexer* L) {
     cc__push_tok(L, CC_TK_ERROR, CC_P_NONE, lead_off, i, i + 1);
 }
 
-static CcTape cc_lex(CCSlice path, CCSlice src, CcDiags* ds, CCArena a) {
+CcTape cc_lex(CCSlice path, CCSlice src, CcDiags* ds, CCArena a) {
     CcLexer L;
     if (src.len >= UINT32_MAX) {
         fprintf(stderr, "cc: %.*s: file of %zu bytes is too large to lex (offsets are 32-bit)\n",
@@ -628,20 +628,20 @@ static CcTape cc_lex(CCSlice path, CCSlice src, CcDiags* ds, CCArena a) {
 
 /* ---- tape ------------------------------------------------------------ */
 
-static const CcToken* CcTape_at(const CcTape* t, uint32_t i) {
+const CcToken* CcTape_at(const CcTape* t, uint32_t i) {
     CcTape* tp = (CcTape*)t;   /* the vec accessors take a mutable receiver */
     size_t n = tp->toks.len();
     if (i >= n) i = (uint32_t)(n - 1);
     return tp->toks.get_ptr(i);
 }
 
-static CcLoc CcTape_loc(const CcTape* t, uint32_t i) {
+CcLoc CcTape_loc(const CcTape* t, uint32_t i) {
     const CcToken* tok = CcTape_at(t, i);
     uint32_t off = (uint32_t)((const char*)tok->text.ptr - (const char*)t->src.ptr);
     return cc__tape_rebase(t, off, tok->line, tok->col);
 }
 
-static CCSlice CcTape_line_text(const CcTape* t, uint32_t phys_line) {
+CCSlice CcTape_line_text(const CcTape* t, uint32_t phys_line) {
     const char* p = (const char*)t->src.ptr;
     size_t len = t->src.len;
     size_t start = 0, i = 0;
@@ -672,15 +672,15 @@ static bool cc__text_is(CCSlice text, const char* word, size_t skip) {
     return true;
 }
 
-static bool CcToken_is(const CcToken* t, CcPunct p) {
+bool CcToken_is(const CcToken* t, CcPunct p) {
     return t->kind == CC_TK_PUNCT && t->punct == p;
 }
 
-static bool CcToken_is_ident(const CcToken* t, const char* word) {
+bool CcToken_is_ident(const CcToken* t, const char* word) {
     return t->kind == CC_TK_IDENT && cc__text_is(t->text, word, 0);
 }
 
-static bool CcToken_is_at(const CcToken* t, const char* word) {
+bool CcToken_is_at(const CcToken* t, const char* word) {
     return t->kind == CC_TK_AT_WORD && cc__text_is(t->text, word, 1);
 }
 

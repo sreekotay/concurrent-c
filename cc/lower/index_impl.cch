@@ -1,4 +1,4 @@
-#pragma(@per_tu)
+#pragma(@module) "lower"
 /* Declaration index: bodies for index.cch.
  *
  * Everything the index knows comes from declarations: the unit's own, the
@@ -109,7 +109,7 @@ static CcLoc cc__span_loc(const CcUnit* u, CcSpan sp) {
     return u->loc(sp);
 }
 
-static CcLoc CcSym_loc(const CcSym* s) {
+CcLoc CcSym_loc(const CcSym* s) {
     CcLoc l;
     l.path = cc_slice_empty();
     l.line = 0;
@@ -159,7 +159,7 @@ static CCSlice cc__unquote(CcIndex* ix, CCSlice text) {
 }
 
 /* The type a declaration node declares, for the kinds that have one. */
-static CcType* cc__decl_type_of(const CcDecl* d) {
+CcType* cc__decl_type_of(const CcDecl* d) {
     if (!d) return NULL;
     @switch (d->k) {
         case .var(v): return v.type;
@@ -208,7 +208,7 @@ static CcSym* cc__sym_find_cstr(const CcIndex* ix, const char* name, int kind) {
     return cc__sym_find_kind(ix, cc__ix_s(name), kind);
 }
 
-static CcSym* !>(CcDiag) CcIndex_sym(CcIndex* ix, CCSlice name) {
+CcSym* !>(CcDiag) CcIndex_sym(CcIndex* ix, CCSlice name) {
     CcSym* s = cc__sym_find_kind(ix, name, 0);
     if (s) return cc_ok(s);
     {
@@ -282,7 +282,7 @@ static CcTypeInfo* cc__type_find(const CcIndex* ix, CCSlice name) {
     return slot ? *slot : NULL;
 }
 
-static CcTypeInfo* !>(CcDiag) CcIndex_type(CcIndex* ix, CCSlice canonical) {
+CcTypeInfo* !>(CcDiag) CcIndex_type(CcIndex* ix, CCSlice canonical) {
     CcTypeInfo* t = cc__type_find(ix, canonical);
     if (t) return cc_ok(t);
     {
@@ -307,7 +307,7 @@ static void cc__type_resolve_hooks(CcIndex* ix, CcTypeInfo* info);
 static void cc__type_instantiate(CcIndex* ix, CcTypeInfo* info);
 static bool cc__infer_family(CcIndex* ix, CcTypeInfo* t);
 
-static CcTypeInfo* CcIndex_type_get(CcIndex* ix, CCSlice canonical) {
+CcTypeInfo* CcIndex_type_get(CcIndex* ix, CCSlice canonical) {
     CcTypeInfo* t = cc__type_find(ix, canonical);
     if (t) return t;
     t = cc_arena_alloc(ix->arena, sizeof(CcTypeInfo), _Alignof(CcTypeInfo));
@@ -444,7 +444,7 @@ static CCSlice cc__mangle(CcIndex* ix, CCSlice s) {
     return cc__trim_underscores(ix, &sb);
 }
 
-static CCSlice CcIndex_snake(CcIndex* ix, CCSlice type_name) {
+CCSlice CcIndex_snake(CcIndex* ix, CCSlice type_name) {
     CCString sb = cc_string_new();
     size_t n = type_name.len;
     size_t i;
@@ -626,7 +626,7 @@ static CCSlice cc__canon_scoped(CcIndex* ix, CcScopedType sc) {
     }
 }
 
-static CCSlice CcIndex_canon(CcIndex* ix, const CcType* t) {
+CCSlice CcIndex_canon(CcIndex* ix, const CcType* t) {
     if (!t) return cc__ix_s("?");
     @switch (t->k) {
         case .named(n): return cc__canon_named(ix, n);
@@ -688,7 +688,7 @@ static CCSlice cc__type_arg_spelling(CcIndex* ix, const CcType* t) {
 
 /* ---- Result specs -------------------------------------------------------- */
 
-static CcTypeInfo* CcIndex_result(CcIndex* ix, CcType* value, CcType* err, bool optional) {
+CcTypeInfo* CcIndex_result(CcIndex* ix, CcType* value, CcType* err, bool optional) {
     CCSlice mv = cc__mangle(ix, CcIndex_canon(ix, value));
     CCSlice me = cc__mangle(ix, CcIndex_canon(ix, err));
     CCSlice name;
@@ -970,7 +970,7 @@ static CcIncludeRefList cc__scan_includes(CcIndex* ix, const CcTape* tape);
 static CCSlice cc__resolve_include(CcIndex* ix, CCSlice from_path, const CcIncludeRef* r, CCString* searched);
 static void cc__load_header(CcIndex* ix, CCSlice path);
 
-static CcNameList CcIndex_known_types(CcIndex* ix) {
+CcNameList CcIndex_known_types(CcIndex* ix) {
     return ix->typedef_names;
 }
 
@@ -1110,7 +1110,7 @@ static void cc__macro_call(CcIndex* ix, CcUnit* u, CcDecl* d, bool is_header) {
     }
 }
 
-static CCSlice CcIndex_expand_call(CcIndex* ix, const CcUnit* u, CcSpan sp) {
+CCSlice CcIndex_expand_call(CcIndex* ix, const CcUnit* u, CcSpan sp) {
     CcNameList args = vec_new::[CCSlice](ix->arena);
     CCSlice name;
     CcSym* ms;
@@ -2545,7 +2545,7 @@ static bool cc__attrs_noreturn(CcAttrList* attrv) {
     return false;
 }
 
-static bool CcSym_noreturn(const CcSym* s) {
+bool CcSym_noreturn(const CcSym* s) {
     const CcDecl* d;
     uint32_t i;
     CCSlice dname;
@@ -2862,7 +2862,7 @@ static bool cc__value_on_type(CcType* t, void* env) {
     return true;
 }
 
-static void CcIndex_add_unit(CcIndex* ix, CcUnit* u, bool is_header) {
+void CcIndex_add_unit(CcIndex* ix, CcUnit* u, bool is_header) {
     size_t i;
     size_t n;
     {
@@ -2894,7 +2894,7 @@ static void CcIndex_add_unit(CcIndex* ix, CcUnit* u, bool is_header) {
     }
 }
 
-static CcIndex* cc_index_new(CcNameList include_dirs, CCSlice quote_dir, CcDiags* ds, CCArena a) {
+CcIndex* cc_index_new(CcNameList include_dirs, CCSlice quote_dir, CcDiags* ds, CCArena a) {
     CcIndex* ix = cc_arena_alloc(a, sizeof(CcIndex), _Alignof(CcIndex));
     memset(ix, 0, sizeof(*ix));
     ix->arena = a;
@@ -3143,7 +3143,7 @@ static void cc__peer_load_dir(CcIndex* ix, CCSlice dir) {
     closedir(dp);
 }
 
-static CCSlice CcIndex_peer_face(CcIndex* ix, CCSlice dir, CCSlice name) {
+CCSlice CcIndex_peer_face(CcIndex* ix, CCSlice dir, CCSlice name) {
     Vec::[CCSlice]* namev;
     Vec::[CCSlice]* pathv;
     size_t n;
@@ -3232,12 +3232,12 @@ static void cc__load_includes_of(CcIndex* ix, const CcTape* tape) {
     }
 }
 
-static void CcIndex_preload_includes(CcIndex* ix, const CcTape* tape, CcParseOpts opts) {
+void CcIndex_preload_includes(CcIndex* ix, const CcTape* tape, CcParseOpts opts) {
     (void)opts;
     cc__load_includes_of(ix, tape);
 }
 
-static void CcIndex_load_includes(CcIndex* ix, CcUnit* u, CcParseOpts opts) {
+void CcIndex_load_includes(CcIndex* ix, CcUnit* u, CcParseOpts opts) {
     (void)opts;
     cc__load_includes_of(ix, &u->tape);
 }
@@ -3975,7 +3975,7 @@ static CcMethod* cc__method_plain(CcIndex* ix, CCSlice method, CCSlice callee, c
     return m;
 }
 
-static CcMethodList CcIndex_methods_of(CcIndex* ix, CcTypeInfo* info) {
+CcMethodList CcIndex_methods_of(CcIndex* ix, CcTypeInfo* info) {
     CcMethodList list = vec_new::[CcMethodRef](ix->arena);
     CcHookReg* hook = cc__hook_match(ix, info->name, true);
     CCSlice prefix_type = cc__cat2(ix, info->name, "_");
@@ -4020,7 +4020,7 @@ static CcMethodList CcIndex_methods_of(CcIndex* ix, CcTypeInfo* info) {
     return list;
 }
 
-static CcMethod* !>(CcDiag) CcIndex_method_recv(CcIndex* ix, CcTypeInfo* recv, CCSlice method, unsigned recv_shape, CCArena a) {
+CcMethod* !>(CcDiag) CcIndex_method_recv(CcIndex* ix, CcTypeInfo* recv, CCSlice method, unsigned recv_shape, CCArena a) {
     CCString tried = cc_string_new();
     CcMethod* m = cc__resolve(ix, recv, method, &tried, a, 0, recv_shape);
     if (m) return cc_ok(m);
@@ -4081,7 +4081,7 @@ static CcMethod* !>(CcDiag) CcIndex_method_recv(CcIndex* ix, CcTypeInfo* recv, C
 
 /* ---- arena parameter ------------------------------------------------------ */
 
-static int CcIndex_arena_param(CcIndex* ix, CcSym* f) {
+int CcIndex_arena_param(CcIndex* ix, CcSym* f) {
     CcFuncType fn;
     CcParamList params;
     size_t i;

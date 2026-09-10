@@ -1,3 +1,4 @@
+#pragma(@module) "staticd"
 /*
  * Pages — load a .js (QuickJS) or .py (CPython) view under --pages.
  * Same request/response ABI on both faces. Policy (when to call, encode)
@@ -14,7 +15,6 @@
  * Resolve never falls through to serving source. Both faces → error.
  * Missing engine for the only face → 501. Throw / no export → 500.
  */
-#pragma(@per_tu)
 #ifndef STATICD_SCRIPT_CCH
 #define STATICD_SCRIPT_CCH
 

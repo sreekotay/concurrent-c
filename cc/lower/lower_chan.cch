@@ -1,4 +1,4 @@
-#pragma(@per_tu)
+#pragma(@module) "lower"
 /* Clean lowerer, step: channels. An endpoint is declared by what travels
  * through it and how much can wait: `int64_t[~4 >] tx;` is a sending end
  * of a four-deep channel of int64_t. In C it is the runtime's untyped
@@ -943,7 +943,7 @@ static void hc_on_ufcs(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m,
     hc_send(st, e, uf);
 }
 
-static void CcLowerer_chan(CcLowerer* L) {
+void CcLowerer_chan(CcLowerer* L) {
     Walker w;
     HStep st;
     memset(&st, 0, sizeof(st));

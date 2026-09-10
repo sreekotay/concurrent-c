@@ -1,9 +1,9 @@
 #ifndef TESTS_QUOTE_CCH_HOST_MOD_CCH
 #define TESTS_QUOTE_CCH_HOST_MOD_CCH
 
-/* Owned face: non-static `host_mod_tag` is one definition in this TU.
- * Includes a differently-stemmed impl guest and a separately-owned peer.
- * Other TUs extract decls; the guest is still owned. */
+/* Module face: exported `host_mod_tag` is one definition in the module
+ * object. Includes a differently-stemmed impl guest and a peer, modules
+ * of their own. Every includer extracts decls. */
 #include "quote_cch_guest_leaf.cch"
 #include "quote_cch_peer_mod.cch"
 

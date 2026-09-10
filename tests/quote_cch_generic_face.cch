@@ -1,3 +1,4 @@
+#pragma(@module) "generic_face"
 #ifndef TESTS_QUOTE_CCH_GENERIC_FACE_CCH
 #define TESTS_QUOTE_CCH_GENERIC_FACE_CCH
 

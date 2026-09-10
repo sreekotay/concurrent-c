@@ -1,4 +1,4 @@
-#pragma(@per_tu)
+#pragma(@module) "lower"
 /* Clean lowerer, step: asynchronous functions. `@async Ret f(a)` is a
  * function that hands back a task instead of a value: the caller gets a
  * `CCTaskIntptr` it can poll, block on, or hand to a nursery.
@@ -1273,7 +1273,7 @@ static bool as_scope_visit(CcDecl* d, void* env) {
     return true;
 }
 
-static void CcLowerer_async(CcLowerer* L) {
+void CcLowerer_async(CcLowerer* L) {
     CcDeclList* decls = &L->unit->decls;
     CcDeclList with = vec_new::[CcDeclRef](L->arena);
     size_t n = decls->len();

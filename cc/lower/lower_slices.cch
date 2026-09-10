@@ -1,4 +1,4 @@
-#pragma(@per_tu)
+#pragma(@module) "lower"
 /* Clean lowerer, step: slice values. The slice types themselves are an
  * instance family, named by the generics step; this step lowers what is
  * written into one. A string literal initializing or passed to a slice is
@@ -480,7 +480,7 @@ static void sl_function(SStep* st, CcFuncDecl f) {
     L->ret_slice = NULL;
 }
 
-static void CcLowerer_slices(CcLowerer* L) {
+void CcLowerer_slices(CcLowerer* L) {
     Walker w;
     SStep st;
     CcVisitor v;
@@ -583,7 +583,7 @@ static void sl_dest_pass(CcLowerer* L) {
 
 /* Argument coercion runs after UFCS: a `x.m("lit")` call site is a plain
  * call by then, and its parameter types are the callee's. */
-static void CcLowerer_slice_args(CcLowerer* L) {
+void CcLowerer_slice_args(CcLowerer* L) {
     Walker w;
     SStep st;
     memset(&st, 0, sizeof(st));

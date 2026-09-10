@@ -3,10 +3,13 @@
 
 #include <ccc/std/prelude.cch>
 
+/* The arm an includer selects with a #define before the include: a
+ * `static inline` body, which the module .h carries. Bodies the module
+ * compiles once are not selected per includer. */
 #ifdef CFG_ON
-static int define_owned_value(void) { return 7; }
+static inline int define_owned_value(void) { return 7; }
 #else
-static int define_owned_value(void) { return 3; }
+static inline int define_owned_value(void) { return 3; }
 #endif
 
 int !>(CCError) define_owned_step(int x) {

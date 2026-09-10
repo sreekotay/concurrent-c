@@ -7,16 +7,7 @@
  *   ccparse --mode source|header|script
  *   ccparse --quiet                    only print files with diagnostics
  * Output is byte-identical to out/cc/bin/ccparse (the C11 reference). */
-#include "lex_impl.cch"
-#include "diag_impl.cch"
-#include "ast_impl.cch"
-#include "parse_state.cch"
-#include "parse_fwd.cch"
-#include "parse_exprs.cch"
-#include "parse_stmts.cch"
-#include "parse_types.cch"
-#include "parse_decls.cch"
-#include "parse_walk.cch"
+#include "lower.cch"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

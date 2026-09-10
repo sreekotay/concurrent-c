@@ -1,4 +1,4 @@
-#pragma(@per_tu)
+#pragma(@module) "lower"
 /* Parser section 2: types. Declaration specifiers, the builtin keyword
  * table, the Concurrent-C type suffixes (`T[:]`, `T[~cap dir]`, `T!>(E)`),
  * generic and macro type arguments, declarators, type names, parameter

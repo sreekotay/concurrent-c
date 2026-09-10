@@ -1,4 +1,4 @@
-#pragma(@per_tu)
+#pragma(@module) "lower"
 /* Clean lowerer, step: walks. `@for (x in xs)` is an index loop over the
  * extent the type declares: its `.len` hook says how many, its `.access`
  * hook says where the elements are. Both are read off the type's own
@@ -1015,7 +1015,7 @@ static void fi_on_stmt(Walker* w, CcStmt* s, bool enter) {
     st->depth++;
 }
 
-static void CcLowerer_forin(CcLowerer* L) {
+void CcLowerer_forin(CcLowerer* L) {
     Walker w;
     FStep st;
     memset(&st, 0, sizeof(st));

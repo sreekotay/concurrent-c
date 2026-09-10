@@ -1,4 +1,4 @@
-#pragma(@per_tu)
+#pragma(@module) "lower"
 /* Parser section 3: expressions, templates, closures and initializers.
  *
  * Precedence climbing over the C operators, then the postfix tails that

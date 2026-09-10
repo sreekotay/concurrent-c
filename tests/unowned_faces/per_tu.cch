@@ -3,13 +3,15 @@
 
 #include <ccc/std/prelude.cch>
 
-/* Unowned all-static impl-grade face: a private copy per TU, no pragma. */
+/* A face with no members: a module of one. `per_tu_step` is
+ * module-private; `per_tu_val` is exported, defined once in the
+ * module object every includer links. */
 static int !>(CCError) per_tu_step(int x) {
     @errhandler(CCError e) { return cc_err(e); }
     return cc_ok(x);
 }
 
-static int per_tu_val(void) {
+int per_tu_val(void) {
     int x = per_tu_step(3) !> { return 0; };
     return x;
 }

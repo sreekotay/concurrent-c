@@ -17,18 +17,7 @@
  * The parse mode follows the extension: .cch is header mode, .shcc script
  * mode, everything else source mode. Output is byte-identical to
  * out/cc/bin/cclower (the C11 reference). */
-#include "lex_impl.cch"
-#include "diag_impl.cch"
-#include "ast_impl.cch"
-#include "parse_state.cch"
-#include "parse_fwd.cch"
-#include "parse_exprs.cch"
-#include "parse_stmts.cch"
-#include "parse_types.cch"
-#include "parse_decls.cch"
-#include "parse_walk.cch"
-#include "print_impl.cch"
-#include "lower_impl.cch"
+#include "lower.cch"
 #include <errno.h>
 #include <sys/stat.h>
 #include <stdio.h>
@@ -145,6 +134,59 @@ static const char* g_instantiate = NULL;
  * `extend` for a handler that appends to a family rather than defining it. */
 static const char* g_factories = NULL;
 static const char* g_h_root;
+/* --modules FILE: the module faces the driver staged (spec 1.7), one per
+ * line as the face, a tab, then the stage that holds its module unit: a
+ * `#line` to the face, then the face with its members spliced in. A face
+ * on disk is not its module; the `.h` the includer reads is extracted
+ * from the whole, and it opens with the link marker naming the C the
+ * driver compiles once. */
+static const char* g_modules = NULL;
+static CcNameList g_module_faces;
+static CcNameList g_module_stages;
+
+static void read_modules(const char* path, CCArena a) {
+    bool ok;
+    CCSlice text = read_whole_file(path, a, &ok);
+    size_t i = 0;
+    if (!ok) { fprintf(stderr, "cclower: cannot read %s: %s\n", path, strerror(errno)); exit(2); }
+    while (i < text.len) {
+        size_t j = i;
+        size_t tab = 0;
+        while (j < text.len && text.ptr[j] != '\n') {
+            if (text.ptr[j] == '\t' && !tab) tab = j;
+            j++;
+        }
+        if (tab > i && tab + 1 < j) {
+            char* face = cc_arena_alloc(a, tab - i + 1, 1);
+            char* stage = cc_arena_alloc(a, j - tab, 1);
+            CCSlice fs;
+            CCSlice ss;
+            memcpy(face, text.ptr + i, tab - i);
+            face[tab - i] = 0;
+            memcpy(stage, text.ptr + tab + 1, j - tab - 1);
+            stage[j - tab - 1] = 0;
+            fs = cc_slice_from_buffer(face, tab - i);
+            ss = cc_slice_from_buffer(stage, j - tab - 1);
+            g_module_faces.push(fs);
+            g_module_stages.push(ss);
+        }
+        i = j < text.len ? j + 1 : j;
+    }
+}
+
+/* The stage of a module face, NUL-terminated, or NULL for an interface face. */
+static const char* module_stage_for(const char* h_c) {
+    size_t n = g_module_faces.len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CCSlice f = *g_module_faces.get_ptr(i);
+        if (cc_slice_eq_cstr(&f, h_c)) {
+            CCSlice st = *g_module_stages.get_ptr(i);
+            return (const char*)st.ptr;
+        }
+    }
+    return NULL;
+}
 
 /* mkdir -p for the directory part of `path`. */
 static bool mkdir_parents(const char* path) {
@@ -510,7 +552,6 @@ static bool load_lowered(Loaded* L, const char* path, CcNameList known, CCArena 
     ix->add_unit(L->unit, opts.mode == CC_UNIT_HEADER);
     if (L->ds.has_errors()) return true;   /* parse errors: print nothing but the diagnostics */
     lo.line_directives = true;
-    lo.per_tu = false;
     if (g_schema_variants) {
         bool sv_ok = false;
         CCSlice sv = read_whole_file(g_schema_variants, a, &sv_ok);
@@ -545,31 +586,6 @@ static bool load_lowered(Loaded* L, const char* path, CcNameList known, CCArena 
 
 static void note_headers(Loaded* L, CcNameList* more, CCArena keep);
 
-/* An owner `.ccs` compiles this header's non-static bodies: the file of the
- * same stem beside it, or the chapter it is a chapter of
- * (`a_b_leaf.cch` under `a_b.ccs`). Without one nothing else compiles them,
- * so the body stays in the `.h` the includer reads -- a prototype there
- * would leave the call to a definition no translation unit holds. */
-static bool cch_has_owner_ccs(const char* path) {
-    char buf[4096];
-    size_t n = path ? strlen(path) : 0;
-    size_t cut;
-    if (n < 5 || n + 1 >= sizeof(buf)) return false;
-    if (memcmp(path + n - 4, ".cch", 4) != 0) return false;
-    memcpy(buf, path, n - 4);
-    cut = n - 4;
-    for (;;) {
-        size_t k = cut;
-        FILE* fp;
-        memcpy(buf + cut, ".ccs", 5);
-        fp = fopen(buf, "rb");
-        if (fp) { fclose(fp); return true; }
-        while (k > 0 && buf[k - 1] != '_' && buf[k - 1] != '/') k--;
-        if (k == 0 || buf[k - 1] == '/') return false;
-        cut = k - 1;
-    }
-}
-
 /* A local header the unit includes, lowered in header mode with the unit's
  * own index (its registrations and known types are the header's context,
  * as they are when the host compiles the include) to `<h-root>/<rel>.h`.
@@ -587,13 +603,15 @@ static int lower_header_with(Loaded* owner, CCSlice hpath, CcNameList known, boo
     CCSlice rel;
     CCString out;
     const char* h_c = (const char*)hpath.ptr;   /* NUL-terminated by note_headers */
+    const char* stage = module_stage_for(h_c);
+    const char* read_from = stage ? stage : h_c;
     CCSlice text;
     int rc = 0;
     memset(&H, 0, sizeof(H));
     H.arena = a;
     H.path = h_c;
-    H.src = read_whole_file(h_c, a, &ok);
-    if (!ok) { fprintf(stderr, "cclower: cannot read %s: %s\n", h_c, strerror(errno)); return 2; }
+    H.src = read_whole_file(read_from, a, &ok);
+    if (!ok) { fprintf(stderr, "cclower: cannot read %s: %s\n", read_from, strerror(errno)); return 2; }
     opts.mode = CC_UNIT_HEADER;
     {
         CcNameList all = vec_new::[CCSlice](a);
@@ -624,13 +642,29 @@ static int lower_header_with(Loaded* owner, CCSlice hpath, CcNameList known, boo
         po.identity = false;
         po.line_directives = line_directives;
         po.header_mode = true;
-        po.header_owned = cch_has_owner_ccs(h_c);
+        po.header_owned = stage != NULL;
         po.path = hpath;
         CcProduct prod = cc_print_unit(u, NULL, po, &H.ds, a) !>(e) {
             fprintf(stderr, "cclower: %s: %.*s\n", h_c, (int)e.msg.len, e.msg.ptr);
             return 2;
         };
         text = cc_string_as_slice(&prod.text);
+        if (stage) {
+            /* the marker is line one; every mapped line moves down by it */
+            CCString marked = cc_string_new();
+            Vec::[CcSrcMapEntry]* ents = &prod.map.entries;
+            size_t ne = ents->len();
+            size_t k;
+            cc_string_push_cstr(&marked, "/" "*cc:link ", a);
+            cc_string_push_slice(&marked, rel, a);
+            cc_string_push_cstr(&marked, "_cch.c*" "/\n", a);
+            cc_string_push_slice(&marked, text, a);
+            text = cc_string_as_slice(&marked);
+            for (k = 0; k < ne; k++) {
+                CcSrcMapEntry* e = ents->get_ptr(k);
+                e->emit_line += 1;
+            }
+        }
         if (!write_product(out_c, text, &prod.map, a)) rc = 2;
         print_diags(&H);
         if (H.ds.n_errors) rc = 1;
@@ -701,7 +735,7 @@ static int run_print(const char* path, CcNameList known, const char* out_path, b
     po.identity = false;
     po.line_directives = line_directives;
     po.header_mode = header_mode;
-    po.header_owned = header_mode ? cch_has_owner_ccs(path) : false;
+    po.header_owned = false;
     po.path = cc_slice_from_buffer((char*)path, strlen(path));
     CcProduct prod = cc_print_unit(L.unit, NULL, po, &L.ds, a) !>(e) {
         fprintf(stderr, "cclower: %s: %.*s\n", path, (int)e.msg.len, e.msg.ptr);
@@ -733,7 +767,7 @@ static void usage(void) {
     fprintf(stderr,
             "usage: cclower --identity [--known-types F] FILE...\n"
             "       cclower --print [--known-types F] [--no-line] [--header] [-o OUT] FILE\n"
-            "       cclower --lower [--known-types F] [-I DIR]... [--root DIR --h-root DIR] [-o OUT] FILE\n"
+            "       cclower --lower [--known-types F] [-I DIR]... [--root DIR --h-root DIR] [--modules F] [-o OUT] FILE\n"
             "       cclower --is-plain-c [--known-types F] FILE\n");
     exit(2);
 }
@@ -756,6 +790,8 @@ int main(int argc, char** argv) {
     bool custom_dirs = false;
     g_include_dirs = vec_new::[CCSlice](tool);
     g_include_dirs.push(CC_SLICE_LIT("cc/include"));
+    g_module_faces = vec_new::[CCSlice](tool);
+    g_module_stages = vec_new::[CCSlice](tool);
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-I") == 0 && i + 1 < argc) {
             CCSlice dir = cc_slice_from_buffer(argv[i + 1], strlen(argv[i + 1]));
@@ -770,6 +806,7 @@ int main(int argc, char** argv) {
         if (strcmp(argv[i], "--schema-variants") == 0 && i + 1 < argc) { g_schema_variants = argv[i + 1]; i++; continue; }
         if (strcmp(argv[i], "--instantiate") == 0 && i + 1 < argc) { g_instantiate = argv[i + 1]; i++; continue; }
         if (strcmp(argv[i], "--factories") == 0 && i + 1 < argc) { g_factories = argv[i + 1]; i++; continue; }
+        if (strcmp(argv[i], "--modules") == 0 && i + 1 < argc) { g_modules = argv[i + 1]; i++; continue; }
         if (strcmp(argv[i], "--identity") == 0) mode = M_IDENTITY;
         else if (strcmp(argv[i], "--print") == 0) mode = M_PRINT;
         else if (strcmp(argv[i], "--lower") == 0) { mode = M_PRINT; lower = true; }
@@ -783,12 +820,14 @@ int main(int argc, char** argv) {
     }
     if (mode == M_NONE) usage();
     if (known_path) read_known_types(known_path, &known, tool);
+    if (g_modules) read_modules(g_modules, tool);
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--known-types") == 0 || strcmp(argv[i], "-o") == 0 || strcmp(argv[i], "-I") == 0 ||
             strcmp(argv[i], "--root") == 0 || strcmp(argv[i], "--h-root") == 0 ||
             strcmp(argv[i], "--schema-variants") == 0 ||
             strcmp(argv[i], "--instantiate") == 0 ||
             strcmp(argv[i], "--factories") == 0 ||
+            strcmp(argv[i], "--modules") == 0 ||
             strcmp(argv[i], "--quote-dir") == 0) { i++; continue; }
         if (argv[i][0] == '-' && argv[i][1]) continue;
         n_files++;

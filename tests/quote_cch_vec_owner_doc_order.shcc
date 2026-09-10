@@ -1,5 +1,5 @@
-/* Factory-prerequisite face after arena spliced chapter: DECL follows the
- * include that declares QuoteOwnerRun, not result-specs. */
+/* Factory-prerequisite face after a spliced member chapter: DECL follows
+ * the include that declares QuoteOwnerRun, not result-specs. */
 CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
 
 CCCommand emit = cc_command(arena, @slice("./cc/bin/ccc"));

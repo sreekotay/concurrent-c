@@ -7,9 +7,7 @@
  *                               NUMBER containing `..`. Exit 1 on any failure.
  *   cclex --dump FILE           one token per line: `line:col kind text`
  *   cclex --loc FILE OFF        logical location of byte offset OFF */
-#include "lex.cch"
-#include "diag_impl.cch"
-#include "lex_impl.cch"
+#include "lower.cch"
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>

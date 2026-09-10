@@ -1,6 +1,8 @@
-/* Sibling `.ccs` owns impl/UFCS bodies. The umbrella consumer extracts
- * decls; the defining TU still splices. */
+/* An impl face with UFCS bodies reached through an interface umbrella is
+ * a module of one (spec 1.7). The umbrella consumer extracts decls; the
+ * bodies lower into the module object, and no unit splices them. */
 CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
+int rc = 0;
 
 CCCommand emit_main = cc_command(arena, @slice("./cc/bin/ccc"));
 emit_main.arg("--no-cache");
@@ -9,12 +11,11 @@ emit_main.arg("tests/quote_cch_sibling_ccs_main_mod.ccs");
 emit_main.arg("-o");
 emit_main.arg("out/quote_cch_sibling_ccs_main.c");
 emit_main.inherit_stdio();
-int rc = emit_main.status() !>;
+rc = emit_main.status() !>;
 if (rc != 0) {
     "emit parent failed".println();
     return 1;
 }
-
 CCCommand grep_parent = cc_command(arena, @slice("grep"));
 grep_parent.arg("-q");
 grep_parent.arg("SIBLING_LEAF_BODY_MUST_NOT_SPLICE");
@@ -24,7 +25,6 @@ if (rc == 0) {
     "parent TU spliced sibling leaf".println();
     return 1;
 }
-
 CCCommand emit_leaf = cc_command(arena, @slice("./cc/bin/ccc"));
 emit_leaf.arg("--no-cache");
 emit_leaf.arg("--emit-c-only");
@@ -37,17 +37,15 @@ if (rc != 0) {
     "emit leaf failed".println();
     return 1;
 }
-
 CCCommand grep_leaf = cc_command(arena, @slice("grep"));
 grep_leaf.arg("-q");
 grep_leaf.arg("SIBLING_LEAF_BODY_MUST_NOT_SPLICE");
 grep_leaf.arg("out/quote_cch_sibling_ccs_leaf.c");
 rc = grep_leaf.status() !>;
-if (rc != 0) {
-    "defining TU did not splice sibling leaf".println();
+if (rc == 0) {
+    "same-stem TU spliced sibling leaf".println();
     return 1;
 }
-
 CCCommand build = cc_command(arena, @slice("./cc/bin/ccc"));
 build.arg("build");
 build.arg("--no-cache");

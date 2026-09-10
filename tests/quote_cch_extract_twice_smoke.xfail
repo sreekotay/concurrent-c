@@ -1,1 +1,0 @@
-M9 (spec 1.7, modules): the second include of the face is refused today as an extract followed by a splice in one unit; the face as a module of one, included twice through a guarded .h, is not implemented

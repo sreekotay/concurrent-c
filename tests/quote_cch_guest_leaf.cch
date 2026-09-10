@@ -3,7 +3,7 @@
 
 #include <ccc/std/prelude.cch>
 
-/* Different stem from host_mod — owned because host_mod.cch includes this. */
+/* Different stem from host_mod: a module of one, included by host_mod.cch. */
 int !>(CCError) guest_leaf_step(int x) {
     /* GUEST_LEAF_BODY_MUST_NOT_SPLICE */
     @errhandler(CCError e) { return cc_err(e); }

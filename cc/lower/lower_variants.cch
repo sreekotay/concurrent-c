@@ -1,4 +1,4 @@
-#pragma(@per_tu)
+#pragma(@module) "lower"
 /* Clean lowerer, step: variants. A variant declaration lowers to its tag
  * enum and its tagged union, `typedef enum { V_a, V_b } VKind; typedef
  * struct V { VKind kind; union { A a; B b; } u; } V;`, and, when an arm
@@ -2566,7 +2566,7 @@ static bool vt_leftover_visit(CcExpr* e, void* env) {
     return true;
 }
 
-static void CcLowerer_variants(CcLowerer* L) {
+void CcLowerer_variants(CcLowerer* L) {
     Walker w;
     VStep st;
     CcVisitor v;

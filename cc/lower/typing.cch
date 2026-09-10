@@ -1,4 +1,4 @@
-#pragma(@per_tu)
+#pragma(@module) "lower"
 /* Receiver typing for UFCS call sites, shared by the index tool (which
  * records sites) and the clean lowerer (which rewrites them). A walk over
  * a unit keeps a scope of the locals in view and types each receiver
@@ -8,8 +8,8 @@
 #define CC_LOWER_TYPING_CCH
 #include "index.cch"
 
-static CCSlice cstr_slice(const char* s) { return cc_slice_from_buffer((char*)s, strlen(s)); }
-static bool slice_eq(CCSlice a, CCSlice b) { return a.len == b.len && (a.len == 0 || memcmp(a.ptr, b.ptr, a.len) == 0); }
+CCSlice cstr_slice(const char* s) { return cc_slice_from_buffer((char*)s, strlen(s)); }
+bool slice_eq(CCSlice a, CCSlice b) { return a.len == b.len && (a.len == 0 || memcmp(a.ptr, b.ptr, a.len) == 0); }
 static CcSym* sym_any(CcIndex* ix, CCSlice name) {
     CcSym* !>(CcDiag) r = ix->sym(name);
     if (r.is_ok()) return r.value();
@@ -86,7 +86,7 @@ static CcType* sc_lookup(Walker* w, CCSlice name) {
 
 static CcType* type_of_expr(Walker* w, CcExpr* e);
 
-static CcType* peel(CcType* t) {
+CcType* peel(CcType* t) {
     for (;;) {
         CcType* inner = NULL;
         if (!t) return NULL;
@@ -1202,7 +1202,7 @@ static void tw_entries(Walker* w, CcHookEntryList entries) {
     sc_pop(w);
 }
 
-static void tw_unit(Walker* w) {
+void tw_unit(Walker* w) {
     CcUnit* u = w->unit;
     CcDeclList* declv = &u->decls;
     size_t i;

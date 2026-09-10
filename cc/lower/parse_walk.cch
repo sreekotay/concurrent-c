@@ -1,4 +1,4 @@
-#pragma(@per_tu)
+#pragma(@module) "lower"
 /* The generic walk (CcUnit_walk / CcStmt_walk / CcExpr_walk), the debug
  * dump (CcUnit_dump) and cc_parse_expr.
  *
@@ -1289,7 +1289,7 @@ static void dump_decl_d(Dump* d, const CcDecl* dc, int depth) {
         }
 }
 
-static void CcUnit_dump(const CcUnit* u, FILE* out) {
+void CcUnit_dump(const CcUnit* u, FILE* out) {
     Dump d;
     CcDeclList* decls = (CcDeclList*)&u->decls;
     size_t n = decls->len();
@@ -1690,15 +1690,15 @@ static void walk_decl_c(CcVisitor* v, CcDecl* d) {
         }
 }
 
-static void CcUnit_walk(CcUnit* u, CcVisitor v) {
+void CcUnit_walk(CcUnit* u, CcVisitor v) {
     walk_decls(&v, &u->decls);
 }
 
-static void CcStmt_walk(CcStmt* s, CcVisitor v) {
+void CcStmt_walk(CcStmt* s, CcVisitor v) {
     walk_stmt(&v, s);
 }
 
-static void CcExpr_walk(CcExpr* e, CcVisitor v) {
+void CcExpr_walk(CcExpr* e, CcVisitor v) {
     walk_expr(&v, e);
 }
 
@@ -1706,7 +1706,7 @@ static void CcExpr_walk(CcExpr* e, CcVisitor v) {
 
 /* Parse `text` as one expression in the unit's arena, positioned at `at`
  * for diagnostics. The first error is the result's error arm. */
-static CcExpr* !>(CcDiag) cc_parse_expr(CCSlice text, CcLoc at, CcUnit* u) {
+CcExpr* !>(CcDiag) cc_parse_expr(CCSlice text, CcLoc at, CcUnit* u) {
     CCArena a = u->arena;
     CcDiags ds = CcDiags_new(a);
     CcTape* tp = cc_arena_alloc(a, sizeof(CcTape), _Alignof(CcTape));
