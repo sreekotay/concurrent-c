@@ -345,6 +345,18 @@ differential report.
   `lower`, which the four tools include. Every `quote_cch_*` and
   `cch_face_*` row keeps its meaning; `two_includers` is a smoke, since
   two includers of one face is the normal case.
+- **After M9.** A `@comptime { }` block that registers type hooks stays
+  in the stage for the index; `cc_ufcs_register` is read as the `.ufcs`
+  entry it is; a copied `#line` pins itself and `@linenumbers off` omits
+  it; a Result spec lands below the rewritten quoted include that
+  defines its Ok type. Two gaps are the shadow path's and carry
+  `.xfail.shadow`: `Table::[K,V]` in an interface face
+  (`quote_cch_table_face_smoke`: the text header lowerer meets the face
+  before the unit's factory families are registered, and its complaint
+  prints on a clean build that then succeeds, since the clean lowerer
+  emits the instance into the `.h` itself), and the typeview-as-UFCS
+  rows of `quote_cch_typeview_smoke`'s class. Both want a shadow-side
+  fix and a shipped seed.
 
 M0 and M1 carry no risk to the shipping compiler and are where work
 starts.

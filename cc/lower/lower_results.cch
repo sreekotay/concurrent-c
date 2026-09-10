@@ -1967,6 +1967,15 @@ static size_t rl_after_quoted_includes(CcLowerer* L) {
         bool is_pp = false;
         @switch (d->k) {
             case .pp(x): tok = x.tok; is_pp = true; break;
+            /* a quoted include already rewritten to the lowered `.h`: the
+             * line is the include and the span is still the token it came
+             * from, which says whether it was quoted */
+            case .raw(rt):
+                if (rt.len > 10 && memcmp(rt.ptr, "#include <", 10) == 0 && d->span.first < L->unit->tape.toks.len()) {
+                    tok = d->span.first;
+                    is_pp = true;
+                }
+                break;
             default: break;
         }
         if (!is_pp) continue;

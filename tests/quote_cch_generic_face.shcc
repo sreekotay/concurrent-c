@@ -1,4 +1,6 @@
-/* Extracted face must spell Name::[args] to host C (no leftover ::). */
+/* A face's Name::[args] reaches host C spelled out (no leftover ::[).
+ * The face is a member of the program module, so its text is in the
+ * emitted C, not in a .h of its own. */
 CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
 
 CCCommand emit = cc_command(arena, @slice("./cc/bin/ccc"));
@@ -16,32 +18,32 @@ if (rc != 0) {
 
 CCCommand grep_col = cc_command(arena, @slice("grep"));
 grep_col.arg("-q");
-grep_col.arg("-F");
-grep_col.arg("::[");
-grep_col.arg("out/include/tests/quote_cch_generic_face.h");
+grep_col.arg("-E");
+grep_col.arg("::\\[(int|char)");
+grep_col.arg("out/quote_cch_generic_face_smoke.c");
 rc = grep_col.status() !>;
 if (rc == 0) {
-    "extracted .h still has ::[".println();
+    "emitted C still has ::[".println();
     return 1;
 }
 
 CCCommand grep_pair = cc_command(arena, @slice("grep"));
 grep_pair.arg("-q");
 grep_pair.arg("QuotePair_int_int");
-grep_pair.arg("out/include/tests/quote_cch_generic_face.h");
+grep_pair.arg("out/quote_cch_generic_face_smoke.c");
 rc = grep_pair.status() !>;
 if (rc != 0) {
-    "extracted .h missing QuotePair_int_int".println();
+    "emitted C missing QuotePair_int_int".println();
     return 1;
 }
 
 CCCommand grep_vec = cc_command(arena, @slice("grep"));
 grep_vec.arg("-q");
 grep_vec.arg("CCVec_char");
-grep_vec.arg("out/include/tests/quote_cch_generic_face.h");
+grep_vec.arg("out/quote_cch_generic_face_smoke.c");
 rc = grep_vec.status() !>;
 if (rc != 0) {
-    "extracted .h missing CCVec_char".println();
+    "emitted C missing CCVec_char".println();
     return 1;
 }
 

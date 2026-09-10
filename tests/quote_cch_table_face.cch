@@ -1,0 +1,14 @@
+#ifndef TESTS_QUOTE_CCH_TABLE_FACE_CCH
+#define TESTS_QUOTE_CCH_TABLE_FACE_CCH
+
+#include <ccc/std/prelude.cch>
+#include <ccc/std/table.cch>
+
+/* An interface face that names a generic instance: the lowered .h carries
+ * the instance, so an includer that never spells Table::[int, int] itself
+ * still has the type and its methods. */
+typedef Table::[int, int] Counts;
+
+static inline Counts counts_new(CCArena a) { return table_new::[int, int](a); }
+
+#endif
