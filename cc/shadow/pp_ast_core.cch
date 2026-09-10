@@ -2069,6 +2069,9 @@ static int shadow_spell_generic_family(const char* family, const char* compact,
     } else if (strcmp(family, "ArrayMap") == 0) {
         snprintf(dst, cap, "ArrayMap_%s*", compact);
         shadow_parse_ginst_need_ex("ArrayMap", compact, gargs, ngargs);
+    } else if (strcmp(family, "Table") == 0) {
+        snprintf(dst, cap, "Table_%s*", compact);
+        shadow_parse_ginst_need_ex("Table", compact, gargs, ngargs);
     } else if (strcmp(family, "Vec") == 0) {
         snprintf(dst, cap, "CCVec_%s", compact);
         shadow_parse_ginst_need_ex("Vec", compact, gargs, ngargs);
@@ -2082,6 +2085,12 @@ static int shadow_spell_generic_family(const char* family, const char* compact,
     } else if (strcmp(family, "array_map_new_count") == 0) {
         snprintf(dst, cap, "array_map_new_count_%s", compact);
         shadow_parse_ginst_need_ex("ArrayMap", compact, gargs, ngargs);
+    } else if (strcmp(family, "table_new") == 0) {
+        snprintf(dst, cap, "table_new_%s", compact);
+        shadow_parse_ginst_need_ex("Table", compact, gargs, ngargs);
+    } else if (strcmp(family, "table_new_count") == 0) {
+        snprintf(dst, cap, "table_new_count_%s", compact);
+        shadow_parse_ginst_need_ex("Table", compact, gargs, ngargs);
     } else if (strcmp(family, "vec_new") == 0 ||
              strcmp(family, "cc_vec_new") == 0) {
         snprintf(dst, cap, "CCVec_%s_new", compact);

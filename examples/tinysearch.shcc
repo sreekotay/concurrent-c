@@ -1,0 +1,625 @@
+#!/usr/bin/env -S ./cc/bin/ccc
+/*
+ * tinysearch — whole-file trigram index (MVP twin of a Python sketch).
+ *
+ * Full rebuild on @index (no mtime reuse). @search confirms with substring
+ * (`-i` → has_ci). No regex. On-disk layout matches the Python tool:
+ *   MAGIC "TS01"
+ *   u32 nfiles; {u64 mtime_ns, u64 size, u32 path_len, path}…
+ *   u32 ngrams; {u32 gram, u32 npost, npost×u32 file_id}…  (grams sorted)
+ *
+ * Usage:
+ *   ./examples/tinysearch.shcc @idx [root] [-f path]
+ *   ./examples/tinysearch.shcc @query QUERY [root] [-f path] [-i]
+ *   ./examples/tinysearch.shcc @
+ *
+ * Task names are @idx / @query (not @index — clashes with POSIX index(3)).
+ * Gaps vs Python (intentional MVP): incremental index, -e regex, path.stat.
+ */
+#include <stdlib.h>
+
+enum { TS_MAX_FILE = 2 * 1024 * 1024, TS_SAMPLE = 4096 };
+
+static const char TS_MAGIC[4] = { 'T', 'S', '0', '1' };
+
+static const char *const TS_SKIP_DIRS[] = {
+    ".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv",
+    "venv", "target", "dist", "build", ".tinysearch.idx",
+    NULL,
+};
+
+static const char *const TS_SKIP_SUFFIX[] = {
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf",
+    ".zip", ".gz", ".bz2", ".xz", ".7z", ".tar",
+    ".woff", ".woff2", ".ttf", ".eot",
+    ".mp3", ".mp4", ".mkv", ".avi", ".mov",
+    ".o", ".so", ".dylib", ".dll", ".a", ".exe",
+    ".pyc", ".pyo", ".class", ".wasm",
+    NULL,
+};
+
+typedef struct {
+    CCSlice rel;
+    uint64_t size;
+} TsFile;
+
+typedef ArrayMap::[size_t, Vec::[size_t]] TsPostings;
+typedef ArrayMap::[size_t, bool] TsGramSet;
+typedef ArrayMap::[size_t, bool] TsCand;
+
+typedef struct {
+    int scanned;
+    int skipped;
+} TsCounts;
+
+@grammar(cli) IndexOpts {~~~~
+    help: flag -h, --help desc "Show this help"
+    index: opt string -f, --index as PATH desc "Index file (default: <root>/.tinysearch.idx)"
+    root: rest string desc "Tree root (default: .)"
+~~~~}
+
+@grammar(cli) SearchOpts {~~~~
+    help: flag -h, --help desc "Show this help"
+    ignore_case: flag -i, --ignore-case desc "Case-insensitive confirm"
+    index: opt string -f, --index as PATH desc "Index file (default: <root>/.tinysearch.idx)"
+    args: rest string desc "QUERY [ROOT]"
+~~~~}
+
+static int cmp_size_t(const void *a, const void *b) {
+    size_t x = *(const size_t *)a;
+    size_t y = *(const size_t *)b;
+    return (x > y) - (x < y);
+}
+
+static unsigned char ts_fold(unsigned char c) {
+    if (c >= 'A' && c <= 'Z') return (unsigned char)(c + 32);
+    return c;
+}
+
+static unsigned char ts_lower(unsigned char c) {
+    return ts_fold(c);
+}
+
+static bool ts_eq_ci_cstr(CCSlice s, const char *lit) {
+    size_t i;
+    if (!lit) return false;
+    for (i = 0; lit[i]; i++) {
+        if (i >= s.len) return false;
+        if (ts_lower((unsigned char)s.ptr[i]) != ts_lower((unsigned char)lit[i]))
+            return false;
+    }
+    return i == s.len;
+}
+
+static bool ts_ends_with_ci_cstr(CCSlice s, const char *suf) {
+    size_t n = 0;
+    size_t i;
+    while (suf[n]) n++;
+    if (n > s.len) return false;
+    for (i = 0; i < n; i++) {
+        unsigned char a = (unsigned char)s.ptr[s.len - n + i];
+        unsigned char b = (unsigned char)suf[i];
+        if (ts_lower(a) != ts_lower(b)) return false;
+    }
+    return true;
+}
+
+static bool ts_should_skip_dir(CCSlice name) {
+    size_t i;
+    if (name.len == 0) return true;
+    if (name.ptr[0] == '.') return true;
+    for (i = 0; TS_SKIP_DIRS[i]; i++) {
+        if (ts_eq_ci_cstr(name, TS_SKIP_DIRS[i])) return true;
+    }
+    return false;
+}
+
+static bool ts_should_skip_file(CCSlice name) {
+    size_t i;
+    if (ts_eq_ci_cstr(name, ".tinysearch.idx")) return true;
+    for (i = 0; TS_SKIP_SUFFIX[i]; i++) {
+        if (ts_ends_with_ci_cstr(name, TS_SKIP_SUFFIX[i])) return true;
+    }
+    return false;
+}
+
+static bool ts_is_binary_sample(CCSlice data) {
+    size_t n = data.len < (size_t)TS_SAMPLE ? data.len : (size_t)TS_SAMPLE;
+    size_t i;
+    size_t weird = 0;
+    const unsigned char *b;
+    if (n == 0) return false;
+    b = (const unsigned char *)data.ptr;
+    for (i = 0; i < n; i++) {
+        unsigned char c = b[i];
+        if (c == 0) return true;
+        if (c < 9 || (c > 13 && c < 32) || c > 126) weird++;
+    }
+    return (weird * 100) / n > 30;
+}
+
+static void !>(CCError) ts_write_bytes(CCFile *f, const void *p, size_t n) {
+    @errhandler(CCError e) { return cc_err(e); }
+    CCSlice s = cc_slice_from_buffer((void *)p, n);
+    f->write(s) !>(e) {
+        (void)e;
+        return cc_err(CC_ERROR(CC_ERR_IO, "tinysearch: write failed"));
+    };
+    return cc_ok();
+}
+
+static void !>(CCError) ts_write_u32(CCFile *f, uint32_t v) {
+    @errhandler(CCError e) { return cc_err(e); }
+    unsigned char b[4];
+    b[0] = (unsigned char)(v & 0xffu);
+    b[1] = (unsigned char)((v >> 8) & 0xffu);
+    b[2] = (unsigned char)((v >> 16) & 0xffu);
+    b[3] = (unsigned char)((v >> 24) & 0xffu);
+    ts_write_bytes(f, b, 4) !>;
+    return cc_ok();
+}
+
+static void !>(CCError) ts_write_u64(CCFile *f, uint64_t v) {
+    @errhandler(CCError e) { return cc_err(e); }
+    unsigned char b[8];
+    size_t i;
+    for (i = 0; i < 8; i++)
+        b[i] = (unsigned char)((v >> (8 * i)) & 0xffu);
+    ts_write_bytes(f, b, 8) !>;
+    return cc_ok();
+}
+
+static uint32_t !>(CCError) ts_read_u32(CCSlice data, size_t *off) {
+    const unsigned char *p;
+    uint32_t v;
+    if (!off || *off + 4 > data.len)
+        return cc_err(CC_ERROR(CC_ERR_PARSE, "tinysearch: truncated u32"));
+    p = (const unsigned char *)data.ptr + *off;
+    v = (uint32_t)p[0]
+      | ((uint32_t)p[1] << 8)
+      | ((uint32_t)p[2] << 16)
+      | ((uint32_t)p[3] << 24);
+    *off += 4;
+    return cc_ok(v);
+}
+
+static uint64_t !>(CCError) ts_read_u64(CCSlice data, size_t *off) {
+    const unsigned char *p;
+    uint64_t v = 0;
+    size_t i;
+    if (!off || *off + 8 > data.len)
+        return cc_err(CC_ERROR(CC_ERR_PARSE, "tinysearch: truncated u64"));
+    p = (const unsigned char *)data.ptr + *off;
+    for (i = 0; i < 8; i++)
+        v |= ((uint64_t)p[i]) << (8 * i);
+    *off += 8;
+    return cc_ok(v);
+}
+
+static CCSlice ts_default_idx(CCSlice root, CCArena arena) {
+    return cc_path_join(arena, root, @slice(".tinysearch.idx"));
+}
+
+static CCSlice ts_pick_root(char[:0] *rest, size_t rest_len) {
+    if (rest_len > 0 && rest[0].ptr && rest[0].len)
+        return rest[0];
+    return @slice(".");
+}
+
+static void ts_add_posting(TsPostings post, CCArena arena, size_t gram, size_t fid) {
+    Vec::[size_t] *ids = post->get_ptr(gram);
+    if (!ids) {
+        Vec::[size_t] v = vec_new::[size_t](arena);
+        v.push(fid);
+        post->insert(gram, v);
+        return;
+    }
+    ids->push(fid);
+}
+
+static void ts_grams_into(TsGramSet grams, CCSlice data) {
+    const unsigned char *b = (const unsigned char *)data.ptr;
+    size_t n = data.len;
+    size_t i;
+    if (n < 3) return;
+    for (i = 0; i + 2 < n; i++) {
+        size_t g = (size_t)ts_fold(b[i])
+                 | ((size_t)ts_fold(b[i + 1]) << 8)
+                 | ((size_t)ts_fold(b[i + 2]) << 16);
+        if (!grams->get_ptr(g))
+            grams->insert(g, true);
+    }
+}
+
+static void ts_index_file(CCArena arena, CCSlice abs_path, CCSlice rel,
+                          Vec::[TsFile] *files, TsPostings post, TsCounts *counts) {
+    CCFile f = cc_file_open(abs_path) !>(e) {
+        (void)e;
+        counts->skipped++;
+        return;
+    };
+    size_t sz = cc_file_size(&f) !>(e) {
+        (void)e;
+        cc_file_close(&f);
+        counts->skipped++;
+        return;
+    };
+    if (sz > (size_t)TS_MAX_FILE) {
+        cc_file_close(&f);
+        counts->skipped++;
+        return;
+    }
+    CCSlice data = cc_file_read_all(&f, arena) !>(e) {
+        (void)e;
+        cc_file_close(&f);
+        counts->skipped++;
+        return;
+    };
+    cc_file_close(&f);
+    if (ts_is_binary_sample(data)) {
+        counts->skipped++;
+        return;
+    }
+    {
+        size_t fid = files->len();
+        TsFile meta;
+        TsGramSet grams = array_map_new::[size_t, bool](arena);
+        size_t i;
+        size_t ng;
+        meta.rel = rel;
+        meta.size = (uint64_t)data.len;
+        files->push(meta);
+        ts_grams_into(grams, data);
+        ng = grams->len();
+        for (i = 0; i < ng; i++) {
+            size_t *gp = grams->key_ptr(i);
+            if (gp) ts_add_posting(post, arena, *gp, fid);
+        }
+        counts->scanned++;
+    }
+}
+
+static void !>(CCError) ts_walk(CCArena live, CCSlice dir_abs, CCSlice rel,
+                                Vec::[TsFile] *files, TsPostings post,
+                                TsCounts *counts) {
+    @errhandler(CCError e) { return cc_err(e); }
+    CCArena dir_arena = cc_arena_heap(megabytes(1)) @destroy;
+    if (!cc_arena_is_live(dir_arena))
+        return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "tinysearch: dir arena"));
+    CCDirIter * !>(CCIoError) iter_res = cc_dir_open(dir_arena, dir_abs);
+    if (cc_is_err(iter_res))
+        return cc_err(CC_ERROR(CC_ERR_IO, "tinysearch: dir open failed"));
+    CCDirIter *iter = cc_unwrap_as(iter_res, CCDirIter *);
+    @defer cc_dir_close(iter);
+    while (true) {
+        CCDirEntry !>(CCIoError) entry_res = cc_dir_next(iter, dir_arena);
+        if (cc_is_err(entry_res)) {
+            CCIoError err = cc_unwrap_err_as(entry_res, CCIoError);
+            if (err.base.kind == CC_IO_OTHER && err.os_code == 0)
+                return cc_ok(); /* EOF */
+            return cc_err(CC_ERROR(CC_ERR_IO, "tinysearch: dir read failed"));
+        }
+        CCDirEntry entry = cc_unwrap_as(entry_res, CCDirEntry);
+        CCSlice name = entry.name;
+        CCSlice child_abs;
+        CCSlice child_rel;
+        if (CCSlice_eq_cstr(&name, ".") || CCSlice_eq_cstr(&name, ".."))
+            continue;
+        if (entry.is_dir()) {
+            if (ts_should_skip_dir(name)) continue;
+            child_abs = cc_path_join(live, dir_abs, name);
+            if (rel.len == 0)
+                child_rel = name.clone_into(live) !>;
+            else
+                child_rel = cc_path_join(live, rel, name);
+            ts_walk(live, child_abs, child_rel, files, post, counts) !>;
+            continue;
+        }
+        if (ts_should_skip_file(name)) continue;
+        if (!entry.is_file() && !entry.is_symlink()) continue;
+        child_abs = cc_path_join(live, dir_abs, name);
+        if (!cc_path_is_file(child_abs)) continue;
+        if (rel.len == 0)
+            child_rel = name.clone_into(live) !>;
+        else
+            child_rel = cc_path_join(live, rel, name);
+        ts_index_file(live, child_abs, child_rel, files, post, counts);
+    }
+}
+
+static void !>(CCError) ts_save_index(CCSlice path, Vec::[TsFile] *files,
+                                      TsPostings post, CCArena arena) {
+    @errhandler(CCError e) { return cc_err(e); }
+    CCString tmp_s = @string(`${path}.tmp`, arena);
+    CCSlice tmp = tmp_s.as_slice();
+    CCFile out = {0};
+    Vec::[size_t] grams = vec_new::[size_t](arena);
+    size_t i;
+    size_t nfiles = files->len();
+    size_t np = post->len();
+
+    out.create(tmp) !>(e) {
+        (void)e;
+        return cc_err(CC_ERROR(CC_ERR_IO, "tinysearch: create index failed"));
+    };
+
+    ts_write_bytes(&out, TS_MAGIC, 4) !>;
+    ts_write_u32(&out, (uint32_t)nfiles) !>;
+    for (i = 0; i < nfiles; i++) {
+        TsFile *meta = files->get_ptr(i);
+        ts_write_u64(&out, 0) !>; /* mtime_ns — MVP always rebuilds */
+        ts_write_u64(&out, meta->size) !>;
+        ts_write_u32(&out, (uint32_t)meta->rel.len) !>;
+        ts_write_bytes(&out, meta->rel.ptr, meta->rel.len) !>;
+    }
+
+    for (i = 0; i < np; i++) {
+        size_t *gp = post->key_ptr(i);
+        if (gp) grams.push(*gp);
+    }
+    if (grams.len() > 1)
+        qsort(grams.get_ptr(0), grams.len(), sizeof(size_t), cmp_size_t);
+
+    ts_write_u32(&out, (uint32_t)grams.len()) !>;
+    for (i = 0; i < grams.len(); i++) {
+        size_t gram = *grams.get_ptr(i);
+        Vec::[size_t] *ids = post->get_ptr(gram);
+        size_t j;
+        size_t npost = ids ? ids->len() : 0;
+        ts_write_u32(&out, (uint32_t)gram) !>;
+        ts_write_u32(&out, (uint32_t)npost) !>;
+        for (j = 0; j < npost; j++)
+            ts_write_u32(&out, (uint32_t)*ids->get_ptr(j)) !>;
+    }
+    cc_file_close(&out);
+
+    if (rename((const char *)tmp.ptr, (const char *)path.ptr) != 0) {
+        (void)cc_file_remove(tmp);
+        return cc_err(CC_ERROR(CC_ERR_IO, "tinysearch: rename index failed"));
+    }
+    return cc_ok();
+}
+
+static void !>(CCError) ts_load_index(CCSlice path, CCArena arena,
+                                      Vec::[TsFile] *files, TsPostings post) {
+    @errhandler(CCError e) { return cc_err(e); }
+    CCSlice data = cc_file_read_path(path, arena) !>;
+    size_t off = 0;
+    uint32_t nfiles;
+    uint32_t ngrams;
+    uint32_t i;
+    if (data.len < 4 || data.ptr[0] != 'T' || data.ptr[1] != 'S'
+        || data.ptr[2] != '0' || data.ptr[3] != '1')
+        return cc_err(CC_ERROR(CC_ERR_PARSE, "tinysearch: bad index magic"));
+    off = 4;
+    nfiles = ts_read_u32(data, &off) !>;
+    for (i = 0; i < nfiles; i++) {
+        TsFile meta;
+        uint64_t mtime_ns;
+        uint32_t plen;
+        mtime_ns = ts_read_u64(data, &off) !>;
+        (void)mtime_ns;
+        meta.size = ts_read_u64(data, &off) !>;
+        plen = ts_read_u32(data, &off) !>;
+        if (off + plen > data.len)
+            return cc_err(CC_ERROR(CC_ERR_PARSE, "tinysearch: truncated path"));
+        meta.rel = data.sub(off, off + plen).clone_into(arena) !>;
+        off += plen;
+        files->push(meta);
+    }
+    ngrams = ts_read_u32(data, &off) !>;
+    for (i = 0; i < ngrams; i++) {
+        uint32_t gram = ts_read_u32(data, &off) !>;
+        uint32_t npost = ts_read_u32(data, &off) !>;
+        uint32_t j;
+        Vec::[size_t] ids = vec_new::[size_t](arena);
+        for (j = 0; j < npost; j++) {
+            uint32_t fid = ts_read_u32(data, &off) !>;
+            ids.push((size_t)fid);
+        }
+        post->insert((size_t)gram, ids);
+    }
+    return cc_ok();
+}
+
+static void ts_intersect_into(TsCand dst, Vec::[size_t] *ids) {
+    size_t i;
+    size_t n = ids->len();
+    for (i = 0; i < n; i++) {
+        size_t fid = *ids->get(i);
+        if (!dst->get_ptr(fid))
+            dst->insert(fid, true);
+    }
+}
+
+static void ts_intersect_filter(TsCand dst, Vec::[size_t] *ids, CCArena arena) {
+    TsCand next = array_map_new::[size_t, bool](arena);
+    size_t i;
+    size_t n = ids->len();
+    size_t nn;
+    for (i = 0; i < n; i++) {
+        size_t fid = *ids->get(i);
+        if (dst->get_ptr(fid) && !next->get_ptr(fid))
+            next->insert(fid, true);
+    }
+    dst->clear();
+    nn = next->len();
+    for (i = 0; i < nn; i++) {
+        size_t *fp = next->key_ptr(i);
+        if (fp) dst->insert(*fp, true);
+    }
+}
+
+/**
+ * @task Build a fresh trigram index under ROOT.
+ */
+static int idx(int argc, char **argv) {
+    CCArena arena = cc_arena_heap(megabytes(64)) @destroy;
+    IndexOpts opts = {0};
+    bool go = cc_prepare_args(IndexOpts, argc, argv, arena, &opts, stderr) !>;
+    if (!go) return 0;
+
+    CCSlice root = ts_pick_root(opts.root, opts.root_len);
+    CCSlice idx_path = opts.index_present ? opts.index : ts_default_idx(root, arena);
+
+    Vec::[TsFile] files = vec_new::[TsFile](arena);
+    TsPostings post = array_map_new::[size_t, Vec::[size_t]](arena);
+    TsCounts counts = {0};
+    size_t nbytes = 0;
+
+    if (!cc_path_is_dir(root)) {
+        CCString s = @string(`tinysearch: not a directory: ${root}`, arena);
+        s.eprintln();
+        return 2;
+    }
+
+    ts_walk(arena, root, cc_slice_empty(), &files, post, &counts) !>;
+    ts_save_index(idx_path, &files, post, arena) !>;
+
+    {
+        CCSlice !>(CCError) blob_res = cc_file_read_path(idx_path, arena);
+        if (cc_is_ok(blob_res))
+            nbytes = cc_unwrap_as(blob_res, CCSlice).len;
+    }
+    {
+        CCString s = @string(
+            `indexed ${files.len()} files (scanned ${counts.scanned}, skipped ${counts.skipped}) → ${idx_path} (${nbytes} bytes)`,
+            arena);
+        s.println();
+    }
+    return 0;
+}
+
+/**
+ * @task Search using the index; confirm with substring (optional -i).
+ */
+static int query(int argc, char **argv) {
+    CCArena arena = cc_arena_heap(megabytes(64)) @destroy;
+    SearchOpts opts = {0};
+    bool go = cc_prepare_args(SearchOpts, argc, argv, arena, &opts, stderr) !>;
+    if (!go) return 0;
+
+    if (opts.args_len < 1 || !opts.args[0].ptr) {
+        "tinysearch: @query needs QUERY [ROOT]".eprintln();
+        return 2;
+    }
+    CCSlice query = opts.args[0];
+    CCSlice root = (opts.args_len >= 2 && opts.args[1].ptr && opts.args[1].len)
+                       ? opts.args[1]
+                       : @slice(".");
+    CCSlice idx_path = opts.index_present ? opts.index : ts_default_idx(root, arena);
+
+    if (!cc_path_exists(idx_path)) {
+        "tinysearch: no index; run @idx first".eprintln();
+        return 2;
+    }
+
+    Vec::[TsFile] files = vec_new::[TsFile](arena);
+    TsPostings post = array_map_new::[size_t, Vec::[size_t]](arena);
+    ts_load_index(idx_path, arena, &files, post) !>;
+
+    TsCand cand = array_map_new::[size_t, bool](arena);
+    TsGramSet qgrams = array_map_new::[size_t, bool](arena);
+    ts_grams_into(qgrams, query);
+
+    if (query.len >= 3 && qgrams->len() > 0) {
+        Vec::[size_t] glist = vec_new::[size_t](arena);
+        size_t i;
+        size_t nq = qgrams->len();
+        for (i = 0; i < nq; i++) {
+            size_t *gp = qgrams->key_ptr(i);
+            if (!gp) continue;
+            if (!post->get_ptr(*gp))
+                return 1; /* missing gram → no hits */
+            glist.push(*gp);
+        }
+        for (i = 0; i < glist.len(); i++) {
+            size_t best = i;
+            size_t j;
+            for (j = i + 1; j < glist.len(); j++) {
+                size_t gj = *glist.get_ptr(j);
+                size_t gb = *glist.get_ptr(best);
+                Vec::[size_t] *a = post->get_ptr(gj);
+                Vec::[size_t] *b = post->get_ptr(gb);
+                if (a->len() < b->len()) best = j;
+            }
+            if (best != i) {
+                size_t *pi = glist.get_ptr(i);
+                size_t *pb = glist.get_ptr(best);
+                size_t tmp = *pi;
+                *pi = *pb;
+                *pb = tmp;
+            }
+        }
+        {
+            size_t g0 = *glist.get_ptr(0);
+            ts_intersect_into(cand, post->get_ptr(g0));
+        }
+        for (i = 1; i < glist.len(); i++) {
+            size_t gi = *glist.get_ptr(i);
+            ts_intersect_filter(cand, post->get_ptr(gi), arena);
+            if (cand->len() == 0) break;
+        }
+    } else {
+        size_t i;
+        size_t n = files.len();
+        for (i = 0; i < n; i++)
+            cand->insert(i, true);
+    }
+
+    {
+        Vec::[size_t] fids = vec_new::[size_t](arena);
+        size_t i;
+        size_t nc = cand->len();
+        size_t hits = 0;
+        for (i = 0; i < nc; i++) {
+            size_t *fp = cand->key_ptr(i);
+            if (fp) fids.push(*fp);
+        }
+        if (fids.len() > 1)
+            qsort(fids.get_ptr(0), fids.len(), sizeof(size_t), cmp_size_t);
+
+        for (i = 0; i < fids.len(); i++) {
+            size_t id = *fids.get_ptr(i);
+            TsFile *meta;
+            CCSlice abs_path;
+            CCSlice text;
+            size_t line_no;
+            size_t p;
+            if (id >= files.len()) continue;
+            meta = files.get_ptr(id);
+            abs_path = cc_path_join(arena, root, meta->rel);
+            text = cc_file_read_path(abs_path, arena) !>(e) {
+                (void)e;
+                continue;
+            };
+            if (opts.ignore_case) {
+                if (!text.has_ci(query)) continue;
+            } else {
+                if (!text.has(query)) continue;
+            }
+            line_no = 1;
+            p = 0;
+            while (p <= text.len) {
+                size_t start = p;
+                CCSlice line;
+                while (p < text.len && text.ptr[p] != '\n') p++;
+                line = text.sub(start, p);
+                if (opts.ignore_case ? line.has_ci(query) : line.has(query)) {
+                    CCString s = @string(`${meta->rel}:${line_no}:${line}`, arena);
+                    s.println();
+                    hits++;
+                }
+                if (p >= text.len) break;
+                p++;
+                line_no++;
+            }
+        }
+        return hits ? 0 : 1;
+    }
+}
+
+"usage: tinysearch.shcc @idx [root] [-f path]".println();
+"       tinysearch.shcc @query QUERY [root] [-f path] [-i]".println();
+"       tinysearch.shcc @".println();
+return 2;

@@ -2060,6 +2060,7 @@ static void shadow_register_from_text(const char* s) {
                  (fam[0] >= 'A' && fam[0] <= 'Z') ||
                  strncmp(fam, "Map", 3) == 0 || strncmp(fam, "CCVec", 5) == 0 ||
                  strncmp(fam, "ArrayMap", 8) == 0 ||
+                 strncmp(fam, "Table", 5) == 0 ||
                  strncmp(fam, "Vec", 3) == 0)) {
                 char mangled[160];
                 snprintf(mangled, sizeof(mangled), "%s_%s", fam, compact);
@@ -2257,6 +2258,7 @@ static void shadow_collect_binds_node(AstNode* st) {
         shadow_slice_note_raw(st->a);
         shadow_map_note_raw(st->a);
         shadow_amap_note_raw(st->a);
+        shadow_table_note_raw(st->a);
         shadow_td_alias_note_raw(st->a);
     } else if (st->kind == AST_TYPEDEF_STRUCT || st->kind == AST_STRUCT) {
         int i;
@@ -2391,6 +2393,15 @@ static void shadow_collect_binds_node(AstNode* st) {
                 shadow_ufn_register(fname, first);
             } else
                 shadow_ufn_register(fname, "");
+            /* Plain return type for @switch(call(...)) / UFCS subjects. */
+            if (st->kind == AST_FN_PROTO || st->kind == AST_STATIC_FN ||
+                st->kind == AST_ASYNC_FN) {
+                if (st->a && st->a[0] && strcmp(st->a, "void") != 0)
+                    shadow_ufn_set_ret(fname, st->a);
+            } else if (st->kind == AST_FN) {
+                if (st->e && st->e[0] && strcmp(st->e, "void") != 0)
+                    shadow_ufn_set_ret(fname, st->e);
+            }
             for (pi = 0; pi < np; pi++) {
                 char base[64];
                 int stars = 0;
@@ -8407,6 +8418,27 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             }
             {
                 int saved_via = ctx ? ctx->err_via_bang : 0;
+                int bind_mark = g_shadow_nbinds;
+                {
+                    const char* cal = shadow_outer_call_ident(call);
+                    char cname[128];
+                    size_t clen = 0;
+                    const char* ety = NULL;
+                    if (cal && cal[0]) {
+                        while (cal[clen] && shadow_is_id(cal[clen]) &&
+                               clen + 1 < sizeof(cname))
+                            clen++;
+                        if (clen) {
+                            memcpy(cname, cal, clen);
+                            cname[clen] = 0;
+                            ety = shadow_rfn_err(cname);
+                        }
+                    }
+                    if (ety && ety[0])
+                        shadow_bind_name(bind, ety, 0);
+                    else if (ctx && ctx->eh && ctx->eh->a && ctx->eh->a[0])
+                        shadow_bind_name(bind, ctx->eh->a, 0);
+                }
                 if (ctx) ctx->err_via_bang = 1;
                 if (use_eh && st->nbody == 0) {
                     if (!shadow_emit_handler(out, ctx, bind, i2)) {
@@ -8414,6 +8446,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                             ctx->err_via_bang = saved_via;
                             ctx->eh = saved_eh;
                         }
+                        g_shadow_nbinds = bind_mark;
                         return 0;
                     }
                 } else if (strcmp(ast_slot(st->c), "bang_stmt") == 0) {
@@ -8424,6 +8457,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                             ctx->err_via_bang = saved_via;
                             ctx->eh = saved_eh;
                         }
+                        g_shadow_nbinds = bind_mark;
                         return 0;
                     }
                 } else {
@@ -8434,11 +8468,13 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                                 ctx->err_via_bang = saved_via;
                                 ctx->eh = saved_eh;
                             }
+                            g_shadow_nbinds = bind_mark;
                             return 0;
                         }
                     }
                 }
                 if (ctx) ctx->err_via_bang = saved_via;
+                g_shadow_nbinds = bind_mark;
             }
                 if (ctx) ctx->eh = saved_eh;
                 /* Result assign keeps `.u.value` (Generic may miss a TU
@@ -8449,7 +8485,8 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                                      i1, i1, st->e, uw_val, indent);
                 return cemit_fmt(out, "%s}\n%s}\n", i1, indent);
             }
-            /* Field-typed binder keeps CCIoError. */
+            /* Field-typed binder keeps CCIoError / custom E. Bind `e` as E
+             * so `e.kind == .arm` / `@switch (e)` resolve designators. */
             if (!cemit_fmt(out,
                     "%s{\n"
                     "%s__typeof__(%s) __r = %s;\n"
@@ -8460,12 +8497,31 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             if (!shadow_resync_line(out, ctx, i2)) return 0;
             {
                 int saved_via = ctx ? ctx->err_via_bang : 0;
+                int bind_mark = g_shadow_nbinds;
+                {
+                    const char* cal = shadow_outer_call_ident(call);
+                    char cname[128];
+                    size_t clen = 0;
+                    const char* ety = NULL;
+                    if (cal && cal[0]) {
+                        while (cal[clen] && shadow_is_id(cal[clen]) &&
+                               clen + 1 < sizeof(cname))
+                            clen++;
+                        if (clen) {
+                            memcpy(cname, cal, clen);
+                            cname[clen] = 0;
+                            ety = shadow_rfn_err(cname);
+                        }
+                    }
+                    if (ety && ety[0]) shadow_bind_name(bind, ety, 0);
+                }
                 if (ctx) ctx->err_via_bang = 1;
                 if (strcmp(ast_slot(st->c), "bang_stmt") == 0) {
                     if (st->nbody > 0 &&
                         !shadow_emit_stmt_ctx(st->body[0], out, ctx, i2,
                                               use_cleanup)) {
                         if (ctx) ctx->err_via_bang = saved_via;
+                        g_shadow_nbinds = bind_mark;
                         return 0;
                     }
                 } else {
@@ -8473,11 +8529,13 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                         if (!shadow_emit_stmt_ctx(st->body[k], out, ctx, i2,
                                                   use_cleanup)) {
                             if (ctx) ctx->err_via_bang = saved_via;
+                            g_shadow_nbinds = bind_mark;
                             return 0;
                         }
                     }
                 }
                 if (ctx) ctx->err_via_bang = saved_via;
+                g_shadow_nbinds = bind_mark;
             }
             if (st->e && st->e[0])
                 return cemit_fmt(out, "%s}\n%s%s = __r.u.value;\n%s}\n", i1, i1,
@@ -9646,6 +9704,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                 (strncmp(vty, "CCSlice_", 8) == 0 || strcmp(vty, "CCSlice") == 0 ||
                  strncmp(vty, "CCVec_", 6) == 0 || strncmp(vty, "Map_", 4) == 0 ||
                  strncmp(vty, "ArrayMap_", 9) == 0 ||
+                 strncmp(vty, "Table_", 6) == 0 ||
                  strncmp(vty, "CCChan", 6) == 0 ||
                  strncmp(vty, "CCResult_", 9) == 0 ||
                  strncmp(vty, "Pair_", 5) == 0 ||
@@ -9687,28 +9746,64 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                                    ? st->d + 16
                                    : st->d + 11;
             char i1[80], i2[80];
+            int is_rfn = shadow_call_is_result_fn(call);
             shadow_indent_nest(i1, sizeof(i1), indent, 1);
             shadow_indent_nest(i2, sizeof(i2), indent, 2);
-            if (!cemit_fmt(out,
-                    "%s{\n"
-                    "%s__typeof__(%s) __r = %s;\n"
-                    "%sif (__cc_uw_is_err(__r)) {\n",
-                    indent, i1, call, call, i1))
-                return 0;
+            /* Result UFCS bang: field-typed E binder (same as AST_STMT_UNWRAP)
+             * so custom E / designators work cross-TU. Pointer producers keep
+             * `__cc_uw_*`. */
+            if (is_rfn) {
+                if (!cemit_fmt(out,
+                        "%s{\n"
+                        "%s__typeof__(%s) __r = %s;\n"
+                        "%sif (!__r.ok) {\n"
+                        "%s__typeof__(__r.u.error) %s = __r.u.error;\n",
+                        indent, i1, call, call, i1, i2, bind))
+                    return 0;
+            } else {
+                if (!cemit_fmt(out,
+                        "%s{\n"
+                        "%s__typeof__(%s) __r = %s;\n"
+                        "%sif (__cc_uw_is_err(__r)) {\n",
+                        indent, i1, call, call, i1))
+                    return 0;
+            }
             if (!shadow_resync_line(out, ctx, i2)) return 0;
-            if (!shadow_emit_ptr_err_at_bind(out, ctx, i2, bind, st->b))
-                return 0;
+            if (!is_rfn) {
+                if (!shadow_emit_ptr_err_at_bind(out, ctx, i2, bind, st->b))
+                    return 0;
+            }
             {
                 int saved_via = ctx ? ctx->err_via_bang : 0;
+                int bind_mark = g_shadow_nbinds;
+                {
+                    const char* cal = shadow_outer_call_ident(call);
+                    char cname[128];
+                    size_t clen = 0;
+                    const char* ety = NULL;
+                    if (cal && cal[0]) {
+                        while (cal[clen] && shadow_is_id(cal[clen]) &&
+                               clen + 1 < sizeof(cname))
+                            clen++;
+                        if (clen) {
+                            memcpy(cname, cal, clen);
+                            cname[clen] = 0;
+                            ety = shadow_rfn_err(cname);
+                        }
+                    }
+                    if (ety && ety[0]) shadow_bind_name(bind, ety, 0);
+                }
                 if (ctx) ctx->err_via_bang = 1;
                 for (int k = 0; k < st->nbody; k++) {
                     if (!shadow_emit_stmt_ctx(st->body[k], out, ctx, i2,
                                               use_cleanup)) {
                         if (ctx) ctx->err_via_bang = saved_via;
+                        g_shadow_nbinds = bind_mark;
                         return 0;
                     }
                 }
                 if (ctx) ctx->err_via_bang = saved_via;
+                g_shadow_nbinds = bind_mark;
             }
             return cemit_fmt(out, "%s}\n%s}\n", i1, indent);
         }

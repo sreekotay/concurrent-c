@@ -4,6 +4,7 @@
  *
  * Include after <ccc/std/prelude.cch>.
  */
+#pragma(@per_tu)
 #ifndef STATICD_HTTP_CCH
 #define STATICD_HTTP_CCH
 
@@ -151,11 +152,16 @@ static int http_parse_date(char[:] s, CCArena a, time_t* out) {
     HttpDate d;
     int m;
     struct tm tm;
+    struct tm back;
+    time_t t;
     if (!cc_parse(HttpDate, s.ptr, s.len, a, &d)) return 0;
     if (d.month.len != 3) return 0;
     for (m = 0; m < 12; m++)
         if (memcmp(d.month.ptr, k_mo[m], 3) == 0) break;
     if (m == 12 || d.day < 1 || d.day > 31) return 0;
+    if (d.hour < 0 || d.hour > 23) return 0;
+    if (d.minute < 0 || d.minute > 59) return 0;
+    if (d.sec < 0 || d.sec > 60) return 0;
     memset(&tm, 0, sizeof(tm));
     tm.tm_mday = d.day;
     tm.tm_mon = m;
@@ -163,8 +169,15 @@ static int http_parse_date(char[:] s, CCArena a, time_t* out) {
     tm.tm_hour = d.hour;
     tm.tm_min = d.minute;
     tm.tm_sec = d.sec;
-    *out = timegm(&tm);
-    return *out != (time_t)-1;
+    t = timegm(&tm);
+    if (t == (time_t)-1) return 0;
+    if (!gmtime_r(&t, &back)) return 0;
+    if (back.tm_year != tm.tm_year || back.tm_mon != tm.tm_mon
+            || back.tm_mday != tm.tm_mday || back.tm_hour != tm.tm_hour
+            || back.tm_min != tm.tm_min || back.tm_sec != tm.tm_sec)
+        return 0;
+    *out = t;
+    return 1;
 }
 
 static int digits_u(char[:] s, size_t* out) {
@@ -189,6 +202,7 @@ static int range_parse(char[:] v, size_t n, CCArena a, size_t* off, size_t* len)
     if (!r.lo.len && !r.hi.len) return 0;
     if (!r.lo.len) {
         if (!digits_u(r.hi, &end) || n == 0) return -1;
+        if (end == 0) return -1; /* bytes=-0 → 416 (RFC 9110 §14.1.2) */
         if (end > n) end = n;
         *off = n - end;
         *len = end;
@@ -224,6 +238,106 @@ static char[:] path_ext(char[:] path) {
         return empty;
     }
     return path.sub(dot, path.len);
+}
+
+static int uri_hexval(unsigned char c) {
+    if (c >= '0' && c <= '9') return (int)(c - '0');
+    if (c >= 'a' && c <= 'f') return (int)(c - 'a') + 10;
+    if (c >= 'A' && c <= 'F') return (int)(c - 'A') + 10;
+    return -1;
+}
+
+static int uri_unreserved(unsigned char c) {
+    if (c >= 'A' && c <= 'Z') return 1;
+    if (c >= 'a' && c <= 'z') return 1;
+    if (c >= '0' && c <= '9') return 1;
+    return c == '-' || c == '.' || c == '_' || c == '~';
+}
+
+/* Strict path decode after query split. Rejects bad %, decoded / \,
+ * C0 controls, and DEL (byte-oriented; POSIX filenames). */
+static bool !>(CCError) uri_path_decode(char[:] src, CCString* dst, CCArena a) {
+    size_t i = 0;
+    if (!dst) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "uri decode"));
+    *dst = cc_string_new();
+    while (i < src.len) {
+        unsigned char ch = (unsigned char)src.ptr[i];
+        char one[1];
+        if (ch == '%') {
+            int hi, lo;
+            if (i + 2 >= src.len)
+                return cc_err(CC_ERROR(CC_ERR_PARSE, "bad uri"));
+            hi = uri_hexval((unsigned char)src.ptr[i + 1]);
+            lo = uri_hexval((unsigned char)src.ptr[i + 2]);
+            if (hi < 0 || lo < 0)
+                return cc_err(CC_ERROR(CC_ERR_PARSE, "bad uri"));
+            ch = (unsigned char)((hi << 4) | lo);
+            i += 3;
+            if (ch < 0x20 || ch == 0x7f || ch == '/' || ch == '\\')
+                return cc_err(CC_ERROR(CC_ERR_PARSE, "bad uri"));
+        } else {
+            i++;
+            if (ch < 0x20 || ch == 0x7f)
+                return cc_err(CC_ERROR(CC_ERR_PARSE, "bad uri"));
+        }
+        one[0] = (char)ch;
+        if (!dst->append(cc_slice_from_buffer(one, 1), a) || dst->failed())
+            return cc_err(CC_ERR_OUT_OF_MEMORY, "uri decode");
+    }
+    return cc_ok(true);
+}
+
+/* Percent-encode one path component (RFC unreserved literal). */
+static bool !>(CCError) uri_path_encode_component(char[:] name, CCString* dst,
+                                                   CCArena a) {
+    static const char hex[] = "0123456789ABCDEF";
+    if (!dst) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "uri encode"));
+    *dst = cc_string_new();
+    @for (ch in name) {
+        unsigned char c = (unsigned char)ch;
+        if (uri_unreserved(c)) {
+            char one[1] = { (char)c };
+            if (!dst->append(cc_slice_from_buffer(one, 1), a) || dst->failed())
+                return cc_err(CC_ERR_OUT_OF_MEMORY, "uri encode");
+        } else {
+            char esc[3] = { '%', hex[c >> 4], hex[c & 15] };
+            if (!dst->append(cc_slice_from_buffer(esc, 3), a) || dst->failed())
+                return cc_err(CC_ERR_OUT_OF_MEMORY, "uri encode");
+        }
+    }
+    return cc_ok(true);
+}
+
+/* Encode a full decoded path: keep `/` separators; encode each component. */
+static bool !>(CCError) uri_path_encode_path(char[:] path, CCString* dst,
+                                              CCArena a) {
+    size_t i = 0;
+    if (!dst) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "uri encode path"));
+    *dst = cc_string_new();
+    if (!path.len) {
+        if (!dst->append(cc_slice_cstr("/"), a) || dst->failed())
+            return cc_err(CC_ERR_OUT_OF_MEMORY, "uri encode path");
+        return cc_ok(true);
+    }
+    while (i < path.len) {
+        if (path.ptr[i] == '/') {
+            if (!dst->append(cc_slice_cstr("/"), a) || dst->failed())
+                return cc_err(CC_ERR_OUT_OF_MEMORY, "uri encode path");
+            i++;
+            continue;
+        }
+        {
+            size_t start = i;
+            CCString comp;
+            while (i < path.len && path.ptr[i] != '/') i++;
+            uri_path_encode_component(path.sub(start, i), &comp, a) !>(err) {
+                return cc_err(err);
+            };
+            if (!dst->append(comp.as_slice(), a) || dst->failed())
+                return cc_err(CC_ERR_OUT_OF_MEMORY, "uri encode path");
+        }
+    }
+    return cc_ok(true);
 }
 
 #endif /* STATICD_HTTP_CCH */

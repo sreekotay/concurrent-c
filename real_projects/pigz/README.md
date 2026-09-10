@@ -1,9 +1,16 @@
 # pigz_cc: Parallel Gzip in Concurrent-C
 
-This project provides two implementations of parallel gzip compression:
+Upstream Mark Adler pigz plus Concurrent-C variants of the same job.
 
-1. **Original pigz** - Mark Adler's pthread-based implementation
-2. **pigz_cc** - Native Concurrent-C rewrite using structured concurrency
+- **`pigz`** — original pthread pigz (`pigz_c/`, via `setup.sh`)
+- **`pigz_idiomatic`** — teachable compress model (`@parallel wait` + chained dict)
+- **`pigz_cc`** — feature-complete CC port (wait-for compress, channel decompress)
+- Plus sketches: `pigz_channel`, `pigz_parallel`, `pigz_hybrid`, `pigz_pthread`,
+  unordered / profile / directjoin ladders (see Files)
+
+`make all` builds: pigz, pigz_cc, idiomatic, parallel, channel, hybrid, pthread.
+Not in `all` (build by name): `pigz_unordered`, `pigz_profile`,
+`pigz_pthread_profile`, `pigz_fiber_directjoin`, `pigz_thread_directjoin`.
 
 ## Quick Start
 
@@ -16,16 +23,22 @@ chmod +x setup.sh
 chmod +x download_silesia.sh
 ./download_silesia.sh
 
-# 3. Build both versions
-make pigz      # Original (requires zlib, pthreads)
-make pigz_cc   # CC version (requires CC compiler + zlib)
+# 3. Build (ccc prefers ../../cc/bin/ccc)
+make all       # main matrix
+make pigz_idiomatic   # teachable binary alone
+# optional ladders:
+#   make pigz_fiber_directjoin pigz_thread_directjoin pigz_unordered pigz_profile
 
-# 4. Run benchmark
+# 4. Smoke / test
+make test      # gzip round-trip for pigz / pigz_cc / idiomatic / channel / hybrid
+./out/pigz_idiomatic somefile.txt   # → somefile.txt.gz
+
+# 5. Run benchmark
 ./bench_defaults.sh              # latest method: 50 MB, 5 rounds, <bin> <file>
 ./bench_defaults.sh 50 5 pigz,pigz_idiomatic
 ./benchmark.sh 200 8 3           # older: size / pigz -p workers / runs
 
-# 5. Linux ILP32 (Docker) — pigz.c vs pigz_idiomatic vs pigz_cc
+# 6. Linux ILP32 (Docker) — pigz.c vs pigz_idiomatic vs pigz_cc
 ../../scripts/pigz_i386.sh
 ../../scripts/pigz_arm32.sh
 # Optional: PIGZ_BENCH_MB=50 PIGZ_BENCH_WORKERS=8 PIGZ_BENCH_RUNS=3 ../../scripts/pigz_i386.sh
@@ -157,20 +170,23 @@ for (int w = 0; w < num_workers; w++) {
 
 ## Usage
 
-Both versions support similar options:
+Upstream `pigz` / `pigz_cc` share similar flags (`-p`, `-c`, `-k`). The
+idiomatic demos take a filename and write `file.gz` (see each `.ccs`
+header for flags).
 
 ```bash
 # Compress file
-./pigz -p 4 file.txt        # -> file.txt.gz
-./pigz_cc -p 4 file.txt     # -> file.txt.gz
+./out/pigz -p 4 file.txt        # -> file.txt.gz
+./out/pigz_cc -p 4 file.txt     # -> file.txt.gz
+./out/pigz_idiomatic file.txt   # -> file.txt.gz
 
 # To stdout
-./pigz -c file.txt > out.gz
-./pigz_cc -c file.txt > out.gz
+./out/pigz -c file.txt > out.gz
+./out/pigz_cc -c file.txt > out.gz
 
 # Keep original
-./pigz -k file.txt
-./pigz_cc -k file.txt
+./out/pigz -k file.txt
+./out/pigz_cc -k file.txt
 ```
 
 ## Building

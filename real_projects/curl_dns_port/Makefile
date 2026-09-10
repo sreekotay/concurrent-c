@@ -15,6 +15,10 @@ BASELINE_ROUNDS ?= 10
 
 CURL_VERSION := $(shell tr -d '[:space:]' < CURL_VERSION)
 CC_RT_OBJ ?= $(REPO_ROOT)/out/cc/obj/runtime/concurrent_c.o
+BEARSSL_A ?= $(REPO_ROOT)/third_party/bearssl/build/libbearssl.a
+# concurrent_c.o may reference BearSSL when the toolchain was built with
+# CC_ENABLE_TLS=1 (e.g. after a staticd build). Link it when present.
+CC_RT_LIBS = $(CC_RT_OBJ) $(wildcard $(BEARSSL_A)) -lpthread -lm
 STOCK_LIB = $(PREFIX)/lib/libcurl.a.stock
 STOCK_BIN = $(PREFIX)/bin/curl.stock
 LIVE_LIB = $(PREFIX)/lib/libcurl.a
@@ -55,7 +59,7 @@ BASELINE_CFLAGS = $(shell test -x $(CURL_CONFIG) && $(CURL_CONFIG) --cflags) -Wa
 BASELINE_LIBS = $(shell test -x $(CURL_CONFIG) && $(CURL_CONFIG) --static-libs)
 # curl-config --static-libs minus the archive path — used when relinking curl.
 CURL_SYS_LIBS = $(filter-out $(LIVE_LIB),$(BASELINE_LIBS))
-CC_LINK = $(CC_RT_OBJ) -lpthread -lm $(CURL_SYS_LIBS)
+CC_LINK = $(CC_RT_LIBS) $(CURL_SYS_LIBS)
 
 SAN_CC ?= $(shell command -v clang >/dev/null 2>&1 && echo clang || echo $(CC))
 SAN_FLAGS = -fsanitize=address -fno-omit-frame-pointer -g -O1
@@ -115,7 +119,7 @@ $(OUT_DIR)/thrdqueue.o: thrdqueue.ccs cc_thrdqueue.h | $(OUT_DIR)
 $(OUT_DIR)/thrdqueue_smoke: thrdqueue_smoke.c $(OUT_DIR)/thrdqueue.o
 	@test -f "$(CC_RT_OBJ)" || { echo "missing $(CC_RT_OBJ) — build the CC toolchain first"; exit 1; }
 	$(CC) -Wall -Wextra -O2 -o $@ thrdqueue_smoke.c $(OUT_DIR)/thrdqueue.o \
-		$(CC_RT_OBJ) -lpthread -lm
+		$(CC_RT_LIBS)
 
 queue-smoke: $(OUT_DIR)/thrdqueue_smoke
 	$(OUT_DIR)/thrdqueue_smoke
@@ -126,7 +130,7 @@ $(OUT_DIR)/thrdqueue.asan.o: thrdqueue.ccs cc_thrdqueue.h | $(OUT_DIR)
 $(OUT_DIR)/thrdqueue_smoke.asan: thrdqueue_smoke.c $(OUT_DIR)/thrdqueue.asan.o
 	@test -f "$(CC_RT_OBJ)" || { echo "missing $(CC_RT_OBJ) — build the CC toolchain first"; exit 1; }
 	$(SAN_CC) $(SAN_FLAGS) -Wall -Wextra -o $@ thrdqueue_smoke.c \
-		$(OUT_DIR)/thrdqueue.asan.o $(CC_RT_OBJ) -lpthread -lm
+		$(OUT_DIR)/thrdqueue.asan.o $(CC_RT_LIBS)
 
 # Darwin ASan + CC fibers can hang (see scripts/real_projects_sanitize.sh).
 # The unsanitized join_blocked test is the timing proof; this is the UAF net.

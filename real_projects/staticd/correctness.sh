@@ -2,10 +2,13 @@
 # Correctness gate: every enabled server must match fixtures/manifest.txt
 # (status 200, Content-Length, body SHA-256) and reject traversal.
 # staticd also: OPTIONS, query strip, --header, --index, --list,
-# Connection token list, Range / 304 / If-Range, intermediate symlink
-# jail, atomic rename under a hot name, WebSocket echo, --pages script
-# replies (SKIP if QuickJS / libpython missing), optional TLS
-# (--tls-cert/--tls-key with BearSSL sample PEMs).
+# Connection token list, Range / 304 / If-Range / bytes=-0, POST body
+# forces close, listing/pages Connection: close body, intermediate
+# symlink jail, atomic rename under a hot name, WebSocket suite
+# (ws_test.py: echo / ping / close / handshake rejects),
+# --pages script replies (SKIP if QuickJS / libpython missing; py
+# handler isolation), optional TLS (--tls-cert/--tls-key with BearSSL
+# sample PEMs).
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -222,7 +225,17 @@ check_server() {
         fi
         echo "  ok Range overflow -> 416"
 
-        local lm ims_code ifr_ok ifr_miss bad_ims conn_h
+        local suf0
+        suf0=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H 'Range: bytes=-0' \
+            "http://127.0.0.1:${port}/4kb.html")
+        if [[ "$suf0" != "416" ]]; then
+            echo "FAIL $name Range bytes=-0 status=$suf0 (want 416)" >&2
+            exit 1
+        fi
+        echo "  ok Range bytes=-0 -> 416"
+
+        local lm ims_code ifr_ok ifr_miss bad_ims conn_h post_close
         curl -sS -D "$TMPDIR_RUN/lm.hdr" -o /dev/null \
             "http://127.0.0.1:${port}/4kb.html"
         lm=$(hdr_field "$TMPDIR_RUN/lm.hdr" Last-Modified)
@@ -273,84 +286,25 @@ check_server() {
         fi
         echo "  ok Connection token list -> $conn_h"
 
+        # POST with a body must close: leftover body bytes must not become
+        # the next request line on a keep-alive connection.
+        post_close=$(curl -sS -D- -o /dev/null -X POST \
+            -H 'Content-Length: 5' --data-binary 'hello' \
+            "http://127.0.0.1:${port}/4kb.html" \
+            | awk 'BEGIN{IGNORECASE=1} /^Connection:/ {print}' | tr -d '\r')
+        if [[ "$post_close" != *close* ]]; then
+            echo "FAIL $name POST with body Connection: '$post_close' (want close)" >&2
+            exit 1
+        fi
+        echo "  ok POST with body -> Connection: close"
+
         check_ws "$port"
     fi
 }
 
 check_ws() {
     local port="$1"
-    python3 - "$port" <<'PY'
-import base64, hashlib, os, socket, struct, sys
-
-port = int(sys.argv[1])
-key = base64.b64encode(os.urandom(16)).decode()
-guid = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-want = base64.b64encode(hashlib.sha1(key.encode() + guid).digest()).decode()
-
-s = socket.create_connection(("127.0.0.1", port), 2)
-req = (
-    "GET /echo HTTP/1.1\r\n"
-    "Host: 127.0.0.1\r\n"
-    "Upgrade: websocket\r\n"
-    "Connection: Upgrade\r\n"
-    f"Sec-WebSocket-Key: {key}\r\n"
-    "Sec-WebSocket-Version: 13\r\n"
-    "\r\n"
-).encode()
-s.sendall(req)
-buf = b""
-while b"\r\n\r\n" not in buf:
-    chunk = s.recv(4096)
-    if not chunk:
-        raise SystemExit("FAIL WS handshake closed")
-    buf += chunk
-head, rest = buf.split(b"\r\n\r\n", 1)
-if b"101" not in head.split(b"\r\n", 1)[0]:
-    raise SystemExit(f"FAIL WS status {head.split(b'\\n', 1)[0]!r}")
-if want.encode() not in head:
-    raise SystemExit("FAIL WS Accept mismatch")
-
-def recvn(sock, n, extra):
-    out = extra
-    extra = b""
-    while len(out) < n:
-        chunk = sock.recv(n - len(out))
-        if not chunk:
-            raise SystemExit("FAIL WS short read")
-        out += chunk
-    return out, extra
-
-def send_text(sock, text):
-    payload = text.encode()
-    mkey = os.urandom(4)
-    masked = bytes(b ^ mkey[i % 4] for i, b in enumerate(payload))
-    hdr = bytearray([0x81, 0x80 | len(payload)])
-    hdr.extend(mkey)
-    sock.sendall(bytes(hdr) + masked)
-
-def read_unmasked(sock, extra):
-    hdr, extra = recvn(sock, 2, extra)
-    if (hdr[0] & 0x80) == 0:
-        raise SystemExit("FAIL WS fragment")
-    opcode = hdr[0] & 0x0F
-    n = hdr[1] & 0x7F
-    if hdr[1] & 0x80:
-        raise SystemExit("FAIL WS server masked")
-    if n == 126:
-        ext, extra = recvn(sock, 2, extra)
-        n = struct.unpack("!H", ext)[0]
-    elif n == 127:
-        raise SystemExit("FAIL WS huge frame")
-    body, extra = recvn(sock, n, extra)
-    return opcode, body, extra
-
-send_text(s, "hello")
-op, body, rest = read_unmasked(s, rest)
-if op != 1 or body != b"hello":
-    raise SystemExit(f"FAIL WS echo op={op} body={body!r}")
-s.close()
-PY
-    echo "  ok WS echo hello"
+    python3 "$SCRIPT_DIR/ws_test.py" --port "$port"
 }
 
 [[ -f "$MANIFEST" ]] || ./gen_fixtures.sh
@@ -385,6 +339,23 @@ if [[ "$INCLUDE_STATICD" == "1" ]]; then
         exit 1
     fi
     echo "  ok --list /sub/ -> 200"
+    # Connection: close must still deliver the listing body (not headers-only).
+    {
+        cl_code=$(curl -sS -o "$TMPDIR_RUN/list-close.html" -w '%{http_code}' \
+            -H 'Connection: close' \
+            "http://127.0.0.1:${list_port}/sub/")
+        cl_body=$(cat "$TMPDIR_RUN/list-close.html")
+        cl_hdr=$(curl -sS -D- -o /dev/null -H 'Connection: close' \
+            "http://127.0.0.1:${list_port}/sub/" \
+            | awk 'BEGIN{IGNORECASE=1} /^Content-Length:/ {print $2}' | tr -d '\r')
+        cl_bytes=$(wc -c < "$TMPDIR_RUN/list-close.html" | tr -d ' ')
+        if [[ "$cl_code" != "200" || "$cl_body" != *a.txt* \
+                || -z "$cl_hdr" || "$cl_hdr" != "$cl_bytes" ]]; then
+            echo "FAIL staticd listing Connection: close status=$cl_code clen=$cl_hdr bytes=$cl_bytes" >&2
+            exit 1
+        fi
+        echo "  ok --list Connection: close -> body matches Content-Length"
+    }
     icode=$(curl -sS -o "$TMPDIR_RUN/home.body" -w '%{http_code}' \
         "http://127.0.0.1:${list_port}/")
     ibody=$(cat "$TMPDIR_RUN/home.body")
@@ -499,6 +470,42 @@ if [[ "$INCLUDE_STATICD" == "1" ]]; then
         exit 1
     else
         echo "  ok pages hello.js -> 200"
+        {
+            cat >"$pages_js/hdrs.js" <<'EOF'
+export function GET(request) {
+  return new Response("ok\n", {
+    headers: {
+      "content-type": "text/plain; charset=utf-8",
+      "X-Page": "hdrs",
+    },
+  });
+}
+EOF
+            hdr_line=$(curl -sS -D- -o /dev/null \
+                "http://127.0.0.1:${pages_port}/hdrs" \
+                | awk 'BEGIN{IGNORECASE=1} /^X-Page:/ {print $2}' | tr -d '\r')
+            if [[ "$hdr_line" != "hdrs" ]]; then
+                echo "FAIL staticd pages custom header X-Page=$hdr_line (want hdrs)" >&2
+                exit 1
+            fi
+            echo "  ok pages custom response header"
+        }
+        {
+            pc_code=$(curl -sS -o "$TMPDIR_RUN/hello-close.js.body" -w '%{http_code}' \
+                -H 'Connection: close' \
+                "http://127.0.0.1:${pages_port}/hello")
+            pc_body=$(cat "$TMPDIR_RUN/hello-close.js.body"; printf x); pc_body=${pc_body%x}
+            pc_clen=$(curl -sS -D- -o /dev/null -H 'Connection: close' \
+                "http://127.0.0.1:${pages_port}/hello" \
+                | awk 'BEGIN{IGNORECASE=1} /^Content-Length:/ {print $2}' | tr -d '\r')
+            pc_bytes=$(wc -c < "$TMPDIR_RUN/hello-close.js.body" | tr -d ' ')
+            if [[ "$pc_code" != "200" || "$pc_body" != $'hello /hello\n' \
+                    || "$pc_clen" != "$pc_bytes" ]]; then
+                echo "FAIL staticd pages Connection: close status=$pc_code clen=$pc_clen body=$(printf %q "$pc_body")" >&2
+                exit 1
+            fi
+            echo "  ok pages Connection: close -> body matches Content-Length"
+        }
         boom_code=$(curl -sS -o /dev/null -w '%{http_code}' \
             "http://127.0.0.1:${pages_port}/boom")
         if [[ "$boom_code" != "500" ]]; then
@@ -536,6 +543,40 @@ if [[ "$INCLUDE_STATICD" == "1" ]]; then
         exit 1
     else
         echo "  ok pages hello.py -> 200"
+        # Cross-page namespace: prior GET must not satisfy a later page that
+        # only defines handler, and a page with neither must fail.
+        cat > "$pages_py/only_get.py" <<'PY'
+def GET(request):
+    return Response("from-get\n", content_type="text/plain; charset=utf-8")
+PY
+        cat > "$pages_py/only_handler.py" <<'PY'
+def handler(request):
+    return Response("from-handler\n", content_type="text/plain; charset=utf-8")
+PY
+        cat > "$pages_py/no_fn.py" <<'PY'
+x = 1
+PY
+        g_code=$(curl -sS -o "$TMPDIR_RUN/py-get.body" -w '%{http_code}' \
+            "http://127.0.0.1:${pages_py_port}/only_get")
+        g_body=$(cat "$TMPDIR_RUN/py-get.body"; printf x); g_body=${g_body%x}
+        h_code=$(curl -sS -o "$TMPDIR_RUN/py-handler.body" -w '%{http_code}' \
+            "http://127.0.0.1:${pages_py_port}/only_handler")
+        h_body=$(cat "$TMPDIR_RUN/py-handler.body"; printf x); h_body=${h_body%x}
+        n_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            "http://127.0.0.1:${pages_py_port}/no_fn")
+        if [[ "$g_code" != "200" || "$g_body" != $'from-get\n' ]]; then
+            echo "FAIL staticd pages py only_get status=$g_code body=$(printf %q "$g_body")" >&2
+            exit 1
+        fi
+        if [[ "$h_code" != "200" || "$h_body" != $'from-handler\n' ]]; then
+            echo "FAIL staticd pages py only_handler (GET leak?) status=$h_code body=$(printf %q "$h_body")" >&2
+            exit 1
+        fi
+        if [[ "$n_code" != "500" ]]; then
+            echo "FAIL staticd pages py no_fn status=$n_code (want 500; GET must not leak)" >&2
+            exit 1
+        fi
+        echo "  ok pages py handler isolation (GET / handler / none)"
     fi
 
     pages_both="$TMPDIR_RUN/pages_both"

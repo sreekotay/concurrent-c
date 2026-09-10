@@ -1,0 +1,39 @@
+#!ccc ccs
+/*
+ * Serial gate create+free churn: discovery-map compact must not retire a
+ * new table per tomb cycle (O(tickets) RSS). Live entries stay O(1).
+ *
+ * Concurrent freelist smash under wait/pass: turnstile_concurrent_churn_smoke.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+#define TICKETS 200000
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "%s\n", e.message ? e.message : "error");
+        return 1;
+    }
+    CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+    CCExclusive excl = cc_exclusive_create(arena, 16) !> @destroy;
+
+    for (int i = 0; i < TICKETS; i++) {
+        uint64_t name = 0x100000000ull + (uint64_t)i;
+        if (cc_exclusive_gate_pass(excl, name) != CC_EXCL_WAIT_OK)
+            return 1;
+        if (cc_exclusive_gate_wait(excl, name) != CC_EXCL_WAIT_OK)
+            return 1;
+    }
+
+    size_t live = cc_exclusive_live_count(excl);
+    size_t alive = arena.live();
+    /* One small map + freelisted entries; not O(TICKETS) retired tables. */
+    if (live > 2 || alive > kilobytes(64)) {
+        fprintf(stderr, "FAIL live=%zu arena_live=%zu (tickets=%d)\n",
+                live, alive, TICKETS);
+        return 1;
+    }
+    printf("exclusive_gate_churn_smoke: OK\n");
+    return 0;
+}

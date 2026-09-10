@@ -24,6 +24,7 @@ static inline int cc_ufcs_type_is_known_family_base(const char* type_name) {
     if (!type_name || !type_name[0]) return 0;
     return strncmp(type_name, "CCVec_", 6) == 0 ||
            strncmp(type_name, "ArrayMap_", 9) == 0 ||
+           strncmp(type_name, "Table_", 6) == 0 ||
            strncmp(type_name, "Map_", 4) == 0 ||
            strcmp(type_name, "CCString") == 0 ||
            strcmp(type_name, "CCSlice") == 0 ||
@@ -48,6 +49,8 @@ static inline const char* cc_ufcs_family_header_suffix(const char* base) {
     if (strncmp(base, "CCSlice_", 8) == 0) return "cc_slice.cch";
     if (strncmp(base, "CCVec_", 6) == 0) return "std/vec.cch";
     if (strncmp(base, "ArrayMap_", 9) == 0) return "std/array_map.cch";
+    /* Table DECL reuses ArrayMap's ##_ method set (CC_TABLE_DECL → core). */
+    if (strncmp(base, "Table_", 6) == 0) return "std/array_map.cch";
     if (strncmp(base, "Map_", 4) == 0) return "std/map_impl.cch";
     if (strncmp(base, "CCResult_", 9) == 0) return "cc_result.cch";
     return NULL;

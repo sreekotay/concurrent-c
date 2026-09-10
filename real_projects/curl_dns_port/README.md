@@ -64,10 +64,15 @@ make stock          # restore the snapshot
 
 `make flavor` prints `stock` or `cc` (`cc_curl_thrdq` in `libcurl.a`).
 Smoke and baseline always test the live prefix. `make queue-smoke` hits
-the queue knobs and a blocked join/detach (no libcurl). `make queue-asan`
-is the same smoke under AddressSanitizer. `make runtests-dns` runs the
-curl tests that can hit this queue on a non-debug build (1515, 1516,
-3301). 2103/2104 need `override-dns`; 1512 is DISABLED upstream.
+the queue knobs and a blocked join/detach (no libcurl). It links
+`out/cc/obj/runtime/concurrent_c.o`; when that object was built with
+`CC_ENABLE_TLS=1` (e.g. after a `staticd` build), the Makefile also
+pulls in `third_party/bearssl/build/libbearssl.a` if present — build
+BearSSL with `make -C cc bearssl` if `queue-smoke` fails on unresolved
+TLS symbols. `make queue-asan` is the same smoke under AddressSanitizer.
+`make runtests-dns` runs the curl tests that can hit this queue on a
+non-debug build (1515, 1516, 3301). 2103/2104 need `override-dns`; 1512
+is DISABLED upstream.
 
 Contract and numbers: [BASELINE.md](BASELINE.md).
 

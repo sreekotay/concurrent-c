@@ -1,4 +1,4 @@
-CCC = ../../out/cc/bin/ccc
+CCC ?= $(shell test -x ../../cc/bin/ccc && echo ../../cc/bin/ccc || echo ../../out/cc/bin/ccc)
 OUT_DIR = out
 REPO_ROOT = ../..
 CC_LOCAL ?= cc

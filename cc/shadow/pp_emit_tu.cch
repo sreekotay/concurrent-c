@@ -19,7 +19,8 @@ static int shadow_ty_is_generic_container(const char* ty) {
     if (n >= sizeof(base)) n = sizeof(base) - 1;
     base[n] = 0;
     p = base;
-    return strncmp(p, "ArrayMap_", 9) == 0 || strncmp(p, "Map_", 4) == 0 ||
+    return strncmp(p, "ArrayMap_", 9) == 0 || strncmp(p, "Table_", 6) == 0 ||
+           strncmp(p, "Map_", 4) == 0 ||
            strncmp(p, "CCVec_", 6) == 0;
 }
 
@@ -59,7 +60,9 @@ static int shadow_typedef_struct_embeds_generic_container(const AstNode* it) {
             return 1;
         if (f->kind == AST_FIELD_INT) continue;
         /* raw / other field shapes: best-effort scan of type text */
-        if (f->a && f->a[0] && (strstr(ast_slot(f->a), "ArrayMap_") || strstr(ast_slot(f->a), "Map_") ||
+        if (f->a && f->a[0] && (strstr(ast_slot(f->a), "ArrayMap_") ||
+                        strstr(ast_slot(f->a), "Table_") ||
+                        strstr(ast_slot(f->a), "Map_") ||
                         strstr(ast_slot(f->a), "CCVec_")))
             return 1;
     }
@@ -1380,9 +1383,11 @@ static int shadow_emit_unwrap_generics(CEmit* out, char seen_ok[][128],
         shadow_result_name(seen_ok[si], seen_err[si], rname, sizeof(rname));
         if (shadow_uw_skip_builtin_rname(rname)) continue;
         apath[0] = 0;
-        /* `__cc_uw_err_at` is the ambient-CCError path (hoist cells). Keep
-         * CCPrintError out: it does not as: to CCError; PrintError bangs use
-         * field bind via `@errhandler(CCPrintError)` / `!>(e)`. */
+        /* Ambient CCError path keeps as:-to-CCError coercion. Custom E
+         * (WaitFail / ArmFail / …) still needs a typed arm so UFCS bang
+         * via `__cc_uw_err_at` does not default to CCError. PrintError and
+         * similar stay field-bind for @errhandler; the arm here is only
+         * for typeof / hoist when the controlling type is that Result. */
         if (strcmp(seen_err[si], "CCError") == 0) {
             if (!cemit_fmt(out,
                     ", %s: (cc_rt_diag_record_unwrap_site(__f__, __l__), "
@@ -1395,6 +1400,12 @@ static int shadow_emit_unwrap_generics(CEmit* out, char seen_ok[][128],
             if (!cemit_fmt(out,
                     ", %s: (cc_rt_diag_record_unwrap_site(__f__, __l__), "
                     "(*(CCError*)(void*)&((%s*)(void*)&(__x__))->u.error))",
+                    rname, rname))
+                return 0;
+        } else {
+            if (!cemit_fmt(out,
+                    ", %s: (cc_rt_diag_record_unwrap_site(__f__, __l__), "
+                    "((%s*)(void*)&(__x__))->u.error)",
                     rname, rname))
                 return 0;
         }
@@ -2008,6 +2019,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                      * hoisting them early leaves RedisDbMap as an unknown
                      * incomplete type. */
                     if (strncmp(ast_slot(items[i]->b), "ArrayMap_", 9) == 0 ||
+                        strncmp(ast_slot(items[i]->b), "Table_", 6) == 0 ||
                         strncmp(ast_slot(items[i]->b), "Map_", 4) == 0 ||
                         strncmp(ast_slot(items[i]->b), "CCVec_", 6) == 0 ||
                         strncmp(ast_slot(items[i]->b), "CCSlice", 7) == 0)
@@ -2327,6 +2339,11 @@ ginst_emit_pass:
             }
             if (strcmp(inst->family, "ArrayMap") == 0 &&
                 shadow_amap_already(inst->compact)) {
+                cc_arena_free(&def_ar);
+                continue;
+            }
+            if (strcmp(inst->family, "Table") == 0 &&
+                shadow_table_already(inst->compact)) {
                 cc_arena_free(&def_ar);
                 continue;
             }
@@ -2680,6 +2697,9 @@ ginst_emit_pass:
                         diag_note("include <ccc/std/array_map.cch> or "
                                   "<ccc/std/prelude.cch> "
                                   "(CC_GENERIC_FACTORY(ArrayMap))");
+                    else if (strcmp(inst->family, "Table") == 0)
+                        diag_note("include <ccc/std/table.cch> "
+                                  "(CC_GENERIC_FACTORY(Table))");
                     else if (strcmp(inst->family, "CCSlice") == 0)
                         diag_note("include <ccc/cc_slice.cch> or "
                                   "<ccc/std/prelude.cch> "
@@ -2734,6 +2754,10 @@ ginst_emit_pass:
                 }
                 inst->emitted = 1;
                 shadow_ginst_ufcs_harvest_body(inst->mangled, body);
+                if (strcmp(inst->family, "Table") == 0 ||
+                    strcmp(inst->family, "ArrayMap") == 0 ||
+                    strcmp(inst->family, "Map") == 0)
+                    shadow_map_ufcs_install(inst->mangled);
                 /* Same as preprocess.c on a spliced factory def: the
                  * generated `T !>(E) name(` is not an AST_RESULT_FN, so
                  * `T x = name() !> @destroy` would skip unwrap and assign
@@ -3838,6 +3862,7 @@ ginst_after_quotes:
             shadow_slice_note_raw(it->a);
             shadow_map_note_raw(it->a);
             shadow_amap_note_raw(it->a);
+            shadow_table_note_raw(it->a);
             shadow_td_alias_note_raw(it->a);
             if (it->a && it->a[0] && strncmp(ast_slot(it->a), "static void", 11) == 0 &&
                 strstr(ast_slot(it->a), "[]")) {

@@ -9,6 +9,7 @@
  * Fd cache: pathname revalidate ≤1s (absolute). Hold dups the fd so a
  * swap can close the slot fd while in-flight holds finish.
  */
+#pragma(@per_tu)
 #ifndef STATICD_FS_CCH
 #define STATICD_FS_CCH
 
@@ -36,6 +37,7 @@
 typedef struct FileHold {
     size_t file_len;
     time_t mtime;
+    long mtime_nsec;
     uint64_t dev;
     uint64_t ino;
     int slot;
@@ -105,10 +107,10 @@ static int open_beneath(int root_fd, const char* rel, int last_dir) {
         if (n == 0) {
             if (last) {
                 if (last_dir) {
-                    if (dirfd == root_fd) {
-                        fd = fcntl(root_fd, F_DUPFD_CLOEXEC, 0);
-                        return fd;
-                    }
+                    /* Fresh OFD — F_DUPFD shares readdir offset with root_fd. */
+                    if (dirfd == root_fd)
+                        return openat(root_fd, ".",
+                                      O_RDONLY | O_DIRECTORY | O_CLOEXEC);
                     return dirfd;
                 }
                 if (dirfd != root_fd) close(dirfd);
@@ -144,7 +146,8 @@ static int open_beneath(int root_fd, const char* rel, int last_dir) {
 
 static int !>(CCIoError) open_at(int root_fd, const char* rel,
                                  size_t* file_len, time_t* mtime,
-                                 uint64_t* dev, uint64_t* ino) {
+                                 long* mtime_nsec, uint64_t* dev,
+                                 uint64_t* ino) {
     struct stat st;
     int fd;
     if (!rel || !rel[0] || rel[0] == '/')
@@ -161,6 +164,13 @@ static int !>(CCIoError) open_at(int root_fd, const char* rel,
         return cc_err(cc_io_from_errno(EINVAL));
     }
     *mtime = st.st_mtime;
+#if defined(__APPLE__)
+    *mtime_nsec = st.st_mtimespec.tv_nsec;
+#elif defined(__linux__)
+    *mtime_nsec = st.st_mtim.tv_nsec;
+#else
+    *mtime_nsec = 0;
+#endif
     *file_len = (size_t)st.st_size;
     *dev = (uint64_t)st.st_dev;
     *ino = (uint64_t)st.st_ino;
@@ -172,6 +182,7 @@ static int !>(CCIoError) open_at(int root_fd, const char* rel,
 typedef struct FileSlot {
     char rel[FILE_CACHE_KEY];
     time_t mtime;
+    long mtime_nsec;
     time_t until;
     time_t checked;
     size_t file_len;
@@ -228,6 +239,7 @@ static int fc_dup_hold(int i, time_t now, FileHold* h) {
     g_fc[i].refs++;
     g_fc[i].until = now + FILE_CACHE_TTL;
     h->mtime = g_fc[i].mtime;
+    h->mtime_nsec = g_fc[i].mtime_nsec;
     h->file_len = g_fc[i].file_len;
     h->dev = g_fc[i].dev;
     h->ino = g_fc[i].ino;
@@ -238,12 +250,15 @@ static int fc_dup_hold(int i, time_t now, FileHold* h) {
 
 /* Lock held. Consume fd: same inode keeps slot.fd, else swap. */
 static void fc_apply_open(int i, int fd, time_t now, size_t file_len,
-                          time_t mtime, uint64_t dev, uint64_t ino) {
+                          time_t mtime, long mtime_nsec, uint64_t dev,
+                          uint64_t ino) {
     int same = (g_fc[i].fd >= 0 && g_fc[i].dev == dev && g_fc[i].ino == ino);
     if (same) {
-        if (g_fc[i].mtime != mtime || g_fc[i].file_len != file_len) {
+        if (g_fc[i].mtime != mtime || g_fc[i].mtime_nsec != mtime_nsec
+                || g_fc[i].file_len != file_len) {
             block_cull_id(g_fc[i].dev, g_fc[i].ino);
             g_fc[i].mtime = mtime;
+            g_fc[i].mtime_nsec = mtime_nsec;
             g_fc[i].file_len = file_len;
         }
         close(fd);
@@ -253,6 +268,7 @@ static void fc_apply_open(int i, int fd, time_t now, size_t file_len,
         if (g_fc[i].fd >= 0) close(g_fc[i].fd);
         g_fc[i].fd = fd;
         g_fc[i].mtime = mtime;
+        g_fc[i].mtime_nsec = mtime_nsec;
         g_fc[i].file_len = file_len;
         g_fc[i].dev = dev;
         g_fc[i].ino = ino;
@@ -260,7 +276,7 @@ static void fc_apply_open(int i, int fd, time_t now, size_t file_len,
     g_fc[i].checked = now;
 }
 
-void file_hold_drop(FileHold* h) {
+static void file_hold_drop(FileHold* h) {
     if (!h) return;
     if (h->fd >= 0) close(h->fd);
     if (h->slot >= 0) {
@@ -285,7 +301,8 @@ static FileHold !>(CCIoError) file_hold(int root_fd, const char* rel) {
     n = strlen(rel);
     if (n < FILE_CACHE_KEY) memcpy(h.rel, rel, n + 1);
     if (n >= FILE_CACHE_KEY) {
-        fd = open_at(root_fd, rel, &h.file_len, &h.mtime, &h.dev, &h.ino) !>(err) {
+        fd = open_at(root_fd, rel, &h.file_len, &h.mtime, &h.mtime_nsec,
+                     &h.dev, &h.ino) !>(err) {
             return cc_err(err);
         };
         h.fd = fd;
@@ -310,7 +327,8 @@ static FileHold !>(CCIoError) file_hold(int root_fd, const char* rel) {
     }
     hold.release();
 
-    fd = open_at(root_fd, rel, &h.file_len, &h.mtime, &h.dev, &h.ino) !>(err) {
+    fd = open_at(root_fd, rel, &h.file_len, &h.mtime, &h.mtime_nsec,
+                 &h.dev, &h.ino) !>(err) {
         hold = g_fc_mx.acquire();
         now = time(NULL);
         i = fc_find(rel);
@@ -327,7 +345,8 @@ static FileHold !>(CCIoError) file_hold(int root_fd, const char* rel) {
     fc_sweep(now);
     i = fc_find(rel);
     if (i >= 0) {
-        fc_apply_open(i, fd, now, h.file_len, h.mtime, h.dev, h.ino);
+        fc_apply_open(i, fd, now, h.file_len, h.mtime, h.mtime_nsec, h.dev,
+                      h.ino);
         if (fc_dup_hold(i, now, &h) != 0) {
             e = errno;
             hold.release();
@@ -346,6 +365,7 @@ static FileHold !>(CCIoError) file_hold(int root_fd, const char* rel) {
     }
     memcpy(g_fc[i].rel, rel, n + 1);
     g_fc[i].mtime = h.mtime;
+    g_fc[i].mtime_nsec = h.mtime_nsec;
     g_fc[i].file_len = h.file_len;
     g_fc[i].dev = h.dev;
     g_fc[i].ino = h.ino;
@@ -393,8 +413,10 @@ static int join_index(char* dst, size_t cap, const char* rel, const char* index)
 }
 
 static int fs_dir_open(int root_fd, const char* rel) {
+    /* openat(".") — not F_DUPFD: dup shares the directory offset, so the
+     * second listing of / would readdir from EOF and look empty. */
     if (!rel || !rel[0] || strcmp(rel, ".") == 0)
-        return fcntl(root_fd, F_DUPFD_CLOEXEC, 0);
+        return openat(root_fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     return open_beneath(root_fd, rel, 1);
 }
 
@@ -433,6 +455,14 @@ static CCString !>(CCError) dir_listing(int dfd, char[:] url, CCArena a) {
     CCString html = cc_string_new();
     int root = (url.len == 1 && url.ptr[0] == '/');
 
+    /* Private OFD for readdir (caller may have passed a shared dup). */
+    {
+        int listfd = openat(dfd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        close(dfd);
+        if (listfd < 0)
+            return cc_err(CC_ERR_IO, "openat listing");
+        dfd = listfd;
+    }
     dp = fdopendir(dfd);
     if (!dp) {
         close(dfd);
@@ -462,17 +492,25 @@ static CCString !>(CCError) dir_listing(int dfd, char[:] url, CCArena a) {
     }
     qsort(ents, n, sizeof(ents[0]), dirent_cmp);
 
+    /* Decoded `url` for titles/text; encoded base for hrefs (so `?` `#`
+     * in parent dirs do not become query/fragment). */
+    CCString url_enc;
+    uri_path_encode_path(url, &url_enc, a) !>(err) {
+        return cc_err(err);
+    };
+    char[:] href_base = url_enc.as_slice();
+
     html.append("<html><head><title>Index of ", a);
     html_push(&html, a, url);
     html.append("</title></head><body><h1>Index of ", a);
     html_push(&html, a, url);
     html.append("</h1><pre>\n", a);
     if (!root) {
-        size_t pn = url.len;
+        size_t pn = href_base.len;
         char[:] parent;
-        while (pn > 1 && url.ptr[pn - 1] == '/') pn--;
-        while (pn > 0 && url.ptr[pn - 1] != '/') pn--;
-        parent = pn ? url.sub(0, pn) : cc_slice_cstr("/");
+        while (pn > 1 && href_base.ptr[pn - 1] == '/') pn--;
+        while (pn > 0 && href_base.ptr[pn - 1] != '/') pn--;
+        parent = pn ? href_base.sub(0, pn) : cc_slice_cstr("/");
         html.append("<a href=\"", a);
         html_push(&html, a, parent);
         html.append("\">../</a>\n", a);
@@ -481,15 +519,22 @@ static CCString !>(CCError) dir_listing(int dfd, char[:] url, CCArena a) {
         DirEnt e = ents[i];
         char[:] name = cc_slice_cstr(e.name);
         char[:] slash = e.is_dir ? cc_slice_cstr("/") : cc_slice_empty();
-        size_t un = url.len;
+        size_t un = href_base.len;
+        CCString enc;
         CCString href;
         uint64_t sz = e.size;
-        while (un > 1 && url.ptr[un - 1] == '/') un--;
-        if (un == 1 && url.ptr[0] == '/')
-            href = @string(`/${name}${slash}`, a);
-        else {
-            char[:] base = url.sub(0, un);
-            href = @string(`${base}/${name}${slash}`, a);
+        while (un > 1 && href_base.ptr[un - 1] == '/') un--;
+        uri_path_encode_component(name, &enc, a) !>(err) {
+            return cc_err(err);
+        };
+        {
+            char[:] encs = enc.as_slice();
+            if (un == 1 && href_base.ptr[0] == '/')
+                href = @string(`/${encs}${slash}`, a);
+            else {
+                char[:] base = href_base.sub(0, un);
+                href = @string(`${base}/${encs}${slash}`, a);
+            }
         }
         html.append("<a href=\"", a);
         html_push(&html, a, href);

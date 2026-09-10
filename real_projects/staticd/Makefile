@@ -1,4 +1,4 @@
-CCC = ../../out/cc/bin/ccc
+CCC ?= $(shell test -x ../../cc/bin/ccc && echo ../../cc/bin/ccc || echo ../../out/cc/bin/ccc)
 OUT_DIR = out
 DARKHTTPD_DIR = vendor/darkhttpd
 DARKHTTPD_BIN = $(OUT_DIR)/darkhttpd
@@ -13,7 +13,7 @@ BEARSSL_INC = $(abspath $(BEARSSL_DIR)/inc)
 REPO_CC = ../../cc
 REPO_ROOT = ../..
 
-.PHONY: all staticd darkhttpd fixtures clean setup smoke bench string_tpl \
+.PHONY: all staticd darkhttpd fixtures clean setup smoke bench ws stress string_tpl \
 	ensure-tls-runtime ensure-bearssl
 
 all: staticd
@@ -38,13 +38,14 @@ endif
 
 $(OUT_DIR)/staticd: staticd.ccs staticd_ws.cch \
 		staticd_http.cch staticd_block.cch staticd_fs.cch staticd_script.cch \
-		CCServer.cch CCServer.ccs \
+		CCServer.cch CCServer.ccs CCServerPoll.cch CCServerPoll.ccs \
 		| $(OUT_DIR) ensure-tls-runtime
 ifeq ($(CC_ENABLE_TLS),1)
-	CFLAGS="-DCC_ENABLE_TLS -I$(BEARSSL_INC) $${CFLAGS:-}" \
-		$(CCC) -O -o $@ staticd.ccs CCServer.ccs --release
+	CFLAGS="-DCC_ENABLE_TLS -I$(BEARSSL_INC) $(EXTRA_CFLAGS) $${CFLAGS:-}" \
+		$(CCC) -O -o $@ staticd.ccs CCServer.ccs CCServerPoll.ccs --release
 else
-	$(CCC) -O -o $@ staticd.ccs CCServer.ccs --release
+	CFLAGS="$(EXTRA_CFLAGS) $${CFLAGS:-}" \
+		$(CCC) -O -o $@ staticd.ccs CCServer.ccs CCServerPoll.ccs --release
 endif
 
 staticd: $(OUT_DIR)/staticd
@@ -71,6 +72,14 @@ setup:
 
 smoke: staticd fixtures
 	./compare.sh --smoke
+
+# Narrow WebSocket subset (spawn throwaway staticd on :18080).
+ws: staticd
+	python3 ./ws_test.py --spawn ./out/staticd --port 18080
+
+# Adversarial storms (see ../../stress/staticd/staticd_stress.md).
+stress: staticd fixtures
+	cd ../.. && CHAOS_SCALE=$${CHAOS_SCALE:-quick} ./stress/staticd/run.sh
 
 # Isolated RSS (fresh process per cell). Override with DURATION=5 REPEATS=3 …
 bench: staticd fixtures

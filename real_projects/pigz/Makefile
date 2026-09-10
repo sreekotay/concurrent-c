@@ -99,6 +99,13 @@ $(OUT_DIR)/pigz_pthread_profile: pigz_pthread_profile.ccs | $(OUT_DIR)
 $(OUT_DIR)/pigz_unordered: pigz_unordered.ccs | $(OUT_DIR)
 	$(CCC) -O -o $@ pigz_unordered.ccs --ld-flags "-lz" --release
 
+# Ladder: direct FIFO joins (no channel)
+$(OUT_DIR)/pigz_fiber_directjoin: pigz_fiber_directjoin.ccs | $(OUT_DIR)
+	$(CCC) -O -o $@ pigz_fiber_directjoin.ccs --ld-flags "-lz" --release
+
+$(OUT_DIR)/pigz_thread_directjoin: pigz_thread_directjoin.ccs | $(OUT_DIR)
+	$(CCC) -O -o $@ pigz_thread_directjoin.ccs --ld-flags "-lz" --release
+
 # Convenience targets
 pigz: $(OUT_DIR)/pigz
 pigz_cc: $(OUT_DIR)/pigz_cc
@@ -110,7 +117,10 @@ pigz_pthread: $(OUT_DIR)/pigz_pthread
 pigz_profile: $(OUT_DIR)/pigz_profile
 pigz_pthread_profile: $(OUT_DIR)/pigz_pthread_profile
 pigz_unordered: $(OUT_DIR)/pigz_unordered
+pigz_fiber_directjoin: $(OUT_DIR)/pigz_fiber_directjoin
+pigz_thread_directjoin: $(OUT_DIR)/pigz_thread_directjoin
 
+# Main matrix. Not included: unordered, profile*, *directjoin (build by name).
 all: pigz pigz_cc pigz_idiomatic pigz_parallel pigz_channel pigz_hybrid pigz_pthread
 
 # Download source files if not present
@@ -163,4 +173,7 @@ clean:
 smoke: pigz_cc
 	@./smoke.sh
 
-.PHONY: setup test clean all pigz pigz_cc pigz_idiomatic pigz_parallel pigz_channel pigz_hybrid smoke
+.PHONY: setup test clean all smoke \
+	pigz pigz_cc pigz_idiomatic pigz_parallel pigz_channel pigz_hybrid \
+	pigz_pthread pigz_profile pigz_pthread_profile pigz_unordered \
+	pigz_fiber_directjoin pigz_thread_directjoin
