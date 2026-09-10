@@ -873,8 +873,12 @@ static CCSlice pl_for_ex_type(CcLowerer* L, uint32_t id) {
     return lw_keep(L, &s);
 }
 
-/* The cell an exit is recorded in, and the environment each half carries. */
-static CCString pl_for_env_text(PStep* st, uint32_t id, PCapList* caps, CCSlice ret_ty) {
+static CcStmt* pl_raise_handler(CcLowerer* L, CCSlice ety, CCSlice cell, CcStmt* leave, CcSpan sp);
+
+/* The cell an exit is recorded in, and the environment each half carries.
+ * `xk`: 0 nothing yet, 1 a `break`, 2 a `return` (`rv`), 3 a raise (`err`,
+ * present when `err_ty` names a type). */
+static CCString pl_for_env_text(PStep* st, uint32_t id, PCapList* caps, CCSlice ret_ty, CCSlice err_ty) {
     CcLowerer* L = st->L;
     CCArena a = L->arena;
     CCString sb = cc_string_new();
@@ -884,7 +888,12 @@ static CCString pl_for_env_text(PStep* st, uint32_t id, PCapList* caps, CCSlice 
     size_t i;
     sb.push_cstr("typedef struct { cc_atomic_int lock; cc_atomic_int xk; ", a);
     sb.push_slice(ret_ty, a);
-    sb.push_cstr(" rv; } ", a);
+    sb.push_cstr(" rv; ", a);
+    if (err_ty.len) {
+        sb.push_slice(err_ty, a);
+        sb.push_cstr(" err; ", a);
+    }
+    sb.push_cstr("} ", a);
     sb.push_slice(ex, a);
     sb.push_cstr(";\n", a);
     sb.push_cstr("typedef struct {\n", a);
@@ -977,7 +986,7 @@ static void pl_for_exits(PForExit* fx, CcStmt* s, int depth) {
         if (is_ret) {
             CCString spelled = r.value ? lw_spell_expr(L, r.value) : @string(`0`, L->arena);
             CCSlice v = lw_keep(L, &spelled);
-            CCString t = @string(`{ int __cc_z = 0; while (!cc_atomic_cas(&e->__cc_pf_ex->lock, &__cc_z, 1)) __cc_z = 0; if (cc_atomic_load(&e->__cc_pf_ex->xk) != 2) { e->__cc_pf_ex->rv = (${v}); cc_atomic_store(&e->__cc_pf_ex->xk, 2); } cc_atomic_store(&e->__cc_pf_ex->lock, 0); }`, L->arena);
+            CCString t = @string(`{ int __cc_z = 0; while (!cc_atomic_cas(&e->__cc_pf_ex->lock, &__cc_z, 1)) __cc_z = 0; if (cc_atomic_load(&e->__cc_pf_ex->xk) < 2) { e->__cc_pf_ex->rv = (${v}); cc_atomic_store(&e->__cc_pf_ex->xk, 2); } cc_atomic_store(&e->__cc_pf_ex->lock, 0); }`, L->arena);
             CcStmt* blk = lw_block(L, sp);
             lw_push(blk, lw_expr_stmt(L, lw_text(L, t, sp), sp));
             if (fx->cancel) {
@@ -1036,7 +1045,7 @@ static void pl_for_exits(PForExit* fx, CcStmt* s, int depth) {
  * runtime accepts. The leaf loop is emitted once: a span of one skips the
  * split, and a split whose spawn was refused falls through to it. */
 static CcDecl* pl_for_walk_decl(PStep* st, uint32_t id, PCapList* caps, CcForIn loop,
-                                CcExpr* lo, CcExpr* hi, bool has_ex, CcSpan sp) {
+                                CcExpr* lo, CcExpr* hi, bool has_ex, CCSlice err_ty, CcSpan sp) {
     CcLowerer* L = st->L;
     CCSlice env = pl_for_name(L, id, "_env_t");
     CCSlice walk = pl_for_name(L, id, "_walk");
@@ -1145,6 +1154,16 @@ static CcDecl* pl_for_walk_decl(PStep* st, uint32_t id, PCapList* caps, CcForIn 
         fs = cc__stmt_blank(sp, L->arena);
         { CcStmtK sk = { .for_ = fl }; fs->k = sk; }
         lw_push(fnbody, lw_decl_stmt(L, intt, bind, NULL, sp));
+        if (err_ty.len) {
+            /* a bare `!>` in the body: this half is a function of its own,
+             * so the handler the frame carries is not here. The body opens
+             * under a handler that records the error in the exit cell and
+             * ends the walk; the site raises the record after the join.
+             * Added after the exit rewriting walked the body, so the
+             * `return` it ends in is its own. */
+            lw_push(fnbody, pl_raise_handler(L, err_ty, cstr_slice("e->__cc_pf_ex"),
+                                             cc_stmt_return(NULL, sp, L->arena), sp));
+        }
         lw_push(fnbody, fs);
     }
     {
@@ -1570,13 +1589,35 @@ static bool pl_reject(CcLowerer* L, CcParallel p, CcSpan sp) {
 
 static CcStmt* pl_unwrap_stmt(CcLowerer* L, CcExpr* call, CcSpan sp);
 
-/* An arm whose bare `!>` reaches nothing of its own: it raises through the
- * join. A block that opens with a handler of its own belongs to that one. */
+/* `@err(e);` forwards to the handler in scope the way a bare `!>` does. */
+static bool pl_err_fwd_stmt(CcStmt* s, void* env) {
+    bool* hit = (bool*)env;
+    @switch (s->k) {
+        case .err_fwd: *hit = true; break;
+        default: break;
+    }
+    return true;
+}
+
+/* A body whose error reaches nothing of its own -- a bare `!>`, or an
+ * `@err(e);` forward -- and so raises through the join. A block that opens
+ * with a handler of its own belongs to that one. */
+static bool pl_body_raises(CcStmt* body) {
+    CcVisitor v;
+    bool hit = false;
+    if (!body) return false;
+    if (pl_block_has_handler(body)) return false;
+    memset(&v, 0, sizeof(v));
+    v.expr = pl_bare_unwrap_expr;
+    v.stmt = pl_err_fwd_stmt;
+    v.env = &hit;
+    CcStmt_walk(body, v);
+    return hit;
+}
+
 static bool pl_arm_raises(CcParallelArm* arm) {
     if (!arm->serial) return false;
-    if (!pl_has_bare_unwrap(arm->serial)) return false;
-    if (pl_block_has_handler(arm->serial)) return false;
-    return true;
+    return pl_body_raises(arm->serial);
 }
 
 /* The error type the exit cell carries: the one the handlers of the
@@ -1619,15 +1660,15 @@ static CCSlice pl_eh_type(PStep* st, CcSpan sp) {
  * none of that body: it records the error in the exit cell, first arrival winning, and
  * leaves the arm -- to the join on the caller, out of the thunk elsewhere.
  * The join then raises what the cell holds into the one handler the
- * function emits. `cell` is the pointer the arm reaches the cell through. */
-static CcStmt* pl_raise_handler(CcLowerer* L, CCSlice ety, CCSlice cell, CCSlice leave, CcSpan sp) {
+ * function emits. `cell` is the pointer the arm reaches the cell through;
+ * `leave` is the statement that ends the arm once the cell is claimed. */
+static CcStmt* pl_raise_handler(CcLowerer* L, CCSlice ety, CCSlice cell, CcStmt* leave, CcSpan sp) {
     CcStmt* s = cc__stmt_blank(sp, L->arena);
     CcStmt* body = lw_block(L, sp);
     CcErrhandler eh;
     CCString claim = @string(`{ int __cc_z = 0; while (!cc_atomic_cas(&${cell}->lock, &__cc_z, 1)) __cc_z = 0; if (cc_atomic_load(&${cell}->xk) < 2) { ${cell}->err = __cc_pe; cc_atomic_store(&${cell}->xk, 3); } cc_atomic_store(&${cell}->lock, 0); }`, L->arena);
     lw_push(body, lw_expr_stmt(L, lw_text(L, claim, sp), sp));
-    if (leave.len) lw_push(body, lw_goto(L, leave, sp));
-    else lw_push(body, cc_stmt_return(lw_text(L, @string(`NULL`, L->arena), sp), sp, L->arena));
+    lw_push(body, leave);
     eh.err_type = cc_type_named(ety, sp, L->arena);
     eh.binder = cstr_slice("__cc_pe");
     eh.body = body;
@@ -2040,7 +2081,8 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
             /* a bare `!>` in the thunk records its error in the cell and
              * ends the thunk; the join raises it on the caller */
             if (pl_arm_raises(arm))
-                pl_arm_open_with(L, ab, pl_raise_handler(L, pj_ety, pj_cell, cc_slice_empty(), sp));
+                pl_arm_open_with(L, ab, pl_raise_handler(L, pj_ety, pj_cell,
+                                                         cc_stmt_return(lw_text(L, @string(`NULL`, L->arena), sp), sp, L->arena), sp));
             st->made.push(th);
             /* a bound handle makes the arms fibers of a dest */
             if (hspell.len) {
@@ -2079,7 +2121,7 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
              * but a `return` from it would leave while the arms behind
              * this one run */
             if (pl_arm_raises(arm))
-                pl_arm_open_with(L, ab, pl_raise_handler(L, pj_ety, pj_ptr, pj_leave, sp));
+                pl_arm_open_with(L, ab, pl_raise_handler(L, pj_ety, pj_ptr, lw_goto(L, pj_leave, sp), sp));
             lw_push(blk, ab);
         } else {
             CcExpr* e0 = arm->expr;
@@ -2283,6 +2325,16 @@ static void pl_stray_stages(PStep* st, CcStmt* body) {
 }
 
 
+/* `(T)(e)` as a node. */
+static CcExpr* pl_cast(CcLowerer* L, CcType* t, CcExpr* a, CcSpan sp) {
+    CcExpr* e = cc__expr_blank(sp, L->arena);
+    CcCast ca;
+    ca.type = t;
+    ca.a = a;
+    { CcExprK ek = { .cast = ca }; e->k = ek; }
+    return e;
+}
+
 /* The site: build the environment, walk the whole span on the caller, then
  * read back whichever exit arrived first. */
 static void pl_for_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
@@ -2299,9 +2351,34 @@ static void pl_for_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
     CCSlice cell = pl_for_name(L, id, "_ex");
     CCSlice ev = pl_for_name(L, id, "_e");
     CCSlice ret_ty = cstr_slice("int");
+    CCSlice err_ty = cc_slice_empty();
     bool has_ret = false;
+    bool fn_void = false;
     size_t n;
     size_t i;
+    if (pf.loop.body) {
+        /* The body leaves for the walk function before the outer walk
+         * reaches it, so whatever `@parallel` it holds is lowered here,
+         * first, in the scope the body was written in -- the binder
+         * included, which the inner construct captures as the leaf loop
+         * variable of the walk. */
+        sc_push(w);
+        sc_declare(w, pf.loop.bind, cc_type_named(cstr_slice("int"), sp, L->arena));
+        tw_stmt(w, pf.loop.body);
+        sc_pop(w);
+    }
+    if (pl_body_raises(pf.loop.body)) {
+        /* a bare `!>` in the body raises after the walk joins, into the
+         * handler the frame carries: the cell has to carry its error */
+        if (!st->eh_any) {
+            CCString m = cc_string_new();
+            m.push_cstr("a bare '!>' in a @parallel for body raises after the walk joins, into an @errhandler on the function it stands in, and this function declares none; declare one above the walk or handle the Result in the body with '!>(e) { ... }'", L->arena);
+            lw_error(L, sp, m);
+            return;
+        }
+        err_ty = pl_eh_type(st, sp);
+        if (!err_ty.len) return;
+    }
     memset(&sc, 0, sizeof(sc));
     sc.st = st;
     sc.w = w;
@@ -2322,8 +2399,12 @@ static void pl_for_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
         c->by_addr = true;
     }
     if (st->fn_ret) {
+        /* the cell a `return` lands in is typed by the function it leaves;
+         * a `void` one still needs a cell C can declare, and returns nothing */
         CCSlice rn = L->ix->canon(st->fn_ret);
-        if (rn.len) ret_ty = rn;
+        CCSlice vd = cstr_slice("void");
+        if (rn.len && slice_eq(rn, vd)) fn_void = true;
+        else if (rn.len) ret_ty = rn;
     }
     {
         PForExit fx;
@@ -2336,12 +2417,12 @@ static void pl_for_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
         has_ret = true;
     }
     {
-        CCString et = pl_for_env_text(st, id, &caps, ret_ty);
+        CCString et = pl_for_env_text(st, id, &caps, ret_ty, err_ty);
         pl_host(st); st->fwd.push_slice(et.as_slice(), L->arena);
     }
     pl_for_forward(st, id);
     st->made.push(pl_for_thunk_decl(st, id, sp));
-    st->made.push(pl_for_walk_decl(st, id, &caps, pf.loop, rg.lo, rg.hi, has_ret, sp));
+    st->made.push(pl_for_walk_decl(st, id, &caps, pf.loop, rg.lo, rg.hi, has_ret, err_ty, sp));
     {
         CCString d1 = @string(`${env} ${ev}`, L->arena);
         CCString d2 = @string(`${ex} ${cell}`, L->arena);
@@ -2349,12 +2430,15 @@ static void pl_for_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
         lw_push(blk, lw_expr_stmt(L, lw_text(L, d2, sp), sp));
     }
     for (i = 0; i < n; i++) {
+        /* nodes, not text: a walk inside another walk is captured by the
+         * outer one through these, so the names have to be names it can
+         * see and rewrite */
         PCap* c = *caps.get_ptr(i);
         CCSlice cn = c->name;
-        CCString as = pl_for_decayed(c->type)
-            ? @string(`${ev}.${cn} = (${cn})`, L->arena)
-            : @string(`${ev}.${cn} = &(${cn})`, L->arena);
-        lw_push(blk, lw_expr_stmt(L, lw_text(L, as, sp), sp));
+        CcExpr* slot = cc_expr_member(lw_ident(L, ev, sp), cn, false, sp, L->arena);
+        CcExpr* what = lw_paren(L, lw_ident(L, cn, sp), sp);
+        if (!pl_for_decayed(c->type)) what = cc_expr_unary(CC_OP_ADDR, what, sp, L->arena);
+        lw_push(blk, lw_expr_stmt(L, lw_assign(L, slot, what, sp), sp));
     }
     {
         CCString z = @string(`cc__bytes_zero(&${cell}, sizeof(${cell}))`, L->arena);
@@ -2365,19 +2449,27 @@ static void pl_for_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
         lw_push(blk, lw_expr_stmt(L, lw_text(L, a2, sp), sp));
     }
     {
-        CCString lo = lw_spell_expr(L, rg.lo);
-        CCString hi = lw_spell_expr(L, rg.hi);
-        CCSlice los = lw_keep(L, &lo);
-        CCSlice his = lw_keep(L, &hi);
-        CCString call = @string(`${walk}((int)(${los}), (int)(${his}), &${ev})`, L->arena);
-        lw_push(blk, lw_expr_stmt(L, lw_text(L, call, sp), sp));
+        /* the bounds as written, so an outer walk sees what they name */
+        CcExpr* call = cc_expr_call(lw_ident(L, walk, sp), sp, L->arena);
+        CcExprList* args = lw_call_args(call);
+        CcType* intt = cc_type_named(cstr_slice("int"), sp, L->arena);
+        args->push(pl_cast(L, intt, lw_paren(L, rg.lo, sp), sp));
+        args->push(pl_cast(L, intt, lw_paren(L, rg.hi, sp), sp));
+        args->push(cc_expr_unary(CC_OP_ADDR, lw_ident(L, ev, sp), sp, L->arena));
+        lw_push(blk, lw_expr_stmt(L, call, sp));
+    }
+    if (err_ty.len) {
+        /* a bare `!>` in the walk: the error the first half to err
+         * recorded, raised where the walk stands, once every half is done */
+        lw_push(blk, pl_raise_after_join(L, cell, sp));
     }
     {
         /* a `return` inside the walk is the caller's to make */
         CcStmt* then = lw_block(L, sp);
         CCString rv = @string(`${cell}.rv`, L->arena);
         CCString cond = @string(`cc_atomic_load(&${cell}.xk) == 2`, L->arena);
-        lw_push(then, cc_stmt_return(lw_text(L, rv, sp), sp, L->arena));
+        if (fn_void) lw_push(then, cc_stmt_return(NULL, sp, L->arena));
+        else lw_push(then, cc_stmt_return(lw_text(L, rv, sp), sp, L->arena));
         lw_push(blk, lw_if(L, lw_text(L, cond, sp), then, NULL, sp));
     }
     s->k = blk->k;
