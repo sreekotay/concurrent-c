@@ -130,6 +130,57 @@ static CCString as_spell(CcLowerer* L, CcType* t, CCSlice name) {
     return CcType_spell(t, name, &L->unit->tape, L->arena);
 }
 
+/* A generic parameter type, resolved to the instance the generics step
+ * would name it by.
+ *
+ * The frame fields and the factory signature are SPELLED here, into text,
+ * and the generics step runs after this one. A `BufReader::[CCSocket]*`
+ * left as written therefore freezes into the frame as a spelling no C
+ * compiler reads, and every field after it in the struct goes with it.
+ * Asking the index for the canonical name instantiates the instance
+ * exactly as a later use of it would, and the node the body reads is this
+ * same one, so the frame and the body agree on the type. */
+static bool as_mono_type(CcType* t, void* env) {
+    CcLowerer* L = (CcLowerer*)env;
+    CcIndex* ix = L->ix;
+    bool is_generic = false;
+    @switch (t->k) {
+        case .generic: is_generic = true; break;
+        default: break;
+    }
+    if (!is_generic) return true;
+    {
+        CCSlice name = ix->canon(t);
+        if (!name.len) return true;
+        if (gn_instance_is_pointer(L, name)) {
+            /* a family whose constructor returns `Instance*`: the spelled type is the pointer */
+            CcType* base = cc_type_named(name, t->span, L->arena);
+            CcPointerType pt;
+            pt.pointee = base;
+            t->k = { .pointer = pt };
+        } else {
+            CcNamedType nt;
+            memset(&nt, 0, sizeof(nt));
+            nt.name = name;
+            t->k = { .named = nt };
+        }
+    }
+    return false;
+}
+
+static void as_mono_params(CcLowerer* L, CcParamList* ps) {
+    CcVisitor v;
+    size_t n = ps->len();
+    size_t i;
+    memset(&v, 0, sizeof(v));
+    v.env = L;
+    v.type = as_mono_type;
+    for (i = 0; i < n; i++) {
+        CcParam* p = ps->get_ptr(i);
+        if (p->type) walk_type(&v, p->type);
+    }
+}
+
 /* `int v, char* p` as written, or `void` for a function of none. */
 static CCString as_param_list(CcLowerer* L, CcParamList* ps) {
     CCString out = cc_string_new();
@@ -1007,7 +1058,9 @@ static bool as_lower_one(AStep* st, CcDecl* d, CcDeclList* into) {
         CcParamList ps = ft->params;
         CCString bn = @string(`__cc_async_${fd.name}_${id}`, L->arena);
         CCSlice base = lw_keep(L, &bn);
-        CCString fields = as_frame_fields(L, &ps);
+        CCString fields;
+        as_mono_params(L, &ps);
+        fields = as_frame_fields(L, &ps);
         CCString plist = as_param_list(L, &ps);
         CCString fills = as_frame_fills(L, &ps);
         CCString frame = @string(`typedef struct ${base}_frame {

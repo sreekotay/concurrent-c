@@ -337,8 +337,15 @@ static CcStmt* cl_arena_release(CcLowerer* L, CcVarDecl v, CcSpan sp) {
     return lw_expr_stmt(L, cast, sp);
 }
 
-/* `T x = e @destroy [{ D }];` -> the declaration, then the site's flag. */
-static void cl_register_destroy(CFn* fn, CcStmt* s, CcDecl* d, CcVarDecl v, CcStmtList* out) {
+/* `T x = e @destroy [{ D }];` -> the declaration, then the site's flag.
+ *
+ * `arm_after` is how the flag leaves when the declaration no longer carries
+ * its own initializer: `T x = e !> @destroy` reaches this step as the bare
+ * `T x;` the Results step left, followed by the block that assigns it. A
+ * flag set between the two says the value is live while `x` still holds
+ * whatever the frame had, and the scope exit then destroys that. The caller
+ * pushes what it hands back after the statement that does the assigning. */
+static void cl_register_destroy(CFn* fn, CcStmt* s, CcDecl* d, CcVarDecl v, CcStmtList* out, CcStmt** arm_after) {
     CcLowerer* L = fn->L;
     CSite* site;
     CCSlice canon;
@@ -384,7 +391,11 @@ static void cl_register_destroy(CFn* fn, CcStmt* s, CcDecl* d, CcVarDecl v, CcSt
     v.destroy_body = NULL;
     d->k = { .var = v };
     out->push(s);
-    out->push(cl_set_flag(L, site->id, "1", s->span));
+    {
+        CcStmt* flag = cl_set_flag(L, site->id, "1", s->span);
+        if (arm_after && !v.init) *arm_after = flag;
+        else out->push(flag);
+    }
 }
 
 /* ---- exits ------------------------------------------------------------------ */
@@ -520,6 +531,8 @@ static void cl_stmts(CFn* fn, CcStmtList* list, int kind) {
     CcStmtList out = vec_new::[CcStmtRef](L->arena);
     size_t n = list->len();
     size_t i;
+    /* a `@destroy` flag whose declaration the next statement initializes */
+    CcStmt* arm_pending = NULL;
     memset(&sc, 0, sizeof(sc));
     sc.parent = outer;
     sc.sites = vec_new::[CSiteRef](L->arena);
@@ -527,12 +540,25 @@ static void cl_stmts(CFn* fn, CcStmtList* list, int kind) {
     fn->scope = &sc;
     for (i = 0; i < n; i++) {
         CcStmt* s = *list->get_ptr(i);
+        CcStmt* arm_now = arm_pending;
+        CcStmt* arm_next = NULL;
         bool done = false;
+        bool next_is_block = false;
+        CcStmt** arm_slot = NULL;
+        arm_pending = NULL;
+        if (i + 1 < n) {
+            CcStmt* nxt = *list->get_ptr(i + 1);
+            if (nxt && nxt->k.kind == CcStmtK_block) next_is_block = true;
+        }
+        if (next_is_block) arm_slot = &arm_next;
         @switch (s->k) {
             case .decl(ds): {
                 CcVarDecl v;
                 bool is_var = cl_var_of(ds.d, &v);
-                if (is_var && v.destroy) { cl_register_destroy(fn, s, ds.d, v, &out); done = true; }
+                if (is_var && v.destroy) {
+                    cl_register_destroy(fn, s, ds.d, v, &out, arm_slot);
+                    done = true;
+                }
                 break;
             }
             default: break;
@@ -541,7 +567,10 @@ static void cl_stmts(CFn* fn, CcStmtList* list, int kind) {
             CcStmt* r = cl_stmt(fn, s);
             out.push(r);
         }
+        if (arm_now) out.push(arm_now);
+        arm_pending = arm_next;
     }
+    if (arm_pending) out.push(arm_pending);
     fn->scope = outer;
     {
         CSiteList* sites = &sc.sites;

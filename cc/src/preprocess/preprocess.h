@@ -198,6 +198,20 @@ char* cc_rewrite_local_cch_includes_to_lowered_headers(const char* src,
 char* cc_splice_owned_cch_impl(const char* src, size_t input_len,
                                const char* input_path);
 int cc_local_header_lower_failed(void);
+/* Expand the function-like `#define`s of `src` whose bodies carry a
+ * lifetime attribute (`@destroy` / `@detach`), and only those.
+ *
+ * A lowerer that reads the source with the directives still in it never
+ * sees such a body: the invocation is a call to the host preprocessor,
+ * which knows nothing of `@destroy`, so the attribute reaches the printer
+ * as a literal `@` (or is dropped by a lowered header, which is worse --
+ * the destroy silently does not happen). Expanded at the use site here,
+ * the attribute is ordinary source for the lowerer to lower. Bodies that
+ * carry no attribute are left for the host preprocessor, which is where
+ * this path already leaves them. Line count is preserved: a body spliced
+ * across lines expands onto the one line the use site occupies.
+ * NULL when nothing changed. */
+char* cc_expand_cc_attr_defines(const char* src, size_t n);
 size_t cc_lowered_local_header_count(void);
 const char* cc_lowered_local_header_source_path(size_t i);
 char* cc_rewrite_system_cch_includes_to_lowered_headers(const char* src,

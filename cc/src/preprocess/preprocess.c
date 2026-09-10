@@ -19874,6 +19874,58 @@ char* cc_splice_owned_cch_impl(const char* src, size_t input_len,
     }
 }
 
+/* Function-like `#define`s whose body carries `@destroy` / `@detach`,
+ * expanded at the use site. See `cc_expand_cc_attr_defines` in the header
+ * for why the clean path needs this and the built-in life macros are
+ * deliberately NOT seeded here: `cc_arena_stack` and its family are the
+ * host preprocessor's on this path, and seeding them would silently
+ * change the body every unit that calls one gets. */
+char* cc_expand_cc_attr_defines(const char* src, size_t n) {
+    CCLifeMacro ms[CC__LIFE_MACRO_MAX];
+    int nm = 0, harvested, changed = 0, round, i;
+    char* cur;
+    size_t cur_n;
+    if (!src || n == 0) return NULL;
+    memset(ms, 0, sizeof(ms));
+    do {
+        harvested = nm;
+        (void)cc__life_harvest(ms, &nm, src, n);
+    } while (nm > harvested);
+    if (nm == 0) return NULL;
+    /* A body is written across lines with `\` splices and the use site is
+     * one line: blanking the splices keeps the expansion on that line, so
+     * every line after it still names the line the user wrote. */
+    for (i = 0; i < nm; i++) {
+        char* b = (char*)ms[i].body;
+        size_t k;
+        if (!ms[i].owned || !b) continue;
+        for (k = 0; k + 1 < ms[i].body_n; k++) {
+            size_t j;
+            if (b[k] != '\\') continue;
+            j = k + 1;
+            if (b[j] == '\r' && j + 1 < ms[i].body_n) j++;
+            if (b[j] != '\n') continue;
+            while (k <= j) b[k++] = ' ';
+            k--;
+        }
+    }
+    cur = cc__life_expand_once(src, n, ms, nm, &changed);
+    if (!cur) { cc__life_free(ms, nm); return NULL; }
+    cur_n = strlen(cur);
+    for (round = 0; changed && round < 7; round++) {
+        int again = 0;
+        char* nxt = cc__life_expand_once(cur, cur_n, ms, nm, &again);
+        if (!nxt) { free(cur); cc__life_free(ms, nm); return NULL; }
+        free(cur);
+        cur = nxt;
+        cur_n = strlen(cur);
+        changed = again;
+    }
+    cc__life_free(ms, nm);
+    if (cur_n == n && memcmp(cur, src, n) == 0) { free(cur); return NULL; }
+    return cur;
+}
+
 char* cc_rewrite_local_cch_includes_to_lowered_headers(const char* src,
                                                        size_t input_len,
                                                        const char* input_path) {

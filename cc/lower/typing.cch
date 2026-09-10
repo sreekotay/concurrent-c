@@ -47,6 +47,9 @@ typedef struct Walker {
     /* called at every closure, with the enclosing scope still in hand */
     void (*on_closure)(struct Walker* w, CcExpr* e, CcClosure cl);
     void* env;
+    /* the variant a `@switch` in view is over, so an arm binder in its body
+     * can be declared at the payload type the arm names; empty outside one */
+    CCSlice vswitch;
 } Walker;
 
 static void sc_push(Walker* w) {
@@ -880,6 +883,9 @@ typedef struct StmtView {
     CcType* type;
     bool has_exprs; bool has_cache; bool has_arms; bool has_stmts; bool has_then; bool has_else;
     bool is_decl; bool is_expr; bool is_errh; bool is_for_in; bool is_with_deadline; bool is_parallel; bool is_block;
+    bool is_vswitch;            /* `@switch (v)`: the subject is in e1 */
+    CCSlice case_arm;           /* `case .arm(bind):` -- both empty for every other label */
+    CCSlice case_bind;
 } StmtView;
 
 static void view_for_in(StmtView* v, CcForIn fi) {
@@ -937,6 +943,8 @@ static void view_stmt(StmtView* v, CcStmt* s) {
     memset(v, 0, sizeof(*v));
     v->name = cc_slice_empty();
     v->name2 = cc_slice_empty();
+    v->case_arm = cc_slice_empty();
+    v->case_bind = cc_slice_empty();
     @switch (s->k) {
         case .expr(es): v->is_expr = true; v->e1 = es.e; v->body = es.body; return;
         case .decl(dd): v->is_decl = true; v->dcl = dd.d; return;
@@ -948,8 +956,8 @@ static void view_stmt(StmtView* v, CcStmt* s) {
             v->dcl = f.init_decl; v->init_expr = f.init_expr; v->e1 = f.cond; v->e2 = f.step;
             v->body = f.body; v->stmts = f.more; v->has_stmts = true;
             return;
-        case .switch_(sw): v->e1 = sw.subject; v->body = sw.body; return;
-        case .case_(c): v->e1 = c.lo; v->e2 = c.hi; v->body = c.inner; return;
+        case .switch_(sw): v->e1 = sw.subject; v->body = sw.body; v->is_vswitch = sw.is_variant; return;
+        case .case_(c): v->e1 = c.lo; v->e2 = c.hi; v->body = c.inner; v->case_arm = c.arm; v->case_bind = c.bind; return;
         case .return_(r): v->e1 = r.value; return;
         case .label(l): v->body = l.inner; return;
         case .defer(df): v->body = df.body; return;
@@ -1016,6 +1024,64 @@ static bool stmt_parallel_bind(CcStmt* t, CCSlice* name, CcType** type) {
 
 /* Declarations in a block are visible to the statements after them: one
  * scope for the whole block, entered by the caller. */
+/* The variant a `@switch` subject is of, by the name the index knows it by
+ * (the subject may be a pointer to it). */
+static CCSlice variant_of_subject(Walker* w, CcExpr* subject) {
+    CcType* t = type_of_expr(w, subject);
+    CCSlice nm = cc_slice_empty();
+    if (!t) return nm;
+    if (!type_named_name(peel(t), &nm)) return cc_slice_empty();
+    return nm;
+}
+
+/* The payload type an arm of a variant declares, or NULL when the index
+ * knows no such variant or no such arm. The binder of `case .arm(x):` is
+ * declared at that type, the same one the variants step gives it. */
+static CcType* variant_arm_payload(Walker* w, CCSlice vname, CCSlice arm) {
+    CcIndex* ix = w->ix;
+    CcDeclList* vv;
+    size_t n;
+    size_t i;
+    if (!vname.len || !arm.len || !ix) return NULL;
+    vv = &ix->variants;
+    n = vv->len();
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *vv->get_ptr(i);
+        CcVariantDecl vd;
+        bool is_variant = false;
+        @switch (d->k) {
+            case .variant(x): vd = x; is_variant = true; break;
+            default: break;
+        }
+        if (!is_variant) continue;
+        if (!slice_eq(vd.name, vname)) continue;
+        {
+            Vec::[CcVariantArm] arms = vd.arms;
+            size_t na = arms.len();
+            size_t k;
+            for (k = 0; k < na; k++) {
+                CcVariantArm* a = arms.get_ptr(k);
+                if (slice_eq(a->name, arm)) return a->payload;
+            }
+        }
+    }
+    return NULL;
+}
+
+/* `case .arm(x):` inside a `@switch`: the binder outlives the label, so it
+ * is declared in the scope of the switch body and not in the label's own.
+ * Without it nothing in the arm can be typed off `x` -- a walk over
+ * `x->field` reports that it cannot type what it is over. */
+static void declare_case_bind(Walker* w, CcStmt* t) {
+    StmtView v;
+    CcType* payload;
+    if (!w->vswitch.len) return;
+    view_stmt(&v, t);
+    if (!v.case_arm.len || !v.case_bind.len) return;
+    payload = variant_arm_payload(w, w->vswitch, v.case_arm);
+    if (payload) sc_declare(w, v.case_bind, payload);
+}
+
 static void tw_block_stmts(Walker* w, CcStmtList stmts) {
     size_t i;
     size_t n = stmts.len();
@@ -1033,6 +1099,7 @@ static void tw_block_stmts(Walker* w, CcStmtList stmts) {
             CcType* bt;
             if (stmt_is_expr(t)) declare_from_macro_stmt(w, t);
             if (stmt_parallel_bind(t, &bn, &bt)) sc_declare(w, bn, bt);
+            declare_case_bind(w, t);
             tw_stmt(w, t);
         }
     }
@@ -1067,9 +1134,12 @@ static void tw_arms(Walker* w, Vec::[CcParallelArm] arms) {
 
 static void tw_stmt(Walker* w, CcStmt* s) {
     StmtView v;
+    CCSlice vsave;
     if (!s) return;
+    vsave = w->vswitch;
     if (w->on_stmt) w->on_stmt(w, s, true);
     view_stmt(&v, s);
+    if (v.is_vswitch) w->vswitch = variant_of_subject(w, v.e1);
     sc_push(w);
     if (v.dcl) tw_decl_local(w, v.dcl);
     if (v.is_expr) declare_from_macro_stmt(w, s);
@@ -1096,6 +1166,7 @@ static void tw_stmt(Walker* w, CcStmt* s) {
     tw_expr(w, v.par_tail);
     if (w->on_stmt) w->on_stmt(w, s, false);
     sc_pop(w);
+    w->vswitch = vsave;
 }
 
 static void tw_func_decl(Walker* w, CcFuncDecl f) {

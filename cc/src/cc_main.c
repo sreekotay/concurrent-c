@@ -4177,6 +4177,22 @@ static int cc__materialize_comptime_for_clean(const char* in_path, char* out_ccs
             len = strlen(buf);
         }
     }
+    /* A `#define` body may be written in the language.
+     *
+     * The lowerer reads the unit with its directives intact, so a macro
+     * body carrying `@destroy` never reaches it as anything but a call the
+     * host preprocessor will expand -- and the host knows no `@`. Expanded
+     * here, at the use site, the attribute is source the lowerer lowers.
+     * Only bodies that carry a lifetime attribute are touched; the line
+     * count is kept, as with the prepare passes above and below. */
+    {
+        char* expanded = cc_expand_cc_attr_defines(buf, len);
+        if (expanded) {
+            free(buf);
+            buf = expanded;
+            len = strlen(buf);
+        }
+    }
     if (cc_comptime_prepare_source_ex(&buf, &len, in_path,
                                       CC_PREPARE_COMPTIME_IF | CC_PREPARE_GRAMMAR |
                                       CC_PREPARE_MODULE_EXPORT | CC_PREPARE_STATIC_MAP) != 0) {

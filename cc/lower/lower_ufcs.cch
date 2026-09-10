@@ -1157,6 +1157,45 @@ static bool uf_has_ufcs_hook(CcIndex* ix, CCSlice tn) {
     return hook->ufcs_fn.len > 0 && hook->ufcs_fn.ptr[0] != '<';
 }
 
+/* `n.spawn_async(task(...))` carries the task's name to the fiber.
+ *
+ * `cc_nursery_spawn_async` is the arity the program spells; the runtime
+ * also declares `_named`, which stamps the callee name and the spawn site
+ * onto the fiber so anything running inside it can answer what task it is
+ * (`cc_rt_diag_current_async_info`). Only the site knows the name the user
+ * wrote, so it is attached here; a spawn that resolved to any other callee
+ * is left as it is. */
+static void uf_spawn_named(CcLowerer* L, CcCall* call, CcSpan sp) {
+    CCSlice cn = uf_ident_name_or_empty(call->callee);
+    CCSlice nm = cstr_slice("<async>");
+    CcExpr* a0;
+    CCString q;
+    if (!cc_slice_eq_cstr(&cn, "cc_nursery_spawn_async")) return;
+    if (call->args.len() != 2) return;
+    a0 = *call->args.get_ptr(1);
+    {
+        CcExpr* inner = strip_parens_expr(a0);
+        CcCall cl;
+        bool is_call = false;
+        @switch (inner->k) {
+            case .call(c): cl = c; is_call = true; break;
+            default: break;
+        }
+        if (is_call && cl.callee) {
+            CCSlice who;
+            if (expr_ident(strip_parens_expr(cl.callee), &who) && who.len) nm = who;
+        }
+    }
+    q = cc_string_new();
+    cc_string_push_char(&q, '"', L->arena);
+    cc_string_push_slice(&q, nm, L->arena);
+    cc_string_push_char(&q, '"', L->arena);
+    call->callee = lw_ident(L, cstr_slice("cc_nursery_spawn_async_named"), sp);
+    call->args.push(lw_text(L, q, sp));
+    call->args.push(lw_ident(L, cstr_slice("__FILE__"), sp));
+    call->args.push(lw_ident(L, cstr_slice("__LINE__"), sp));
+}
+
 static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m, CCSlice tn, CCSlice reason) {
     UStep* st = (UStep*)w->env;
     CcLowerer* L = st->L;
@@ -1374,6 +1413,7 @@ static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m,
             }
         }
     }
+    uf_spawn_named(L, &call, sp);
     e->k = { .call = call };
 }
 
