@@ -1,0 +1,26 @@
+/* A typedef alias of a factory instance is the instance: `m->len()` on a
+ * `FooMap` is `ArrayMap_int_int_len`, not `foo_map_len`, a declared
+ * function that merely spells the alias's composed name and takes
+ * something else. */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/array_map.cch>
+#include <stdio.h>
+
+typedef ArrayMap::[int, int] FooMap;
+typedef struct Foo { FooMap map; } Foo;
+
+static size_t foo_map_len(const Foo* f) { return f && f->map ? f->map->len() + 100 : 100; }
+static size_t alias_len(FooMap m) { return m ? m->len() : 0; }
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(64)) @destroy;
+    Foo f;
+    f.map = array_map_new::[int, int](a);
+    if (!f.map) return 1;
+    f.map->insert(1, 10);
+    f.map->insert(2, 20);
+    if (alias_len(f.map) != 2) return 2;
+    if (foo_map_len(&f) != 102) return 3;
+    printf("ok\n");
+    return 0;
+}

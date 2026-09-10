@@ -3887,9 +3887,25 @@ static CcMethod* cc__resolve_const_family(CcIndex* ix, CcTypeInfo* recv, CCSlice
     return cc__method_plain(ix, method, composed, "cc_snake_method", cc__sym_origin(ix, cs), cs, false);
 }
 
+/* A typedef whose type is a factory instance (`typedef Vec::[int] Ints;`). */
+static bool cc__alias_of_instance(CcIndex* ix, CcTypeInfo* recv) {
+    CcType* t;
+    CcTypeInfo* target;
+    int kind;
+    if (!(recv->sym && recv->sym->kind == CC_SYM_TYPE && recv->sym->decl && recv->sym->type)) return false;
+    kind = (int)recv->sym->decl->k.kind;
+    if (kind != (int)CcDeclK_typedef_) return false;
+    t = recv->sym->type;
+    if (t->k.kind == CcTypeK_generic) return true;
+    if (t->k.kind != CcTypeK_named) return false;
+    target = CcIndex_type_get(ix, CcIndex_canon(ix, t));
+    return target && target != recv && target->family.len > 0;
+}
+
 static CcMethod* cc__resolve(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCString* tried, CCArena ta, int depth, unsigned recv_shape) {
     CcMethod* m;
     bool stop;
+    bool alias_tried = false;
     CCSlice base_name;
     CcMethodList* methv = &recv->methods;
     size_t i;
@@ -3909,6 +3925,14 @@ static CcMethod* cc__resolve(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCSt
     if (m) return m;
     m = cc__resolve_registered(ix, recv, method, tried, ta);
     if (m) return m;
+    /* An alias of a factory instance IS the instance: its members outrank
+     * a name composed from the alias (`typedef ArrayMap::[K,V] FooMap;`
+     * with a `foo_map_len(const Foo*)` declared for something else). */
+    if (cc__alias_of_instance(ix, recv)) {
+        m = cc__resolve_alias(ix, recv, method, tried, ta, depth, recv_shape);
+        if (m) return m;
+        alias_tried = true;
+    }
     base_name = cc__strip_tag(recv->name);
     m = cc__resolve_type_method(ix, recv, method, tried, ta, base_name);
     if (m) return m;
@@ -3923,8 +3947,10 @@ static CcMethod* cc__resolve(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCSt
         m = cc__resolve_bare(ix, recv, method, tried, ta, recv_shape);
         if (m) return m;
     }
-    m = cc__resolve_alias(ix, recv, method, tried, ta, depth, recv_shape);
-    if (m) return m;
+    if (!alias_tried) {
+        m = cc__resolve_alias(ix, recv, method, tried, ta, depth, recv_shape);
+        if (m) return m;
+    }
     m = cc__resolve_faces(ix, recv, method, tried, ta, depth);
     if (m) return m;
     return cc__resolve_sink(ix, recv, method, tried, ta);

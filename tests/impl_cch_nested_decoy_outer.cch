@@ -1,0 +1,14 @@
+/* A library face (`@defer` makes it one) that defines a map alias and
+ * includes a leaf that calls a method through the alias. */
+#ifndef IMPL_CCH_NESTED_DECOY_OUTER_CCH
+#define IMPL_CCH_NESTED_DECOY_OUTER_CCH
+typedef ArrayMap::[int, int] DecoyMap;
+typedef struct DecoyDb {
+    DecoyMap entries;
+} DecoyDb;
+#include "impl_cch_nested_decoy_inner.cch"
+static void decoy_destroy(DecoyDb* db) {
+    @defer (void)0;
+    if (db && db->entries) db->entries->destroy();
+}
+#endif /* IMPL_CCH_NESTED_DECOY_OUTER_CCH */

@@ -1568,6 +1568,9 @@ static CcStmt* rl_stmt(RFn* fn, CcStmt* s) {
         case .switch_: s->k.switch_.body = rl_body(fn, s->k.switch_.body); break;
         case .case_: s->k.case_.inner = rl_body(fn, s->k.case_.inner); break;
         case .label: s->k.label.inner = rl_body(fn, s->k.label.inner); break;
+        /* the deferred statement is a statement: `CALL !>(e) { ... }` in it
+         * is a statement-position unwrap, not an expression one */
+        case .defer: s->k.defer.body = rl_body(fn, s->k.defer.body); break;
         default: break;
     }
     {

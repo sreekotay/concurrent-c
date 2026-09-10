@@ -998,7 +998,7 @@ inside a `static` body, and method-call UFCS are all interface-grade)
 extracts to a lowered `.h`. A library face — every definition `static`,
 with unit-only syntax (`@string`, `@errhandler`, `@defer`, `?>`) in a body
 or at file scope — splices into each includer, C header-library style: no
-`.h`, no object. An implementation face — a file-scope function body that
+`.h`, no object; the interface faces it includes splice with it. An implementation face — a file-scope function body that
 is not `static`, or initialized file-scope data that is not `static` — is
 a module: one translation unit, `<face>_cch.c`, one object, one lowered
 `<face>.h`. A unit joins it with

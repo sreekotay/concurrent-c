@@ -247,7 +247,10 @@ or file-scope items use `@string`, `@errhandler`, `@defer`, `?>` or other
 unit-pipeline syntax is a library face: each includer compiles its own
 copy, as C does for a `static` body in a header, so the face splices into
 the including unit where its include stands and lowers with it, and it
-has no `.h` and no object. A face with a file-scope function definition
+has no `.h` and no object. An interface face that a library face includes
+splices with it: the types it names may live on the library face, and a
+name resolved without them can land on a declaration that merely shares
+the spelling. A face with a file-scope function definition
 that is not `static`, or a file-scope data definition with an initializer
 that is not `static`, is an implementation face. `@comptime` blocks,
 `@comptime` functions and generic factories decide nothing: the header

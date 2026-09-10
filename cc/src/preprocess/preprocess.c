@@ -15598,6 +15598,10 @@ static int cc__cch_text_grade(const char* src, size_t n) {
         size_t fn_end = 0;
         if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
         if (i >= n) break;
+        /* An item starts at its first token: a directive line ahead of a
+         * function is not part of its declaration, and `static` is read
+         * off the declaration. */
+        if (src[i] == '\n' || src[i] == '\r' || src[i] == ' ' || src[i] == '\t') { i++; continue; }
         if (src[i] == '#') {
             while (i < n && src[i] != '\n') i++;
             if (i < n) i++;
@@ -15608,6 +15612,7 @@ static int cc__cch_text_grade(const char* src, size_t n) {
             continue;
         }
         if (cc__file_scope_fn_def_end(src, n, i, &fn_end)) {
+            if (getenv("CC_GRADE_DEBUG")) { size_t k; fprintf(stderr, "cc: grade fn static=%d [", cc__fn_decl_has_static(src, n, i, fn_end)); for (k = i; k < fn_end && k < i + 70; k++) fputc(src[k] == '\n' ? '|' : src[k], stderr); fprintf(stderr, "]\n"); }
             if (!cc__fn_decl_has_static(src, n, i, fn_end)) {
                 /* A body the module owns. */
                 needs_owner = 1;
@@ -15624,6 +15629,7 @@ static int cc__cch_text_grade(const char* src, size_t n) {
                 if (cc__cch_range_has_extract_at(src, i, e)) has_at = 1;
                 /* Data the module owns: one definition, `extern` in the `.h`. */
                 if (cc__file_scope_item_is_data_def(src, n, i)) needs_owner = 1;
+                if (getenv("CC_GRADE_DEBUG")) { size_t k; fprintf(stderr, "cc: grade item data=%d [", cc__file_scope_item_is_data_def(src, n, i)); for (k = i; k < e && k < i + 70; k++) fputc(src[k] == '\n' ? '|' : src[k], stderr); fprintf(stderr, "]\n"); }
                 i = e;
             }
         }
@@ -15697,6 +15703,9 @@ static int cc__local_cch_grade(const char* abs_src) {
     free(unit);
     free(src);
     cc__cch_grade_memo_set(abs_src, grade);
+    if (getenv("CC_GRADE_DEBUG"))
+        fprintf(stderr, "cc: grade %s: %s\n", abs_src,
+                grade == CC_GRADE_MODULE ? "module" : grade == CC_GRADE_LIBRARY ? "library" : "interface");
     return grade;
 }
 
@@ -15708,6 +15717,7 @@ static int cc__local_cch_is_impl_grade(const char* abs_src) {
 static int cc__local_cch_is_library(const char* abs_src) {
     return cc__local_cch_grade(abs_src) == CC_GRADE_LIBRARY;
 }
+
 
 /* Members already spliced into the module unit being rewritten (one
  * top-level call of cc_rewrite_local_cch_includes_to_lowered_headers or
@@ -15969,6 +15979,15 @@ static int cc__root_includes(const char* root, const char* member, int depth) {
  * this module, splice it; 0: a face (or the root, `*is_root`), treat as any
  * include; -1: refused, the error is at the include site and says what to
  * write. */
+/* A library face that names no module: a member's own text may grade as
+ * a library, but a member is its module's, and the faces it includes are
+ * the module unit's `.h` includes. */
+static int cc__face_is_library_root(const char* abs_src) {
+    char name[CC_MODULE_NAME_CAP];
+    if (!cc__unit_module_name(abs_src, name, sizeof(name)) || name[0]) return 0;
+    return cc__local_cch_is_library(abs_src);
+}
+
 static int cc__member_include_class(const char* child_abs, const char* current_path,
                                     size_t line_no, int* is_root) {
     char name[CC_MODULE_NAME_CAP];
@@ -16375,23 +16394,51 @@ static char* cc__omit_static_file_scope_fns(const char* src, size_t n) {
 
 /* `static` may sit before `T !>(E)` or other specifiers; `at` may land
  * on `int` of `static int !>(E) f`. Walk back to the declaration start. */
+/* Where the declaration that ends at `at` begins: just after the last
+ * `;`, `}`, directive line or blank line that precedes `at` in code. Read
+ * forward from the start of the text with the scanner, never backward:
+ * a walk back can land inside a comment, and a scan that starts there
+ * takes an apostrophe in prose for a character literal. */
+static size_t cc__decl_start_before(const char* src, size_t n, size_t at) {
+    size_t q = 0;
+    size_t last = 0;
+    int at_bol = 1;
+    CCScannerState scan;
+    cc_scanner_init(&scan);
+    while (q < at && q < n) {
+        size_t before = q;
+        if (cc_scanner_skip_non_code(&scan, src, n, &q)) {
+            size_t k;
+            for (k = before; k < q; k++) at_bol = src[k] == '\n' ? 1 : (src[k] == ' ' || src[k] == '\t') ? at_bol : 0;
+            continue;
+        }
+        if (src[q] == ';' || src[q] == '}') { last = q + 1; at_bol = 0; q++; continue; }
+        if (src[q] == '#' && at_bol) {
+            while (q < n && src[q] != '\n') q++;
+            if (q < n) q++;
+            last = q;
+            at_bol = 1;
+            continue;
+        }
+        if (src[q] == '\n') {
+            if (at_bol) last = q + 1; /* a blank line */
+            at_bol = 1;
+            q++;
+            continue;
+        }
+        if (src[q] != ' ' && src[q] != '\t') at_bol = 0;
+        q++;
+    }
+    return last > at ? at : last;
+}
+
 static int cc__fn_decl_has_static(const char* src, size_t n, size_t at,
                                   size_t fn_end) {
-    size_t lo = at;
+    size_t lo;
     size_t q;
     CCScannerState scan;
     if (!src || at >= n) return 0;
-    while (lo > 0) {
-        char c = src[lo - 1];
-        if (c == ';' || c == '}') break;
-        if (c == '\n') {
-            size_t j = lo - 1;
-            while (j > 0 && (src[j - 1] == ' ' || src[j - 1] == '\t')) j--;
-            if (j > 0 && src[j - 1] == '#') break;
-            if (j == 0 || src[j - 1] == '\n') break;
-        }
-        lo--;
-    }
+    lo = cc__decl_start_before(src, n, at);
     cc_scanner_init(&scan);
     q = lo;
     while (q < fn_end && q < n) {
@@ -16405,21 +16452,11 @@ static int cc__fn_decl_has_static(const char* src, size_t n, size_t at,
 
 static int cc__fn_decl_has_inline(const char* src, size_t n, size_t at,
                                   size_t fn_end) {
-    size_t lo = at;
+    size_t lo;
     size_t q;
     CCScannerState scan;
     if (!src || at >= n) return 0;
-    while (lo > 0) {
-        char c = src[lo - 1];
-        if (c == ';' || c == '}') break;
-        if (c == '\n') {
-            size_t j = lo - 1;
-            while (j > 0 && (src[j - 1] == ' ' || src[j - 1] == '\t')) j--;
-            if (j > 0 && src[j - 1] == '#') break;
-            if (j == 0 || src[j - 1] == '\n') break;
-        }
-        lo--;
-    }
+    lo = cc__decl_start_before(src, n, at);
     cc_scanner_init(&scan);
     q = lo;
     while (q < fn_end && q < n) {
@@ -18958,9 +18995,15 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                             ufcs = cc__lowered_header_needs_ufcs_splice(child_src,
                                                                         child_len);
                         free(child_src);
-                        if (ufcs && cc__path_ends_with(current_path, ".cch")) {
-                            /* Nested in a spliced member: Type_meth lives
-                             * on the parent. Do not extract. */
+                        if (cc__path_ends_with(current_path, ".cch") &&
+                            (ufcs || cc__face_is_library_root(current_path))) {
+                            /* Nested in spliced text: a member whose leaf
+                             * still has raw UFCS (Type_meth lives on the
+                             * parent), or any leaf of a library face, whose
+                             * types may live on the parent -- a name
+                             * resolved without them can land on a declared
+                             * decoy with the same spelling. It is this
+                             * unit's copy: splice it, do not extract. */
                             splice_child = 1;
                         } else if (ufcs) {
                             const char* lp = cc__lower_local_cch_header(child_abs);
@@ -19283,8 +19326,14 @@ static char* cc__splice_members_into(const char* src, size_t n,
                         g_local_cch_lower_failed = 1;
                         goto refuse;
                     }
+                    /* A member, a library face, or an interface leaf nested
+                     * in a library face being spliced: the leaf's types may
+                     * live on the parent, and a name resolved without them
+                     * can land on a declared decoy with the same spelling.
+                     * Each is this unit's own copy. */
                     if (cls == 1 || is_root ||
-                        (cls == 0 && cc__local_cch_is_library(child_abs))) {
+                        (cls == 0 && (cc__local_cch_is_library(child_abs) ||
+                                      (depth > 0 && cc__face_is_library_root(current_path))))) {
                         char* member = NULL;
                         if (is_root || cc__impl_cch_was_spliced(child_abs)) {
                             /* Repeat include: the guard would make this
