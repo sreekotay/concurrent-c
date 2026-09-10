@@ -1,0 +1,1 @@
+the extras' destroy loop and the declaration share one D node; the results step, which now lowers D, rewrites it twice in place into a cycle and the lowerer overflows its stack (SIGSEGV in walk_stmt) -- D must be emitted once
