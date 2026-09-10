@@ -2756,7 +2756,18 @@ static CcStmt* pl_pw_for(CcLowerer* L, CCString init, CCString cond, CCString st
  * nursery the pool shares, one slot per runner for the error it saw, the
  * argument a runner starts from, the cell an exit is recorded in, and the
  * environment the body reaches its captures through. */
-static CCString pl_pw_env_text(PStep* st, uint32_t id, PCapList* caps, CCSlice ret_ty) {
+/* Whether `nm` is one of the names a `cache (...)` clause adopts. */
+static bool pl_pw_is_cache(CcNameList* cache, CCSlice nm) {
+    size_t n = cache->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CCSlice c = *cache->get_ptr(i);
+        if (slice_eq(c, nm)) return true;
+    }
+    return false;
+}
+
+static CCString pl_pw_env_text(PStep* st, uint32_t id, PCapList* caps, CCSlice ret_ty, CcNameList* cache) {
     CcLowerer* L = st->L;
     CCArena a = L->arena;
     CCString sb = cc_string_new();
@@ -2791,6 +2802,15 @@ static CCString pl_pw_env_text(PStep* st, uint32_t id, PCapList* caps, CCSlice r
         sb.push_cstr("* ", a);
         sb.push_slice(c->name, a);
         sb.push_cstr(";\n", a);
+        if (pl_pw_is_cache(cache, c->name)) {
+            /* the extra instances of a cached name, one per runner slot
+             * past the first; slot 0 is the declared instance above */
+            sb.push_cstr("    ", a);
+            sb.push_slice(tn, a);
+            sb.push_cstr("* __cc_pw_cx_", a);
+            sb.push_slice(c->name, a);
+            sb.push_cstr(";\n", a);
+        }
     }
     sb.push_cstr("    ", a);
     sb.push_slice(ex, a);
@@ -3116,7 +3136,7 @@ static bool pl_pw_stages_ok(PStep* st, CcStmt* body) {
  * is and which slot is its own; the ticket is already held when it starts and
  * is given back before it returns, so both schedules keep the gate balanced. */
 static CcDecl* pl_pw_run_decl(PStep* st, uint32_t id, PCapList* caps, CcForIn loop,
-                              CCSlice worker, CcSpan sp) {
+                              CCSlice worker, CcNameList* cache, CcSpan sp) {
     CcLowerer* L = st->L;
     CCSlice env = pl_pw_name(L, id, "_env_t");
     CCSlice run = pl_pw_name(L, id, "_run");
@@ -3192,6 +3212,18 @@ static CcDecl* pl_pw_run_decl(PStep* st, uint32_t id, PCapList* caps, CcForIn lo
         CCSlice cn = c->name;
         if (el) {
             lw_push(fnbody, lw_decl_stmt(L, cc_type_pointer(el, sp, L->arena), cn, read, sp));
+        } else if (pl_pw_is_cache(cache, cn)) {
+            /* a cached name is checked out per runner slot: slot 0 takes
+             * the declared instance, every other slot its own extra. One
+             * runner runs one ticket at a time, so the checkout is
+             * exclusive; the caller, which runs tickets only when no pool
+             * was spawned, is slot 0 */
+            CcType* pt = cc_type_pointer(c->type, sp, L->arena);
+            CCString rn = @string(`__cc_ref_${cn}`, L->arena);
+            CCSlice ref = lw_keep(L, &rn);
+            CCString pick = @string(`(__cc_pw_slot > 0 && e->__cc_pw_cx_${cn}) ? &e->__cc_pw_cx_${cn}[__cc_pw_slot - 1] : e->${cn}`, L->arena);
+            lw_push(fnbody, lw_decl_stmt(L, pt, ref, lw_text(L, pick, sp), sp));
+            pl_rewrite(L, NULL, loop.body, cn, ref);
         } else {
             CcType* pt = cc_type_pointer(c->type, sp, L->arena);
             CCString rn = @string(`__cc_ref_${cn}`, L->arena);
@@ -3354,6 +3386,273 @@ static int pl_stage_gate_form(Walker* w, CcExpr* g) {
  * the whole turnstile takes the phase beside it. */
 static bool pl_stage_is_face(int gform) { return gform == 5 || gform == 6; }
 
+/* ---- `cache (name, ...)` ------------------------------------------------- */
+
+/* The declaration of `nm` in the function the site stands in: the type,
+ * initializer and destroy hook the extras take. */
+typedef struct PDeclQ { CCSlice name; CcVarDecl v; bool hit; } PDeclQ;
+
+static bool pl_decl_visit(CcStmt* s, void* env) {
+    PDeclQ* q = (PDeclQ*)env;
+    CcDecl* d = NULL;
+    CcVarDecl v;
+    bool is_var = false;
+    if (q->hit) return false;
+    @switch (s->k) {
+        case .decl(x): d = x.d; break;
+        default: break;
+    }
+    if (!d) return true;
+    @switch (d->k) {
+        case .var(x): v = x; is_var = true; break;
+        default: break;
+    }
+    if (is_var && slice_eq(v.name, q->name)) { q->v = v; q->hit = true; }
+    return !q->hit;
+}
+
+static bool pl_find_var_decl(PStep* st, CCSlice nm, CcVarDecl* out) {
+    PDeclQ q;
+    CcVisitor v;
+    CcFuncDecl f;
+    bool is_fn = false;
+    CcDecl* ad = st->at_decl;
+    if (!ad) return false;
+    @switch (ad->k) {
+        case .func(x): f = x; is_fn = true; break;
+        default: break;
+    }
+    if (!is_fn || !f.body) return false;
+    memset(&q, 0, sizeof(q));
+    q.name = nm;
+    memset(&v, 0, sizeof(v));
+    v.stmt = pl_decl_visit;
+    v.env = &q;
+    CcStmt_walk(f.body, v);
+    if (q.hit) *out = q.v;
+    return q.hit;
+}
+
+/* The names `cache (...)` adopts, as written. */
+static CcNameList pl_pw_cache_names(CcLowerer* L, CcParallelFor pf) {
+    CcNameList out = vec_new::[CCSlice](L->arena);
+    CcExprList* cv = &pf.cache;
+    size_t n = cv->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CcExpr* ce = *cv->get_ptr(i);
+        CCSlice nm = cc_slice_empty();
+        if (!expr_ident(strip_parens_expr(ce), &nm) || !nm.len) continue;
+        out.push(nm);
+    }
+    return out;
+}
+
+/* The extras of a cached name, as the site declares them. */
+static CCSlice pl_pw_cx_name(CcLowerer* L, uint32_t id, CCSlice nm) {
+    CCString s = @string(`__cc_pw_${id}_cx_${nm}`, L->arena);
+    return lw_keep(L, &s);
+}
+
+/* Whether `nm` is read inside an `@stage` block of the body. A stage is
+ * loop-carried identity; a cached name is an instance no ticket can name,
+ * and the spec keeps the two apart. */
+typedef struct PNameQ { CCSlice name; bool hit; } PNameQ;
+
+static bool pl_name_expr(CcExpr* e, void* env) {
+    PNameQ* q = (PNameQ*)env;
+    CCSlice nm;
+    @switch (e->k) {
+        case .ident(x): nm = x; break;
+        default: return true;
+    }
+    if (slice_eq(nm, q->name)) q->hit = true;
+    return !q->hit;
+}
+
+static bool pl_pw_cache_in_stage(CcStmt* body, CCSlice nm) {
+    CcStmtList* bs = lw_block_stmts(body);
+    size_t n;
+    size_t i;
+    if (!bs) return false;
+    n = bs->len();
+    for (i = 0; i < n; i++) {
+        CcStmt* q = *bs->get_ptr(i);
+        CcExpr* g = NULL;
+        CcExprList qa;
+        CcStmtList qs;
+        size_t k;
+        size_t nk;
+        if (!pl_stage_parts(q, &g, &qa, &qs)) continue;
+        nk = qs.len();
+        for (k = 0; k < nk; k++) {
+            CcStmt* t = *qs.get_ptr(k);
+            PNameQ nq;
+            CcVisitor v;
+            memset(&nq, 0, sizeof(nq));
+            nq.name = nm;
+            memset(&v, 0, sizeof(v));
+            v.expr = pl_name_expr;
+            v.env = &nq;
+            CcStmt_walk(t, v);
+            if (nq.hit) return true;
+        }
+    }
+    return false;
+}
+
+/* ---- the cache extras: allocated per runner slot past the first, cold-
+ * initialized, checked out exclusively by the runner, destroyed at the
+ * join ------------------------------------------------------------------ */
+
+static void pl_pw_cache_alloc(PStep* st, CcStmt* blk, uint32_t id, PCapList* caps, CcNameList* cache, CCSlice nur, CCSlice nw, CCString* more_out, CcSpan sp) {
+    CcLowerer* L = st->L;
+    size_t n = caps->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        /* the extras of a cached name: one per runner slot past the
+         * first, in the storage of the pool, so they go when it goes.
+         * An extra that did not come back closes the pool like any
+         * other allocation that did not: the tickets run on the caller,
+         * on the declared instance. */
+        PCap* c = *caps->get_ptr(i);
+        CCSlice cn = c->name;
+        CCSlice cx;
+        CCSlice tn;
+        CCString dtext;
+        CCString al;
+        CCString more;
+        if (!pl_pw_is_cache(cache, cn)) continue;
+        cx = pl_pw_cx_name(L, id, cn);
+        tn = L->ix->canon(c->type);
+        dtext = @string(`${tn}* ${cx} = 0`, L->arena);
+        al = @string(`if (${nur} && ${nw} > 1) ${cx} = cc_nursery_closure_env_alloc_host(${nur}, (size_t)(${nw} - 1) * sizeof(*${cx}), 16)`, L->arena);
+        more = @string(` || (${nw} > 1 && !${cx})`, L->arena);
+        pl_pw_text(L, blk, dtext, sp);
+        pl_pw_text(L, blk, al, sp);
+        {
+            CCSlice ms = more.as_slice();
+            more_out->push_slice(ms, L->arena);
+        }
+    }
+}
+
+static void pl_pw_cache_init(PStep* st, CcStmt* blk, uint32_t id, PCapList* caps, CcNameList* cache, CCSlice nw, CCSlice wv, CcSpan sp) {
+    CcLowerer* L = st->L;
+    size_t n = caps->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        /* the extras start cold: the initializer the declaration wrote runs
+         * on each. A pool that closed leaves none, and the tickets then run
+         * on the one declared instance. */
+        PCap* c = *caps->get_ptr(i);
+        CCSlice cn = c->name;
+        CcVarDecl cv;
+        CCSlice cx;
+        CcStmt* lb;
+        CcStmt* one;
+        CCString ki;
+        CCString kc;
+        CCString ks;
+        CCString put;
+        if (!pl_pw_is_cache(cache, cn)) continue;
+        if (!pl_find_var_decl(st, cn, &cv)) continue;
+        cx = pl_pw_cx_name(L, id, cn);
+        lb = lw_block(L, sp);
+        if (cv.init) {
+            one = cc__stmt_blank(sp, L->arena);
+            {
+                CcDeclStmt ds;
+                ds.d = cc_decl_var(cv.type, cn, cv.init, sp, L->arena);
+                { CcStmtK sk = { .decl = ds }; one->k = sk; }
+            }
+            lw_push(lb, one);
+            put = @string(`${cx}[${wv}] = ${cn}`, L->arena);
+        } else {
+            /* a declaration with no initializer: the extras start zeroed,
+             * which is the most an indeterminate declared instance promises */
+            put = @string(`cc__bytes_zero(&${cx}[${wv}], sizeof(*${cx}))`, L->arena);
+        }
+        pl_pw_text(L, lb, put, sp);
+        ki = @string(`${wv} = 0`, L->arena);
+        kc = @string(`${wv} < ${nw} - 1`, L->arena);
+        ks = @string(`${wv}++`, L->arena);
+        {
+            CcStmt* then = lw_block(L, sp);
+            CCString cnd = @string(`${cx}`, L->arena);
+            lw_push(then, pl_pw_for(L, ki, kc, ks, lb, sp));
+            lw_push(blk, lw_if(L, lw_text(L, cnd, sp), then, NULL, sp));
+        }
+    }
+}
+
+static void pl_pw_cache_destroy(PStep* st, CcStmt* blk, uint32_t id, PCapList* caps, CcNameList* cache, CCSlice nw, CCSlice wv, CcSpan sp) {
+    CcLowerer* L = st->L;
+    size_t n = caps->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        /* the extras are destroyed at the join, each by the destroy hook
+         * the declaration wrote, bound to the name it wrote it against: a
+         * declaration in a block of its own, whose exit is the destroy. The
+         * declared instance keeps its own, at its own scope exit. A
+         * declaration with no hook leaves nothing to run. */
+        PCap* c = *caps->get_ptr(i);
+        CCSlice cn = c->name;
+        CcVarDecl cv;
+        CCSlice cx;
+        CcStmt* lb;
+        CcStmt* inner;
+        CcStmt* one;
+        CCString ki;
+        CCString kc;
+        CCString ks;
+        CCString take;
+        if (!pl_pw_is_cache(cache, cn)) continue;
+        if (!pl_find_var_decl(st, cn, &cv)) continue;
+        if (!cv.destroy) continue;
+        cx = pl_pw_cx_name(L, id, cn);
+        lb = lw_block(L, sp);
+        inner = lw_block(L, sp);
+        one = cc__stmt_blank(sp, L->arena);
+        take = @string(`${cx}[${wv}]`, L->arena);
+        {
+            CcDeclStmt ds;
+            CcDecl* dd = cc_decl_var(cv.type, cn, NULL, sp, L->arena);
+            CcVarDecl nv;
+            bool is_var = false;
+            CcInit* in = cc_arena_alloc(L->arena, sizeof(CcInit), _Alignof(CcInit));
+            memset(in, 0, sizeof(*in));
+            in->span = sp;
+            in->designators = vec_new::[CcDesignator](L->arena);
+            in->items = vec_new::[CcInitRef](L->arena);
+            in->expr = lw_text(L, take, sp);
+            @switch (dd->k) {
+                case .var(x): nv = x; is_var = true; break;
+                default: break;
+            }
+            if (is_var) {
+                nv.init = in;
+                nv.destroy = true;
+                nv.destroy_body = cv.destroy_body;
+                { CcDeclK dk = { .var = nv }; dd->k = dk; }
+            }
+            ds.d = dd;
+            { CcStmtK sk = { .decl = ds }; one->k = sk; }
+        }
+        lw_push(inner, one);
+        lw_push(lb, inner);
+        ki = @string(`${wv} = 0`, L->arena);
+        kc = @string(`${wv} < ${nw} - 1`, L->arena);
+        ks = @string(`${wv}++`, L->arena);
+        {
+            CcStmt* then = lw_block(L, sp);
+            CCString cnd = @string(`${cx}`, L->arena);
+            lw_push(then, pl_pw_for(L, ki, kc, ks, lb, sp));
+            lw_push(blk, lw_if(L, lw_text(L, cnd, sp), then, NULL, sp));
+        }
+    }
+}
+
 /* The site: open the pool, hand out the tickets under the gate, then read
  * what the pool left behind. */
 static void pl_pw_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
@@ -3398,8 +3697,46 @@ static void pl_pw_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
     CCSlice los = cc_slice_empty();
     CCSlice his = cc_slice_empty();
     int gform = pl_pw_gate_form(w, pf.wait);
+    CcNameList cache = pl_pw_cache_names(L, pf);
+    bool hdest = pl_pw_handle_bind(pf);      /* the site binds a live `CCParallel` */
+    CCSlice hv = hdest ? pf.bind : cc_slice_empty();
     size_t n;
     size_t i;
+    if (pf.loop.body) {
+        /* the body leaves for the run function before the walk reaches the
+         * statement: whatever `@parallel` it holds is lowered here, first,
+         * with the ticket binder in scope */
+        sc_push(w);
+        sc_declare(w, pf.loop.bind, cc_type_named(cstr_slice("int"), sp, L->arena));
+        tw_stmt(w, pf.loop.body);
+        sc_pop(w);
+    }
+    {
+        /* a cached name is an enclosing declaration the extras copy: it has
+         * to be one this function declares, of a type an instance of which
+         * is a value, and it stays out of the `@stage` blocks */
+        size_t nc = cache.len();
+        size_t ci;
+        for (ci = 0; ci < nc; ci++) {
+            CCSlice nm = *cache.get_ptr(ci);
+            CcVarDecl cv;
+            if (!pl_find_var_decl(st, nm, &cv)) {
+                CCString m = @string(`cache (name) '${nm}' has no declaration in the function the walk stands in; the extras take their initializer and '${"@"}destroy' from one: declare '${nm}' above the walk`, L->arena);
+                lw_error(L, sp, m);
+                return;
+            }
+            if (pl_for_decayed(cv.type)) {
+                CCString m = @string(`cache (name) '${nm}' is an array; the extras are instances of a value type: wrap the array in a struct and cache that`, L->arena);
+                lw_error(L, sp, m);
+                return;
+            }
+            if (pl_pw_cache_in_stage(pf.loop.body, nm)) {
+                CCString m = @string(`cache (name) '${nm}' is read inside an '${"@"}stage' block: a stage is loop-carried identity and a cached name is an instance no ticket can name; read '${nm}' outside the stage, or drop it from 'cache'`, L->arena);
+                lw_error(L, sp, m);
+                return;
+            }
+        }
+    }
     memset(&sc, 0, sizeof(sc));
     sc.st = st;
     sc.w = w;
@@ -3441,17 +3778,27 @@ static void pl_pw_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
             CCString t = lw_spell_expr(L, pf.target);
             dst = lw_keep(L, &t);
         }
+    } else if (hdest) {
+        /* the handle outlives the block: declared above it, with the
+         * destroy hook the tail wrote, the way a bound brace join is */
+        PBind* b = cc_arena_alloc(L->arena, sizeof(PBind), _Alignof(PBind));
+        memset(b, 0, sizeof(*b));
+        b->at = s;
+        b->name = pf.bind;
+        b->type = pf.bind_type;
+        b->destroy = pl_tail_destroys(pf.tail, &b->destroy_body);
+        st->binds.push(b);
     }
     { CCString t = lw_spell_expr(L, pf.wait); wspell = lw_keep(L, &t); }
     if (pf.seq) { CCString t = lw_spell_expr(L, pf.seq); gspell = lw_keep(L, &t); }
     { CCString t = lw_spell_expr(L, rg.lo); los = lw_keep(L, &t); }
     { CCString t = lw_spell_expr(L, rg.hi); his = lw_keep(L, &t); }
     {
-        CCString et = pl_pw_env_text(st, id, &caps, ret_ty);
+        CCString et = pl_pw_env_text(st, id, &caps, ret_ty, &cache);
         pl_host(st); st->fwd.push_slice(et.as_slice(), L->arena);
     }
     pl_pw_forward(st, id);
-    st->made.push(pl_pw_run_decl(st, id, &caps, pf.loop, pf.worker, sp));
+    st->made.push(pl_pw_run_decl(st, id, &caps, pf.loop, pf.worker, &cache, sp));
     st->made.push(pl_pw_worker_decl(st, id, sp));
     {
         CCString a1 = @string(`${env} ${ev}`, L->arena);
@@ -3479,6 +3826,12 @@ static void pl_pw_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
         pl_pw_text(L, blk, a7, sp);
         pl_pw_text(L, blk, a8, sp);
         pl_pw_text(L, blk, a9, sp);
+    }
+    if (hdest) {
+        /* the dest is planted before the pool opens: live from here to the
+         * join, and the handle the tickets pause, resume and cancel through */
+        CCString t = @string(`${hv} = cc_parallel_dest()`, L->arena);
+        pl_pw_text(L, blk, t, sp);
     }
     {
         CCString b1 = @string(`CCError ${ferr}`, L->arena);
@@ -3531,17 +3884,25 @@ static void pl_pw_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
         /* an allocation that did not come back closes the pool again rather
          * than running half of one: the caller takes the tickets instead */
         CCString c2 = @string(`if (${nur}) { ${work} = cc_chan_create((size_t)${nw}); if (${work}) ${slots} = cc_nursery_closure_env_alloc_host(${nur}, (size_t)${nw} * sizeof(*${slots}), 16); if (${slots}) ${args} = cc_nursery_closure_env_alloc_host(${nur}, (size_t)${nw} * sizeof(*${args}), 16); }`, L->arena);
-        CCString c3 = @string(`if (${nur} && (!${work} || !${slots} || !${args})) { if (${work}) cc_chan_free(${work}); ${work} = 0; ${slots} = 0; ${args} = 0; cc_nursery_free_host(${nur}); ${nur} = 0; }`, L->arena);
+        CCString more = cc_string_new();
+        CCString c3;
         pl_pw_text(L, blk, c2, sp);
+        pl_pw_cache_alloc(st, blk, id, &caps, &cache, nur, nw, &more, sp);
+        c3 = @string(`if (${nur} && (!${work} || !${slots} || !${args}${more})) { if (${work}) cc_chan_free(${work}); ${work} = 0; ${slots} = 0; ${args} = 0; cc_nursery_free_host(${nur}); ${nur} = 0; }`, L->arena);
         pl_pw_text(L, blk, c3, sp);
     }
+    pl_pw_cache_init(st, blk, id, &caps, &cache, nw, wv, sp);
     {
         /* the caller's own slot stands in for a runner's when there is no
          * pool, so the body is handed the same shape on either schedule */
         CCString f1 = @string(`${shv}.gate = ${gv}`, L->arena);
         CCString f2 = @string(`${shv}.nur = ${nur}`, L->arena);
         CCString f3 = @string(`${shv}.work = ${work}`, L->arena);
-        CCString f4 = @string(`${shv}.dest = 0`, L->arena);
+        /* the handle the tickets pause and resume through, and the nursery
+         * its cancel stops: `h.n` is the pool, so `h.cancel()` marks the
+         * dest and cancels the pool, and the enter loop below stops */
+        CCString f4 = hdest ? @string(`${shv}.dest = &${hv}; ${hv}.n = ${nur}`, L->arena)
+                            : @string(`${shv}.dest = 0`, L->arena);
         CCString f5 = @string(`${ev}.sh = &${shv}`, L->arena);
         CCString f6 = @string(`${ev}.slots = ${slots} ? ${slots} : &${s0}`, L->arena);
         CCString f7 = @string(`${ev}.__cc_pf_ex = &${cell}`, L->arena);
@@ -3562,6 +3923,13 @@ static void pl_pw_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
             ? @string(`${ev}.${cn} = (${cn})`, L->arena)
             : @string(`${ev}.${cn} = &(${cn})`, L->arena);
         pl_pw_text(L, blk, as, sp);
+        if (pl_pw_is_cache(&cache, cn)) {
+            /* the extras beside the declared instance: a runner past slot
+             * 0 checks out its own */
+            CCSlice cx = pl_pw_cx_name(L, id, cn);
+            CCString cs = @string(`${ev}.__cc_pw_cx_${cn} = ${cx}`, L->arena);
+            pl_pw_text(L, blk, cs, sp);
+        }
     }
     {
         CCString g1 = @string(`if (${nur}) cc__bytes_zero(${slots}, (size_t)${nw} * sizeof(*${slots}))`, L->arena);
@@ -3575,7 +3943,10 @@ static void pl_pw_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
          * it back; a ticket that was held but never reached gives it back
          * here. */
         CcStmt* lb = lw_block(L, sp);
-        CCString k1 = @string(`if (cc_nursery_is_cancelled_host(${nur})) break`, L->arena);
+        /* a bound handle is honored at enter -- a paused dest hands out no
+         * ticket until it resumes -- and a cancelled one hands out none */
+        CCString k1 = hdest ? @string(`cc_parallel_honor(&${hv}); if (cc_nursery_is_cancelled_host(${nur}) || cc_atomic_load(&${hv}.cancelled)) break`, L->arena)
+                            : @string(`if (cc_nursery_is_cancelled_host(${nur})) break`, L->arena);
         CCString k2 = @string(`if (cc_atomic_load(&${cell}.xk)) break`, L->arena);
         CCString k3 = @string(`if (!${spawned} && ${ev}.slots[0].failed) break`, L->arena);
         CCString k4 = @string(`{ __typeof__(cc_turnstile_enter(${gv}, ${iv})) __cc_pw_r = cc_turnstile_enter(${gv}, ${iv}); ${eok} = __cc_pw_r.ok; if (!__cc_pw_r.ok) ${ferr} = __cc_pw_r.u.error.base; }`, L->arena);
@@ -3603,6 +3974,13 @@ static void pl_pw_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
         CCString h2 = @string(`if (${nur}) (void)cc_nursery_wait_host(${nur})`, L->arena);
         pl_pw_text(L, blk, h1, sp);
         pl_pw_text(L, blk, h2, sp);
+    }
+    pl_pw_cache_destroy(st, blk, id, &caps, &cache, nw, wv, sp);
+    if (hdest) {
+        /* joined: every ticket ran or was drained, and the pool is about to
+         * go, so the handle names no nursery any more */
+        CCString t = @string(`${hv}.n = 0; cc_atomic_store(&${hv}.joined, 1)`, L->arena);
+        pl_pw_text(L, blk, t, sp);
     }
     {
         /* which ticket error re-raises: the earliest one that is not just an
@@ -3662,6 +4040,8 @@ static bool pl_pw_tail_raises(CcExpr* tail) {
     if (!tail) return false;
     @switch (tail->k) {
         case .unwrap: raises = true; break;
+        /* the destroy tail on a bound handle unwraps the same way */
+        case .unwrap_destroy: raises = true; break;
         default: break;
     }
     return raises;
@@ -3992,18 +4372,6 @@ static void pl_for(PStep* st, CcStmt* s, CcParallelFor pf) {
         return;
     }
     if (pf.cache.len() && !pl_pw_cache_ok(st, pf, sp)) {
-        s->k = gone->k;
-        return;
-    }
-    if (pf.cache.len()) {
-        m = @string(`'${"@"}parallel wait (...) for' with 'cache' is not lowered by the clean lowerer yet`, L->arena);
-        lw_error(L, sp, m);
-        s->k = gone->k;
-        return;
-    }
-    if (pl_pw_handle_bind(pf)) {
-        m = @string(`'${"@"}parallel wait (...) for' that binds a live 'CCParallel' is not lowered by the clean lowerer yet: the tickets pause and resume through the handle while the pool is still running`, L->arena);
-        lw_error(L, sp, m);
         s->k = gone->k;
         return;
     }
