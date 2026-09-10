@@ -1,0 +1,1 @@
+the reference keeps a fixed table of eight @errhandlers per function and refuses the ninth out loud ("shadow errhandlers table full (8); refusing silent drop of 'CCError'"); this row stacks nine

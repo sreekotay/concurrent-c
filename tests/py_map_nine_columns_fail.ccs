@@ -1,0 +1,21 @@
+/* `f.map::[T](arena, cols...)` takes at most eight columns: the worker
+ * refuses `argc > 8` at run time, and the lowerer says so at the site
+ * that wrote the ninth, naming the count. A ninth column is not a reason
+ * to stop reading the call as a row batch and hand it to the plain
+ * path, which would resolve `.map` to something else or to nothing. */
+#include <ccc/std/prelude.cch>
+#include <ccc/script/py.cch>
+#include <stdio.h>
+
+int main(void) {
+    @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); return 1; }
+    CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+    CCPy py = cc_py_new(false, a) !>;
+    CCPyObj m = py.import("__main__") !> @destroy;
+    CCPyObj f = m.get("g") !> @destroy;
+    double c1[:] = {1.0}; double c2[:] = {1.0}; double c3[:] = {1.0};
+    double c4[:] = {1.0}; double c5[:] = {1.0}; double c6[:] = {1.0};
+    double c7[:] = {1.0}; double c8[:] = {1.0}; double c9[:] = {1.0};
+    CCSlice out = f.map::[double](a, c1, c2, c3, c4, c5, c6, c7, c8, c9) !>;
+    return (int)out.len;
+}

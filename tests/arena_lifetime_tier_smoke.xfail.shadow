@@ -1,0 +1,1 @@
+the reference assigns the whole Result for `cp = a.try_checkpoint() !>;` into a pre-declared local (host: incompatible types ... from 'CCResult_CCArenaCheckpoint_CCError'); the assignment-form UFCS unwrap lowers on the clean lowerer only

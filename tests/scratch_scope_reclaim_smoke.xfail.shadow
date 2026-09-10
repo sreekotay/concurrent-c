@@ -1,0 +1,1 @@
+the reference keeps @scratch bytes bound to a name for the function lifetime; the block-scope reclaim this row pins is implemented on the clean lowerer only

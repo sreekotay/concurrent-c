@@ -1,0 +1,1 @@
+the clean path expands only function-like #defines whose bodies carry @destroy/@detach when they are in the unit itself; a define from a quoted .cch header (and cc_arena_stack, which is the host preprocessor's) loses the attribute, so the arena is built and never destroyed while the smoke still prints ok

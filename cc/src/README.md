@@ -5,7 +5,7 @@ Driver: `cc_main.c` (native-only; `--frontend=legacy` is a hard error).
 
 Subdirectories:
 
-- `parser/` — `symsig` (signature queries for comptime / lower_headers)
+- `parser/` — (empty since the `symsig` table, which nothing ever populated, was removed)
 - `ast/` — CC-specific node metadata used by remaining sugar helpers
 - `visitor/` — text sugar used by `lower_headers` / comptime (`pass_*_syntax`,
   unwrap/destroy, errhandler lookup) — not a product front

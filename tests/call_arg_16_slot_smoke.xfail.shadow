@@ -1,0 +1,1 @@
+the reference keeps a fixed rewrite buffer for call arguments and refuses the sixteenth slot out loud ("call-arg leftover rewrite buffer full (refuse truncated emit)")

@@ -317,4 +317,7 @@ starts.
   are the work list of the current milestone.
 - Every shape the current compiler refuses in the lowerer's own sources is
   a `stress/break` entry with an `.xfail`; the port avoids it until the
-  clean lowerer lands the fix, then the marker goes.
+  clean lowerer lands the fix. A marker speaks for every lowerer; one
+  named `.xfail.shadow` or `.xfail.clean` speaks for that lowerer only,
+  which is what a shape fixed on one and still open on the other needs.
+  When both are fixed the marker goes.
