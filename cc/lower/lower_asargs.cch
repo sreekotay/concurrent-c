@@ -158,6 +158,10 @@ static void as_call(Walker* w, CcExpr* e, CcCall cl) {
         bool addr = false;
         bool arrow = false;
         if (!at || !pa->type) continue;
+        /* Asked before the projection rules, because a written cast has
+         * already made both sides read `CCFile` and the loop below would
+         * drop out on `from == to` with nothing said. */
+        as_warn_cast_skips(st, pa->type, a, a->span);
         /* `&x` for a `T*` parameter: the face is projected inside the
          * address-of, so the callee points at the face and not at a
          * pointer to the wrapper that happens to start with one */

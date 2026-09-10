@@ -224,7 +224,19 @@ static int run_one_test(const char* stem, const char* input_path, int compile_fa
 /* `<stem>.xfail` beside a test: the expectation files describe the behaviour
  * the compiler should have and does not yet. A failing run is reported as
  * XFAIL and does not count; a passing run is XPASS and counts as a failure
- * until the sidecar is deleted, so the marker never outlives the bug. */
+ * until the sidecar is deleted, so the marker never outlives the bug.
+ *
+ * `<stem>.xfail.<lowerer>` says the same of one lowerer only. Two lowerers
+ * fix a bug on different days, and a single marker has to be wrong for one
+ * of them the moment they disagree: either it outlives the bug on the
+ * lowerer that fixed it, or deleting it turns the other one red. The
+ * lowerer is whatever `CC_LOWERER` names, which is what `ccc` itself reads;
+ * unset means `shadow`, its default. Both files are consulted, so a plain
+ * marker still speaks for every lowerer. */
+static const char* lowerer_name(void) {
+    const char* v = getenv("CC_LOWERER");
+    return (v && *v) ? v : "shadow";
+}
 static int run_one_test_maybe_profile(const char* stem, const char* input_path,
                                       int compile_fail, int verbose,
                                       const char* out_dir, const char* bin_dir,
@@ -234,10 +246,15 @@ static int run_one_test_maybe_profile(const char* stem, const char* input_path,
     int rc;
     char tdir[512];
     char xf[640];
+    char xfl[704];
+    const char* marker;
     int xfail;
     test_dir_from_path(input_path, tdir, sizeof(tdir));
     snprintf(xf, sizeof(xf), "%s/%s.xfail", tdir, stem);
+    snprintf(xfl, sizeof(xfl), "%s/%s.xfail.%s", tdir, stem, lowerer_name());
+    marker = xf;
     xfail = file_exists(xf);
+    if (!xfail && file_exists(xfl)) { xfail = 1; marker = xfl; }
     if (g_cc_test_profile) t0 = now_ms_monotonic();
     rc = run_one_test(stem, input_path, compile_fail, verbose, out_dir, bin_dir,
                       use_cache, opt_o0, build_timeout_sec, run_timeout_sec);
@@ -245,10 +262,10 @@ static int run_one_test_maybe_profile(const char* stem, const char* input_path,
         fprintf(stderr, "[TIME] %s %lldms\n", stem, now_ms_monotonic() - t0);
     if (xfail) {
         if (rc != 0) {
-            fprintf(stderr, "[XFAIL] %s (expected; see %s)\n", stem, xf);
+            fprintf(stderr, "[XFAIL] %s (expected; see %s)\n", stem, marker);
             return 0;
         }
-        fprintf(stderr, "[XPASS] %s: passes now; delete %s\n", stem, xf);
+        fprintf(stderr, "[XPASS] %s: passes now; delete %s\n", stem, marker);
         return 1;
     }
     return rc;

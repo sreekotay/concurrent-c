@@ -365,6 +365,13 @@ Writing a tree of `@variant` nodes with `Vec` children and a template
 printer (`stress/break/break_ast_cc_way_smoke.ccs`) trips seventeen distinct
 defects, each pinned by a sibling `break_*` test with an `.xfail` marker:
 
+A marker named `<stem>.xfail` speaks for every lowerer. `<stem>.xfail.<lowerer>`
+— `.xfail.shadow`, `.xfail.clean` — speaks for the one named, and is what a bug
+fixed on one lowerer and still open on the other needs: a single marker would
+have to be wrong for one of them, either outliving the bug on the lowerer that
+fixed it or turning the other one red when deleted. The name is whatever
+`CC_LOWERER` says, `shadow` when unset.
+
 | Shape | What happens today | Test |
 |-------|--------------------|------|
 | `Vec::[T*]` | no instance is emitted for a pointer element; with a typedef, `@for` types the element as an opaque value and refuses `p->v` | `break_vec_of_pointers` |
