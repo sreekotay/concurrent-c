@@ -4368,7 +4368,7 @@ static int cc__splice_comptime_into_clean(const char* c_path, const char* orig_p
 
 /* Lower `in_path` to C with the clean lowerer into `c_out`. */
 static int cc__run_clean_lowerer(const char* in_path, const char* c_out,
-                                 const char* quote_dir) {
+                                 const char* quote_dir, int no_line) {
     char tool[PATH_MAX], known[PATH_MAX], incdir[PATH_MAX], hroot[PATH_MAX];
     char schema[PATH_MAX];
     char insts[PATH_MAX];
@@ -4395,6 +4395,7 @@ static int cc__run_clean_lowerer(const char* in_path, const char* c_out,
     argv[argc++] = hroot;
     argv[argc++] = (char*)"--known-types";
     argv[argc++] = known;
+    if (no_line) argv[argc++] = (char*)"--no-line";
     if (cc__write_schema_variants(schema, sizeof(schema)) != 0) return -1;
     if (schema[0]) {
         argv[argc++] = (char*)"--schema-variants";
@@ -5096,10 +5097,33 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             }
             /* a stage lives in the cache, so quoted includes still resolve
              * against the directory the user wrote the unit in */
+            int clean_no_line = 0;
             cc__dir_of_path(opt->in_path, clean_qdir, sizeof(clean_qdir));
             /* recorded for the host compile: by then `in_path` is the emitted
              * C, and a quoted include still names a file beside the unit */
             snprintf(g_clean_quote_dir, sizeof(g_clean_quote_dir), "%s", clean_qdir);
+            /* The file-start pragmas, read off the file the user wrote. The
+             * reference lowerer validates them itself (`pp_stage2`); the clean
+             * lowerer knows only `@parallel`, so a misspelled `@prelude` or
+             * `@linenumbers` operand would otherwise be lowered past as if
+             * the line were not there. And it has to be this file: the
+             * comptime stage below prepends a `#line`, behind which the
+             * recogniser sees no pragma at all. `@linenumbers off` is handed
+             * on as `--no-line`. */
+            {
+                size_t rn = 0;
+                char* raw = cc__read_all_file(opt->in_path, &rn);
+                char perr[192];
+                int po = 0;
+                if (raw) {
+                    if (cc_file_start_pragmas(raw, rn, &po, &clean_no_line, NULL, perr, sizeof(perr)) != 0) {
+                        fprintf(stderr, "%s: %s\n", opt->in_path, perr);
+                        free(raw);
+                        return -1;
+                    }
+                    free(raw);
+                }
+            }
             {
                 /* compile time first: what it decides is what there is to lower */
                 /* `o_ct.in_path` outlives this block, so the buffer it points
@@ -5122,7 +5146,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             (void)cc__mkdir_p(dir);
             snprintf(clean_c, sizeof(clean_c), "%s/%s.%016llx.c", dir, stem,
                      (unsigned long long)cc__fold_file_content(1469598103934665603ULL, opt->in_path));
-            if (cc__run_clean_lowerer(opt->in_path, clean_c, clean_qdir) != 0) return -1;
+            if (cc__run_clean_lowerer(opt->in_path, clean_c, clean_qdir, clean_no_line) != 0) return -1;
             if (cc__splice_comptime_into_clean(clean_c, clean_orig) != 0) return -1;
             if (opt->mode == CC_MODE_EMIT_C) {
                 if (cc__materialize_host_c(clean_c, opt->c_out_path) != 0) return -1;

@@ -75,8 +75,11 @@ typedef struct PStep {
 
 /* ---- `#pragma(@parallel) off` ------------------------------------------- */
 
-/* `#pragma(@parallel) off` / `... on`, as the preprocessor token spells it. */
-static bool pl_pragma_par(CCSlice text, bool* is_off, bool* is_on) {
+/* `#pragma(@parallel) off` / `... on`, as the preprocessor token spells it.
+ * `bad` is set when the token is this pragma with some other operand: the
+ * spec allows exactly the two, and a scan that skipped a third would leave
+ * the block parallel for a user who wrote the pragma to make it not so. */
+static bool pl_pragma_par(CCSlice text, bool* is_off, bool* is_on, bool* bad) {
     const char* p = text.ptr;
     size_t n = text.len;
     size_t i = 0;
@@ -91,6 +94,7 @@ static bool pl_pragma_par(CCSlice text, bool* is_off, bool* is_on) {
     while (i < n && (p[i] == ' ' || p[i] == '\t')) i++;
     if (n - i >= 3 && p[i] == 'o' && p[i + 1] == 'f' && p[i + 2] == 'f') { *is_off = true; return true; }
     if (n - i >= 2 && p[i] == 'o' && p[i + 1] == 'n') { *is_on = true; return true; }
+    *bad = true;
     return false;
 }
 
@@ -111,8 +115,18 @@ static void pl_read_par_off(PStep* st) {
         CCSlice tx = t->text;
         bool is_off = false;
         bool is_on = false;
+        bool bad = false;
         if (t->kind != CC_TK_PP) continue;
-        if (!pl_pragma_par(tx, &is_off, &is_on)) continue;
+        if (!pl_pragma_par(tx, &is_off, &is_on, &bad)) {
+            if (bad) {
+                CcSpan sp;
+                CCString msg = @string(`#pragma(${"@"}parallel) takes 'off' or 'on'`, st->L->arena);
+                sp.first = (uint32_t)i;
+                sp.last = (uint32_t)i;
+                lw_error(st->L, sp, msg);
+            }
+            continue;
+        }
         if (is_off && !off) {
             Vec::[uint32_t]* fv = &st->off_from;
             off = true;

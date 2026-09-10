@@ -14,19 +14,26 @@ mkdir -p "$OUT"
 run() {  # name env-assignment
   local name=$1; shift
   env "$@" out/tools/cc_test --quick "${ARGS[@]}" > "$OUT/$name.log" 2>&1 || true
-  # one line per test: ok (OK, or XFAIL after its FAIL line) or fail
-  grep -oE '^\[(OK|FAIL|XFAIL|XPASS)\] [A-Za-z0-9_./-]+' "$OUT/$name.log" \
-    | awk '{ st = ($1 == "[OK]" || $1 == "[XFAIL]") ? "ok" : "fail";
-             if (!($2 in seen) || st == "ok") r[$2] = st; seen[$2] = 1 }
+  # one line per test: ok, fail, xfail or timeout. The harness prints a
+  # row's verdict lines in order -- `[FAIL] s: ...` then `[XFAIL] s (...)`,
+  # `[OK] s` then `[XPASS] s: ...` -- so the last line for a stem is its
+  # verdict. The stem must be followed by end of line, `:` or ` (`: a
+  # `[FAIL] expected stdout to contain: ...` line names no row.
+  sed -nE 's/^\[(OK|FAIL|XFAIL|XPASS|TIMEOUT)\] ([A-Za-z0-9_./-]+)($|:.*| \(.*)/\2 \1/p' "$OUT/$name.log" \
+    | awk '{ st = ($2 == "OK") ? "ok" : ($2 == "XFAIL") ? "xfail" : ($2 == "TIMEOUT") ? "timeout" : "fail"; r[$1] = st }
            END { for (t in r) print t, r[t] }' | sort > "$OUT/$name.tsv"
 }
 ARGS=("$@")
 run shadow CC_LOWERER=shadow
 run clean CC_LOWERER=clean
 join -a1 -a2 -e missing -o 0,1.2,2.2 "$OUT/shadow.tsv" "$OUT/clean.tsv" > "$OUT/table.txt"
+# The 2x2 is over rows neither lowerer marks expected-to-fail; a marked row
+# is counted on its own line, and a hang is a failure that says so.
 pp=$(awk '$2=="ok" && $3=="ok"' "$OUT/table.txt" | wc -l)
-pf=$(awk '$2=="ok" && $3!="ok"' "$OUT/table.txt" | wc -l)
-fp=$(awk '$2!="ok" && $3=="ok"' "$OUT/table.txt" | wc -l)
-ff=$(awk '$2!="ok" && $3!="ok"' "$OUT/table.txt" | wc -l)
-echo "shadow/clean  pass/pass=$pp  pass/fail=$pf  fail/pass=$fp  fail/fail=$ff  (table: $OUT/table.txt)"
-awk '$2=="ok" && $3!="ok" { print "  clean fails:", $1 }' "$OUT/table.txt" | head -40
+pf=$(awk '$2=="ok" && ($3=="fail" || $3=="timeout" || $3=="missing")' "$OUT/table.txt" | wc -l)
+fp=$(awk '($2=="fail" || $2=="timeout" || $2=="missing") && $3=="ok"' "$OUT/table.txt" | wc -l)
+ff=$(awk '($2=="fail" || $2=="timeout" || $2=="missing") && ($3=="fail" || $3=="timeout" || $3=="missing")' "$OUT/table.txt" | wc -l)
+xs=$(awk '$2=="xfail"' "$OUT/table.txt" | wc -l)
+xc=$(awk '$3=="xfail"' "$OUT/table.txt" | wc -l)
+echo "shadow/clean  pass/pass=$pp  pass/fail=$pf  fail/pass=$fp  fail/fail=$ff  xfail: shadow=$xs clean=$xc  (table: $OUT/table.txt)"
+awk '$2=="ok" && $3!="ok" && $3!="xfail" { print "  clean fails:", $1, "(" $3 ")" }' "$OUT/table.txt" | head -40
