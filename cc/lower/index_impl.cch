@@ -2131,6 +2131,18 @@ static CCSlice cc__hook_create_arg(CcIndex* ix, const CcUnit* u, const CcExpr* a
 
 static void cc__hook_create(CcIndex* ix, const CcUnit* u, CcHookReg* reg, const CcExpr* value) {
     CCSlice nm;
+    /* `cc_type_create_hook(fn)` names a handler, not a callee: which
+     * constructor a site gets depends on what it passed, so the answer is
+     * the handler's to give and there is no name to record here. */
+    if (cc__eqc(cc__callee_name(value), "cc_type_create_hook")) {
+        bool ok;
+        CcExprList args = cc__call_arglist(value, &ok);
+        if (ok && args.len() == 1) {
+            const CcExpr* a0 = *args.get_ptr(0);
+            if (cc__expr_is_ident(a0, &nm)) reg->create_handler = nm;
+        }
+        return;
+    }
     if (cc__expr_is_ident(value, &nm)) reg->create_fn = nm;
     else if (cc__expr_is_closure(value)) reg->create_fn = cc__ix_s("<lambda>");
     else {
@@ -2495,6 +2507,7 @@ static void cc__inherit_alias_hooks(CcIndex* ix, CcTypeInfo* info) {
 static void cc__type_resolve_hooks(CcIndex* ix, CcTypeInfo* info) {
     CcHookReg* r = cc__hook_match(ix, info->name, false);
     CcHookReg* create = NULL;
+    CcHookReg* create_hook = NULL;
     CcHookReg* destroy = NULL;
     CcHookRegList* hookv = &ix->hooks;
     size_t i;
@@ -2507,8 +2520,10 @@ static void cc__type_resolve_hooks(CcIndex* ix, CcTypeInfo* info) {
         int score = cc__hook_score(h, name);
         if (score < 0) continue;
         if (h->create_fn.len && (!create || score >= cc__hook_rank(create))) create = h;
+        if (h->create_handler.len && (!create_hook || score >= cc__hook_rank(create_hook))) create_hook = h;
         if ((h->destroy_fn.len || h->pre_destroy_fn.len) && (!destroy || score >= cc__hook_rank(destroy))) destroy = h;
     }
+    info->create_hook = create_hook;
     info->create_fn = create ? cc__suffix_callee(ix, info, create->create_fn) : cc_slice_empty();
     info->destroy_fn = destroy ? cc__suffix_callee(ix, info, destroy->destroy_fn) : cc_slice_empty();
     info->pre_destroy_fn = destroy ? cc__suffix_callee(ix, info, destroy->pre_destroy_fn) : cc_slice_empty();

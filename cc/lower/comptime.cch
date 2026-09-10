@@ -61,6 +61,13 @@ extern int cc_comptime_exec_eval_literal(const char* expr,
  * out of the source that declared it, once, and called per site. */
 #define CC_COMPTIME_TYPE_HOOK_UFCS 1
 
+/* A `.create` hook registered with `cc_type_create_hook` is the same shape
+ * of question about a constructor site: `@create(4)` and `@create("hello")`
+ * are different callees, and the arguments with their types are what says
+ * which. It is compiled and called the same way, with the type name where
+ * the receiver type and the method stand for `.ufcs`. */
+#define CC_COMPTIME_TYPE_HOOK_CREATE 0
+
 /* The `typedef` / `struct` declarations of a source, as a prelude: what a
  * handler's own translation unit needs to name the types it is about. */
 extern char* cc_ct_extract_type_decls_prelude(const char* src, size_t n);
@@ -81,6 +88,11 @@ extern int cc_comptime_compile_type_hook_callable(const char* registration_input
  * receiver goes by value. */
 typedef CCSlice (*CcUfcsHookFn)(CCSlice recv_type, CCSlice method, CCSlice mode,
                                 CCSliceArray argv, CCSliceArray arg_types, CCArena arena);
+
+/* What a computed `.create` hook returns is the constructor, or the empty
+ * slice: no overload for what this site passed. */
+typedef CCSlice (*CcCreateHookFn)(CCSlice type_name, CCSliceArray argv,
+                                  CCSliceArray arg_types, CCArena arena);
 
 /* ---- compiled generic factories ----------------------------------------
  *

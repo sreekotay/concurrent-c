@@ -141,6 +141,85 @@ static bool xt_expr_visit(CcExpr* e, void* env) {
     return true;
 }
 
+/* ---- a type hook whose body decides from the site ----------------------
+ *
+ * A `.ufcs` handler is a function of the call site and a `cc_type_create_hook`
+ * `.create` handler is a function of the constructor site: neither can be
+ * read off its body as a table, because the answer depends on what the
+ * site passed. So the handler is compiled out of the source that declared
+ * it, once, and called per site.
+ *
+ * It lives here, with the rest of the compile-time seam, because the steps
+ * that need it sit on either side of the UFCS step -- `@create` lowers
+ * before it -- and a helper each of them owned would compile one handler
+ * out of two different translation units. */
+
+/* The declaration of the handler a registration names, as its own unit
+ * wrote it, and that unit. NULL when nothing in the index defines it. */
+static CcDecl* lc_hook_decl(CcIndex* ix, CCSlice fn, CcUnit** out_unit) {
+    CcSym* s = cc__sym_find_kind(ix, fn, CC_SYM_FUNC);
+    if (!s || !s->decl || !s->unit || !s->is_definition) return NULL;
+    *out_unit = s->unit;
+    return s->decl;
+}
+
+/* The handler's own translation unit: the prelude it is written against,
+ * the type declarations of the file that registered it, and the handler.
+ *
+ * Not the whole file. A handler is compiled to be called, so its unit has
+ * to hold what the handler names and nothing else -- handing over the file
+ * it came from declares that file's types twice, once from the prelude
+ * extraction and once from the file, and the compile fails on the second. */
+static CCString lc_hook_tu(CcLowerer* L, CcUnit* reg_unit, CCSlice body) {
+    CCArena a = L->arena;
+    CCSlice src = reg_unit->tape.src;
+    CCString tu = cc_string_new();
+    char* types;
+    cc_string_push_cstr(&tu, "#define CC_UFCS_SLIM\n"
+                             "#include <ccc/std/prelude.cch>\n"
+                             "#include <ccc/cc_ufcs.cch>\n", a);
+    types = cc_ct_extract_type_decls_prelude(src.ptr, src.len);
+    if (types) {
+        if (types[0]) cc_string_push_cstr(&tu, types, a);
+        free(types);
+    }
+    cc_string_push_slice(&tu, body, a);
+    cc_string_push_char(&tu, '\n', a);
+    return tu;
+}
+
+/* The handler, compiled. NULL when there is nothing to compile or the
+ * compile did not succeed; what a miss means is the caller's to say. */
+static const void* lc_hook_fn(CcLowerer* L, CcUnit* reg_unit, CCSlice fn, int kind) {
+    CcIndex* ix = L->ix;
+    CCArena a = L->arena;
+    const void* out = NULL;
+    void* owner = NULL;
+    CcUnit* du = NULL;
+    CcDecl* d;
+    CCString tu;
+    CCString path_s = cc_string_new();
+    CCString name_s = cc_string_new();
+    const char* path;
+    const char* name;
+    const char* tu_c;
+    if (!reg_unit || !fn.len || fn.ptr[0] == '<') return NULL;
+    d = lc_hook_decl(ix, fn, &du);
+    if (!d || !du) return NULL;
+    tu = lc_hook_tu(L, reg_unit, cc__span_text(ix, du, d->span.first, d->span.last));
+    cc_string_push_slice(&path_s, reg_unit->tape.path, a);
+    path = cc_string_cstr(&path_s, a);
+    cc_string_push_slice(&name_s, fn, a);
+    name = cc_string_cstr(&name_s, a);
+    tu_c = cc_string_cstr(&tu, a);
+    if (!path || !name || !tu_c) return NULL;
+    if (cc_comptime_compile_type_hook_callable(path, path, tu_c, strlen(tu_c),
+                                               name, strlen(name), kind,
+                                               &owner, &out) != 0)
+        return NULL;
+    return out;
+}
+
 static void CcLowerer_comptime(CcLowerer* L) {
     XStep st;
     CcVisitor v;

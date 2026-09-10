@@ -1483,6 +1483,149 @@ static size_t gn_anchor(CcLowerer* L, CCSlice name, size_t base) {
     return at;
 }
 
+/* ---- `py.expose::[T](...)`: the member spelling of a family factory ----
+ *
+ * `py_expose::[Counter](&py, "counter", &seed)` is the free-name spelling
+ * of a registered generic factory, and `py.expose::[Counter]("counter",
+ * &seed)` is the same call written the way every other method on `py` is
+ * written -- the receiver goes first, so the member spelling is the free
+ * one with the receiver put back at the head of the arguments. Nothing
+ * else on the receiver can answer `::[...]`: the type formal is the
+ * factory's, and a dynamic sink -- which is what an unresolved method on
+ * `CCPy` reaches -- has no formal to bind and would drop what the site
+ * wrote.
+ *
+ * This runs with the rest of the generics because the instance it names
+ * has to be written out with the others; by the UFCS step the expansions
+ * are already placed. */
+
+/* Does a registered, non-extend factory family carry this name? */
+static bool gn_family_named(CcLowerer* L, CCSlice name) {
+    CcDeclList* factv = &L->ix->factories;
+    size_t n = factv->len();
+    size_t i;
+    if (!name.len) return false;
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *factv->get_ptr(i);
+        CCSlice fam = cc__factory_name(d);
+        if (!fam.len || cc__factory_is_extend(d)) continue;
+        if (slice_eq(fam, name)) return true;
+    }
+    return false;
+}
+
+/* The one family whose name ends `_<method>`, for a receiver nothing can
+ * type -- the value a previous hop of the same chain answered with.  Two
+ * such families is not a choice this step has grounds to make, and it says
+ * nothing rather than guessing. */
+static CCSlice gn_family_by_member(CcLowerer* L, CCSlice method) {
+    CcDeclList* factv = &L->ix->factories;
+    size_t n = factv->len();
+    size_t i;
+    size_t hits = 0;
+    CCSlice hit = cc_slice_empty();
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *factv->get_ptr(i);
+        CCSlice fam = cc__factory_name(d);
+        if (!fam.len || cc__factory_is_extend(d)) continue;
+        if (fam.len <= method.len + 1) continue;
+        if (fam.ptr[fam.len - method.len - 1] != '_') continue;
+        if (memcmp(fam.ptr + fam.len - method.len, method.ptr, method.len) != 0) continue;
+        hits++;
+        hit = fam;
+    }
+    return hits == 1 ? hit : cc_slice_empty();
+}
+
+/* `CCPy` -> `py`: the family stem a receiver type spells. */
+static CCSlice gn_recv_stem(CcLowerer* L, CCSlice tn) {
+    size_t n = tn.len;
+    CCSlice base;
+    while (n && (tn.ptr[n - 1] == '*' || tn.ptr[n - 1] == ' ')) n--;
+    base = cc_slice_from_buffer((char*)tn.ptr, n);
+    if (base.len > 2 && base.ptr[0] == 'C' && base.ptr[1] == 'C' &&
+        base.ptr[2] >= 'A' && base.ptr[2] <= 'Z')
+        base = cc__skip(base, 2);
+    if (!base.len) return cc_slice_empty();
+    return L->ix->snake(base);
+}
+
+/* A receiver written as an unwrap: the hop before this one already
+ * answered with the value this one takes, so it goes as written. */
+static bool gn_recv_is_unwrap(CcExpr* e) {
+    if (!e) return false;
+    @switch (e->k) {
+        case .paren(pa): return gn_recv_is_unwrap(pa.a);
+        case .unwrap: return true;
+        case .unwrap_body: return true;
+        case .unwrap_or: return true;
+        case .unwrap_destroy: return true;
+        default: return false;
+    }
+}
+
+static bool gn_recv_type_is_pointer(CcType* t) {
+    if (!t) return false;
+    return t->k.kind == CcTypeK_pointer || t->k.kind == CcTypeK_array;
+}
+
+static void gn_member_generic(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m,
+                              CCSlice tn, CCSlice reason) {
+    CcLowerer* L = (CcLowerer*)w->env;
+    CCSlice recv_name = cc_slice_empty();
+    CCSlice fam = cc_slice_empty();
+    bool hop = gn_recv_is_unwrap(uf.recv);
+    (void)m;
+    (void)reason;
+    if (uf.arrow || !uf.targs.len() || !uf.recv) return;
+    if (expr_ident(strip_parens_expr(uf.recv), &recv_name) && recv_name.len) {
+        CCString cand = @string(`${recv_name}_${uf.method}`, L->arena);
+        CCSlice cs = lw_keep(L, &cand);
+        if (gn_family_named(L, cs)) fam = cs;
+    }
+    if (!fam.len && tn.len) {
+        CCSlice stem = gn_recv_stem(L, tn);
+        if (stem.len) {
+            CCString cand = @string(`${stem}_${uf.method}`, L->arena);
+            CCSlice cs = lw_keep(L, &cand);
+            if (gn_family_named(L, cs)) fam = cs;
+        }
+    }
+    if (!fam.len && hop) fam = gn_family_by_member(L, uf.method);
+    if (!fam.len) return;
+    {
+        CcGenericFn gf;
+        CcExpr* recv_arg = uf.recv;
+        CcExprList* av = &uf.args;
+        size_t n = av->len();
+        size_t i;
+        if (!hop && !gn_recv_type_is_pointer(rt)) {
+            if (!expr_ident(strip_parens_expr(uf.recv), &recv_name)) return;
+            recv_arg = cc_expr_unary(CC_OP_ADDR, uf.recv, e->span, L->arena);
+        }
+        gf.name = fam;
+        gf.targs = uf.targs;
+        gf.args = vec_new::[CcExprRef](L->arena);
+        gf.args.push(recv_arg);
+        for (i = 0; i < n; i++) {
+            CcExpr* a = *av->get_ptr(i);
+            gf.args.push(a);
+        }
+        e->k = { .generic_fn = gf };
+    }
+}
+
+static void gn_member_generic_pass(CcLowerer* L) {
+    Walker w;
+    memset(&w, 0, sizeof(w));
+    w.arena = L->arena;
+    w.ix = L->ix;
+    w.unit = L->unit;
+    w.on_ufcs = gn_member_generic;
+    w.env = L;
+    tw_unit(&w);
+}
+
 static void CcLowerer_generics(CcLowerer* L) {
     GStep st;
     CcVisitor v;
@@ -1496,6 +1639,7 @@ static void CcLowerer_generics(CcLowerer* L) {
     v.expr = gn_expr_visit;
     v.env = &st;
     gn_collect_requests(&st);
+    gn_member_generic_pass(L);   /* before the walk: the member spelling becomes the free one */
     CcUnit_walk(L->unit, v);
     {
         CcNameList* o = &st.order;

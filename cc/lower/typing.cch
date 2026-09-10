@@ -434,6 +434,13 @@ static CcType* type_of_call(Walker* w, CcCall cl) {
     if (expr_ident(c, &nm)) {
         CcType* mt = type_of_result_macro(w, nm, cl.args);
         if (mt) return mt;
+        /* `CC_SLICE_LIT("...")` is what `@slice("...")` became a pass ago.
+         * It is a macro too, so nothing declares a return type for it, and
+         * a receiver written as `@slice("x").println()` would arrive here
+         * with no type at all. What it yields is the slice the literal
+         * spells. */
+        if (cc_slice_eq_cstr(&nm, "CC_SLICE_LIT") && cl.args.len() == 1)
+            return synth_slice(w, named(w, "char"));
         return return_type_of_sym(sym_any(w->ix, nm));
     }
     if (expr_arrow_member(c, &recv, &nm)) {

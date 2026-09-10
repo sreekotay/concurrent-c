@@ -110,6 +110,9 @@ struct CcHookReg {
     CcUnit* unit;
     CCSlice create_fn;          /* first create overload; "_new" style suffixes are kept as written */
     CCSlice create_fn2;
+    CCSlice create_handler;     /* `.create = cc_type_create_hook(fn)`: the handler that names the callee per site */
+    void* create_callable;      /* that handler, compiled */
+    bool create_compile_tried;  /* compiled once, or found not compilable; either way not again */
     CCSlice destroy_fn;
     CCSlice pre_destroy_fn;
     CCSlice ufcs_fn;            /* handler name, or "<lambda>" */
@@ -163,6 +166,7 @@ typedef struct CcTypeInfo {
     CCSlice create_fn;
     CCSlice pre_destroy_fn;
     CcHookReg* hooks;           /* the narrowest @typehooks registration that matches, or NULL */
+    CcHookReg* create_hook;     /* the narrowest registration whose `.create` is a handler, or NULL */
     CCSlice family;             /* generic family for an instance ("Map" for Map_int_int); empty otherwise */
     CcTypeList targs;           /* the instance's type arguments */
     CCSlice ufcs_registered_by; /* "CC_MAP_DECL_UFCS" when a *_DECL_UFCS(Name) names this type */
