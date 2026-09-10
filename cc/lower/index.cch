@@ -182,6 +182,18 @@ typedef struct CcTypeInfo {
 typedef CcTypeInfo* CcTypeInfoRef;
 typedef Vec::[CcTypeInfoRef] CcTypeInfoList;
 
+/* One unit's spelling of a Result box, as first written: whether the ok
+ * type carried `const`, and where. Qualifiers are not part of the box, so
+ * a later spelling that disagrees is told so, once. */
+typedef struct CcResultQual {
+    CCSlice name;               /* the box: CCResult_<ok>_<err> */
+    bool is_const;
+    bool warned;
+    CcUnit* unit;
+    CcSpan span;
+} CcResultQual;
+typedef Vec::[CcResultQual] CcResultQualList;
+
 typedef struct CcIndex {
     CCArena arena;
     CcDiags* ds;
@@ -190,6 +202,7 @@ typedef struct CcIndex {
     Map::[CCSlice, CcSymRef] sym_heads;     /* name -> newest symbol of that name (chain: same_name) */
     Map::[CCSlice, CcTypeInfoRef] type_map;
     Vec::[CcTypeInfoRef] result_specs;      /* first-use order */
+    CcResultQualList result_quals;          /* per box, the first spelling in a non-header unit */
     /* Bookkeeping for dumps and for the resolution steps. */
     Vec::[CcSymRef] syms;       /* every symbol, in declaration order */
     Vec::[CcTypeInfoRef] types; /* every type info, in creation order */

@@ -2639,6 +2639,86 @@ static void cc__index_enum(CcIndex* ix, CcUnit* u, CcDecl* d, CcType* t, CcEnumT
     }
 }
 
+/* A warning the index raises about a declaration, with the other place
+ * the reader has to see to understand it. */
+static void cc__diag_warning_at(CcIndex* ix, CcLoc at, CCSlice msg, CcLoc note_at, CCSlice note) {
+    CcDiag d = CcDiag_warning(at, msg);
+    d.len = 0;
+    d.phys_line = 0;
+    d.notes = NULL;
+    d = CcDiag_with_note_at(d, note_at, note, ix->arena);
+    ix->ds->push(d);
+}
+
+/* `const` on any level of a type: the ok type of `const char* !>(E)`
+ * carries it on the pointee. */
+static bool cc__type_has_const(const CcType* t) {
+    while (t) {
+        const CcType* inner = NULL;
+        if (t->quals & CC_QUAL_CONST) return true;
+        @switch (t->k) {
+            case .pointer(pt): inner = pt.pointee; break;
+            case .array(ar): inner = ar.elem; break;
+            default: break;
+        }
+        t = inner;
+    }
+    return false;
+}
+
+/* Qualifiers are not part of a Result box: `char*` and `const char*` land
+ * on one `CCResult_charptr_E`, and the first spelling wins. A unit that
+ * declares both is told so, once per box, at the second spelling, with
+ * the first pointed at. Headers are not read for this: the check is about
+ * what one file wrote, and a header would say it to every user. Nothing is
+ * minted here -- the name is composed the way `CcIndex_result` composes
+ * it, so the record does not move a spec in the first-use order. */
+static void cc__index_result_quals(CcIndex* ix, CcUnit* u, CcType* t, CcResultType rs, bool is_header) {
+    CcResultQualList* qv = &ix->result_quals;
+    CCSlice name;
+    bool is_const;
+    size_t i;
+    size_t n;
+    if (is_header || !rs.value || !rs.err) return;
+    {
+        CCSlice mv = cc__mangle(ix, CcIndex_canon(ix, rs.value));
+        CCSlice me = cc__mangle(ix, CcIndex_canon(ix, rs.err));
+        CCString sb = cc_string_new();
+        sb.push_cstr("CCResult_", ix->arena);
+        sb.push_slice(mv, ix->arena);
+        sb.push_char('_', ix->arena);
+        sb.push_slice(me, ix->arena);
+        name = cc__ix_finish(ix, &sb);
+    }
+    is_const = cc__type_has_const(rs.value);
+    n = qv->len();
+    for (i = 0; i < n; i++) {
+        CcResultQual* q = qv->get_ptr(i);
+        if (!cc__eq(q->name, name)) continue;
+        if (q->is_const == is_const || q->warned) return;
+        q->warned = true;
+        {
+            CCSlice here = cc__ix_s(is_const ? "const" : "unqualified");
+            CCSlice there = cc__ix_s(q->is_const ? "const" : "unqualified");
+            CCString msg = @string(`type: '${name}' is declared with a ${here} ok type here and a ${there} one; qualifiers are not part of the identity of a box, so both share one box and the first spelling wins`, ix->arena);
+            CCString note = @string(`the first spelling`, ix->arena);
+            CCSlice m = cc__ix_finish(ix, &msg);
+            CCSlice nt = cc__ix_finish(ix, &note);
+            cc__diag_warning_at(ix, cc__span_loc(u, t->span), m, cc__span_loc(q->unit, q->span), nt);
+        }
+        return;
+    }
+    {
+        CcResultQual q;
+        q.name = name;
+        q.is_const = is_const;
+        q.warned = false;
+        q.unit = u;
+        q.span = t->span;
+        qv->push(q);
+    }
+}
+
 static void cc__index_tag_type(CcIndex* ix, CcUnit* u, CcDecl* d, CcType* t, bool is_header) {
     if (!t) return;
     @switch (t->k) {
@@ -2646,6 +2726,7 @@ static void cc__index_tag_type(CcIndex* ix, CcUnit* u, CcDecl* d, CcType* t, boo
         case .enumt(en): cc__index_enum(ix, u, d, t, en, is_header); break;
         case .pointer(pt): cc__index_tag_type(ix, u, d, pt.pointee, is_header); break;
         case .array(ar): cc__index_tag_type(ix, u, d, ar.elem, is_header); break;
+        case .result(rs): cc__index_result_quals(ix, u, t, rs, is_header); break;
         default: break;
     }
 }
@@ -2823,6 +2904,7 @@ static CcIndex* cc_index_new(CcNameList include_dirs, CCSlice quote_dir, CcDiags
     ix->sym_heads = map_new::[CCSlice, CcSymRef](a);
     ix->type_map = map_new::[CCSlice, CcTypeInfoRef](a);
     ix->result_specs = vec_new::[CcTypeInfoRef](a);
+    ix->result_quals = vec_new::[CcResultQual](a);
     ix->syms = vec_new::[CcSymRef](a);
     ix->types = vec_new::[CcTypeInfoRef](a);
     ix->hooks = vec_new::[CcHookRegRef](a);
@@ -3848,6 +3930,39 @@ static CcMethod* cc__resolve(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCSt
     return cc__resolve_sink(ix, recv, method, tried, ta);
 }
 
+/* A function-like macro that only forwards -- `#define f3(a, b, c)
+ * f_into((a), (b), (c))` -- declares nothing about its first parameter,
+ * so the receiver question has to be asked of the function its body
+ * calls. Followed as far as the forwarding goes. A name that comes back
+ * around is a cycle the preprocessor would never expand, and the walk
+ * stops on what it has; so does a body that is not a call. */
+static CcSym* cc__macro_forward_sym(const CcIndex* ix, CcSym* s) {
+    CcSym* start = s;
+    while (s && s->kind == CC_SYM_MACRO && s->macro && s->macro->function_like) {
+        CCSlice body = s->macro->body;
+        CCSlice head;
+        CcSym* next;
+        size_t i = 0;
+        size_t b;
+        while (i < body.len && (body.ptr[i] == ' ' || body.ptr[i] == '\t')) i++;
+        b = i;
+        while (i < body.len) {
+            char c = body.ptr[i];
+            bool word = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+            if (!word) break;
+            i++;
+        }
+        if (i == b) break;
+        head = cc_slice_from_buffer((char*)body.ptr + b, i - b);
+        while (i < body.len && (body.ptr[i] == ' ' || body.ptr[i] == '\t')) i++;
+        if (i >= body.len || body.ptr[i] != '(') break;
+        next = cc__callee_sym(ix, head);
+        if (!next || next == s || next == start) break;
+        s = next;
+    }
+    return s;
+}
+
 static CcMethod* cc__method_plain(CcIndex* ix, CCSlice method, CCSlice callee, const char* source, CCSlice origin, CcSym* sym, bool by_value) {
     CcMethod* m = cc_arena_alloc(ix->arena, sizeof(CcMethod), _Alignof(CcMethod));
     memset(m, 0, sizeof(*m));
@@ -3856,7 +3971,7 @@ static CcMethod* cc__method_plain(CcIndex* ix, CCSlice method, CCSlice callee, c
     m->source = cc__ix_s(source);
     m->origin = origin;
     m->sym = sym;
-    m->recv_by_ptr = by_value ? false : cc__first_param_is_pointer(sym);
+    m->recv_by_ptr = by_value ? false : cc__first_param_is_pointer(cc__macro_forward_sym(ix, sym));
     return m;
 }
 

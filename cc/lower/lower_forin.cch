@@ -43,7 +43,7 @@ typedef struct FStep {
     uint32_t next_id;
     uint32_t depth;         /* statements entered, so a handler's scope ends with its block */
     uint32_t n_eh;          /* the `@errhandler`s a raise here would reach */
-    uint32_t eh_depth[64];
+    CcIntList eh_depth;     /* the depth each was declared at; n_eh is the live count */
 } FStep;
 
 /* One sequence of a walk: the subject as written, the extent it declares,
@@ -996,7 +996,7 @@ static void fi_on_stmt(Walker* w, CcStmt* s, bool enter) {
     bool is_eh = false;
     if (!enter) {
         if (st->depth) st->depth--;
-        while (st->n_eh && st->eh_depth[st->n_eh - 1] > st->depth) st->n_eh--;
+        while (st->n_eh && *st->eh_depth.get_ptr(st->n_eh - 1) > (int)st->depth) st->n_eh--;
         return;
     }
     @switch (s->k) {
@@ -1006,8 +1006,9 @@ static void fi_on_stmt(Walker* w, CcStmt* s, bool enter) {
     }
     /* a handler covers the rest of the list it sits in, so it leaves scope
      * with the statement that holds that list */
-    if (is_eh && st->n_eh < 64) {
-        st->eh_depth[st->n_eh] = st->depth;
+    if (is_eh) {
+        if (st->n_eh < st->eh_depth.len()) { *st->eh_depth.get_ptr(st->n_eh) = (int)st->depth; }
+        else { st->eh_depth.push((int)st->depth); }
         st->n_eh++;
     }
     if (is_for_in) fi_stmt(st, s, fi);
@@ -1019,6 +1020,7 @@ static void CcLowerer_forin(CcLowerer* L) {
     FStep st;
     memset(&st, 0, sizeof(st));
     st.L = L;
+    st.eh_depth = vec_new::[int](L->arena);
     st.w = &w;
     memset(&w, 0, sizeof(w));
     w.arena = L->arena;

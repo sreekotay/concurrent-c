@@ -1015,7 +1015,7 @@ static bool uf_map_rows(Walker* w, UStep* st, CcExpr* e, CcUfcs uf, CCSlice tn, 
     bool recv_ptr;
     if (uf.arrow || !cc_slice_eq_cstr(&uf.method, "map")) return false;
     /* arena, then one column at least: fewer is not a row batch */
-    if (na < 2 || na > 9) return false;
+    if (na < 2) return false;
     ds = uf_sink_of(L, tn);
     if (!ds || !ds->sink_arg.len) return false;
     if (tv->len() == 1) {
@@ -1030,6 +1030,17 @@ static bool uf_map_rows(Walker* w, UStep* st, CcExpr* e, CcUfcs uf, CCSlice tn, 
      * the typed worker the destination binds through */
     if (cc__has_prefix(et, "CCSlice_")) { dslice = et; et = cc__skip(et, 8); }
     if (!uf_map_elem_desc(et, &esz, &isf)) return false;
+    /* The worker takes at most eight columns (`argc > 8` is refused in
+     * `cc__*_map_raw`). A ninth is not a reason to stop reading the site
+     * as a row batch and hand it to the plain path, which would resolve
+     * `.map` to something else or to nothing: it is refused here, at the
+     * site that wrote the columns. */
+    if (na - 1 > 8) {
+        int ncol = (int)(na - 1);
+        CCString msg = @string(`a row batch takes at most 8 columns; this one has ${ncol}`, L->arena);
+        lw_error(L, sp, msg);
+        return true;
+    }
     snake = ix->snake(uf_base_name(tn));
     if (!cc__has_prefix(snake, "cc_") || snake.len <= 3) return false;
     {
