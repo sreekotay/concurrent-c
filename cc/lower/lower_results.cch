@@ -1300,6 +1300,7 @@ static bool rl_decl_unwrap(RFn* fn, CcStmt* s, CcDecl* d, CcStmtList* out) {
                 plain->k = { .unwrap = u };
                 v.destroy = true;
                 v.destroy_body = ud.destroy_body;
+                if (v.destroy_body) v.destroy_body = rl_body(fn, v.destroy_body);
                 break;
             }
             default: break;
@@ -1568,6 +1569,24 @@ static CcStmt* rl_stmt(RFn* fn, CcStmt* s) {
         case .case_: s->k.case_.inner = rl_body(fn, s->k.case_.inner); break;
         case .label: s->k.label.inner = rl_body(fn, s->k.label.inner); break;
         default: break;
+    }
+    {
+        /* the `@destroy { D }` body of a declaration runs at the scope
+         * exit of that declaration, in the scope it stands in: the unwraps
+         * inside D forward to the handler in scope there */
+        CcDecl* d = NULL;
+        if (stmt_is_decl(s, &d) && d) {
+            CcVarDecl v;
+            bool is_var = false;
+            @switch (d->k) {
+                case .var(vv): v = vv; is_var = true; break;
+                default: break;
+            }
+            if (is_var && v.destroy_body) {
+                v.destroy_body = rl_body(fn, v.destroy_body);
+                d->k = { .var = v };
+            }
+        }
     }
     return s;
 }
