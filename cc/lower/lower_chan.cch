@@ -222,6 +222,203 @@ static bool hc_chan_of(HStep* st, CcType* t, CcChanType* out) {
     return hc_is_chan(unalias_local(st->w, t), out);
 }
 
+/* A payload handed over rather than copied: a pointer, or a slice header. */
+static bool hc_elem_takes(CcLowerer* L, CcType* elem) {
+    CCSlice canon;
+    if (!elem) return false;
+    if (elem->k.kind == CcTypeK_pointer) return true;
+    if (elem->k.kind == CcTypeK_slice) return true;
+    canon = L->ix->canon(elem);
+    return canon.len >= 7 && memcmp(canon.ptr, "CCSlice", 7) == 0;
+}
+
+/* The width the channel carries: a taken payload travels as its handle. */
+static CCString hc_elem_size(CcLowerer* L, CcType* elem, CCSlice canon) {
+    if (elem && elem->k.kind == CcTypeK_pointer) return @string(`sizeof(void*)`, L->arena);
+    if (hc_elem_takes(L, elem)) return @string(`sizeof(CCSlice)`, L->arena);
+    return @string(`sizeof(${canon})`, L->arena);
+}
+
+/* ---- `T[~N owned { .create, .destroy, .reset }]`: the pool ------------- */
+
+/* An owned channel is a pool. What travels through it is lent and given
+ * back rather than handed over, and the lifecycle block says how an item
+ * is made, unmade, and made fit to lend again.
+ *
+ * The runtime holds the three as closure handles -- `cc_chan_create_owned`
+ * takes a `CCClosure0` and two `CCClosure1` -- so the hook expressions are
+ * moved into the create call as written and the closures step lowers each
+ * one where it now sits. That is why a hook that reads an outer local
+ * needs nothing special here: a capture is what the closure environment is
+ * for, and the environment is built by the step that owns closures.
+ *
+ * The declaration becomes the handle the runtime answers with:
+ * `CCChan* pool = cc_chan_create_owned(cap, sizeof(elem), ...)`. A pool is
+ * not an endpoint -- it has no send end and no receive end, and nothing
+ * pairs with it -- so no `HEnd` is recorded against the name and the
+ * operations on it are the runtime calls the author writes. */
+
+/* The expression a lifecycle field was given, or NULL when the block does
+ * not name that field. */
+static CcExpr* hc_hook(CcInit* hooks, CCSlice want) {
+    CcInitList* items;
+    size_t n;
+    size_t i;
+    if (!hooks) return NULL;
+    items = &hooks->items;
+    n = items->len();
+    for (i = 0; i < n; i++) {
+        CcInit* it = *items->get_ptr(i);
+        Vec::[CcDesignator]* ds;
+        CcDesignator* d0;
+        if (!it) continue;
+        ds = &it->designators;
+        if (ds->len() != 1) continue;
+        d0 = ds->get_ptr(0);
+        if (slice_eq(d0->field, want)) return it->expr;
+    }
+    return NULL;
+}
+
+/* Every entry in the lifecycle block names one of the three hooks.
+ *
+ * An entry this step does not know would be read by nobody: the pool would
+ * be built without it and the program would run as though the line had not
+ * been written, which is a lifecycle silently missing a half. */
+static bool hc_hooks_named(CcLowerer* L, CcInit* hooks) {
+    CcInitList* items = &hooks->items;
+    size_t n = items->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CcInit* it = *items->get_ptr(i);
+        Vec::[CcDesignator]* ds;
+        CcDesignator* d0;
+        CCSlice f;
+        if (!it) continue;
+        ds = &it->designators;
+        if (ds->len() != 1) {
+            CCString m = @string(`owned channel: a lifecycle entry is written '.create = ...', '.destroy = ...' or '.reset = ...'`, L->arena);
+            lw_error(L, it->span, m);
+            return false;
+        }
+        d0 = ds->get_ptr(0);
+        f = d0->field;
+        if (cc_slice_eq_cstr(&f, "create")) continue;
+        if (cc_slice_eq_cstr(&f, "destroy")) continue;
+        if (cc_slice_eq_cstr(&f, "reset")) continue;
+        {
+            CCString m = @string(`owned channel: '.${f}' is not a lifecycle hook; a pool states '.create', '.destroy' and '.reset'`, L->arena);
+            lw_error(L, it->span, m);
+        }
+        return false;
+    }
+    return true;
+}
+
+/* A pool takes none of the modifiers a transferring channel does: it is
+ * bidirectional and it blocks until an item comes back, and
+ * `cc_chan_create_owned` has no argument to carry a direction, a drop
+ * policy, a topology or an order through. Each would be dropped on the
+ * floor, so each is named at the declaration that wrote it. */
+static bool hc_owned_bare(CcLowerer* L, CcChanType ch, CcSpan sp) {
+    if (ch.dir) {
+        CCString m = @string(`owned channel: a pool lends and takes back on the same handle, so it states no direction; drop the '<' or '>'`, L->arena);
+        lw_error(L, sp, m);
+        return false;
+    }
+    if (ch.ordered) {
+        CCString m = @string(`owned channel: 'ordered' names the order a receiver observes; a pool hands back whichever item is free`, L->arena);
+        lw_error(L, sp, m);
+        return false;
+    }
+    if (ch.topology.len) {
+        CCSlice t = ch.topology;
+        CCString m = @string(`owned channel: a pool has no topology to state; '${t}' would be read by nobody`, L->arena);
+        lw_error(L, sp, m);
+        return false;
+    }
+    if (ch.policy.len) {
+        CCSlice p = ch.policy;
+        CCString m = @string(`owned channel: a pool blocks until an item is returned; the drop policy '${p}' would be read by nobody`, L->arena);
+        lw_error(L, sp, m);
+        return false;
+    }
+    return true;
+}
+
+/* `= e` as the initializer of a declaration. */
+static CcInit* hc_init_expr(CcLowerer* L, CcExpr* e, CcSpan sp) {
+    CcInit* in = cc_arena_alloc(L->arena, sizeof(CcInit), _Alignof(CcInit));
+    memset(in, 0, sizeof(*in));
+    in->span = sp;
+    in->designators = vec_new::[CcDesignator](L->arena);
+    in->items = vec_new::[CcInitRef](L->arena);
+    in->expr = e;
+    return in;
+}
+
+/* `T[~N owned { ... }] pool;` becomes the pool the runtime creates. */
+static void hc_owned(HStep* st, CcDecl* d, CcVarDecl v, CcChanType ch) {
+    CcLowerer* L = st->L;
+    CcSpan sp = d->span;
+    CCSlice nm = v.name;
+    CcExpr* create;
+    CcExpr* destroy;
+    CcExpr* reset;
+    if (!hc_owned_bare(L, ch, sp)) return;
+    if (v.init) {
+        CCString m = @string(`owned channel '${nm}': the pool is what the lifecycle block builds, so the declaration takes no initializer`, L->arena);
+        lw_error(L, sp, m);
+        return;
+    }
+    if (!ch.hooks) {
+        CCString m = @string(`owned channel '${nm}': a pool states its lifecycle, '{ .create = ..., .destroy = ... }'; with none, nothing makes or unmakes what it lends`, L->arena);
+        lw_error(L, sp, m);
+        return;
+    }
+    if (!hc_hooks_named(L, ch.hooks)) return;
+    if (!ch.cap) {
+        CCString m = @string(`owned channel '${nm}': a pool needs a capacity, and the runtime creates no pool at 0`, L->arena);
+        lw_error(L, sp, m);
+        return;
+    }
+    create = hc_hook(ch.hooks, cstr_slice("create"));
+    destroy = hc_hook(ch.hooks, cstr_slice("destroy"));
+    reset = hc_hook(ch.hooks, cstr_slice("reset"));
+    if (!create) {
+        CCString m = @string(`owned channel '${nm}': no '.create', so a receive on the empty pool has nothing to hand back and waits forever`, L->arena);
+        lw_error(L, sp, m);
+        return;
+    }
+    if (!destroy) {
+        CCString m = @string(`owned channel '${nm}': no '.destroy', so what the pool made is never unmade; write '.destroy = (T item) => { ... }'`, L->arena);
+        lw_error(L, sp, m);
+        return;
+    }
+    {
+        CCSlice canon = L->ix->canon(ch.elem);
+        CCString capt = lw_spell_expr(L, ch.cap);
+        CCString szt = hc_elem_size(L, ch.elem, canon);
+        CCString nulls = @string(`cc_closure1_make(NULL, NULL, NULL)`, L->arena);
+        CcExpr* none = lw_text(L, nulls, sp);
+        CcExpr* on_reset = reset ? reset : none;
+        CcExpr* call = cc__expr_blank(sp, L->arena);
+        CcType* handle = cc_type_pointer(cc_type_named(cstr_slice("CCChan"), sp, L->arena), sp, L->arena);
+        CcCall out;
+        out.callee = lw_ident(L, cstr_slice("cc_chan_create_owned"), sp);
+        out.args = vec_new::[CcExprRef](L->arena);
+        out.args.push(lw_text(L, capt, sp));
+        out.args.push(lw_text(L, szt, sp));
+        out.args.push(create);
+        out.args.push(destroy);
+        out.args.push(on_reset);
+        call->k = { .call = out };
+        v.type = handle;
+        v.init = hc_init_expr(L, call, sp);
+        d->k = { .var = v };
+    }
+}
+
 /* `int64_t[~4 >] tx;` keeps what it carries, and becomes the handle. */
 static void hc_decl(HStep* st, CcDecl* d, CcVarDecl v) {
     CcLowerer* L = st->L;
@@ -230,6 +427,7 @@ static void hc_decl(HStep* st, CcDecl* d, CcVarDecl v) {
     CCSlice mode;
     CCSlice topo;
     if (!hc_chan_of(st, v.type, &ch)) return;
+    if (ch.owned) { hc_owned(st, d, v, ch); return; }
     if (!hc_mode_of(L, ch, d->span, &mode)) return;
     if (!hc_topo_of(L, ch, d->span, &topo)) return;
     e = cc_arena_alloc(L->arena, sizeof(HEnd), _Alignof(HEnd));
@@ -261,23 +459,6 @@ static CCSlice hc_addr_name(CcExpr* e) {
         }
         default: return cc_slice_empty();
     }
-}
-
-/* A payload handed over rather than copied: a pointer, or a slice header. */
-static bool hc_elem_takes(CcLowerer* L, CcType* elem) {
-    CCSlice canon;
-    if (!elem) return false;
-    if (elem->k.kind == CcTypeK_pointer) return true;
-    if (elem->k.kind == CcTypeK_slice) return true;
-    canon = L->ix->canon(elem);
-    return canon.len >= 7 && memcmp(canon.ptr, "CCSlice", 7) == 0;
-}
-
-/* The width the channel carries: a taken payload travels as its handle. */
-static CCString hc_elem_size(CcLowerer* L, CcType* elem, CCSlice canon) {
-    if (elem && elem->k.kind == CcTypeK_pointer) return @string(`sizeof(void*)`, L->arena);
-    if (hc_elem_takes(L, elem)) return @string(`sizeof(CCSlice)`, L->arena);
-    return @string(`sizeof(${canon})`, L->arena);
 }
 
 /* `cc_channel_pair(&tx, &rx)` is built from what the two ends declared. */
