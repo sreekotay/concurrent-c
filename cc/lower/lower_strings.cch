@@ -26,6 +26,7 @@ typedef struct TStep {
     CcExprList emitted;         /* template literals that are an `@emit` argument, not an `@string` */
     bool scratch_used;          /* this function has a template on `@scratch` */
     int scratch_bytes;          /* the largest size any of them asked for */
+    int depth;                  /* nesting of the statement list being walked; 0 is the body */
 } TStep;
 
 /* The stack arena a `@scratch` template builds into: one per function,
@@ -555,6 +556,148 @@ static void sr_wrap_call_local(TStep* st, CcStmt* s) {
     s->k = blk->k;
 }
 
+/* ---- scope reclaim for a named `@scratch` product ------------------------
+ *
+ * A bound product is not a temporary, but it is not the frame's either: it
+ * belongs to the scope that declares the name. So a block that declares one
+ * takes the watermark on the way in and puts it back on the way out, and a
+ * function that does its string work in blocks holds only what the block it
+ * is in has built. Blocks nest, so their allocations nest, and a restore is
+ * the top of the arena by construction -- no analysis of what died when.
+ *
+ * The one shape that breaks it is a name declared further out and filled in
+ * here:
+ *
+ *     CCString row = …;
+ *     for (…) { row = @string(`${row}${part}`, @scratch); }
+ *
+ * `row`'s bytes are the outer scope's, and giving them back at the end of
+ * the loop body would free what `row` still reads. A scope that stores a
+ * product into a name it did not declare therefore keeps its hands off the
+ * watermark, and the scope that declares `row` reclaims it instead.
+ *
+ * The other exclusions are places the bytes can outlive the scope without an
+ * assignment naming them: a closure that captures, and a store through
+ * anything but a plain local. Freeing memory that is still read is the one
+ * failure here that does not announce itself, so each is a bail-out rather
+ * than a judgement. */
+typedef struct SrScope {
+    CcNameList declared;        /* names this scope declares */
+    bool binds;                 /* one of them is a `@scratch` product */
+    bool escapes;               /* something here can outlive the scope */
+} SrScope;
+
+static bool sr_name_in(CcNameList* names, CCSlice nm) {
+    size_t n = names->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CCSlice got = *names->get_ptr(i);
+        if (slice_eq(got, nm)) return true;
+    }
+    return false;
+}
+
+static bool sr_scope_expr(CcExpr* e, void* env) {
+    SrScope* sc = (SrScope*)env;
+    CcBinary as;
+    bool is_assign = false;
+    bool is_closure = false;
+    @switch (e->k) {
+        case .assign(x): as = x; is_assign = true; break;
+        case .closure: is_closure = true; break;
+        default: break;
+    }
+    /* a capture can carry the bytes anywhere */
+    if (is_closure) { sc->escapes = true; return true; }
+    if (!is_assign) return true;
+    if (!sr_stores_scratch(as.b, 0)) return true;
+    {
+        CCSlice nm = cc_slice_empty();
+        bool plain = false;
+        @switch (as.a->k) {
+            case .ident(id): nm = id; plain = true; break;
+            default: break;
+        }
+        /* a store through a member, an index or a dereference reaches
+         * memory this scope cannot account for */
+        if (!plain) { sc->escapes = true; return true; }
+        if (!sr_name_in(&sc->declared, nm)) sc->escapes = true;
+    }
+    return true;
+}
+
+static bool sr_scope_stmt(CcStmt* s, void* env) {
+    SrScope* sc = (SrScope*)env;
+    CcDecl* d = NULL;
+    CcVarDecl vd;
+    bool is_var = false;
+    if (!stmt_is_decl(s, &d) || !d) return true;
+    @switch (d->k) {
+        case .var(x): vd = x; is_var = true; break;
+        default: break;
+    }
+    if (!is_var || !vd.name.len) return true;
+    sc->declared.push(vd.name);
+    if (vd.init && vd.init->expr && sr_stores_scratch(vd.init->expr, 0)) sc->binds = true;
+    return true;
+}
+
+/* Whether this statement list should take and give back the watermark. The
+ * declarations are collected first: an assignment may precede, in the walk
+ * order, the declaration of the name it stores to. */
+static bool sr_scope_owns_scratch(TStep* st, CcStmtList* list) {
+    CcLowerer* L = st->L;
+    CcVisitor v;
+    SrScope sc;
+    size_t n = list->len();
+    size_t i;
+    sc.declared = vec_new::[CCSlice](L->arena);
+    sc.binds = false;
+    sc.escapes = false;
+    memset(&v, 0, sizeof(v));
+    v.stmt = sr_scope_stmt;
+    v.env = &sc;
+    for (i = 0; i < n; i++) CcStmt_walk(*list->get_ptr(i), v);
+    if (!sc.binds) return false;
+    memset(&v, 0, sizeof(v));
+    v.expr = sr_scope_expr;
+    v.env = &sc;
+    for (i = 0; i < n; i++) CcStmt_walk(*list->get_ptr(i), v);
+    return !sc.escapes;
+}
+
+static void sr_scope_reclaim(TStep* st, CcStmtList* out) {
+    CcLowerer* L = st->L;
+    CcSpan sp;
+    uint32_t id = L->temp_id();
+    CCString nm = @string(`__cc_scope_cp${id}`, L->arena);
+    CCSlice cp = lw_keep(L, &nm);
+    CcStmtList with = vec_new::[CcStmtRef](L->arena);
+    CcStmt* release;
+    CcStmt* deferred;
+    CcDefer df;
+    CcExpr* take;
+    size_t n = out->len();
+    size_t i;
+    if (!n) return;
+    sp = (*out->get_ptr(0))->span;
+    take = lw_call1(L, cstr_slice("cc_arena_checkpoint_local"), lw_ident(L, sr_scratch_name(), sp), sp);
+    with.push(lw_decl_stmt(L, lw_named_type(L, cstr_slice("CCArenaCheckpoint"), sp), cp, take, sp));
+    release = lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_arena_restore_local"), lw_ident(L, cp, sp), sp), sp);
+    memset(&df, 0, sizeof(df));
+    df.name = cc_slice_empty();
+    df.on = 0;
+    df.body = release;
+    deferred = cc__stmt_blank(sp, L->arena);
+    deferred->k = { .defer = df };
+    with.push(deferred);
+    for (i = 0; i < n; i++) {
+        CcStmt* t = *out->get_ptr(i);
+        with.push(t);
+    }
+    *out = with;
+}
+
 static void sr_stmts(TStep* st, CcStmtList* list);
 
 static void sr_stmt(TStep* st, CcStmt* s) {
@@ -563,7 +706,9 @@ static void sr_stmt(TStep* st, CcStmt* s) {
     view_stmt(&v, s);
     if (v.is_block || (v.has_stmts && v.stmts.len())) {
         CcStmtList inner = v.stmts;
+        st->depth++;
         sr_stmts(st, &inner);
+        st->depth--;
         @switch (s->k) {
             case .block(b): b.stmts = inner; s->k = { .block = b }; break;
             default: break;
@@ -581,6 +726,9 @@ static void sr_stmts(TStep* st, CcStmtList* list) {
     CcStmtList out = vec_new::[CcStmtRef](L->arena);
     size_t n = list->len();
     size_t i;
+    /* asked before the walk: a bound template is rewritten into the pushes
+     * that fill it, so by the end there is no template left to recognise */
+    bool owns = st->depth > 0 && sr_scope_owns_scratch(st, list);
     for (i = 0; i < n; i++) {
         CcStmt* s = *list->get_ptr(i);
         CcDecl* d = NULL;
@@ -616,6 +764,9 @@ static void sr_stmts(TStep* st, CcStmtList* list) {
             out.push(s);
         }
     }
+    /* the body itself is the frame's: reclaiming there would give the bytes
+     * back a statement before the arena dies with the frame anyway */
+    if (owns) sr_scope_reclaim(st, &out);
     *list = out;
 }
 
