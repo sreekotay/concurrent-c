@@ -1790,6 +1790,13 @@ static void pr_d_pp(Pr* p, const CcDecl* d, const CcPpDecl* pd, int indent) {
          * The pin still advances so the next line is attributed. */
         CCSlice text = p->t[pd->tok].text;
         if (text.len >= 2 && text.ptr[0] == '#' && text.ptr[1] == '!') return;
+        if (pr_mark_after(p, pd->tok)) {
+            /* a `#line` copied from the input pins the host itself: with
+             * directives off it is one more directive to omit, and with
+             * them on the printer places none of its own ahead of it */
+            if (!p->opts.line_directives) return;
+            pr_line_begin(p, false);
+        }
         pr_tok_text(p, pd->tok);
     } else
         pr_span_c(p, d->span, "preprocessor line");
@@ -2039,6 +2046,15 @@ static void pr_init_ctx(Pr* p, CCString* out, const CcTape* tape, CCArena a, CcD
     if (p->len || p->n) pr_set_pin(p, 0);
 }
 
+/* A `#line` copied from the input: it pins the host itself, so the item
+ * start places no directive ahead of it. */
+static bool decl_self_pins(Pr* p, const CcDecl* d) {
+    @switch (d->k) {
+        case .pp(pd): return CcSpan_is_empty(pd.skipped) && pd.tok < p->n && pr_mark_after(p, pd.tok) != NULL;
+        default: return false;
+    }
+}
+
 static void pr_unit(Pr* p, const CcUnit* u) {
     CcDeclList* dl = (CcDeclList*)&u->decls;
     size_t nd = dl->len();
@@ -2051,7 +2067,13 @@ static void pr_unit(Pr* p, const CcUnit* u) {
         const CcDecl* d = *dl->get_ptr(k);
         if (!d) continue;
         p->indent = 0;
-        pr_item_start(p, d->span, 0);
+        if (decl_self_pins(p, d)) {
+            pr_lead(p, d->span.first, 0);
+            pr_set_pin_tok(p, d->span.first);
+            if (!p->at_line_start) pr_nl(p);
+            pr_line_begin(p, false);
+        } else
+            pr_item_start(p, d->span, 0);
         pr_decl(p, d);
         pr_trailing(p, d->span.last + 1);
         pr_nl(p);

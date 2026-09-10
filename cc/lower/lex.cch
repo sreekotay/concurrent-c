@@ -65,8 +65,11 @@ bool CcToken_is_ident(const CcToken* t, const char* word);
 bool CcToken_is_at(const CcToken* t, const char* word);
 
 /* A `#line N "path"` seen in the input, rebasing logical positions from
- * the physical line after it. */
+ * the physical line after it. The directive line itself belongs to the
+ * position it names: nothing on the tape reads as the stage the directive
+ * was prepended to. */
 typedef struct CcLineMark {
+    uint32_t dir_off;       /* first byte of the directive */
     uint32_t off;           /* first byte of the line after the directive */
     uint32_t phys_line;     /* physical line of `off` */
     uint32_t logical_line;

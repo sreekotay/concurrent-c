@@ -1,0 +1,10 @@
+#!ccc ccs
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+static int bump(int x) { return x + 1; }
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    CCString s = @string(`v=${bump(1)}`, a);
+    printf("%s\n", s.cstr(a));
+    return 0;
+}

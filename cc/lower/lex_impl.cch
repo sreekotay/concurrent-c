@@ -93,14 +93,15 @@ static CcLoc cc__tape_rebase(const CcTape* t, uint32_t off, uint32_t pline, uint
     loc.path = t->path;
     loc.line = pline;
     loc.col = pcol;
-    if (n && tp->marks.get_ptr(0)->off <= off) {
+    if (n && tp->marks.get_ptr(0)->dir_off <= off) {
         uint32_t lo = 0, hi = n;
         while (hi - lo > 1) {
             uint32_t mid = lo + (hi - lo) / 2;
-            if (tp->marks.get_ptr(mid)->off <= off) lo = mid; else hi = mid;
+            if (tp->marks.get_ptr(mid)->dir_off <= off) lo = mid; else hi = mid;
         }
         const CcLineMark* m = tp->marks.get_ptr(lo);
-        loc.line = m->logical_line + (pline - m->phys_line);
+        /* on the directive line itself: the line the directive names */
+        loc.line = off < m->off ? m->logical_line : m->logical_line + (pline - m->phys_line);
         if (m->path.len) loc.path = m->path;
     }
     return loc;
@@ -166,9 +167,11 @@ static CCSlice cc__stray_byte_msg(CcLexer* L, unsigned c) {
 
 /* ---- marks ----------------------------------------------------------- */
 
-/* `off` is the first byte of the line after the directive. */
-static void cc__add_mark(CcLexer* L, uint32_t off, uint32_t logical_line, CCSlice path) {
+/* `dir_off` is the first byte of the directive; `off` is the first byte of
+ * the line after it. */
+static void cc__add_mark(CcLexer* L, uint32_t dir_off, uint32_t off, uint32_t logical_line, CCSlice path) {
     CcLineMark m;
+    m.dir_off = dir_off;
     m.off = off;
     m.phys_line = cc__line_index(L, off) + 1;
     m.logical_line = logical_line;
@@ -240,7 +243,7 @@ static void cc__comment_mark(CcLexer* L, uint32_t start, uint32_t end) {
     next_line = end;
     while (next_line < L->len && L->bytes[next_line] != '\n') next_line++;
     if (next_line < L->len) next_line++;
-    cc__add_mark(L, next_line, n, path);
+    cc__add_mark(L, start, next_line, n, path);
 }
 
 /* A preprocessor line at [start, end): record a `#line N "p"` / `# N "p"`
@@ -267,7 +270,7 @@ static void cc__pp_mark(CcLexer* L, uint32_t start, uint32_t end, uint32_t next)
         (e - p == 4 || !cc__is_ident_cont(p[4])))
         p += 4;
     if (cc__parse_mark_tail(L, p, e, false, start, &n, &path))
-        cc__add_mark(L, next, n, path);
+        cc__add_mark(L, start, next, n, path);
 }
 
 /* ---- trivia ---------------------------------------------------------- */
