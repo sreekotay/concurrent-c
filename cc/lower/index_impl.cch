@@ -2278,7 +2278,10 @@ static void cc__hook_entry(CcIndex* ix, const CcUnit* u, CcHookReg* reg, CCSlice
     }
 }
 
-static CcHookReg* cc__hook_new(CcIndex* ix, CcUnit* u, CcDecl* d, CCSlice subject) {
+/* `legacy`: the subject is a `cc_ufcs_register` pattern, where a trailing
+ * `*` is a prefix glob (`LegacyWild*` covers `LegacyWildAlpha`), not the
+ * pointer subject `Base*` of `@typehooks`. */
+static CcHookReg* cc__hook_new(CcIndex* ix, CcUnit* u, CcDecl* d, CCSlice subject, bool legacy) {
     CcHookReg* reg = cc_arena_alloc(ix->arena, sizeof(CcHookReg), _Alignof(CcHookReg));
     size_t n = subject.len;
     size_t i;
@@ -2289,10 +2292,14 @@ static CcHookReg* cc__hook_new(CcIndex* ix, CcUnit* u, CcDecl* d, CCSlice subjec
     reg->subject = cc__ix_copy(ix, subject);
     reg->decl = d;
     reg->unit = u;
+    reg->legacy = legacy;
     reg->rules = vec_new::[CcUfcsRule](ix->arena);
     if (cc__eqc(subject, "*")) {
         reg->any = true;
         reg->base = cc__ix_s("");
+    } else if (legacy && n > 1 && subject.ptr[n - 1] == '*') {
+        reg->family = true;
+        reg->base = cc__ix_dupn(ix, subject.ptr, n - 1);
     } else if (n > 2 && subject.ptr[n - 1] == '*' && subject.ptr[n - 2] == '_') {
         reg->family = true;
         reg->base = cc__ix_dupn(ix, subject.ptr, n - 1); /* keep the `_` */
@@ -2338,7 +2345,7 @@ static void cc__typehooks_decl(CcIndex* ix, CcUnit* u, CcDecl* d, CcHookEntryLis
         cc__diag_error(ix, cc__span_loc(u, d->span), cc__ix_s("@" "typehooks without a subject type"));
         return;
     }
-    reg = cc__hook_new(ix, u, d, subject);
+    reg = cc__hook_new(ix, u, d, subject, false);
     for (i = 0; i < n; i++) {
         CcHookEntry* e = entries.get_ptr(i);
         if (e->key.len) cc__hook_entry(ix, u, reg, e->key, e->value);
@@ -2346,7 +2353,9 @@ static void cc__typehooks_decl(CcIndex* ix, CcUnit* u, CcDecl* d, CcHookEntryLis
 }
 
 /* `(void)cc_type_register("Name", (CCTypeHooks){ .ufcs = f, ... })` inside
- * a @comptime block: the marker form of the same registration. */
+ * a @comptime block: the marker form of the same registration. The older
+ * `(void)cc_ufcs_register("Pattern", f)` is the `.ufcs` entry alone, with
+ * a trailing `*` in the pattern as a prefix glob (docs/deprecated.md). */
 static const CcExpr* cc__strip_parens_casts(const CcExpr* e) {
     for (;;) {
         const CcExpr* inner = NULL;
@@ -2382,7 +2391,17 @@ static void cc__comptime_register_expr(CcIndex* ix, CcUnit* u, const CcExpr* e) 
     e = cc__strip_parens_casts(e);
     if (!e) return;
     c = cc__callee_name(e);
-    if (!c.ptr || !(cc__eqc(c, "cc_type_register") || cc__eqc(c, "cc_type_define"))) return;
+    if (!c.ptr) return;
+    if (cc__eqc(c, "cc_ufcs_register")) {
+        args = cc__call_arglist(e, &ok);
+        if (!ok || args.len() < 2) return;
+        name = cc__expr_string(ix, u, *args.get_ptr(0));
+        if (!name.ptr) return;
+        reg = cc__hook_new(ix, u, NULL, name, true);
+        cc__hook_entry(ix, u, reg, cc__ix_s("ufcs"), *args.get_ptr(1));
+        return;
+    }
+    if (!(cc__eqc(c, "cc_type_register") || cc__eqc(c, "cc_type_define"))) return;
     args = cc__call_arglist(e, &ok);
     if (!ok || args.len() < 2) return;
     name = cc__expr_string(ix, u, *args.get_ptr(0));
@@ -2390,7 +2409,7 @@ static void cc__comptime_register_expr(CcIndex* ix, CcUnit* u, const CcExpr* e) 
     if (!name.ptr) return;
     in = cc__compound_init(hooks);
     if (!in) return;
-    reg = cc__hook_new(ix, u, NULL, name);
+    reg = cc__hook_new(ix, u, NULL, name, false);
     items = in->items;
     n = items.len();
     for (i = 0; i < n; i++) {
@@ -2440,10 +2459,14 @@ static CCSlice cc__strip_tag(CCSlice name) {
 /* Specificity of a registration for a name: exact beats pointer-subject
  * beats family beats `*`; -1 when it does not match. */
 static int cc__hook_score(const CcHookReg* r, CCSlice name) {
+    int score;
     if (r->any) return 0;
-    if (r->family) return cc__has_prefix_s(name, r->base) && name.len > r->base.len ? 1 + (int)r->base.len : -1;
-    if (r->ptr) return cc__eq(name, r->base) ? 2000 : -1;
-    return cc__eq(name, r->base) ? 3000 : -1;
+    if (r->family) score = cc__has_prefix_s(name, r->base) && name.len > r->base.len ? 1 + (int)r->base.len : -1;
+    else if (r->ptr) score = cc__eq(name, r->base) ? 2000 : -1;
+    else score = cc__eq(name, r->base) ? 3000 : -1;
+    /* the legacy form yields to a `@typehooks` / `cc_type_register` of the same specificity */
+    if (score > 0 && r->legacy) score -= 1;
+    return score;
 }
 
 static int cc__hook_rank(const CcHookReg* r) {

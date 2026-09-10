@@ -43,6 +43,12 @@ char* cc_comptime_blank_blocks(const char* src, size_t n);
  * caller registers them from its own parse, so what a value-position
  * `@comptime(expr)` calls is there to be read, and drops them itself. */
 #define CC_BLANK_KEEP_FN 2u
+/* Leave a file-scope `@comptime { }` block in place when it registers type
+ * hooks (`cc_type_register` / `cc_type_define` / `cc_ufcs_register`) and
+ * emits nothing: the caller reads the registrations from its own parse of
+ * the block, and drops the block itself. A block that also emits is
+ * blanked as usual, so its site marker stays where the emits splice. */
+#define CC_BLANK_KEEP_HOOKS 4u
 char* cc_comptime_blank_blocks_ex(const char* src, size_t n, unsigned keep);
 
 /* Resolve `@comptime if/for`, then lower `@emit` / `@string` templates.

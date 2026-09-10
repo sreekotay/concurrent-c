@@ -440,10 +440,11 @@ static void lw_drop_cc_only(CcLowerer* L) {
             case .typehooks: drop = true; break;
             case .factory: drop = true; break;
             /* A unit reaches the lowerer with its compile-time blocks
-             * already run and blanked; a header is read as it was written,
-             * so the `.h` drops them here. What they produced is spliced
-             * into the translation unit, not into the header. */
-            case .comptime_block: drop = L->header_mode; break;
+             * already run: blanked, or left in place for the hooks they
+             * register, which the index has read. A header is read as it
+             * was written. Either way nothing of the block is C; what it
+             * produced is spliced into the translation unit by the driver. */
+            case .comptime_block: drop = true; break;
             case .comptime_fn: drop = L->header_mode; break;
             case .comptime_if: drop = L->header_mode; break;
             default: break;

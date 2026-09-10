@@ -1353,6 +1353,10 @@ static void kl_on_decl(Walker* w, CcDecl* d) {
     st->locals = vec_new::[KLocalRef](st->L->arena);
     @switch (d->k) {
         case .typehooks: st->in_hooks = true; break;
+        /* a `@comptime { }` block reaches the lowerer for the registrations
+         * it makes (`cc_type_register(..., (CCTypeHooks){ .ufcs = ... })`):
+         * the same handlers under the older spelling, dropped the same way */
+        case .comptime_block: st->in_hooks = true; break;
         default: break;
     }
 }

@@ -4290,7 +4290,11 @@ static int cc__materialize_comptime_for_clean(const char* in_path, char* out_ccs
     cc_emit_plan_clear_comptime_instantiations();
     cc_emit_plan_collect_comptime_instantiations(buf, len);
     {
-        char* blanked = cc_comptime_blank_blocks_ex(buf, len, CC_BLANK_KEEP_VALUE | CC_BLANK_KEEP_FN);
+        /* A block that registers type hooks stays: the lowerer's index
+         * reads `cc_type_register(...)` off it, as the shadow scanner
+         * reads it off the source, and the lowerer drops the block. */
+        char* blanked = cc_comptime_blank_blocks_ex(buf, len,
+                                                    CC_BLANK_KEEP_VALUE | CC_BLANK_KEEP_FN | CC_BLANK_KEEP_HOOKS);
         free(buf);
         if (!blanked) return -1;
         buf = blanked;

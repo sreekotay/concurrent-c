@@ -39,6 +39,32 @@ static void cc__blank_unterminated(const char* src, size_t at,
             what ? what : "@comptime", line);
 }
 
+/* Whether [l, r] holds `needle` as an identifier followed by `(`. */
+static int cc__range_calls(const char* src, size_t l, size_t r, const char* needle) {
+    size_t k = strlen(needle);
+    size_t i;
+    if (r < l || r - l + 1 < k) return 0;
+    for (i = l; i + k <= r + 1; i++) {
+        size_t j;
+        if (memcmp(src + i, needle, k) != 0) continue;
+        if (i > 0 && cc_is_ident_char(src[i - 1])) continue;
+        j = i + k;
+        while (j <= r && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '\r')) j++;
+        if (j <= r && src[j] == '(') return 1;
+    }
+    return 0;
+}
+
+/* A block kept for its registrations (CC_BLANK_KEEP_HOOKS): it registers
+ * type hooks and emits nothing. */
+static int cc__block_registers_hooks(const char* src, size_t l, size_t r) {
+    if (!(cc__range_calls(src, l, r, "cc_type_register") ||
+          cc__range_calls(src, l, r, "cc_type_define") ||
+          cc__range_calls(src, l, r, "cc_ufcs_register")))
+        return 0;
+    return !cc__range_calls(src, l, r, "@emit");
+}
+
 char* cc_comptime_blank_blocks_ex(const char* src, size_t n, unsigned keep) {
     char* out;
     CCInertScan sc;
@@ -110,6 +136,11 @@ char* cc_comptime_blank_blocks_ex(const char* src, size_t n, unsigned keep) {
                     cc__blank_unterminated(src, i, "@comptime {…}");
                     free(out);
                     return NULL;
+                }
+                if ((keep & CC_BLANK_KEEP_HOOKS) && file_scope &&
+                    cc__block_registers_hooks(src, body_l, body_r)) {
+                    i = body_r + 1;
+                    continue;
                 }
                 for (size_t k = i; k <= body_r; ++k) {
                     if (out[k] != '\n') out[k] = ' ';

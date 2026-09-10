@@ -24,7 +24,9 @@ of it, and the milestone plan. The audit it answers is
    executes the unit's `@comptime { }` blocks, splices the implementation
    `.cch` the unit owns, expands `#define` bodies that carry a lifetime
    attribute, resolves `@comptime if` / `@comptime for`, `@grammar`
-   bodies, module exports and `static_map`, blanks the run blocks, and
+   bodies, module exports and `static_map`, blanks the run blocks (a
+   block that only registers type hooks stays, so the index reads the
+   registrations as it reads `@typehooks`, and the lowerer drops it), and
    writes the result under `out/.cc-build/clean_comptime/` with
    `#line 1 "<user file>"` on top. Those are the text passes the shadow
    path runs, and they keep the line count, so positions name the user's
