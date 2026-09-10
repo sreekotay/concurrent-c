@@ -122,6 +122,7 @@ struct CcHookReg {
     void* ufcs_callable;        /* an opaque handler, compiled: called per site */
     bool ufcs_compile_tried;    /* compiled once, or found not compilable; either way not again */
     bool has_len; bool has_access; bool has_cast; bool has_niche; bool has_sink;
+    CCSlice cast_fn;            /* .cast handler: the function a destination mints through */
     CCSlice len_kind;           /* .len hook: "field" or "call", naming len_name */
     CCSlice len_name;
     CCSlice access_kind;        /* .access hook: "load" or "call", naming access_name */

@@ -26,16 +26,26 @@ typedef struct AsStep {
     Walker* w;
 } AsStep;
 
-/* `x` -> `x.f1.f2…` for the faces of a path. */
-static CcExpr* as_project(CcLowerer* L, CcExpr* a, CcNameList* path, CcSpan sp) {
+/* `x` -> `x.f1.f2…` for the faces of a path; `p` -> `p->f1.f2…` when the
+ * subject is the pointer to the wrapper rather than the wrapper. */
+static CcExpr* as_project(CcLowerer* L, CcExpr* a, CcNameList* path, bool arrow, CcSpan sp) {
     size_t n = path->len();
     size_t i;
     CcExpr* e = a;
     for (i = 0; i < n; i++) {
         CCSlice face = *path->get_ptr(i);
-        e = lw_member_s(L, e, face, sp);
+        e = cc_expr_member(e, face, i == 0 && arrow, sp, L->arena);
     }
     return e;
+}
+
+/* What a pointer type points at, or NULL when it is not one. */
+static CcType* as_pointee(CcType* t) {
+    if (!t) return NULL;
+    @switch (t->k) {
+        case .pointer(pt): return pt.pointee;
+        default: return NULL;
+    }
 }
 
 /* `&x`: the operand, when the argument is an address-of. */
@@ -86,21 +96,31 @@ static void as_call(Walker* w, CcExpr* e, CcCall cl) {
         bool cycle = false;
         CcExpr* subject = a;
         bool addr = false;
+        bool arrow = false;
         if (!at || !pa->type) continue;
         /* `&x` for a `T*` parameter: the face is projected inside the
          * address-of, so the callee points at the face and not at a
          * pointer to the wrapper that happens to start with one */
         if (pa->type->k.kind == CcTypeK_pointer) {
-            CcType* want = NULL;
-            @switch (pa->type->k) {
-                case .pointer(pt): want = pt.pointee; break;
-                default: break;
-            }
-            if (!want || !as_addr_of(a, &subject)) continue;
-            at = type_of_expr(w, subject);
-            if (!at || at->k.kind == CcTypeK_pointer) continue;
-            addr = true;
+            CcType* want = as_pointee(pa->type);
+            if (!want) continue;
             to = ix->canon(want);
+            if (as_addr_of(a, &subject)) {
+                at = type_of_expr(w, subject);
+                if (!at || at->k.kind == CcTypeK_pointer) continue;
+                addr = true;
+            } else if (at->k.kind == CcTypeK_pointer) {
+                /* `p` is already the pointer to the wrapper: the face is
+                 * reached through it (`&p->file`). Passing `p` as written
+                 * hands the callee the wrapper's address, which C converts
+                 * with a warning and the callee then reads the wrong
+                 * object -- the face is at an offset, not at zero. */
+                CcType* pointee = as_pointee(at);
+                if (!pointee) continue;
+                at = pointee;
+                addr = true;
+                arrow = true;
+            } else continue;
         } else {
             if (at->k.kind == CcTypeK_pointer) continue;
             to = ix->canon(pa->type);
@@ -112,7 +132,7 @@ static void as_call(Walker* w, CcExpr* e, CcCall cl) {
         if (!rl_as_search(L, from, to, &path, &seen, &n_found, &cycle)) continue;
         if (n_found != 1 || cycle) continue;   /* ambiguous: the type's to resolve, not this step's */
         {
-            CcExpr* proj = as_project(L, lw_paren(L, subject, a->span), &path, a->span);
+            CcExpr* proj = as_project(L, lw_paren(L, subject, a->span), &path, arrow, a->span);
             if (addr) proj = cc_expr_unary(CC_OP_ADDR, proj, a->span, L->arena);
             *av->get_ptr(i) = proj;
         }

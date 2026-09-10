@@ -2246,7 +2246,9 @@ static void uf_dest_missing(CcLowerer* L, CCSlice callee, CCSlice dest, CCSlice 
     }
 }
 
-static void uf_dest_call(CcLowerer* L, CcType* want, CcExpr* init) {
+/* True when the call the destination governs was retargeted to one of the
+ * family's installed destinations. */
+static bool uf_dest_call(CcLowerer* L, CcType* want, CcExpr* init) {
     CcIndex* ix = L->ix;
     CcExpr* call = uf_call_under(init);
     CCSlice callee = cc_slice_empty();
@@ -2255,7 +2257,7 @@ static void uf_dest_call(CcLowerer* L, CcType* want, CcExpr* init) {
     size_t sn = sv->len();
     size_t si;
     bool is_sink = false;
-    if (!want || !call) return;
+    if (!want || !call) return false;
     {
         CcCall c;
         bool ok = false;
@@ -2263,30 +2265,56 @@ static void uf_dest_call(CcLowerer* L, CcType* want, CcExpr* init) {
             case .call(x): c = x; ok = true; break;
             default: break;
         }
-        if (!ok || !c.callee) return;
-        if (!expr_ident(strip_parens_expr(c.callee), &callee)) return;
+        if (!ok || !c.callee) return false;
+        if (!expr_ident(strip_parens_expr(c.callee), &callee)) return false;
     }
-    if (!callee.len) return;
+    if (!callee.len) return false;
     for (si = 0; si < sn; si++) if (slice_eq(*sv->get_ptr(si), callee)) { is_sink = true; break; }
-    if (!is_sink) return;
+    if (!is_sink) return false;
     mang = uf_dest_mangle(L, ix->canon(want));
-    if (!mang.len) return;
+    if (!mang.len) return false;
     {
         CCString cand = @string(`${callee}_${mang}`, L->arena);
         CCSlice name = lw_keep(L, &cand);
         CcSym* sym = sym_any(ix, name);
         while (sym && sym->kind != CC_SYM_FUNC) sym = sym->same_name;
-        if (!sym) { uf_dest_missing(L, callee, ix->canon(want), mang, call->span); return; }
+        if (!sym) { uf_dest_missing(L, callee, ix->canon(want), mang, call->span); return false; }
         {
             CcCall c2;
             @switch (call->k) {
                 case .call(x): c2 = x; break;
-                default: return;
+                default: return false;
             }
             c2.callee = lw_ident(L, name, call->span);
             call->k = { .call = c2 };
         }
     }
+    return true;
+}
+
+/* `d = w.foo(6.0);` names a destination too: the declared type of the
+ * lvalue is what the value has to fit, exactly as at the declaration that
+ * introduced it. Only a plain `=` to a bare name -- a compound assignment
+ * reads the old value first, so what the call answers with is not by
+ * itself the destination, and a member or an index is a place whose type
+ * this step does not have in hand. */
+static CcExpr* uf_dest_assign_rhs(CcStmt* s, CCSlice* name) {
+    CcExpr* e = NULL;
+    CcBinary as;
+    bool is_assign = false;
+    @switch (s->k) {
+        case .expr(x): e = x.e; break;
+        default: break;
+    }
+    e = strip_parens_expr(e);
+    if (!e) return NULL;
+    @switch (e->k) {
+        case .assign(x): as = x; is_assign = true; break;
+        default: break;
+    }
+    if (!is_assign || as.op != CC_OP_ASSIGN || !as.a || !as.b) return NULL;
+    if (!expr_ident(strip_parens_expr(as.a), name) || !name->len) return NULL;
+    return as.b;
 }
 
 static void uf_dest_stmt(Walker* w, CcStmt* s, bool enter) {
@@ -2302,17 +2330,166 @@ static void uf_dest_stmt(Walker* w, CcStmt* s, bool enter) {
         }
         if (is_var && v.init && !v.init->is_list && v.init->expr)
             uf_dest_call(L, v.type, v.init->expr);
+        return;
     }
+    {
+        CCSlice nm = cc_slice_empty();
+        CcExpr* rhs = uf_dest_assign_rhs(s, &nm);
+        if (rhs) uf_dest_call(L, sc_lookup(w, nm), rhs);
+    }
+}
+
+/* A call under nothing but parentheses. An unwrap or a `@destroy` tail
+ * between the cast and the call is a step of its own, and the cast is
+ * about what that step answers with, not about the call. */
+static CcExpr* uf_paren_call(CcExpr* e) {
+    CcExpr* a = strip_parens_expr(e);
+    if (!a) return NULL;
+    @switch (a->k) {
+        case .call: return a;
+        default: return NULL;
+    }
+}
+
+/* `(double)w.foo(5.5)` -- a cast that directly wraps the call spells the
+ * destination as plainly as a declaration does, and the variant it picks
+ * already answers with that type, so the cast is absorbed rather than
+ * left to convert a value that is already right. A cast whose type the
+ * family installed no destination for keeps its ordinary C meaning. */
+static bool uf_dest_cast_visit(CcExpr* e, void* env) {
+    CcLowerer* L = (CcLowerer*)env;
+    CcCast ct;
+    bool is_cast = false;
+    CcExpr* call;
+    @switch (e->k) {
+        case .cast(x): ct = x; is_cast = true; break;
+        default: break;
+    }
+    if (!is_cast || !ct.type || !ct.a) return true;
+    call = uf_paren_call(ct.a);
+    if (!call) return true;
+    if (!uf_dest_call(L, ct.type, call)) return true;
+    e->k = call->k;
+    return true;
 }
 
 static void uf_dest_pass(CcLowerer* L) {
     Walker w;
+    CcVisitor v;
     if (!L->sinks.len()) return;
     memset(&w, 0, sizeof(w));
     w.arena = L->arena;
     w.ix = L->ix;
     w.unit = L->unit;
     w.on_stmt = uf_dest_stmt;
+    w.env = L;
+    tw_unit(&w);
+    /* after the statement destinations: a cast inside one has already been
+     * governed by the declaration or assignment it sits in */
+    memset(&v, 0, sizeof(v));
+    v.expr = uf_dest_cast_visit;
+    v.env = L;
+    CcUnit_walk(L->unit, v);
+}
+
+/* ---- `.cast`: a destination that mints ---------------------------------
+ *
+ * `CCBox::[H] b = &host;` is not an assignment C can make: the cell is the
+ * box and the right side is the host pointer the box is a name for. A
+ * type's `.cast` hook is what turns one into the other -- it is handed the
+ * source and destination spellings and answers with the function that
+ * mints (`CCBox_H_from_host`), with `__cc_ufcs_pass__` (nothing to
+ * convert), or with the empty slice (mine, and refused). Read the
+ * registration and never call it and the site reaches the host compiler
+ * unconverted, as `invalid initializer` on a line the language accepts.
+ *
+ * Slice destinations (`char[:] s = str;`, `int[:] xs = v;`) are converted
+ * by the slice lowering, which knows the shapes it builds; this step
+ * leaves them to it so that no site is wrapped twice. */
+static CCSlice uf_cast_handler(CcIndex* ix, CCSlice dest) {
+    CcHookReg* hook = cc__hook_match(ix, dest, false);
+    if (hook && hook->has_cast && hook->cast_fn.len) return hook->cast_fn;
+    /* Bare `CCBox` is the erased core: it names no family, so the
+     * `CCBox_*` registration does not match it, and it casts by the same
+     * hook its instances do. */
+    if (uf_is_box_instance(dest)) return cstr_slice("cc_box_cast_lower_c");
+    return cc_slice_empty();
+}
+
+/* A destination this step can be about: a value of a named type. A pointer
+ * cell takes the pointer as written, and a Result cell is filled by the
+ * unwrap steps, not by a conversion. */
+static bool uf_cast_dest(CCSlice dest) {
+    size_t i;
+    if (!dest.len) return false;
+    for (i = 0; i < dest.len; i++) if (dest.ptr[i] == '*') return false;
+    return !cc__has_prefix(dest, "CCResult_");
+}
+
+/* The minting call for one destination, or NULL when the site already is
+ * what it should be. */
+static CcExpr* uf_cast_wrap(Walker* w, CcLowerer* L, CcType* want, CcExpr* rhs) {
+    CcIndex* ix = L->ix;
+    CCSlice dest;
+    CCSlice src = cc_slice_empty();
+    CCSlice handler;
+    CCSlice out;
+    CcType* at;
+    CcSpan sp;
+    if (!want || !rhs) return NULL;
+    sp = rhs->span;
+    dest = ix->canon(want);
+    if (!uf_cast_dest(dest)) return NULL;
+    handler = uf_cast_handler(ix, dest);
+    if (!handler.len) return NULL;
+    if (cc_slice_eq_cstr(&handler, "cc_slice_cast_lower_c")) return NULL;
+    if (!cc_slice_eq_cstr(&handler, "cc_box_cast_lower_c")) {
+        /* A hook the lowerer cannot run is not a hook that had nothing to
+         * say: emitting the right side unconverted would look exactly like
+         * a site that needed no conversion. */
+        CCString m = @string(`type: ${"."}cast handler '${handler}' for '${dest}' is not compiled`, L->arena);
+        lw_error(L, sp, m);
+        return NULL;
+    }
+    at = type_of_expr(w, rhs);
+    if (at) src = ix->canon(at);
+    if (src.len && slice_eq(src, dest)) return NULL;
+    out = cc_box_cast_lower_c(src, dest, cstr_slice("implicit"), L->arena);
+    if (!out.len) {
+        CCString m = @string(`type: ${"."}cast hook rejected implicit convert to '${dest}'`, L->arena);
+        lw_error(L, sp, m);
+        return NULL;
+    }
+    if (cc_slice_eq_cstr(&out, CC_UFCS_PASS_TAG)) return NULL;
+    return lw_call1(L, out, rhs, sp);
+}
+
+static void uf_cast_stmt(Walker* w, CcStmt* s, bool enter) {
+    CcLowerer* L = (CcLowerer*)w->env;
+    CcDecl* d = NULL;
+    CcVarDecl v;
+    CcInit* init;
+    CcExpr* wrap;
+    bool is_var = false;
+    if (!enter || !stmt_is_decl(s, &d) || !d) return;
+    @switch (d->k) {
+        case .var(x): v = x; is_var = true; break;
+        default: break;
+    }
+    if (!is_var) return;
+    init = v.init;
+    if (!init || init->is_list || !init->expr) return;
+    wrap = uf_cast_wrap(w, L, v.type, init->expr);
+    if (wrap) init->expr = wrap;
+}
+
+static void uf_cast_pass(CcLowerer* L) {
+    Walker w;
+    memset(&w, 0, sizeof(w));
+    w.arena = L->arena;
+    w.ix = L->ix;
+    w.unit = L->unit;
+    w.on_stmt = uf_cast_stmt;
     w.env = L;
     tw_unit(&w);
 }
@@ -2347,6 +2524,7 @@ static void CcLowerer_ufcs(CcLowerer* L) {
     v.env = L;
     CcUnit_walk(L->unit, v);
     uf_dest_pass(L);   /* last: the calls are built, so a destination can pick one */
+    uf_cast_pass(L);   /* after it: the right side is the expression the cast is about */
     uf_check_views(L);
 }
 

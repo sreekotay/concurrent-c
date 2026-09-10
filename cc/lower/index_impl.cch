@@ -2238,7 +2238,15 @@ static void cc__hook_entry(CcIndex* ix, const CcUnit* u, CcHookReg* reg, CCSlice
         reg->has_access = true;
         cc__hook_kind_name(ix, u, value, &reg->access_kind, &reg->access_name);
     }
-    else if (cc__eqc(f, "cast")) reg->has_cast = true;
+    else if (cc__eqc(f, "cast")) {
+        /* The handler is what a destination mints through, so the name is
+         * kept: a registration read as `has_cast` and nothing else leaves
+         * the lowering with no function to call and the site emitting the
+         * right side unconverted. */
+        CCSlice a = cc__expr_is_ident(value, &nm) ? nm : cc__expr_string(ix, u, value);
+        reg->has_cast = true;
+        if (a.ptr) reg->cast_fn = a;
+    }
     else if (cc__eqc(f, "niche")) cc__hook_niche(ix, u, reg, value);
     else if (cc__has_prefix(f, "ufcs_sink") || cc__has_prefix(f, "ufcs_dynamic")) {
         CCSlice a = cc__expr_is_ident(value, &nm) ? nm : cc__expr_string(ix, u, value);
@@ -3719,13 +3727,12 @@ static CcMethod* cc__resolve_faces(CcIndex* ix, CcTypeInfo* recv, CCSlice method
     return NULL;
 }
 
-/* 8. `.ufcs_sink`: the last resort of a dynamic family */
-static CcMethod* cc__resolve_sink(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCString* tried, CCArena ta) {
+/* The `.ufcs_sink` registration that governs a receiver, or NULL. */
+static CcHookReg* cc__sink_reg(CcIndex* ix, const CcTypeInfo* recv) {
     CcHookRegList* hookv = &ix->hooks;
     size_t i;
     size_t n = hookv->len();
     CcHookReg* best = NULL;
-    CcSym* cs;
     for (i = 0; i < n; i++) {
         CcHookReg* h = *hookv->get_ptr(i);
         if (!h->sink_fn.len) continue;
@@ -3733,6 +3740,13 @@ static CcMethod* cc__resolve_sink(CcIndex* ix, CcTypeInfo* recv, CCSlice method,
             (!h->family && cc__eq(recv->name, h->base)))
             best = h;
     }
+    return best;
+}
+
+/* 8. `.ufcs_sink`: the last resort of a dynamic family */
+static CcMethod* cc__resolve_sink(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCString* tried, CCArena ta) {
+    CcHookReg* best = cc__sink_reg(ix, recv);
+    CcSym* cs;
     if (!best) return NULL;
     cs = cc__callee_sym(ix, best->sink_fn);
     if (cs) {
@@ -3776,8 +3790,15 @@ static CcMethod* cc__resolve(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCSt
     if (m) return m;
     m = cc__resolve_snake(ix, recv, method, tried, ta, base_name);
     if (m) return m;
-    m = cc__resolve_bare(ix, recv, method, tried, ta, recv_shape);
-    if (m) return m;
+    /* A type that registered a `.ufcs_sink` has already said what becomes
+     * of a method it does not declare, so the bare tier -- any visible
+     * `method(T*, ...)` anywhere in the unit -- must not capture one on
+     * the way past. The sink still stays the last rung: an `as:` embed
+     * that really has the method IS the method, not a dynamic call. */
+    if (!cc__sink_reg(ix, recv)) {
+        m = cc__resolve_bare(ix, recv, method, tried, ta, recv_shape);
+        if (m) return m;
+    }
     m = cc__resolve_alias(ix, recv, method, tried, ta, depth, recv_shape);
     if (m) return m;
     m = cc__resolve_faces(ix, recv, method, tried, ta, depth);

@@ -225,11 +225,30 @@ static CcType* field_type(Walker* w, CcType* recv, CCSlice field);
 /* The C-member-first rule: `x.m()` is a plain C call when `m` is a field of
  * function or function-pointer type; a data field named like a method
  * (Vec's `len`) does not hide the method. */
+/* A typedef the unit or a header declared resolves to what it names. The
+ * C-member-first rule asks whether a field can be called, and a field
+ * declared through a typedef (`widget_op_fn op;`) is a named type until
+ * the declaration is read: left unresolved it reads as not callable, and
+ * `w.op(5)` is taken for a UFCS site and lowered to a free function of
+ * the same name -- a call to something else that compiles. */
+static CcType* unalias_declared(Walker* w, CcType* t) {
+    int depth = 0;
+    CCSlice nm;
+    while (t && type_named_name(t, &nm) && nm.len && depth++ < 8) {
+        CcSym* sym = sym_any(w->ix, nm);
+        while (sym && sym->kind != CC_SYM_TYPE) sym = sym->same_name;
+        if (!sym || !sym->type || sym->type == t) break;
+        t = sym->type;
+    }
+    return t;
+}
+
 static bool field_is_callable(Walker* w, CcType* recv, CCSlice field) {
     CcType* ft = field_type(w, recv, field);
     CcType* t;
     if (!ft) return false;
     t = peel(unalias_local(w, peel(ft)));
+    t = peel(unalias_declared(w, t));
     if (!t) return false;
     if (t->k.kind == CcTypeK_func) return true;
     if (t->k.kind == CcTypeK_pointer) {
