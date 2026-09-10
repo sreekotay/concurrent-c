@@ -484,7 +484,7 @@ ifeq ($(suffix $(TCC_LIB)),.a)
 endif
 
 .PHONY: lower-cc
-lower-cc: $(SHADOW_LOWER_WRAPPER) $(LOWER_HEADERS_STAMP)
+lower-cc: $(CCC_SCRIPT) $(SHADOW_LOWER_WRAPPER) $(LOWER_HEADERS_STAMP)
 	bin/ccc build lower/cclex.ccs -o $(OUT_BINDIR)/cclex_cc
 	bin/ccc build lower/ccparse.ccs -o $(OUT_BINDIR)/ccparse_cc
 	bin/ccc build lower/cclower.ccs --ld-flags "$(LOWER_CC_COMPTIME_LIBS)" -o $(OUT_BINDIR)/cclower_cc
