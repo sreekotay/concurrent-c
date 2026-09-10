@@ -823,6 +823,88 @@ static bool decl_at_name_run(P* p, CCSlice name, uint32_t ntok) {
     return true;
 }
 
+/* The source expression of `@auto(src)`; NULL for a plain `auto`. */
+static CcExpr* type_auto_src(const CcType* t) {
+    if (!t) return NULL;
+    @switch (t->k) {
+        case .auto_(au): return au.src;
+        default: break;
+    }
+    return NULL;
+}
+
+/* `@auto(src) name(arena) @destroy;` -- the char grower written short.
+ *
+ * It is `CCVec_char name = CCVec_char_init(arena, (src).len);` with the
+ * ownership `@destroy` always means: the source names the capacity, the
+ * arena names the owner.  Written out that way it is a declaration the rest
+ * of the parser already reads, so this builds that declaration rather than
+ * giving `@auto` a node of its own. */
+static bool parse_auto_grower(P* p, CcDeclList* out, Specs* S, CcAttrList* attrs,
+                              uint32_t first, CcExpr* src) {
+    CcDecl* dn = decl_blank(p, span2(first, first));
+    CcVarDecl v;
+    CcExpr* c;
+    CcCall cl;
+    CcInit* in;
+    memset(&v, 0, sizeof v);
+    dn->specs = S->specs;
+    push_attrs(&dn->attrs, attrs);
+    if (!at_ident(p)) {
+        CCString m = @string(`expected the grower's name after @auto(src)`, p->arena);
+        err_here(p, m);
+        sync(p, first);
+        return false;
+    }
+    v.name = tok_name(p, p->i);
+    adv(p);
+    declare_var(p, v.name);
+    if (!at_p(p, CC_P_LPAREN)) {
+        CCSlice nm = v.name;
+        CCString m = @string(`@auto(src) ${nm} needs '(arena)' after the name`, p->arena);
+        err_here(p, m);
+        sync(p, first);
+        return false;
+    }
+    c = cc__expr_blank(span2(p->i, p->i), p->arena);
+    {
+        CCSlice init_fn = CC_SLICE_LIT("CCVec_char_init");
+        cl.callee = cc_expr_ident(init_fn, span2(p->i, p->i), p->arena);
+    }
+    cl.args = vec_new::[CcExprRef](p->arena);
+    parse_args(p, &cl.args, "@auto(src) name(arena)");
+    {
+        CCSlice len_name = CC_SLICE_LIT("len");
+        CcExpr* cap = cc_expr_member(src, len_name, false, src->span, p->arena);
+        cl.args.push(cap);
+    }
+    c->k = { .call = cl };
+    c->span = span_from(p, c->span.first);
+    in = init_blank(p, c->span);
+    in->expr = c;
+    in->span = c->span;
+    v.init = in;
+    {
+        CCSlice vec_char = CC_SLICE_LIT("CCVec_char");
+        v.type = cc_type_named(vec_char, S->type->span, p->arena);
+    }
+    if (at_word(p, "destroy")) {
+        v.destroy = true;
+        adv(p);
+        if (at_p(p, CC_P_LBRACE)) v.destroy_body = parse_block(p);
+    } else {
+        CCSlice nm = v.name;
+        CCString m = @string(`@auto(src) ${nm} owns its buffer: it needs '@destroy'`, p->arena);
+        err_here(p, m);
+    }
+    if (at_word(p, "detach")) { v.detach = true; adv(p); }
+    decl_install(dn, SHAPE_VAR, v, NULL);
+    if (!expect_list_end(p, "after the @auto grower")) sync(p, first);
+    dn->span = span_from(p, first);
+    out->push(dn);
+    return true;
+}
+
 static bool parse_declaration_specs(P* p, CcDeclList* out, uint32_t first, CcAttrList* attrs, bool file_scope, uint32_t extra_specs) {
     Specs S;
     int count = 0;
@@ -921,6 +1003,10 @@ static bool parse_declaration_specs(P* p, CcDeclList* out, uint32_t first, CcAtt
         dn->span = span_from(p, first);
         out->push(dn);
         return true;
+    }
+    {
+        CcExpr* auto_src = type_auto_src(S.type);
+        if (auto_src) return parse_auto_grower(p, out, &S, attrs, first, auto_src);
     }
     for (;;) {
         uint32_t dfirst = p->i;

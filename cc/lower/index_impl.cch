@@ -3767,6 +3767,29 @@ static CcMethod* cc__resolve_sink(CcIndex* ix, CcTypeInfo* recv, CCSlice method,
     return NULL;
 }
 
+static CcMethod* cc__method_plain(CcIndex* ix, CCSlice method, CCSlice callee, const char* source, CCSlice origin, CcSym* sym, bool by_value);
+
+/* A const receiver where the type spells the two families apart:
+ * `cc_const_char_println` beside `cc_char_println`. The plain one takes
+ * `char *`, so a `const char *` receiver reaches it with the qualifier
+ * dropped -- a warning at every such call, about a callee the type also
+ * provides a const-correct twin of.
+ *
+ * It is answered before the memo and never entered into it: the memo is
+ * keyed by the type and the method, and which of the two families a site
+ * wants is a fact about that site's receiver, not about `char`. */
+static CcMethod* cc__resolve_const_family(CcIndex* ix, CcTypeInfo* recv, CCSlice method) {
+    CCSlice base_name = cc__strip_tag(recv->name);
+    CCSlice snake = CcIndex_snake(ix, cc__cat3(ix, "const ", base_name, ""));
+    CCSlice composed;
+    CcSym* cs;
+    if (cc__has_prefix(snake, "cc_")) composed = cc__join(ix, snake, "_", method);
+    else composed = cc__join(ix, cc__cat3(ix, "cc_", snake, ""), "_", method);
+    cs = cc__callee_sym(ix, composed);
+    if (!cs) return NULL;
+    return cc__method_plain(ix, method, composed, "cc_snake_method", cc__sym_origin(ix, cs), cs, false);
+}
+
 static CcMethod* cc__resolve(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCString* tried, CCArena ta, int depth, unsigned recv_shape) {
     CcMethod* m;
     bool stop;
@@ -3775,6 +3798,10 @@ static CcMethod* cc__resolve(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCSt
     size_t i;
     size_t n = methv->len();
     if (depth > 6) return NULL;
+    if (recv_shape & CC_RECV_CONST) {
+        m = cc__resolve_const_family(ix, recv, method);
+        if (m) return m;
+    }
     for (i = 0; i < n; i++) {
         m = *methv->get_ptr(i);
         if (cc__eq(m->method, method)) return m;

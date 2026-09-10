@@ -933,7 +933,18 @@ static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m,
         lw_error(L, sp, msg);
         return;
     }
-    if (!m) m = uf_hook_site(w, L, tn, uf, sp);
+    /* A `.ufcs` handler the index could not read as rules decides from the
+     * site -- the arguments as well as the method -- so it decides before
+     * the composed names do. `stdin.read_line(&line)` is `read_line_into`
+     * because the handler says so, and `BufReader_CCStdin_read_line`, which
+     * is also declared, is its answer to the call that passes nothing.
+     * Letting the composed name win would hand the site a callee of the
+     * wrong arity that the handler was written to prevent. A handler that
+     * passes or refuses leaves `m` as the index resolved it. */
+    {
+        CcMethod* hm = uf_hook_site(w, L, tn, uf, sp);
+        if (hm) m = hm;
+    }
     if (!m) {
         CCString msg = @string(`type: ${reason}`, L->arena);
         lw_error(L, sp, msg);

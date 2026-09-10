@@ -3919,6 +3919,15 @@ static int g_lowerer_clean = 0;
  * still knows which unit it was. */
 static uint64_t g_clean_src_key = 0;
 
+/* The directory the unit was written in, on the clean path.
+ *
+ * The clean branch hands the host compiler the C it emitted into
+ * out/.cc-build/clean, so the directory a quoted `#include "x.h"` resolves
+ * against is that one and not the unit's own. The shadow path never loses
+ * it: its `in_path` stays the source. Kept as content, not as a pointer --
+ * the buffer it is copied from is a block local. */
+static char g_clean_quote_dir[PATH_MAX];
+
 static int cc__set_lowerer_name(const char* v) {
     if (!v || !v[0] || strcmp(v, "shadow") == 0 || strcmp(v, "native") == 0) { g_lowerer_clean = 0; return 0; }
     if (strcmp(v, "clean") == 0) { g_lowerer_clean = 1; return 0; }
@@ -5072,6 +5081,9 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             /* a stage lives in the cache, so quoted includes still resolve
              * against the directory the user wrote the unit in */
             cc__dir_of_path(opt->in_path, clean_qdir, sizeof(clean_qdir));
+            /* recorded for the host compile: by then `in_path` is the emitted
+             * C, and a quoted include still names a file beside the unit */
+            snprintf(g_clean_quote_dir, sizeof(g_clean_quote_dir), "%s", clean_qdir);
             {
                 /* compile time first: what it decides is what there is to lower */
                 /* `o_ct.in_path` outlives this block, so the buffer it points
@@ -5694,6 +5706,17 @@ static int cc__compile_c_to_obj(const CCBuildOptions* opt,
         // Add -I<dir> so generated C can include headers relative to the original source directory.
         char inc[PATH_MAX + 8];
         snprintf(inc, sizeof(inc), " -I%s", extra_include_dir);
+        strncat(cmd, inc, sizeof(cmd) - strlen(cmd) - 1);
+    }
+    /* On the clean path `extra_include_dir` is the emit directory, not the
+     * unit's own: the C being compiled lives under out/.cc-build/clean. A
+     * quoted include the unit wrote (`#include "helper.h"`) names a file
+     * beside the unit, so the directory the unit was written in is searched
+     * too. */
+    if (g_lowerer_clean && g_clean_quote_dir[0] &&
+        (!extra_include_dir || strcmp(extra_include_dir, g_clean_quote_dir) != 0)) {
+        char inc[PATH_MAX + 8];
+        snprintf(inc, sizeof(inc), " -I%s", g_clean_quote_dir);
         strncat(cmd, inc, sizeof(cmd) - strlen(cmd) - 1);
     }
     {

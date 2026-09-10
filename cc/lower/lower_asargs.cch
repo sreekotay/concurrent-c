@@ -62,6 +62,64 @@ static bool as_addr_of(CcExpr* a, CcExpr** out) {
     }
 }
 
+/* `(T *)x`: the cast's type and its operand. */
+static bool as_cast_of(CcExpr* a, CcType** ty, CcExpr** inner) {
+    CcExpr* e = strip_parens_expr(a);
+    if (!e) return false;
+    @switch (e->k) {
+        case .cast(cs): {
+            *ty = cs.type;
+            *inner = cs.a;
+            return true;
+        }
+        default: return false;
+    }
+}
+
+/* An explicit cast at an argument whose type has an `as:` path to what the
+ * parameter wants.
+ *
+ * The cast is C's answer and it stands: `(CCFile *)&w` is the address of
+ * the wrapper, and the face lives somewhere inside it. Taking the `as:`
+ * path anyway would make a written cast mean something other than what C
+ * says it means. Leaving it silent is the other half of the trap -- the
+ * call compiles and reads the wrong bytes -- so the site says so. */
+static void as_warn_cast_skips(AsStep* st, CcType* want_param, CcExpr* a, CcSpan sp) {
+    CcLowerer* L = st->L;
+    CcIndex* ix = L->ix;
+    Walker* w = st->w;
+    CcType* cty = NULL;
+    CcExpr* inner = NULL;
+    CcType* want;
+    CcType* have;
+    CCSlice from;
+    CCSlice to;
+    CcNameList path;
+    CcNameList seen;
+    int n_found = 0;
+    bool cycle = false;
+    if (!as_cast_of(a, &cty, &inner) || !cty || !inner) return;
+    want = as_pointee(want_param);
+    if (!want || !as_pointee(cty)) return;
+    to = ix->canon(want);
+    if (!slice_eq(to, ix->canon(as_pointee(cty)))) return;
+    have = type_of_expr(w, inner);
+    if (have && have->k.kind == CcTypeK_pointer) have = as_pointee(have);
+    else if (as_addr_of(inner, &inner)) have = type_of_expr(w, inner);
+    else return;
+    if (!have) return;
+    from = ix->canon(have);
+    if (!from.len || !to.len || slice_eq(from, to)) return;
+    path = vec_new::[CCSlice](L->arena);
+    seen = vec_new::[CCSlice](L->arena);
+    if (!rl_as_search(L, from, to, &path, &seen, &n_found, &cycle)) return;
+    if (n_found != 1 || cycle || !path.len()) return;
+    {
+        CCString m = @string(`explicit cast to '${to} *' from '${from}' skips as: path`, L->arena);
+        lw_warning(L, sp, m);
+    }
+}
+
 static void as_call(Walker* w, CcExpr* e, CcCall cl) {
     AsStep* st = (AsStep*)w->env;
     CcLowerer* L = st->L;
@@ -95,6 +153,8 @@ static void as_call(Walker* w, CcExpr* e, CcCall cl) {
         int n_found = 0;
         bool cycle = false;
         CcExpr* subject = a;
+        CcType* cast_ty = NULL;
+        CcExpr* cast_inner = NULL;
         bool addr = false;
         bool arrow = false;
         if (!at || !pa->type) continue;

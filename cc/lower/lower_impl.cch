@@ -51,6 +51,16 @@ static void lw_error(CcLowerer* L, CcSpan span, CCString msg) {
     ds->push(d);
 }
 
+/* A warning: the C is what the source asked for, and the source asked for
+ * something it probably did not mean. It does not stop the lowering. */
+static void lw_warning(CcLowerer* L, CcSpan span, CCString msg) {
+    CcUnit* u = L->unit;
+    CcLoc loc = u->loc(span);
+    CcDiag d = CcDiag_warning(loc, cc_string_persist_slice(L->arena, &msg));
+    CcDiags* ds = L->ds;
+    ds->push(d);
+}
+
 /* An error about two positions: where it went wrong, and the place the
  * reader has to see to understand why. */
 static void lw_error_at(CcLowerer* L, CcSpan span, CCString msg,
@@ -375,6 +385,41 @@ static bool lw_strip_view_attrs(CcType* t, void* env) {
  * language. */
 #define LW_SPEC_SCHEDULING (CC_SPEC_BLOCKING | CC_SPEC_NONBLOCKING | CC_SPEC_LATENCY_SENSITIVE)
 
+/* A named value view names an alias of its subject, T_Restrict_Mode
+ * (spec/draft_facets.md), and a source declares locals of that name. What
+ * the view allows is checked by the index and C has nothing to say about
+ * it, but the NAME has to exist in the C or every such declaration is an
+ * unknown type. */
+static bool lw_decl_typeview(CcDecl* d, CcTypeview* out) {
+    if (!d) return false;
+    @switch (d->k) {
+        case .typeview(tv): {
+            CcTypeview v = tv;
+            *out = v;
+            return true;
+        }
+        default: return false;
+    }
+}
+
+static CcDecl* lw_typeview_alias(CcLowerer* L, CcDecl* d, CcTypeview tv) {
+    CCSlice subject;
+    CCString text = cc_string_new();
+    if (!tv.view.len || !tv.target) return NULL;
+    subject = cc__strip_tag(L->ix->canon(tv.target));
+    if (!subject.len) return NULL;
+    /* a glob subject (`Fam_*`) names no one type to alias */
+    if (subject.ptr[subject.len - 1] == '*') return NULL;
+    cc_string_push_cstr(&text, "typedef ", L->arena);
+    cc_string_push_slice(&text, subject, L->arena);
+    cc_string_push_char(&text, ' ', L->arena);
+    cc_string_push_slice(&text, subject, L->arena);
+    cc_string_push_cstr(&text, "_Restrict_", L->arena);
+    cc_string_push_slice(&text, tv.view, L->arena);
+    cc_string_push_cstr(&text, ";\n", L->arena);
+    return lw_raw_decl(L, text, d->span);
+}
+
 /* Declarations the index consumed and C never sees: `@typeview`, and a
  * `@comptime` definition — that one ran at compile time, and what it
  * computed is already the literal standing in its caller's place. */
@@ -386,6 +431,9 @@ static void lw_drop_cc_only(CcLowerer* L) {
     CcVisitor v;
     for (i = 0; i < n; i++) {
         CcDecl* d = *decls->get_ptr(i);
+        CcDecl* alias = NULL;
+        CcTypeview tv_of;
+        bool is_typeview = lw_decl_typeview(d, &tv_of);
         bool drop = false;
         @switch (d->k) {
             case .typeview: drop = true; break;
@@ -400,8 +448,10 @@ static void lw_drop_cc_only(CcLowerer* L) {
             case .comptime_if: drop = L->header_mode; break;
             default: break;
         }
+        if (is_typeview) alias = lw_typeview_alias(L, d, tv_of);
         if ((d->specs & (uint32_t)CC_SPEC_COMPTIME) != 0) drop = true;
         d->specs &= ~(uint32_t)LW_SPEC_SCHEDULING;
+        if (drop && alias) { with.push(alias); }
         if (!drop) with.push(d);
     }
     *decls = with;

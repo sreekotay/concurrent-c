@@ -32,6 +32,34 @@ static bool sl_is_string(const CcExpr* e) {
     return e->k.kind == CcExprK_string;
 }
 
+/* An identifier that names an object-like `#define` whose body is one string
+ * literal: `#define PORT "127.0.0.1:18765"`.
+ *
+ * The value at a slice parameter is that literal, and `CC_SLICE_LIT` is a
+ * macro too -- so the name goes on being written and the preprocessor puts
+ * the literal inside the wrapper. Spelling the literal here instead would
+ * take the name out of the C, and out of the diagnostics the host compiler
+ * writes about it. */
+static bool sl_is_string_macro(CcIndex* ix, CcExpr* e) {
+    CCSlice nm;
+    CcSym* s;
+    CcMacroDef* m;
+    CCSlice b;
+    size_t lo = 0;
+    size_t hi;
+    if (!expr_ident(e, &nm) || !nm.len) return false;
+    s = sym_any(ix, nm);
+    while (s && s->kind != CC_SYM_MACRO) s = s->same_name;
+    if (!s || !s->macro) return false;
+    m = s->macro;
+    if (m->function_like || m->alt) return false;
+    b = m->body;
+    hi = b.len;
+    while (lo < hi && (b.ptr[lo] == ' ' || b.ptr[lo] == '\t')) lo++;
+    while (hi > lo && (b.ptr[hi - 1] == ' ' || b.ptr[hi - 1] == '\t')) hi--;
+    return hi - lo >= 2 && b.ptr[lo] == '"' && b.ptr[hi - 1] == '"';
+}
+
 /* The element type of a slice type as written. */
 static CcType* sl_elem_of(CcType* t) {
     if (!t) return NULL;
@@ -321,7 +349,7 @@ static void sl_call_args(SStep* st, CcCall cl) {
         CCSlice pc;
         if (!p->type) continue;
         pc = ix->canon(p->type);
-        if (sl_is_string(a)) {
+        if (sl_is_string(a) || sl_is_string_macro(ix, a)) {
             if (sl_canon_is_slice(pc)) *args->get_ptr(i) = sl_lit_call(st->L, a);
             continue;
         }

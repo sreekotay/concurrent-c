@@ -1270,6 +1270,13 @@ static CcStmt* parse_at_stmt(P* p) {
         sync(p, first);
         return mk_empty_stmt(p, span_from(p, first));
     }
+    /* A declaration whose first token is an `@word`: `@auto(src) v(a) @destroy;`,
+     * `@typeview(V) T* p;`, `@async int f(void);`.  Statement position reaches
+     * this function for every `@word`, so the declaration test that
+     * `parse_stmt` applies to the other statement starts has to be applied
+     * here too -- otherwise a declaration the parser knows how to read is
+     * reported as an unknown word. */
+    if (at_declaration_start(p)) return parse_decl_stmt(p, first);
     /* expression statement starting with an @word (@await, @string, ...) */
     if (!(at_word(p, "await") || at_word(p, "blocking") || at_word(p, "nonblocking") || at_word(p, "noblock") ||
           at_word(p, "string") || at_word(p, "emit") || at_word(p, "slice") || at_word(p, "scratch") ||
