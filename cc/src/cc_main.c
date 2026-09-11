@@ -5085,6 +5085,27 @@ typedef struct {
     int failed;
 } CCModuleStageEnv;
 
+/* A stage whose name is not content-keyed (`<rel>.module.cch`) is rewritten
+ * whenever its bytes changed: the face's implementation is edited under the
+ * same name, and a stage that stays put would silently lower the old
+ * module. Same bytes: left alone, so the products keyed on it stay warm. */
+static int cc__install_stage_file(const char* path, const char* data, size_t n) {
+    size_t have_n = 0;
+    char* have = cc__read_all_file(path, &have_n);
+    char tmp[PATH_MAX];
+    int w;
+    if (have) {
+        int same = have_n == n && (n == 0 || memcmp(have, data, n) == 0);
+        free(have);
+        if (same) return 0;
+    }
+    w = snprintf(tmp, sizeof(tmp), "%s.%d.tmp", path, (int)getpid());
+    if (w < 0 || (size_t)w >= sizeof(tmp)) return -1;
+    if (cc__write_file_bytes(tmp, data, n) != 0) { unlink(tmp); return -1; }
+    if (rename(tmp, path) != 0) { unlink(tmp); return -1; }
+    return 0;
+}
+
 static int cc__stage_one_module_for_clean(const char* face_abs, const char* text, size_t n,
                                           void* envp) {
     CCModuleStageEnv* env = (CCModuleStageEnv*)envp;
@@ -5101,7 +5122,7 @@ static int cc__stage_one_module_for_clean(const char* face_abs, const char* text
         return -1;
     cc__module_dir_of(stage, stage_dir, sizeof(stage_dir));
     if (stage_dir[0] && cc__mkdir_p(stage_dir) != 0) return -1;
-    if (cc__install_wrap_file(stage, text, n) != 0) return -1;
+    if (cc__install_stage_file(stage, text, n) != 0) return -1;
     fprintf(env->list, "%s\t%s\n", face_abs, stage);
     return 0;
 }
@@ -6598,17 +6619,26 @@ static int cc__compile_c_to_obj(const CCBuildOptions* opt,
     const char* cppflags_env = getenv("CPPFLAGS");
     int is_tcc = cc__is_tcc(cc_bin);
     char cmd[2048];
-    char lead_inc[PATH_MAX + 8];
+    char lead_inc[2 * PATH_MAX + 16];
 
     /* Two lowered forms of the same local `.cch` exist side by side: the one
      * the preprocess stage left under out/include, and the one the clean
-     * lowerer wrote beside the C it emitted. A translation unit has to read
-     * the header its own lowerer produced -- the two spell generic instances
-     * differently -- so on the clean path the emit directory is searched
-     * ahead of out/include. */
+     * lowerer wrote under out/.cc-build/clean. A translation unit has to
+     * read the header its own lowerer produced -- the two spell generic
+     * instances differently -- so on the clean path that directory is
+     * searched ahead of out/include, whichever route (a unit, a build file
+     * target, a module face) asked for the object. The caller's extra
+     * directory follows it. */
     lead_inc[0] = '\0';
-    if (g_lowerer_clean && extra_include_dir && *extra_include_dir)
-        snprintf(lead_inc, sizeof(lead_inc), "-I%s ", extra_include_dir);
+    if (g_lowerer_clean) {
+        char clean_dir[PATH_MAX];
+        size_t n;
+        snprintf(clean_dir, sizeof(clean_dir), "%s/.cc-build/clean", g_out_root);
+        n = (size_t)snprintf(lead_inc, sizeof(lead_inc), "-I%s ", clean_dir);
+        if (extra_include_dir && *extra_include_dir && strcmp(extra_include_dir, clean_dir) != 0 &&
+            n < sizeof(lead_inc))
+            snprintf(lead_inc + n, sizeof(lead_inc) - n, "-I%s ", extra_include_dir);
+    }
 
     // TCC doesn't support -MMD/-MF/-MT dependency tracking flags
     // Add lowered include path first so .h versions of .cch are found before originals

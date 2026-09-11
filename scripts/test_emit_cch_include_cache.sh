@@ -62,4 +62,54 @@ if [ "$rc" -ne 2 ]; then
   exit 1
 fi
 
+# A module face's implementation (`m.ccs` beside `m.cch`) is staged under a
+# stable name; editing the .ccs must refresh that stage, or the includer
+# silently links the old module. Under the checkout: a module face is
+# placed against the repository root.
+mkdir -p "$ROOT/out"
+mod="$(mktemp -d "$ROOT/out/emit_cch_mod.XXXXXX")"
+trap 'rm -rf "$tmp" "$mod"' EXIT
+
+cat >"$mod/m.cch" <<'EOF'
+#ifndef M_CCH
+#define M_CCH
+/* a body that is not static makes the face a module; m.ccs is a member */
+int m_twice(int x) { return 2 * x; }
+int m_answer(void);
+#include "m.ccs"
+#endif
+EOF
+cat >"$mod/m.ccs" <<'EOF'
+#pragma(@module) "m"
+int m_answer(void) { return 1; }
+EOF
+cat >"$mod/main.ccs" <<'EOF'
+#include <ccc/std/prelude.cch>
+#include "m.cch"
+int main(void) { return m_answer(); }
+EOF
+
+"$CCC" build --no-cache --out-dir "$mod/out" --bin-dir "$mod/bin" \
+  "$mod/main.ccs" -o "$mod/bin/app" >/dev/null
+rc=0
+"$mod/bin/app" || rc=$?
+if [ "$rc" -ne 1 ]; then
+  echo "module first run: expected exit 1, got $rc" >&2
+  exit 1
+fi
+
+cat >"$mod/m.ccs" <<'EOF'
+#pragma(@module) "m"
+int m_answer(void) { return 2; }
+EOF
+
+"$CCC" build --no-cache --out-dir "$mod/out" --bin-dir "$mod/bin" \
+  "$mod/main.ccs" -o "$mod/bin/app" >/dev/null
+rc=0
+"$mod/bin/app" || rc=$?
+if [ "$rc" -ne 2 ]; then
+  echo "after module .ccs edit: expected exit 2, got $rc (stale module stage?)" >&2
+  exit 1
+fi
+
 echo "[test_emit_cch_include_cache] OK"
