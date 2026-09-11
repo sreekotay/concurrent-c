@@ -247,6 +247,18 @@ CCLOWER_BINARY := $(OUT_BINDIR)/cclower
 CCINDEX_OBJ := $(OBJDIR)/lower/index_test.o
 CCINDEX_BINARY := $(OUT_BINDIR)/ccindex
 LOWER_TOOLS := $(CCLEX_BINARY) $(CCPARSE_BINARY) $(CCLOWER_BINARY) $(CCINDEX_BINARY)
+# The clean lowerer's tools, seeded: defined here so `all` sees them (a
+# prerequisite list expands when its rule is read). The rules are below,
+# by `lower-cc`.
+CLEAN_BOOT_ROOT := bootstrap/clean
+CLEAN_BOOT_VER := $(shell cat $(CLEAN_BOOT_ROOT)/last-good 2>/dev/null)
+CLEAN_BOOT_DIR := $(CLEAN_BOOT_ROOT)/$(CLEAN_BOOT_VER)
+CLEAN_BOOT_OBJ := $(OBJDIR)/clean_boot
+CLEAN_BOOT_CFLAGS := -I$(CLEAN_BOOT_DIR) -I../out/include -I../cc/include -I../cc -I.. \
+	-O2 -ffunction-sections -fdata-sections -Werror=implicit-function-declaration
+CLEAN_TOOLS_CC := $(OUT_BINDIR)/cclex_cc $(OUT_BINDIR)/ccparse_cc \
+	$(OUT_BINDIR)/cclower_cc $(OUT_BINDIR)/ccindex_cc
+
 LOWER_DEPS := $(LOWER_OBJS:.o=.d) $(CCLEX_OBJ:.o=.d) $(CCPARSE_OBJ:.o=.d) $(CCLOWER_OBJ:.o=.d) $(CCINDEX_OBJ:.o=.d)
 
 # The default build: driver, lowered headers, the clean lowerer's tools
@@ -496,15 +508,6 @@ endif
 # `lower-cc` rebuilds them from their sources with these, and
 # scripts/lowerer_selfhost.sh says whether the two agree. Ship a seed:
 # scripts/ship_clean_seed.sh --promote.
-CLEAN_BOOT_ROOT := bootstrap/clean
-CLEAN_BOOT_VER := $(shell cat $(CLEAN_BOOT_ROOT)/last-good 2>/dev/null)
-CLEAN_BOOT_DIR := $(CLEAN_BOOT_ROOT)/$(CLEAN_BOOT_VER)
-CLEAN_BOOT_OBJ := $(OBJDIR)/clean_boot
-CLEAN_BOOT_CFLAGS := -I$(CLEAN_BOOT_DIR) -I../out/include -I../cc/include -I../cc -I.. \
-	-O2 -ffunction-sections -fdata-sections -Werror=implicit-function-declaration
-CLEAN_TOOLS_CC := $(OUT_BINDIR)/cclex_cc $(OUT_BINDIR)/ccparse_cc \
-	$(OUT_BINDIR)/cclower_cc $(OUT_BINDIR)/ccindex_cc
-
 $(CLEAN_BOOT_OBJ)/lower_cch.o: $(CLEAN_BOOT_DIR)/lower_cch.c $(wildcard $(CLEAN_BOOT_DIR)/*.h) \
 		$(LOWER_HEADERS_STAMP)
 	@test -n "$(CLEAN_BOOT_VER)" || (echo "missing $(CLEAN_BOOT_ROOT)/last-good"; exit 1)
