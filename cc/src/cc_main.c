@@ -5946,6 +5946,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             if (cc__splice_comptime_into_clean(clean_c, clean_orig) != 0) return -1;
             if (opt->mode == CC_MODE_EMIT_C) {
                 if (cc__materialize_host_c(clean_c, opt->c_out_path) != 0) return -1;
+                cc__postprocess_link_directives(opt->c_out_path);
                 if (summary_out) { memset(summary_out, 0, sizeof(*summary_out)); summary_out->c_out_path = opt->c_out_path; summary_out->did_emit_c = 1; }
                 return 0;
             }
@@ -6069,6 +6070,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
                     summary_out->reuse_emit_c = 0;
                     summary_out->did_emit_c = 1;
                 }
+                cc__postprocess_link_directives(opt->c_out_path);
             }
             return 0;
         }
@@ -6159,8 +6161,10 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         if (summary_out) { summary_out->reuse_emit_c = 0; summary_out->did_emit_c = 1; }
     }
 
-    // Post-process generated .c to rewrite @link directives from headers
-    if (!is_raw_c && opt->c_out_path) {
+    /* Rewrite @link("lib") to host-C markers before cc -c. The clean lowerer
+     * emits @link at file scope; materialized .c re-enters as raw C and must
+     * still be rewritten (same as @link from lowered headers). */
+    if (opt->c_out_path) {
         cc__postprocess_link_directives(opt->c_out_path);
     }
 
@@ -8314,6 +8318,7 @@ static int run_build_mode(int argc, char** argv) {
                             inputs[i], c_bufs[i]);
                     goto parse_fail;
                 }
+                cc__postprocess_link_directives(c_bufs[i]);
                 emit_built++;
             }
             const char* c_for_compile = c_bufs[i];
@@ -8372,6 +8377,8 @@ static int run_build_mode(int argc, char** argv) {
                     emit_built++;
                 }
             }
+            if (!is_raw_c)
+                cc__postprocess_link_directives(c_bufs[i]);
             if (mode != CC_MODE_EMIT_C) {
                 char obj_meta_path[PATH_MAX];
                 snprintf(obj_meta_path, sizeof(obj_meta_path), "%s/%s.obj",
@@ -9985,12 +9992,14 @@ int main(int argc, char **argv) {
                             inputs[i], c_bufs[i]);
                     return 1;
                 }
+                cc__postprocess_link_directives(c_bufs[i]);
             }
             const char* c_for_compile = c_bufs[i];
             if (mode == CC_MODE_EMIT_C) {
                 if (!is_raw_c) {
                     int err = cc__compile_with_env(NULL, inputs[i], c_bufs[i], &cfg);
                     if (err != 0) return 1;
+                    cc__postprocess_link_directives(c_bufs[i]);
                 }
                 continue;
             }

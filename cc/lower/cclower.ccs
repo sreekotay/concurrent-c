@@ -586,6 +586,51 @@ static bool load_lowered(Loaded* L, const char* path, CcNameList known, CCArena 
 
 static void note_headers(Loaded* L, CcNameList* more, CCArena keep);
 
+static CCSlice cclower_canon_root(CCArena a, CCSlice root) {
+    char buf[PATH_MAX];
+    CCString s = cc_string_new();
+    cc_string_push_slice(&s, root, a);
+    const char* p = cc_string_cstr(&s, a);
+    if (p && realpath(p, buf)) {
+        char* copy = cc_arena_alloc(a, strlen(buf) + 1, 1);
+        strcpy(copy, buf);
+        return cc_slice_from_buffer(copy, strlen(copy));
+    }
+    return root;
+}
+
+static bool cclower_rel_under(CCSlice abs, CCSlice root, CCSlice* rel) {
+    if (!root.len || abs.len <= root.len) return false;
+    if (memcmp(abs.ptr, root.ptr, root.len) != 0) return false;
+    if (abs.ptr[root.len] != '/') return false;
+    *rel = cc_slice_from_buffer((char*)abs.ptr + root.len + 1, abs.len - root.len - 1);
+    return true;
+}
+
+/* `rel` is the header path without `.cch`, relative to repo root or quote dir. */
+static bool cclower_header_rel(CCSlice hpath, CCArena a, CCSlice* rel) {
+    CCSlice bare;
+    if (g_root.len) {
+        CCSlice root = cclower_canon_root(a, g_root);
+        if (cclower_rel_under(hpath, root, rel)) goto ok;
+    }
+    if (g_quote_dir && g_quote_dir[0]) {
+        CCSlice q = cclower_canon_root(a, cc_slice_from_buffer((char*)g_quote_dir, strlen(g_quote_dir)));
+        if (cclower_rel_under(hpath, q, rel)) goto ok;
+    }
+    return false;
+ok:
+    if (rel->len < 4 || memcmp(rel->ptr + rel->len - 4, ".cch", 4) != 0) return false;
+    bare = cc_slice_from_buffer((char*)rel->ptr, rel->len - 4);
+    *rel = bare;
+    return true;
+}
+
+static bool cclower_header_in_scope(CCSlice hpath, CCArena a) {
+    CCSlice rel;
+    return cclower_header_rel(hpath, a, &rel);
+}
+
 /* A local header the unit includes, lowered in header mode with the unit's
  * own index (its registrations and known types are the header's context,
  * as they are when the host compiles the include) to `<h-root>/<rel>.h`.
@@ -634,7 +679,7 @@ static int lower_header_with(Loaded* owner, CCSlice hpath, CcNameList known, boo
     H.lowered = true;
     note_headers(&H, todo, keep);
     if (H.ds.has_errors()) { print_diags(&H); return 1; }
-    rel = cc_slice_from_buffer((char*)hpath.ptr + g_root.len + 1, hpath.len - g_root.len - 1 - 4);
+    if (!cclower_header_rel(hpath, a, &rel)) return 2;
     out = @string(`${g_h_root}/${rel}.h`, a);
     {
         const char* out_c = cc_string_cstr(&out, a);
@@ -693,7 +738,7 @@ static int lower_headers_of(Loaded* owner, CcNameList known, bool line_directive
         }
         if (dup) continue;
         seen.push(h);
-        if (!(h.len > g_root.len && memcmp(h.ptr, g_root.ptr, g_root.len) == 0 && h.ptr[g_root.len] == '/')) continue;
+        if (!cclower_header_in_scope(h, keep)) continue;
         rc |= lower_header_with(owner, h, known, line_directives, &todo, keep);
     }
     return rc;

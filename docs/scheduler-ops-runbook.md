@@ -37,6 +37,7 @@ Performance comparison surface:
   (`perf/compare_exclusive_named_lock.sh`) exercises the pool-growth
   hold decision under contention
 - `perf/parallel_hello.ccs` — `@parallel` spawn/join pin
+- `perf/parallel_trace.ccs` — same join, Whitted leaf (seq / unbound / cut)
 - `perf/parallel_steal_probe.ccs` — adaptive-gate / ready-queue probe
 - `perf/compare_parallel_unbound.sh` — unbound `@parallel` comparison
 
