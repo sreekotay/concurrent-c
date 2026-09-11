@@ -8,8 +8,12 @@ typedef struct FullIf {
 #if (1 + 2) * 3 == 9 && (8 >> 2) == 2 && (3 & 1) == 1 && (~0 != 0)
     int arith_live;
 #endif
-#if defined(__has_feature) && __has_feature(thread_sanitizer)
+#ifdef __has_feature
+#if __has_feature(thread_sanitizer)
     int tsan;
+#else
+    int no_tsan;
+#endif
 #else
     int no_tsan;
 #endif
