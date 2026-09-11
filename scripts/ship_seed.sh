@@ -40,6 +40,15 @@ for t in $TOOLS; do
   "$CCC" --no-cache --emit-c-only "$ROOT/cc/lower/$t.ccs" -o "$LATEST/$t.c"
   [[ -s "$LATEST/$t.c" ]] || { echo "error: empty emit for $t" >&2; exit 1; }
 done
+# The module product is made on the link path: the driver re-lowers
+# <face>_cch.c beside the faces when the face or the lowerer changed. An
+# emit-only run refreshes the faces under $HDR_SRC and leaves that product
+# as it was, and the copy lower-cc builds lives under cc/out. One link of
+# the smallest tool through this root makes the product next to the faces
+# the one these tools produce.
+ts "refresh the module product"
+"$CCC" --no-cache build "$ROOT/cc/lower/cclex.ccs" -o "$LATEST/.cclex_probe" >/dev/null
+rm -f "$LATEST/.cclex_probe"
 [[ -s "$HDR_SRC/lower_cch.c" ]] || { echo "error: no module product $HDR_SRC/lower_cch.c" >&2; exit 1; }
 cp -f "$HDR_SRC/lower_cch.c" "$LATEST/lower_cch.c"
 cp -f "$HDR_SRC"/*.h "$LATEST/"
