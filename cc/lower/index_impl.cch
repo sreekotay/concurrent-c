@@ -3735,7 +3735,17 @@ static CcMethod* cc__resolve_type_method(CcIndex* ix, CcTypeInfo* recv, CCSlice 
     return NULL;
 }
 
-/* 4. cc_<snake>_method / <snake>_method (a bare type also tries the cc_ prefix) */
+/* A type spelled by the stdlib convention (`CCIoSess`): its snake carries
+ * the `cc_` prefix, and its family is also spelled without it. */
+static bool cc__ty_is_cc_prefixed(CCSlice name) {
+    return name.len > 2 && name.ptr[0] == 'C' && name.ptr[1] == 'C' && name.ptr[2] >= 'A' && name.ptr[2] <= 'Z';
+}
+
+/* 4. cc_<snake>_method / <snake>_method. A bare type tries its snake, then
+ * the `cc_` prefix; a `CC`-prefixed type tries `cc_<stem>`, then the stem
+ * alone (`CCIoSess` -> `cc_io_sess_touch`, then `io_sess_touch`): families
+ * are spelled without the `CC` prefix, and the stdlib's own methods carry
+ * `cc_`. Both rungs are on the ladder either way. */
 static CcMethod* cc__resolve_snake(CcIndex* ix, CcTypeInfo* recv, CCSlice method, CCString* tried, CCArena ta, CCSlice base_name) {
     CCSlice snake = CcIndex_snake(ix, base_name);
     CCSlice composed = cc__join(ix, snake, "_", method);
@@ -3755,6 +3765,11 @@ static CcMethod* cc__resolve_snake(CcIndex* ix, CcTypeInfo* recv, CCSlice method
         cs = cc__callee_sym(ix, composed);
         if (cs) return cc__method_new(ix, recv, method, composed, "cc_snake_method", cc__sym_origin(ix, cs), cs, false);
         cc__tried(tried, ta, composed, cc_why);
+    } else if (cc__ty_is_cc_prefixed(base_name) && snake.len > 3) {
+        composed = cc__join(ix, cc__skip(snake, 3), "_", method);
+        cs = cc__callee_sym(ix, composed);
+        if (cs) return cc__method_new(ix, recv, method, composed, "snake_method", cc__sym_origin(ix, cs), cs, false);
+        cc__tried(tried, ta, composed, NULL);
     }
     return NULL;
 }
