@@ -82,8 +82,13 @@ keeps C's meaning (no adjustment); a cast from `Outer*` to a `T*` whose
 `as:` path is not at offset zero is diagnosed with the member spelling to
 use instead.
 
-By-value conversion of `Outer` to `T` is not performed at ordinary call
-sites. Handler binding (§5) is the exception.
+By-value conversion follows the same rule: an `Outer` lvalue passed where
+`T` is expected, when `Outer` has a unique `as:` path to `T`, lowers to
+`x.path` (`cc_error_str(e)` with `e` a `CCIoError` is
+`cc_error_str(e.base)`); a pointer to the wrapper reads `p->path`. The
+lowering is member selection, and the host compiler type-checks the
+member. Two faces reaching `T` is ill-formed at the argument. A member
+form or any other expression keeps its spelling.
 
 ## 3. Destroy chain
 
@@ -172,7 +177,7 @@ Io vocabulary. Display prefers a custom message when set (`cc_error_str` /
 4. The reverse direction never matches: an `@errhandler(E)` where `E` has
    an `as:` field of type `F` does not handle an `F`-typed unwrap.
 
-Handler binding is the one place a by-value `as:` conversion occurs: the
+Handler binding is a by-value `as:` conversion at the binding site: the
 handler receives a copy of the face subobject and sees only the face's
 vocabulary. Code that needs the derived payload writes the exact-typed
 handler, which wins by rule 1.

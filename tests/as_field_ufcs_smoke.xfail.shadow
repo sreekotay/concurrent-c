@@ -1,1 +1,0 @@
-the reference binds the '!>(e)' handler of a call through an as: face to the raw CCIoError (__typeof__(__r.u.error) e), and cc_error_str takes a CCError; this came in with the shadow-source change in d7a670b, latent on main because main ships no seed for it, live here through seed 0.3.4-328; the clean lowerer passes the row

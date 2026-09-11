@@ -349,14 +349,23 @@ differential report.
   in the stage for the index; `cc_ufcs_register` is read as the `.ufcs`
   entry it is; a copied `#line` pins itself and `@linenumbers off` omits
   it; a Result spec lands below the rewritten quoted include that
-  defines its Ok type. Two gaps are the shadow path's and carry
-  `.xfail.shadow`: `Table::[K,V]` in an interface face
-  (`quote_cch_table_face_smoke`: the text header lowerer meets the face
-  before the unit's factory families are registered, and its complaint
-  prints on a clean build that then succeeds, since the clean lowerer
-  emits the instance into the `.h` itself), and the typeview-as-UFCS
-  rows of `quote_cch_typeview_smoke`'s class. Both want a shadow-side
-  fix and a shipped seed.
+  defines its Ok type. The typeview class (`as_arg_coerce_smoke` and
+  the six rows beside it) is ported to the shadow: its seed had bound
+  the inline handler's error through a `_Generic` projection to
+  `CCError`, and once the binder kept its exact type the by-value
+  `as:` projection at an argument was missing; the argument pass now
+  projects a bare binder through a unique face, as `lower_asargs.cch`
+  does, and `draft_as.md` says so. The shadow rebuilds from its sources
+  again: four weak emit-plan stubs made `pp_ast_core.cch` an
+  implementation face under spec 1.7, so its lowered `.h` lost its
+  bodies; the stubs moved to a plain C header. One gap remains the
+  shadow path's and carries `.xfail.shadow`: `Table::[K,V]` in an
+  interface face (`quote_cch_table_face_smoke`: the text header lowerer
+  meets the face before the unit's factory families are registered,
+  and its complaint prints on a clean build that then succeeds, since
+  the clean lowerer emits the instance into the `.h` itself). The clean
+  driver should stop running the text header lowerer over a quoted face
+  it lowers itself.
 
 M0 and M1 carry no risk to the shipping compiler and are where work
 starts.
