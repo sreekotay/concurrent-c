@@ -1,5 +1,5 @@
 #!ccc ccs
-/* Owned extract: #define before the include must select #ifdef in the face. */
+/* Module extract: #define before the include must select #ifdef in the face. */
 #include <stdio.h>
 #define CFG_ON
 #include "quote_cch_define_owned_mod_leaf.cch"

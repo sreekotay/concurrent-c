@@ -1,11 +1,13 @@
+#pragma(@module) "destroy_smoke"
 #ifndef TESTS_QUOTE_CCH_DESTROY_SMOKE_CCH
 #define TESTS_QUOTE_CCH_DESTROY_SMOKE_CCH
 
 #include <ccc/std/prelude.cch>
 
-/* Statement `@destroy` on a create_buffer helper. Impl-grade: this header
- * splices into the TU (same quoted-`.cch` border as `@typeview` /
- * `@typehooks`). `cc_arena_stack` in a `.ccs` attaches `@destroy` itself. */
+/* Statement `@destroy` on a create_buffer helper. A member of the program
+ * module `destroy_smoke`: this header splices into the program (same
+ * quoted-`.cch` border as `@typeview` / `@typehooks`). `cc_arena_stack`
+ * in a `.ccs` attaches `@destroy` itself. */
 
 enum { QUOTE_CCH_SCRATCH = 256 };
 

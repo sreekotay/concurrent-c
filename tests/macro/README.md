@@ -1,9 +1,8 @@
 # Macro-generated CC syntax tests
 
-> **Mostly legacy-front archaeology.** Default `ccc` is native
-> (`shadow_lower`). Notes below about pre-expand / visitor reparse apply to
-> `--frontend=legacy`. Prefer native for new macro surface unless diagnosing
-> the opt-out path.
+> **Mostly archaeology.** Notes below about pre-expand / visitor reparse
+> describe the removed multipass text-rewrite path. New macro surface belongs
+> on the lowerer (`cc/lower/*.cch` / `*.ccs`).
 
 **Status:** M7.A + M7.B + M7.C (partial) + M7.C3 (M1-lite plumbing)
 shipped, and pre-expand is now the only initial-parse path on the legacy

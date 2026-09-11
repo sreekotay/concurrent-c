@@ -3,8 +3,8 @@
 
 #include <ccc/std/prelude.cch>
 
-/* Impl-grade + UFCS on purpose: without a sibling `.ccs` this would splice
- * into every umbrella consumer. Bodies belong in the defining TU. */
+/* Impl-grade + UFCS on purpose: a module of one. Bodies belong in the
+ * module unit, never in an umbrella consumer. */
 int !>(CCError) sibling_leaf_step(int x) {
     /* SIBLING_LEAF_BODY_MUST_NOT_SPLICE */
     @errhandler(CCError e) { return cc_err(e); }

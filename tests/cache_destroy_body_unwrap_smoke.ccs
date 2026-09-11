@@ -1,0 +1,23 @@
+/* A cached name whose declaration carries a `@destroy { D }` with a bare
+ * unwrap inside D. D runs once for the declared instance at its scope
+ * exit and once per extra at the join; the same D, emitted for each,
+ * with its unwrap forwarding to the handler in scope at the declaration.
+ * Cap 4 over 16 tickets: the declared instance plus up to 3 extras. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+typedef struct { int n; } Slot;
+static cc_atomic_int g_flushed = 0;
+static int !>(CCError) slot_flush(Slot* s) { g_flushed.fetch_add(1); (void)s; return cc_ok(0); }
+int main(void) {
+    @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); return 1; }
+    CCTurnstile ts@(4, 1, cc_arena_heap(megabytes(1))) !> @destroy;
+    int i;
+    {
+        Slot s = {0} @destroy { slot_flush(&s) !>; };
+        @parallel wait (ts) cache (s) for (i in 0..16) {
+            s.n += 1;
+        } !>.wait()!>;
+    }
+    printf("flushed>=1 %s\n", g_flushed.load() >= 1 && g_flushed.load() <= 4 ? "ok" : "bad");
+    return 0;
+}

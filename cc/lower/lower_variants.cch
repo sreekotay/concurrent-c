@@ -1,0 +1,2602 @@
+#pragma(@module) "lower"
+/* Clean lowerer, step: variants. A variant declaration lowers to its tag
+ * enum and its tagged union, `typedef enum { V_a, V_b } VKind; typedef
+ * struct V { VKind kind; union { A a; B b; } u; } V;`, and, when an arm
+ * has a destroy chain, the drop helper `V__cc_drop` that destroys the
+ * active arm. Construction names one arm and the step fills the tag;
+ * a braced assignment to a variant lvalue is a transition that drops the
+ * old arm first when the variant has a drop helper. A projection
+ * `x.arm` reaches `x.u.arm` only under a dominating check (the case of a
+ * checked switch on `x`, a directly enclosing `if (x.kind == .arm)`) or
+ * with its own handler (a diverging body after the bang arrow) or fallback
+ * (a value after the question arrow); an unprotected projection is a diagnostic, never a silent reach
+ * into the union. A bare `.arm` resolves to the tag constant from the
+ * type it is compared with or assigned to. The typing of every later
+ * step sees the lowered shape: the type index carries the struct.
+ * Lifetime: the lowerer arena. */
+#ifndef CC_LOWER_VARIANTS_CCH
+#define CC_LOWER_VARIANTS_CCH
+#include "lower.cch"
+#include "typing.cch"
+
+static int cl_destroy_chain2(CcLowerer* L, CCSlice canon, CcExpr* subject, CcStmt* into, CcSpan sp, int depth, bool convention);
+static bool rl_diverges(CcLowerer* L, const CcStmt* s);
+
+typedef struct VArm {
+    CCSlice name;
+    CcType* type;               /* NULL for a void arm, and for a schema arm (see `payload`) */
+    bool payload;               /* carries a value whose type this step does not know */
+    bool has_dtor;
+    CcSpan span;                /* the arm name */
+    CcSpan type_span;
+    /* what the packed plan reads. `size_known` is the honest answer to "how
+     * many bytes is this arm": a type whose size this step cannot state is
+     * not packed on a guess. A void arm is known and occupies nothing. */
+    bool size_known;
+    uint32_t size;
+    uint32_t align;
+    bool has_niche;             /* the type declares (or, for a raw pointer, has) donatable bytes */
+    uint32_t niche_off;
+    uint32_t niche_width;
+    uint64_t niche_sentinel;
+} VArm;
+typedef VArm* VArmRef;
+
+typedef struct VInfo {
+    CCSlice name;
+    CCSlice kind_name;          /* NameKind */
+    CCSlice drop_fn;            /* Name__cc_drop, when has_dtor */
+    Vec::[VArmRef] arms;
+    bool has_dtor;
+    bool packed;
+    bool packed_ok;             /* a donor arm was found: the packed C is emittable */
+    int donor;                  /* the arm whose niche carries the discriminant, or -1 */
+    uint32_t pack_size;         /* the byte block: the largest arm */
+    uint32_t pack_align;
+    uint32_t niche_off;         /* where in the block the discriminant is read and stamped */
+    uint32_t niche_width;
+    uint64_t niche_sentinel;    /* that value means the arm that is not the donor */
+    bool schema;                /* a `one of` in a `@grammar(schema)` body */
+    CcDecl* decl;
+    CcUnit* unit;
+} VInfo;
+typedef VInfo* VInfoRef;
+typedef Vec::[VInfoRef] VInfoList;
+typedef Vec::[VArmRef] VArmList;
+typedef Vec::[CcDesignator] CcDesignatorList;
+typedef Vec::[CcVariantArm] CcVariantArmList;
+
+/* A dominating check in force: `subject.arm` is legal while it holds. A
+ * frame of a switch body takes its arm from each case label in turn. */
+typedef struct VFrame {
+    CCSlice subject;            /* the receiver as spelled */
+    CCSlice arm;
+    CcStmt* owner;              /* pushed on entering it, popped on leaving it */
+    VInfo* vi;
+    bool by_case;
+} VFrame;
+typedef VFrame* VFrameRef;
+
+/* A frame that starts at a statement the walk has not entered yet (the
+ * then-branch of a guard, a switch body, a handler body). */
+typedef struct VPending {
+    CcStmt* stmt;
+    CCSlice subject;
+    CCSlice arm;
+    VInfo* vi;
+    bool by_case;
+} VPending;
+typedef VPending* VPendingRef;
+typedef Vec::[VFrameRef] VFrameList;
+typedef Vec::[VPendingRef] VPendingList;
+
+/* A packed site the walk found and left standing.
+ *
+ * A tag read and a braced construction are rewritten after the walk, not
+ * where they were found: the guard that dominates a projection, the bare
+ * `.arm` that resolves against a tag type, and the transition that drops the
+ * old arm all match on the member and the initializer as written. Rewriting
+ * them in place would take those shapes away from the checks that need them. */
+typedef struct VKindSite {
+    CcExpr* e;                  /* the `x.kind` member node */
+    CcExpr* recv;               /* `x` */
+    bool arrow;
+    VInfo* vi;
+} VKindSite;
+typedef VKindSite* VKindSiteRef;
+typedef Vec::[VKindSiteRef] VKindSiteList;
+
+typedef struct VCtor {
+    CcInit* in;                 /* the `{ .arm = v }` list, which becomes `Name__cc_set_arm(v)` */
+    VInfo* vi;
+    VArm* arm;
+    CcExpr* payload;            /* NULL for a void arm */
+    CcSpan span;
+} VCtor;
+typedef VCtor* VCtorRef;
+typedef Vec::[VCtorRef] VCtorList;
+
+typedef struct VStep {
+    CcLowerer* L;
+    Walker* w;
+    Vec::[VInfoRef] variants;
+    Vec::[VFrameRef] frames;
+    Vec::[VPendingRef] pending;
+    Vec::[CcStmtRef] entered;   /* the statement path from the function body */
+    Vec::[CcStmtRef] synth;     /* statements this step wrote: already lowered, not walked again */
+    Vec::[VKindSiteRef] kinds;  /* packed `x.kind` reads, rewritten after the walk */
+    Vec::[VCtorRef] ctors;      /* packed `{ .arm = v }` lists, likewise */
+    Vec::[CcExprRef] ctor_exprs;/* the compound literals those lists belong to */
+    bool in_codegen;            /* inside a body the schema engine wrote (see `vt_is_codegen`) */
+    CcExpr* stmt_root;          /* the expression of the statement being entered */
+    bool root_transition;       /* that expression is a transition: the statement becomes a block */
+    CcExpr* tr_lhs;
+    CcExpr* tr_rhs;
+    VInfo* tr_vi;
+    CcSpan tr_span;
+} VStep;
+
+/* A body the schema engine wrote, not one a user wrote.
+ *
+ * The fill/write helpers a `@grammar(schema)` emits build and read the very
+ * union the ownership rules protect: they set `.kind`, project the arm they
+ * have just tagged, and reach through `.u` to lay out bytes. Diagnosing
+ * those would be diagnosing the compiler's own output. The engine names
+ * them `<Type>__fill` / `__wput` / `__wchk` / `__wmeasure`, so the name is
+ * the marker — the same four suffixes the shadow lowerer spans. */
+static bool vt_is_codegen(CCSlice name) {
+    static const char* const sfx[4] = { "__fill", "__wput", "__wchk", "__wmeasure" };
+    size_t k;
+    for (k = 0; k < 4; k++) {
+        size_t sl = strlen(sfx[k]);
+        if (name.len > sl && memcmp(name.ptr + name.len - sl, sfx[k], sl) == 0) return true;
+    }
+    return false;
+}
+
+/* ---- lookups ------------------------------------------------------------------- */
+
+static VInfo* vt_find(VStep* st, CCSlice name) {
+    VInfoList* vv = &st->variants;
+    size_t n = vv->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        VInfo* vi = *vv->get_ptr(i);
+        if (slice_eq(vi->name, name)) return vi;
+    }
+    return NULL;
+}
+
+static VInfo* vt_find_kind(VStep* st, CCSlice kind_name) {
+    VInfoList* vv = &st->variants;
+    size_t n = vv->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        VInfo* vi = *vv->get_ptr(i);
+        if (slice_eq(vi->kind_name, kind_name)) return vi;
+    }
+    return NULL;
+}
+
+static VArm* vt_arm(VInfo* vi, CCSlice name) {
+    VArmList* av = &vi->arms;
+    size_t n = av->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        VArm* a = *av->get_ptr(i);
+        if (slice_eq(a->name, name)) return a;
+    }
+    return NULL;
+}
+
+/* Is `name` an arm of any declared variant? (for the braced-assignment message) */
+static bool vt_arm_anywhere(VStep* st, CCSlice name) {
+    VInfoList* vv = &st->variants;
+    size_t n = vv->len();
+    size_t i;
+    for (i = 0; i < n; i++)
+        if (vt_arm(*vv->get_ptr(i), name)) return true;
+    return false;
+}
+
+/* The variant a type resolves to (through pointers, arrays and local
+ * aliases), and whether the type itself is a pointer. */
+static VInfo* vt_of_type(VStep* st, CcType* t, bool* is_ptr) {
+    Walker* w = st->w;
+    CcIndex* ix = w->ix;
+    CcType* top;
+    CcType* base;
+    CCSlice cn;
+    if (is_ptr) *is_ptr = false;
+    if (!t) return NULL;
+    top = unalias_local(w, t);
+    if (is_ptr && top) *is_ptr = top->k.kind == CcTypeK_pointer;
+    base = peel(unalias_local(w, peel(top)));
+    if (!base) return NULL;
+    cn = ix->canon(base);
+    if (cn.len > 6 && memcmp(cn.ptr, "const ", 6) == 0) cn = cc_slice_from_buffer((char*)cn.ptr + 6, cn.len - 6);
+    return vt_find(st, cn);
+}
+
+/* The variant whose tag type a type is (`VKind`). */
+static VInfo* vt_of_kind_type(VStep* st, CcType* t) {
+    Walker* w = st->w;
+    CCSlice nm;
+    CcType* top;
+    if (!t) return NULL;
+    top = unalias_local(w, t);
+    if (!top || !type_named_name(top, &nm)) return NULL;
+    return vt_find_kind(st, nm);
+}
+
+static CcExpr* vt_strip(CcExpr* e) {
+    for (;;) {
+        CcExpr* inner = NULL;
+        if (!e) return NULL;
+        @switch (e->k) {
+            case .paren(pa): inner = pa.a; break;
+            default: return e;
+        }
+        e = inner;
+    }
+}
+
+static CCSlice vt_spell(VStep* st, CcExpr* e) {
+    CcLowerer* L = st->L;
+    CCString s = lw_spell_expr(L, vt_strip(e));
+    return lw_keep(L, &s);
+}
+
+static CcSpan vt_span1(uint32_t tok) {
+    CcSpan sp;
+    sp.first = tok;
+    sp.last = tok;
+    return sp;
+}
+
+/* The `.` / `->` of a member expression: the token before the name. */
+static CcSpan vt_dot_span(const CcExpr* e) {
+    return vt_span1(e->span.last ? e->span.last - 1 : e->span.first);
+}
+
+static CCSlice vt_tag(VStep* st, VInfo* vi, CCSlice arm) {
+    CcLowerer* L = st->L;
+    CCSlice vname = vi->name;
+    CCString s = @string(`${vname}_${arm}`, L->arena);
+    return lw_keep(L, &s);
+}
+
+static CcExpr* vt_tag_ident(VStep* st, VInfo* vi, CCSlice arm, CcSpan sp) {
+    return lw_ident(st->L, vt_tag(st, vi, arm), sp);
+}
+
+/* ---- diagnostics --------------------------------------------------------------- */
+
+static void vt_error_note(CcLowerer* L, CcSpan span, CCString msg, CCSlice note) {
+    CcUnit* u = L->unit;
+    CcLoc loc = u->loc(span);
+    CcDiag d = CcDiag_error(loc, cc_string_persist_slice(L->arena, &msg));
+    CcDiags* ds = L->ds;
+    d = CcDiag_with_note(d, note);
+    ds->push(d);
+}
+
+/* A line-only position: the host compiler reports the same line. */
+static void vt_error_line(CcLowerer* L, CcSpan span, CCString msg) {
+    CcUnit* u = L->unit;
+    CcLoc loc = u->loc(span);
+    CcDiag d;
+    CcDiags* ds = L->ds;
+    loc.col = 0;
+    d = CcDiag_error(loc, cc_string_persist_slice(L->arena, &msg));
+    ds->push(d);
+}
+
+/* The position of an at-word is reported at its word, after the `@`. */
+static void vt_error_at_word(CcLowerer* L, CcSpan span, CCString msg) {
+    CcUnit* u = L->unit;
+    CcLoc loc = u->loc(span);
+    CcDiag d;
+    CcDiags* ds = L->ds;
+    if (loc.col) loc.col++;
+    d = CcDiag_error(loc, cc_string_persist_slice(L->arena, &msg));
+    ds->push(d);
+}
+
+static CCString vt_arm_list(VStep* st, VInfo* vi) {
+    CcLowerer* L = st->L;
+    CCString sb = cc_string_new();
+    VArmList* av = &vi->arms;
+    size_t n = av->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        VArm* a = *av->get_ptr(i);
+        if (i) sb.push_cstr(", ", L->arena);
+        sb.push_slice(a->name, L->arena);
+    }
+    return sb;
+}
+
+static CCSlice vt_closest_arm(VInfo* vi, CCSlice name) {
+    CcLowerer* L = NULL;
+    VArmList* av = &vi->arms;
+    size_t n = av->len();
+    size_t i;
+    int best = 1 << 30;
+    CCSlice pick = cc_slice_empty();
+    (void)L;
+    for (i = 0; i < n; i++) {
+        VArm* a = *av->get_ptr(i);
+        int d = lw_edit_distance(a->name, name);
+        if (d < best) { best = d; pick = a->name; }
+    }
+    return pick;
+}
+
+static void vt_no_arm(VStep* st, VInfo* vi, CCSlice arm, CcSpan sp) {
+    CcLowerer* L = st->L;
+    CCSlice vname = vi->name;
+    CCString arms = vt_arm_list(st, vi);
+    CCSlice best = vt_closest_arm(vi, arm);
+    CCString m = @string(`variant '${vname}' has no arm '.${arm}' (arms: ${arms}) — did you mean '.${best}'?`, L->arena);
+    lw_error(L, sp, m);
+}
+
+/* ---- the declarations ---------------------------------------------------------- */
+
+static bool vt_is_c_keyword(CCSlice s) {
+    static const char* const kws[] = {
+        "auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else",
+        "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long", "register",
+        "restrict", "return", "short", "signed", "sizeof", "static", "struct", "switch", "typedef",
+        "union", "unsigned", "void", "volatile", "while", "_Bool", "_Atomic", "_Generic", NULL
+    };
+    size_t i;
+    for (i = 0; kws[i]; i++)
+        if (cc_slice_eq_cstr(&s, kws[i])) return true;
+    return false;
+}
+
+/* The spelling of an arm type in the lowered union: as written, with its
+ * qualifiers; a generic or slice type by its instance name. */
+static CCSlice vt_type_text(VStep* st, VInfo* vi, VArm* arm) {
+    CcIndex* ix = st->w->ix;
+    CcUnit* u = vi->unit;
+    CCSlice text = arm->type_span.last >= arm->type_span.first ? u->text(arm->type_span) : cc_slice_empty();
+    size_t i;
+    bool plain = text.len > 0;
+    for (i = 0; i + 1 < text.len && plain; i++)
+        if ((text.ptr[i] == ':' && text.ptr[i + 1] == ':') || (text.ptr[i] == '[' && text.ptr[i + 1] == ':')) plain = false;
+    if (plain) return text;
+    return ix->canon(arm->type);
+}
+
+/* The arm type as the packed C spells it. A void arm has no type node, so
+ * ask nothing of the index for one. */
+static CCSlice vt_arm_type_text(VStep* st, VInfo* vi, VArm* arm) {
+    if (!arm->type) return cstr_slice("void");
+    return vt_type_text(st, vi, arm);
+}
+
+/* ---- the packed plan ----------------------------------------------------------- */
+
+/* `Name__cc_kind`, and `Name__cc_get_arm` / `__cc_set_arm` / `__cc_ov_arm`. */
+static CCSlice vt_pack_fn(VStep* st, VInfo* vi, CCSlice what) {
+    CcLowerer* L = st->L;
+    CCSlice vname = vi->name;
+    CCString s = @string(`${vname}__cc_${what}`, L->arena);
+    return lw_keep(L, &s);
+}
+
+static CCSlice vt_pack_arm_fn(VStep* st, VInfo* vi, CCSlice what, CCSlice arm) {
+    CcLowerer* L = st->L;
+    CCSlice vname = vi->name;
+    CCString s = @string(`${vname}__cc_${what}_${arm}`, L->arena);
+    return lw_keep(L, &s);
+}
+
+/* A number the declaration text carries. */
+static CCSlice vt_num(VStep* st, uint32_t v) {
+    CcLowerer* L = st->L;
+    unsigned n = (unsigned)v;
+    CCString s = @string(`${n}`, L->arena);
+    return lw_keep(L, &s);
+}
+
+static CCSlice vt_num64(VStep* st, uint64_t v) {
+    CcLowerer* L = st->L;
+    unsigned long long n = (unsigned long long)v;
+    CCString s = @string(`${n}`, L->arena);
+    return lw_keep(L, &s);
+}
+
+/* The unsigned type of a niche of this width: the discriminant is read and
+ * stamped through it. */
+static CCSlice vt_niche_uint(VInfo* vi) {
+    if (vi->niche_width == 1) return cstr_slice("uint8_t");
+    if (vi->niche_width == 2) return cstr_slice("uint16_t");
+    if (vi->niche_width == 4) return cstr_slice("uint32_t");
+    return cstr_slice("uint64_t");
+}
+
+/* The size and alignment of a builtin. An unknown spelling is not a size:
+ * the plan says so at the declaration rather than packing on a guess. */
+static bool vt_prim_layout(CCSlice n, uint32_t* size, uint32_t* align) {
+    uint32_t s = 0;
+    if (cc_slice_eq_cstr(&n, "char") || cc_slice_eq_cstr(&n, "signed char") ||
+        cc_slice_eq_cstr(&n, "unsigned char") || cc_slice_eq_cstr(&n, "_Bool") ||
+        cc_slice_eq_cstr(&n, "bool") || cc_slice_eq_cstr(&n, "int8_t") ||
+        cc_slice_eq_cstr(&n, "uint8_t")) s = 1;
+    else if (cc_slice_eq_cstr(&n, "short") || cc_slice_eq_cstr(&n, "short int") ||
+             cc_slice_eq_cstr(&n, "unsigned short") || cc_slice_eq_cstr(&n, "int16_t") ||
+             cc_slice_eq_cstr(&n, "uint16_t")) s = 2;
+    else if (cc_slice_eq_cstr(&n, "int") || cc_slice_eq_cstr(&n, "unsigned") ||
+             cc_slice_eq_cstr(&n, "unsigned int") || cc_slice_eq_cstr(&n, "int32_t") ||
+             cc_slice_eq_cstr(&n, "uint32_t") || cc_slice_eq_cstr(&n, "float")) s = 4;
+    else if (cc_slice_eq_cstr(&n, "long long") || cc_slice_eq_cstr(&n, "unsigned long long") ||
+             cc_slice_eq_cstr(&n, "long long int") || cc_slice_eq_cstr(&n, "int64_t") ||
+             cc_slice_eq_cstr(&n, "uint64_t") || cc_slice_eq_cstr(&n, "double")) s = 8;
+    else if (cc_slice_eq_cstr(&n, "long") || cc_slice_eq_cstr(&n, "unsigned long") ||
+             cc_slice_eq_cstr(&n, "long int")) s = (uint32_t)sizeof(long);
+    else if (cc_slice_eq_cstr(&n, "size_t") || cc_slice_eq_cstr(&n, "ptrdiff_t") ||
+             cc_slice_eq_cstr(&n, "intptr_t") || cc_slice_eq_cstr(&n, "uintptr_t")) s = (uint32_t)sizeof(size_t);
+    if (!s) return false;
+    *size = s;
+    *align = s >= 8 ? 8 : s;
+    return true;
+}
+
+/* What an arm contributes to the block, and the niche it can donate.
+ *
+ * A raw pointer donates its null pattern with nothing declared. Every other
+ * type donates only what a `@typehooks` registration wrote down:
+ * `.niche = cc_type_niche(size, align, offset, width, sentinel)`, which also
+ * states the size. A builtin has a size but no niche.
+ *
+ * The type is read as written (through a local alias) and never peeled: a
+ * pointer arm IS the niche, so peeling to the pointee would lose it. */
+static void vt_arm_layout(VStep* st, VArm* arm) {
+    Walker* w = st->w;
+    CcIndex* ix = w->ix;
+    CcType* t;
+    CCSlice canon;
+    CcTypeInfo* ti;
+    uint32_t s = 0;
+    uint32_t al = 1;
+    arm->size = 0;
+    arm->align = 1;
+    arm->size_known = false;
+    arm->has_niche = false;
+    arm->niche_off = 0;
+    arm->niche_width = 0;
+    arm->niche_sentinel = 0;
+    if (!arm->type) {
+        arm->size_known = !arm->payload;    /* a void arm occupies nothing */
+        return;
+    }
+    t = unalias_local(w, arm->type);
+    if (!t) t = arm->type;
+    if (t->k.kind == CcTypeK_pointer) {
+        arm->size = (uint32_t)sizeof(void*);
+        arm->align = (uint32_t)sizeof(void*);
+        arm->size_known = true;
+        arm->has_niche = true;
+        arm->niche_width = (uint32_t)sizeof(void*);
+        return;
+    }
+    canon = ix->canon(arm->type);
+    ti = canon.len ? ix->type_get(canon) : NULL;
+    if (ti && ti->hooks && ti->hooks->has_niche) {
+        CcHookReg* h = ti->hooks;
+        arm->size = h->niche_size;
+        arm->align = h->niche_align;
+        if (!arm->align) arm->align = h->niche_size >= 8 ? 8 : h->niche_size;
+        if (!arm->align) arm->align = 1;
+        arm->size_known = arm->size != 0;
+        arm->has_niche = true;
+        arm->niche_off = h->niche_off;
+        arm->niche_width = h->niche_width;
+        arm->niche_sentinel = h->niche_sentinel;
+        return;
+    }
+    if (vt_prim_layout(canon, &s, &al)) {
+        arm->size = s;
+        arm->align = al;
+        arm->size_known = true;
+    }
+}
+
+/* The donor arm.
+ *
+ * The donor is the arm whose type has bytes it never holds a given value in;
+ * the other arm is encoded by stamping that value there. It can only be
+ * stamped when the other arm's payload does not reach those bytes -- so the
+ * other arm either carries nothing at all, or ends at or before the niche
+ * offset (both arms are laid out from byte 0 of the block). Arm order breaks
+ * a tie: the first arm that can donate does.
+ *
+ * A niche whose width is not a machine integer, and an arm whose size this
+ * step does not know, disqualify the pair; `packed_ok` stays false and the
+ * declaration says so. */
+static void vt_pack_plan(VStep* st, VInfo* vi) {
+    VArmList* av = &vi->arms;
+    size_t n = av->len();
+    size_t i;
+    uint32_t max_size = 0;
+    uint32_t max_align = 1;
+    int d;
+    vi->donor = -1;
+    vi->packed_ok = false;
+    for (i = 0; i < n; i++) {
+        VArm* arm = *av->get_ptr(i);
+        vt_arm_layout(st, arm);
+        if (arm->size > max_size) max_size = arm->size;
+        if (arm->align > max_align) max_align = arm->align;
+    }
+    if (!max_size) max_size = 1;
+    vi->pack_size = max_size;
+    vi->pack_align = max_align;
+    if (n != 2) return;
+    for (d = 0; d < 2; d++) {
+        VArm* donor = *av->get_ptr((size_t)d);
+        VArm* other = *av->get_ptr((size_t)(1 - d));
+        bool other_void = !other->type && !other->payload;
+        uint32_t wd = donor->niche_width;
+        if (!donor->size_known || !other->size_known) continue;
+        if (!donor->has_niche) continue;
+        if (wd != 1 && wd != 2 && wd != 4 && wd != 8) continue;
+        if (!other_void && other->size > donor->niche_off) continue;
+        vi->donor = d;
+        vi->niche_off = donor->niche_off;
+        vi->niche_width = donor->niche_width;
+        vi->niche_sentinel = donor->niche_sentinel;
+        vi->packed_ok = true;
+        return;
+    }
+}
+
+/* The typing view of the lowered struct: `struct V { VKind kind; union
+ * { arms } u; }`, installed as the type of the symbol of the variant so every
+ * later step types `x.kind` and `x.u.arm` as plain members. */
+static void vt_install_typing(VStep* st, VInfo* vi) {
+    CcLowerer* L = st->L;
+    CcIndex* ix = st->w->ix;
+    CCArena a = L->arena;
+    CcSpan sp = vi->decl->span;
+    CcType* rec = cc_type_named(vi->name, sp, a);
+    CcType* un = cc_type_named(vi->name, sp, a);
+    CcType* en = cc_type_named(vi->kind_name, sp, a);
+    CcRecordType rc;
+    CcRecordType urc;
+    CcEnumType et;
+    CcField f;
+    VArmList* av = &vi->arms;
+    size_t n = av->len();
+    size_t i;
+    CcSym* sym;
+    rc.tag = vi->name;
+    rc.fields = vec_new::[CcField](a);
+    rc.is_union = false;
+    rc.is_definition = true;
+    urc.tag = cc_slice_empty();
+    urc.fields = vec_new::[CcField](a);
+    urc.is_union = true;
+    urc.is_definition = true;
+    et.tag = cc_slice_empty();
+    et.items = vec_new::[CcEnumerator](a);
+    et.base = NULL;
+    et.is_definition = true;
+    for (i = 0; i < n; i++) {
+        VArm* arm = *av->get_ptr(i);
+        CcEnumerator en1;
+        en1.span = arm->span;
+        en1.name = vt_tag(st, vi, arm->name);
+        en1.value = NULL;
+        en1.comptime = NULL;
+        en1.is_pp = false;
+        en1.pp_tok = 0;
+        et.items.push(en1);
+        if (!arm->type) continue;
+        memset(&f, 0, sizeof(f));
+        f.span = arm->span;
+        f.type = arm->type;
+        f.name = arm->name;
+        f.attrs = vec_new::[CcAttr](a);
+        urc.fields.push(f);
+    }
+    un->k = { .record = urc };
+    en->k = { .enumt = et };
+    memset(&f, 0, sizeof(f));
+    f.span = sp;
+    f.type = cc_type_named(vi->kind_name, sp, a);
+    f.name = cstr_slice("kind");
+    f.attrs = vec_new::[CcAttr](a);
+    rc.fields.push(f);
+    memset(&f, 0, sizeof(f));
+    f.span = sp;
+    f.type = un;
+    f.name = cstr_slice("u");
+    f.attrs = vec_new::[CcAttr](a);
+    rc.fields.push(f);
+    rec->k = { .record = rc };
+    sym = cc__sym_find_kind(ix, vi->name, CC_SYM_TYPE);
+    if (sym) sym->type = rec;
+    if (!cc__sym_find_kind(ix, vi->kind_name, CC_SYM_TYPE)) {
+        cc__sym_add(ix, vi->kind_name, CC_SYM_TYPE, vi->decl, vi->unit, en, vi->unit != L->unit, true);
+        cc__add_typedef_name(ix, vi->kind_name);
+    }
+}
+
+/* A generated accessor, as the index sees it: the name and what it returns.
+ * Every later step types a packed tag read, projection and construction
+ * through these. */
+static void vt_add_fn_sym(VStep* st, VInfo* vi, CCSlice name, CcType* ret) {
+    CcLowerer* L = st->L;
+    CcIndex* ix = st->w->ix;
+    CCArena a = L->arena;
+    CcSpan sp = vi->decl->span;
+    CcType* ft;
+    CcFuncType fn;
+    if (cc__sym_find_kind(ix, name, CC_SYM_FUNC)) return;
+    ft = cc__type_blank(sp, a);
+    fn.ret = ret;
+    fn.params = vec_new::[CcParam](a);
+    fn.variadic = false;
+    fn.variadic_tok = 0;
+    fn.has_prototype = true;
+    { CcTypeK tk = { .func = fn }; ft->k = tk; }
+    cc__sym_add(ix, name, CC_SYM_FUNC, vi->decl, vi->unit, ft, vi->unit != L->unit, true);
+}
+
+/* The names the packed C introduces: the decode, one overlay struct per
+ * payload arm (the lvalue face of a projection), and the per-arm getter and
+ * setter. */
+static void vt_install_packed_syms(VStep* st, VInfo* vi) {
+    CcLowerer* L = st->L;
+    CcIndex* ix = st->w->ix;
+    CCArena a = L->arena;
+    CcSpan sp = vi->decl->span;
+    VArmList* av = &vi->arms;
+    size_t n = av->len();
+    size_t i;
+    CCSlice kfn = vt_pack_fn(st, vi, cstr_slice("kind"));
+    vt_add_fn_sym(st, vi, kfn, cc_type_named(vi->kind_name, sp, a));
+    for (i = 0; i < n; i++) {
+        VArm* arm = *av->get_ptr(i);
+        CCSlice sfn = vt_pack_arm_fn(st, vi, cstr_slice("set"), arm->name);
+        CCSlice gfn;
+        CCSlice ovn;
+        CcType* ov;
+        CcRecordType rc;
+        CcField f;
+        vt_add_fn_sym(st, vi, sfn, cc_type_named(vi->name, sp, a));
+        if (!arm->type) continue;
+        gfn = vt_pack_arm_fn(st, vi, cstr_slice("get"), arm->name);
+        vt_add_fn_sym(st, vi, gfn, arm->type);
+        ovn = vt_pack_arm_fn(st, vi, cstr_slice("ov"), arm->name);
+        if (cc__sym_find_kind(ix, ovn, CC_SYM_TYPE)) continue;
+        ov = cc_type_named(ovn, sp, a);
+        rc.tag = cc_slice_empty();
+        rc.fields = vec_new::[CcField](a);
+        rc.is_union = false;
+        rc.is_definition = true;
+        memset(&f, 0, sizeof(f));
+        f.span = arm->span;
+        f.type = arm->type;
+        f.name = arm->name;
+        f.attrs = vec_new::[CcAttr](a);
+        rc.fields.push(f);
+        ov->k = { .record = rc };
+        cc__sym_add(ix, ovn, CC_SYM_TYPE, vi->decl, vi->unit, ov, vi->unit != L->unit, true);
+        cc__add_typedef_name(ix, ovn);
+    }
+}
+
+/* After the walk: what a packed type really is.
+ *
+ * The tagged view above is what `x.kind` and `x.u.arm` needed while this step
+ * read them. The C the packed layout emits has neither member, so once the
+ * walk is done the type carries no members at all -- a later step must not
+ * find one that the emitted struct does not have. */
+static void vt_seal_packed(VStep* st, VInfo* vi) {
+    CcLowerer* L = st->L;
+    CcIndex* ix = st->w->ix;
+    CCArena a = L->arena;
+    CcType* rec = cc_type_named(vi->name, vi->decl->span, a);
+    CcRecordType rc;
+    CcSym* sym;
+    rc.tag = cc_slice_empty();
+    rc.fields = vec_new::[CcField](a);
+    rc.is_union = false;
+    rc.is_definition = true;
+    rec->k = { .record = rc };
+    sym = cc__sym_find_kind(ix, vi->name, CC_SYM_TYPE);
+    if (sym) sym->type = rec;
+}
+
+/* The statements of a block, spelled one per line (the arm bodies of the drop helper). */
+static void vt_spell_block(VStep* st, CcStmt* blk, CCString* sb) {
+    CcLowerer* L = st->L;
+    CcStmtList* stmts = lw_block_stmts(blk);
+    size_t n = stmts->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CcStmt* s = *stmts->get_ptr(i);
+        CcExpr* e = NULL;
+        @switch (s->k) {
+            case .expr(es): e = es.e; break;
+            default: break;
+        }
+        if (!e) continue;
+        {
+            CCString t = lw_spell_expr(L, e);
+            sb->push_cstr(" ", L->arena);
+            sb->push_slice(cc_string_persist_slice(L->arena, &t), L->arena);
+            sb->push_cstr(";", L->arena);
+        }
+    }
+}
+
+/* Which arms carry a destroy chain; the drop helper is registered as the
+ * destroy hook of the variant so locals, members and transitions run it. */
+/* Which arms the drop helper destroys, and so whether locals of the variant
+ * are dropped on scope exit at all.
+ *
+ * The arm type itself must have a registered destructor. A struct that
+ * merely contains one does not make the arm destructor-bearing: an arena
+ * `Vec` inside a plain record is owned by the arena, and reading the
+ * record's fields is not the same as owning them. Counting members here
+ * would give every `@variant` over such a record a scope-exit drop, and
+ * a local copied into a longer-lived node would free what the node
+ * points at. */
+static void vt_detect_dtors(VStep* st, VInfo* vi) {
+    CcLowerer* L = st->L;
+    CcIndex* ix = st->w->ix;
+    VArmList* av = &vi->arms;
+    size_t n = av->len();
+    size_t i;
+    (void)L;
+    for (i = 0; i < n; i++) {
+        VArm* arm = *av->get_ptr(i);
+        CCSlice canon;
+        CcTypeInfo* ti;
+        if (!arm->type) continue;
+        if (arm->type->k.kind == CcTypeK_pointer || arm->type->k.kind == CcTypeK_array) continue;
+        canon = ix->canon(arm->type);
+        ti = canon.len ? ix->type_get(canon) : NULL;
+        if (!ti || !ti->destroy_fn.len) continue;
+        arm->has_dtor = true;
+        vi->has_dtor = true;
+    }
+    if (vi->has_dtor) {
+        CCSlice vname = vi->name;
+        CCString dn = @string(`${vname}__cc_drop`, L->arena);
+        CcTypeInfo* ti;
+        vi->drop_fn = lw_keep(L, &dn);
+        ti = ix->type_get(vi->name);
+        if (ti && !ti->destroy_fn.len) ti->destroy_fn = vi->drop_fn;
+    }
+}
+
+/* The C of the declaration: the tag enum, the tagged union, the drop helper. */
+static void vt_lower_decl(VStep* st, VInfo* vi) {
+    CcLowerer* L = st->L;
+    CcIndex* ix = st->w->ix;
+    CCArena a = L->arena;
+    CcSpan sp = vi->decl->span;
+    CCString sb = cc_string_new();
+    VArmList* av = &vi->arms;
+    size_t n = av->len();
+    size_t i;
+    size_t payloads = 0;
+    sb.push_cstr("typedef enum { ", a);
+    for (i = 0; i < n; i++) {
+        VArm* arm = *av->get_ptr(i);
+        if (i) sb.push_cstr(", ", a);
+        sb.push_slice(vt_tag(st, vi, arm->name), a);
+        if (arm->type) payloads++;
+    }
+    sb.push_cstr(" } ", a);
+    sb.push_slice(vi->kind_name, a);
+    sb.push_cstr(";\ntypedef struct ", a);
+    sb.push_slice(vi->name, a);
+    sb.push_cstr(" { ", a);
+    sb.push_slice(vi->kind_name, a);
+    sb.push_cstr(" kind;", a);
+    if (payloads) {
+        sb.push_cstr(" union {", a);
+        for (i = 0; i < n; i++) {
+            VArm* arm = *av->get_ptr(i);
+            if (!arm->type) continue;
+            sb.push_cstr(" ", a);
+            sb.push_slice(vt_type_text(st, vi, arm), a);
+            sb.push_cstr(" ", a);
+            sb.push_slice(arm->name, a);
+            sb.push_cstr(";", a);
+        }
+        sb.push_cstr(" } u;", a);
+    }
+    sb.push_cstr(" } ", a);
+    sb.push_slice(vi->name, a);
+    sb.push_cstr(";", a);
+    if (vi->has_dtor) {
+        sb.push_cstr("\nstatic inline void ", a);
+        sb.push_slice(vi->drop_fn, a);
+        sb.push_cstr("(", a);
+        sb.push_slice(vi->name, a);
+        sb.push_cstr("* __v) {\n    switch (__v->kind) {\n", a);
+        for (i = 0; i < n; i++) {
+            VArm* arm = *av->get_ptr(i);
+            CcStmt* blk;
+            CcExpr* subject;
+            if (!arm->has_dtor) continue;
+            blk = lw_block(L, sp);
+            subject = cc_expr_member(cc_expr_member(lw_ident(L, cstr_slice("__v"), sp), cstr_slice("u"), true, sp, a), arm->name, false, sp, a);
+            cl_destroy_chain2(L, ix->canon(arm->type), subject, blk, sp, 0, false);
+            sb.push_cstr("    case ", a);
+            sb.push_slice(vt_tag(st, vi, arm->name), a);
+            sb.push_cstr(": {", a);
+            vt_spell_block(st, blk, &sb);
+            sb.push_cstr(" } break;\n", a);
+        }
+        sb.push_cstr("    default: break;\n    }\n}", a);
+    }
+    {
+        CcDecl* raw = lw_raw_decl(L, sb, sp);
+        CcDeclList* declv = &vi->unit->decls;
+        size_t nd = declv->len();
+        size_t k;
+        for (k = 0; k < nd; k++)
+            if (*declv->get_ptr(k) == vi->decl) *declv->get_ptr(k) = raw;
+    }
+}
+
+/* `NUT __s = (NUT)SENTINELULL; cc__bytes_copy(__r.__cc_p + OFF, &__s, W);` */
+static void vt_push_stamp(VStep* st, CCString* sb, VInfo* vi) {
+    CcLowerer* L = st->L;
+    CCArena a = L->arena;
+    CCSlice nut = vt_niche_uint(vi);
+    sb->push_slice(nut, a);
+    sb->push_cstr(" __s = (", a);
+    sb->push_slice(nut, a);
+    sb->push_cstr(")", a);
+    sb->push_slice(vt_num64(st, vi->niche_sentinel), a);
+    sb->push_cstr("ULL; cc__bytes_copy(__r.__cc_p + ", a);
+    sb->push_slice(vt_num(st, vi->niche_off), a);
+    sb->push_cstr(", &__s, ", a);
+    sb->push_slice(vt_num(st, vi->niche_width), a);
+    sb->push_cstr(");", a);
+}
+
+/* The C of a packed declaration: the tag enum, the byte block, an overlay
+ * struct per payload arm, the decode, a setter and a getter per arm, and the
+ * drop helper that destroys the active arm.
+ *
+ * The block holds one arm at a time, laid out from byte 0. The donor arm's
+ * own bytes at the niche offset never hold the sentinel, so stamping it
+ * there is what says "the other arm". A void arm stamps it too when it is
+ * not zero -- zeroing the block would otherwise leave the donor's encoding
+ * behind and the value would decode as the donor. */
+static void vt_lower_decl_packed(VStep* st, VInfo* vi) {
+    CcLowerer* L = st->L;
+    CcIndex* ix = st->w->ix;
+    CCArena a = L->arena;
+    CcSpan sp = vi->decl->span;
+    CCString sb = cc_string_new();
+    VArmList* av = &vi->arms;
+    size_t n = av->len();
+    size_t i;
+    CCSlice nut = vt_niche_uint(vi);
+    CCSlice kfn = vt_pack_fn(st, vi, cstr_slice("kind"));
+    VArm* donor = *av->get_ptr((size_t)vi->donor);
+    VArm* other = *av->get_ptr((size_t)(1 - vi->donor));
+    sb.push_cstr("typedef enum { ", a);
+    for (i = 0; i < n; i++) {
+        VArm* arm = *av->get_ptr(i);
+        if (i) sb.push_cstr(", ", a);
+        sb.push_slice(vt_tag(st, vi, arm->name), a);
+    }
+    sb.push_cstr(" } ", a);
+    sb.push_slice(vi->kind_name, a);
+    sb.push_cstr(";\ntypedef struct ", a);
+    sb.push_slice(vi->name, a);
+    sb.push_cstr(" { _Alignas(", a);
+    sb.push_slice(vt_num(st, vi->pack_align), a);
+    sb.push_cstr(") unsigned char __cc_p[", a);
+    sb.push_slice(vt_num(st, vi->pack_size), a);
+    sb.push_cstr("]; } ", a);
+    sb.push_slice(vi->name, a);
+    sb.push_cstr(";", a);
+    /* the lvalue face of each payload arm */
+    for (i = 0; i < n; i++) {
+        VArm* arm = *av->get_ptr(i);
+        if (!arm->type) continue;
+        sb.push_cstr("\ntypedef struct { ", a);
+        sb.push_slice(vt_arm_type_text(st, vi, arm), a);
+        sb.push_cstr(" ", a);
+        sb.push_slice(arm->name, a);
+        sb.push_cstr("; } ", a);
+        sb.push_slice(vt_pack_arm_fn(st, vi, cstr_slice("ov"), arm->name), a);
+        sb.push_cstr(";", a);
+    }
+    /* the decode */
+    sb.push_cstr("\nstatic inline ", a);
+    sb.push_slice(vi->kind_name, a);
+    sb.push_cstr(" ", a);
+    sb.push_slice(kfn, a);
+    sb.push_cstr("(const ", a);
+    sb.push_slice(vi->name, a);
+    sb.push_cstr("* __v) {\n    ", a);
+    sb.push_slice(nut, a);
+    sb.push_cstr(" __n; cc__bytes_copy(&__n, __v->__cc_p + ", a);
+    sb.push_slice(vt_num(st, vi->niche_off), a);
+    sb.push_cstr(", ", a);
+    sb.push_slice(vt_num(st, vi->niche_width), a);
+    sb.push_cstr(");\n    return __n == (", a);
+    sb.push_slice(nut, a);
+    sb.push_cstr(")", a);
+    sb.push_slice(vt_num64(st, vi->niche_sentinel), a);
+    sb.push_cstr("ULL ? ", a);
+    sb.push_slice(vt_tag(st, vi, other->name), a);
+    sb.push_cstr(" : ", a);
+    sb.push_slice(vt_tag(st, vi, donor->name), a);
+    sb.push_cstr(";\n}", a);
+    /* one setter per arm */
+    for (i = 0; i < n; i++) {
+        VArm* arm = *av->get_ptr(i);
+        bool stamp = arm != donor;
+        sb.push_cstr("\nstatic inline ", a);
+        sb.push_slice(vi->name, a);
+        sb.push_cstr(" ", a);
+        sb.push_slice(vt_pack_arm_fn(st, vi, cstr_slice("set"), arm->name), a);
+        if (!arm->type) {
+            sb.push_cstr("(void) {\n    ", a);
+            sb.push_slice(vi->name, a);
+            sb.push_cstr(" __r; cc__bytes_zero(__r.__cc_p, sizeof(", a);
+            sb.push_slice(vi->name, a);
+            sb.push_cstr("));", a);
+            if (stamp && vi->niche_sentinel != 0) {
+                sb.push_cstr("\n    ", a);
+                vt_push_stamp(st, &sb, vi);
+            }
+            sb.push_cstr(" return __r; }", a);
+            continue;
+        }
+        sb.push_cstr("(", a);
+        sb.push_slice(vt_arm_type_text(st, vi, arm), a);
+        sb.push_cstr(" __x) {\n    ", a);
+        sb.push_slice(vi->name, a);
+        sb.push_cstr(" __r; cc__bytes_zero(__r.__cc_p, sizeof(", a);
+        sb.push_slice(vi->name, a);
+        sb.push_cstr("));\n    cc__bytes_copy(__r.__cc_p, &__x, sizeof(__x));\n", a);
+        if (stamp) {
+            sb.push_cstr("    ", a);
+            vt_push_stamp(st, &sb, vi);
+            sb.push_cstr("\n", a);
+        }
+        sb.push_cstr("    return __r; }", a);
+    }
+    /* one getter per payload arm */
+    for (i = 0; i < n; i++) {
+        VArm* arm = *av->get_ptr(i);
+        CCSlice ty;
+        if (!arm->type) continue;
+        ty = vt_arm_type_text(st, vi, arm);
+        sb.push_cstr("\nstatic inline ", a);
+        sb.push_slice(ty, a);
+        sb.push_cstr(" ", a);
+        sb.push_slice(vt_pack_arm_fn(st, vi, cstr_slice("get"), arm->name), a);
+        sb.push_cstr("(const ", a);
+        sb.push_slice(vi->name, a);
+        sb.push_cstr("* __v) {\n    ", a);
+        sb.push_slice(ty, a);
+        sb.push_cstr(" __x; cc__bytes_copy(&__x, __v->__cc_p, sizeof(", a);
+        sb.push_slice(ty, a);
+        sb.push_cstr(")); return __x; }", a);
+    }
+    if (vi->has_dtor) {
+        sb.push_cstr("\nstatic inline void ", a);
+        sb.push_slice(vi->drop_fn, a);
+        sb.push_cstr("(", a);
+        sb.push_slice(vi->name, a);
+        sb.push_cstr("* __v) {\n    switch (", a);
+        sb.push_slice(kfn, a);
+        sb.push_cstr("(__v)) {\n", a);
+        for (i = 0; i < n; i++) {
+            VArm* arm = *av->get_ptr(i);
+            CcStmt* blk;
+            if (!arm->has_dtor) continue;
+            /* the getter is a value, so the chain runs on a copy of the arm */
+            blk = lw_block(L, sp);
+            cl_destroy_chain2(L, ix->canon(arm->type), lw_ident(L, cstr_slice("__t"), sp), blk, sp, 0, false);
+            sb.push_cstr("    case ", a);
+            sb.push_slice(vt_tag(st, vi, arm->name), a);
+            sb.push_cstr(": { ", a);
+            sb.push_slice(vt_arm_type_text(st, vi, arm), a);
+            sb.push_cstr(" __t = ", a);
+            sb.push_slice(vt_pack_arm_fn(st, vi, cstr_slice("get"), arm->name), a);
+            sb.push_cstr("(__v);", a);
+            vt_spell_block(st, blk, &sb);
+            sb.push_cstr(" } break;\n", a);
+        }
+        sb.push_cstr("    default: break;\n    }\n}", a);
+    }
+    {
+        CcDecl* raw = lw_raw_decl(L, sb, sp);
+        CcDeclList* declv = &vi->unit->decls;
+        size_t nd = declv->len();
+        size_t k;
+        for (k = 0; k < nd; k++)
+            if (*declv->get_ptr(k) == vi->decl) *declv->get_ptr(k) = raw;
+    }
+}
+
+/* The packed refusals, at the declaration. Each one names what it could not
+ * do; none of them falls back to the tagged layout, which would be a
+ * different type with a different footprint under the same name. */
+static void vt_check_packed(VStep* st, VInfo* vi) {
+    CcLowerer* L = st->L;
+    VArmList* av = &vi->arms;
+    size_t n = av->len();
+    size_t i;
+    CCSlice vname = vi->name;
+    CcSpan sp = vi->decl->span;
+    if (n != 2) {
+        int narms = (int)n;
+        CCString m = @string(`${"@"}variant(packed) '${vname}' takes exactly two arms (this one has ${narms}): one sentinel distinguishes one arm from one other`, L->arena);
+        lw_error(L, sp, m);
+        return;
+    }
+    for (i = 0; i < n; i++) {
+        VArm* arm = *av->get_ptr(i);
+        CCSlice an;
+        CCSlice ty;
+        if (arm->size_known) continue;
+        an = arm->name;
+        ty = vt_arm_type_text(st, vi, arm);
+        {
+            CCString m = @string(`${"@"}variant(packed) '${vname}': the size of arm '${an}' (${ty}) is not known here — packing needs every arm size; state it on the type with '${"@"}typehooks on ${ty} { .niche = cc_type_niche(size, align, offset, width, sentinel) }'`, L->arena);
+            lw_error(L, sp, m);
+        }
+        return;
+    }
+    if (vi->packed_ok) return;
+    {
+        VArm* a0 = *av->get_ptr(0);
+        VArm* a1 = *av->get_ptr(1);
+        CCSlice n0 = a0->name;
+        CCSlice n1 = a1->name;
+        CCSlice t0 = vt_arm_type_text(st, vi, a0);
+        CCSlice t1 = vt_arm_type_text(st, vi, a1);
+        CCSlice s0 = vt_num(st, a0->size);
+        CCSlice s1 = vt_num(st, a1->size);
+        CCString m = @string(`${"@"}variant(packed) '${vname}' cannot be niche-packed`, L->arena);
+        CCString note = @string(`arm '${n0}' (${t0}, ${s0} bytes) and arm '${n1}' (${t1}, ${s1} bytes)
+neither donates a free niche`, L->arena);
+        CCSlice nt = lw_keep(L, &note);
+        vt_error_note(L, sp, m, nt);
+    }
+}
+
+static void vt_check_arms(VStep* st, VInfo* vi, CcVariantDecl vd) {
+    CcLowerer* L = st->L;
+    CcUnit* u = L->unit;
+    VArmList* av = &vi->arms;
+    size_t n = av->len();
+    size_t i;
+    CCSlice vname = vi->name;
+    if (vi->unit != u) return;      /* a declaration in a header was checked when the header was lowered */
+    for (i = 0; i < n; i++) {
+        VArm* arm = *av->get_ptr(i);
+        CCSlice an = arm->name;
+        size_t k;
+        for (k = 0; k < i; k++) {
+            VArm* first = *av->get_ptr(k);
+            if (slice_eq(first->name, an)) {
+                CcLoc at = u->loc(first->span);
+                uint32_t line = at.line;
+                CCString m = @string(`${"@"}variant '${vname}': duplicate arm name '${an}' (first declared at line ${line})`, L->arena);
+                lw_error(L, arm->span, m);
+                break;
+            }
+        }
+        if (vt_is_c_keyword(an)) {
+            CCString m = @string(`${"@"}variant '${vname}': arm name '${an}' is a C keyword`, L->arena);
+            vt_error_note(L, arm->span, m, cstr_slice("pick another spelling"));
+        }
+        if (arm->type) {
+            CcType* t = arm->type;
+            CCSlice tn;
+            if (t->k.kind != CcTypeK_pointer && t->k.kind != CcTypeK_slice && type_named_name(t, &tn) && slice_eq(tn, vname)) {
+                CCString m = @string(`${"@"}variant '${vname}': arm '${an}' contains '${vname}' by value — recursive arms must go through a pointer or slice (e.g. '${vname}*' or '${vname}[:]')`, L->arena);
+                lw_error(L, arm->type_span, m);
+            }
+        }
+    }
+    (void)vd;
+}
+
+/* The declaration of variant `name` in the unit being lowered, or NULL.
+ *
+ * The index holds one `CcDecl` per `@variant`, from the parse that indexed
+ * the file. A header lowered on its own is parsed again, so that decl is
+ * not this unit's: its spans index another tape, and replacing it would
+ * rewrite a list nobody prints. The declaration to lower is the one in
+ * `L->unit->decls`; when it is there, this unit owns the variant. */
+static CcDecl* vt_local_decl(VStep* st, CCSlice name, CcVariantDecl* out) {
+    CcLowerer* L = st->L;
+    CcDeclList* declv = &L->unit->decls;
+    size_t n = declv->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *declv->get_ptr(i);
+        @switch (d->k) {
+            case .variant(vd): {
+                if (slice_eq(vd.name, name)) { *out = vd; return d; }
+                break;
+            }
+            default: break;
+        }
+    }
+    return NULL;
+}
+
+static void vt_add(VStep* st, CcUnit* u, CcDecl* d, CcVariantDecl vd) {
+    CcLowerer* L = st->L;
+    CCArena a = L->arena;
+    VInfo* vi;
+    CcVariantArmList* armv = &vd.arms;
+    size_t n = armv->len();
+    size_t i;
+    CCSlice vname = vd.name;
+    CCString kn = @string(`${vname}Kind`, a);
+    CcVariantDecl local_vd;
+    CcDecl* local;
+    if (vt_find(st, vd.name)) return;
+    local = vt_local_decl(st, vd.name, &local_vd);
+    if (local) { u = L->unit; d = local; vd = local_vd; armv = &vd.arms; n = armv->len(); }
+    vi = cc_arena_alloc(a, sizeof(VInfo), _Alignof(VInfo));
+    memset(vi, 0, sizeof(*vi));
+    vi->name = vd.name;
+    vi->kind_name = lw_keep(L, &kn);
+    vi->arms = vec_new::[VArmRef](a);
+    vi->packed = vd.packed;
+    vi->decl = d;
+    vi->unit = u;
+    for (i = 0; i < n; i++) {
+        CcVariantArm* src = armv->get_ptr(i);
+        VArm* arm = cc_arena_alloc(a, sizeof(VArm), _Alignof(VArm));
+        memset(arm, 0, sizeof(*arm));
+        arm->name = src->name;
+        arm->span = src->span;
+        arm->type_span = src->payload_span;
+        arm->type = src->payload;
+        if (arm->type && CcType_is_void(arm->type)) arm->type = NULL;
+        CcParamList* fieldv = &src->fields;
+        if (fieldv->len()) {
+            CCSlice an = src->name;
+            CCString m = @string(`${"@"}variant '${vname}': the field form of arm '${an}' is not lowered by the clean lowerer yet; give the arm one payload type`, L->arena);
+            if (u == L->unit) lw_error(L, src->span, m);
+        }
+        vi->arms.push(arm);
+    }
+    st->variants.push(vi);
+    vt_check_arms(st, vi, vd);
+    if (vi->packed) {
+        vt_pack_plan(st, vi);
+        if (u == L->unit) vt_check_packed(st, vi);
+    }
+    vt_install_typing(st, vi);
+    vt_detect_dtors(st, vi);
+    if (vi->packed && vi->packed_ok) vt_install_packed_syms(st, vi);
+    if (u != L->unit) return;
+    if (!vi->packed) vt_lower_decl(st, vi);
+    else if (vi->packed_ok) vt_lower_decl_packed(st, vi);
+}
+
+/* A tagged union a `@grammar(schema)` declared.
+ *
+ * A `one of` in a schema body is a tagged union with the same kind/`u`
+ * layout and the same projection rules as `@variant`, and the engine emits
+ * its declaration into the source this step lowers — so the index already
+ * has the type, its `NameKind` and every enumerator. The one fact missing
+ * is that it is a tagged union, which is why `v.kind == .object` read as a
+ * stray `.` and `v.object` as a missing member.
+ *
+ * Only the arms are registered. Nothing here declares a type: the engine's
+ * declaration is the real one, with the anonymous struct each arm actually
+ * has, and synthesizing one over it would replace what the index knows
+ * with something less true. */
+static void vt_add_schema(VStep* st, CCSlice name, CcNameList* arms, CcNameList* voids) {
+    CcLowerer* L = st->L;
+    CCArena a = L->arena;
+    VInfo* vi;
+    CCString kn = @string(`${name}Kind`, a);
+    size_t n = arms->len();
+    size_t i;
+    CcSpan zero;
+    CcDecl* d;
+    if (!name.len || !n || vt_find(st, name)) return;
+    zero.first = 0;
+    zero.last = 0;
+    d = cc_arena_alloc(a, sizeof(CcDecl), _Alignof(CcDecl));
+    memset(d, 0, sizeof(*d));
+    d->span = zero;
+    vi = cc_arena_alloc(a, sizeof(VInfo), _Alignof(VInfo));
+    memset(vi, 0, sizeof(*vi));
+    vi->name = name;
+    vi->kind_name = lw_keep(L, &kn);
+    vi->arms = vec_new::[VArmRef](a);
+    vi->decl = d;
+    vi->unit = NULL;
+    vi->schema = true;
+    for (i = 0; i < n; i++) {
+        CCSlice an = *arms->get_ptr(i);
+        VArm* arm = cc_arena_alloc(a, sizeof(VArm), _Alignof(VArm));
+        bool is_void = cc_slice_eq_cstr(voids->get_ptr(i), "void");
+        memset(arm, 0, sizeof(*arm));
+        arm->name = an;
+        arm->span = zero;
+        arm->type = NULL;   /* an anonymous struct: the index has it, this does not */
+        arm->payload = !is_void;
+        vi->arms.push(arm);
+    }
+    st->variants.push(vi);
+}
+
+/* `Name arm1 arm2=void …`, one type per line. */
+static void vt_collect_schema(VStep* st) {
+    CcLowerer* L = st->L;
+    CCSlice text = L->opts.schema_variants;
+    size_t i = 0;
+    if (!text.len) return;
+    while (i < text.len) {
+        size_t line_end = i;
+        CcNameList arms = vec_new::[CCSlice](L->arena);
+        CcNameList voids = vec_new::[CCSlice](L->arena);
+        CCSlice name = cc_slice_empty();
+        size_t k;
+        while (line_end < text.len && text.ptr[line_end] != '\n') line_end++;
+        k = i;
+        while (k < line_end) {
+            size_t w0;
+            size_t w1;
+            while (k < line_end && (text.ptr[k] == ' ' || text.ptr[k] == '\t' || text.ptr[k] == '\r')) k++;
+            w0 = k;
+            while (k < line_end && text.ptr[k] != ' ' && text.ptr[k] != '\t' && text.ptr[k] != '\r') k++;
+            w1 = k;
+            if (w1 > w0) {
+                CCSlice word = cc_slice_from_buffer((char*)text.ptr + w0, w1 - w0);
+                CCSlice payload = cc_slice_empty();
+                size_t eq = 0;
+                while (eq < word.len && word.ptr[eq] != '=') eq++;
+                if (eq < word.len) {
+                    payload = cc_slice_from_buffer((char*)word.ptr + eq + 1, word.len - eq - 1);
+                    word = cc_slice_from_buffer((char*)word.ptr, eq);
+                }
+                if (!name.len) name = word;
+                else { arms.push(word); voids.push(payload); }
+            }
+        }
+        vt_add_schema(st, name, &arms, &voids);
+        i = line_end < text.len ? line_end + 1 : text.len;
+    }
+}
+
+/* Every variant the index knows, those of this unit and of its headers, in
+ * index order (the variant of an arm is indexed before its user). */
+static void vt_collect(VStep* st) {
+    CcIndex* ix = st->w->ix;
+    CcDeclList* vv = &ix->variants;
+    CcUnitList* vu = &ix->variant_units;
+    size_t n = vv->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *vv->get_ptr(i);
+        CcUnit* u = *vu->get_ptr(i);
+        @switch (d->k) {
+            case .variant(vd): vt_add(st, u, d, vd); break;
+            default: break;
+        }
+    }
+}
+
+/* ---- construction -------------------------------------------------------------- */
+
+/* A type as a message spells it: a typedef of a tagged record by its tag. */
+static CCSlice vt_type_display(VStep* st, CcType* t) {
+    CcLowerer* L = st->L;
+    CcIndex* ix = st->w->ix;
+    CCSlice cn = ix->canon(t);
+    CcSym* sym = cc__sym_find_kind(ix, cn, CC_SYM_TYPE);
+    CcRecordType rc;
+    if (sym && sym->type && type_record(sym->type, &rc) && rc.tag.len) {
+        CCSlice tag = rc.tag;
+        CCString sb = @string(`${rc.is_union ? "union" : "struct"} ${tag}`, L->arena);
+        return lw_keep(L, &sb);
+    }
+    return cn;
+}
+
+/* The payload written for an arm must be of the arm type when its own type
+ * is spelled (a compound literal, a cast): the host compiler would say so
+ * later, in its own words. */
+static void vt_check_payload(VStep* st, VInfo* vi, VArm* arm, CcInit* item) {
+    CcLowerer* L = st->L;
+    Walker* w = st->w;
+    CcIndex* ix = w->ix;
+    CcExpr* e = item->expr ? vt_strip(item->expr) : NULL;
+    CcType* given = NULL;
+    CCSlice want;
+    CCSlice got;
+    if (!e || !arm->type) return;
+    @switch (e->k) {
+        case .compound(cl): given = cl.type; break;
+        case .cast(ca): given = ca.type; break;
+        default: break;
+    }
+    if (!given) return;
+    if (given->k.kind == CcTypeK_pointer || arm->type->k.kind == CcTypeK_pointer) return;
+    want = ix->canon(arm->type);
+    got = ix->canon(given);
+    if (!want.len || !got.len || slice_eq(want, got)) return;
+    {
+        CCSlice gd = vt_type_display(st, given);
+        CCSlice wd = vt_type_display(st, arm->type);
+        CCSlice an = arm->name;
+        CCSlice vname = vi->name;
+        CCString m = @string(`cannot convert '${gd}' to '${wd}' for arm '.${an}' of variant '${vname}'`, L->arena);
+        vt_error_line(L, item->span, m);
+    }
+}
+
+static CcInit* vt_init_item(VStep* st, CCSlice field, CcExpr* value, CcSpan sp) {
+    CcLowerer* L = st->L;
+    CcInit* it = cc_arena_alloc(L->arena, sizeof(CcInit), _Alignof(CcInit));
+    CcDesignator ds;
+    memset(it, 0, sizeof(*it));
+    it->span = sp;
+    it->designators = vec_new::[CcDesignator](L->arena);
+    it->items = vec_new::[CcInitRef](L->arena);
+    ds.field = field;
+    ds.index = NULL;
+    ds.index_hi = NULL;
+    it->designators.push(ds);
+    it->expr = value;
+    return it;
+}
+
+static CCSlice vt_first_field(CcInit* it) {
+    CcDesignatorList* dv = &it->designators;
+    if (!dv->len()) return cc_slice_empty();
+    return dv->get_ptr(0)->field;
+}
+
+static bool vt_init_is_zero(CcInit* in) {
+    CcInitList* items = &in->items;
+    CcInit* only;
+    if (items->len() != 1) return false;
+    only = *items->get_ptr(0);
+    CcDesignatorList* od = &only->designators;
+    if (od->len() || !only->expr) return false;
+    return only->expr->k.kind == CcExprK_number;
+}
+
+static void vt_init(VStep* st, CcInit* in, CcType* t);
+
+/* `{ .arm = v }` on a packed variant is `Name__cc_set_arm(v)`.
+ *
+ * The call is written after the walk (`vt_apply_packed`): the transition
+ * check reads the braced initializer to know that an assignment constructs a
+ * new value, and a rewrite here would take that shape away from it. */
+static void vt_packed_ctor(VStep* st, CcInit* in, VInfo* vi, VArm* arm, CcInit* item) {
+    CcLowerer* L = st->L;
+    VCtor* c;
+    if (!vi->packed_ok) return;     /* the declaration already said why */
+    if (arm->type && !item->expr) {
+        CCSlice an = arm->name;
+        CCSlice vname = vi->name;
+        CCString m = @string(`${"@"}variant(packed) '${vname}': the payload of arm '.${an}' has to be one expression — the setter takes a value, so write a compound literal ('.${an} = (T){ ... }')`, L->arena);
+        lw_error(L, item->span, m);
+        return;
+    }
+    if (arm->type) vt_init(st, item, arm->type);
+    c = cc_arena_alloc(L->arena, sizeof(VCtor), _Alignof(VCtor));
+    c->in = in;
+    c->vi = vi;
+    c->arm = arm;
+    c->payload = arm->type ? item->expr : NULL;
+    c->span = item->span;
+    st->ctors.push(c);
+}
+
+/* A compound literal of a packed variant becomes the setter call its
+ * initializer was rewritten into; the node is remembered for that. */
+static void vt_packed_compound(VStep* st, CcExpr* e, CcType* t) {
+    bool is_ptr = false;
+    VInfo* vi = vt_of_type(st, t, &is_ptr);
+    if (!vi || is_ptr || !vi->packed) return;
+    st->ctor_exprs.push(e);
+}
+
+/* `{ .arm = v }` of a variant: `{ .kind = V_arm, .u.arm = v }`; a void
+ * arm keeps only the tag; `.kind = ...` passes through. */
+static void vt_variant_init(VStep* st, CcInit* in, VInfo* vi) {
+    CcLowerer* L = st->L;
+    CCArena a = L->arena;
+    CcInitList* items = &in->items;
+    size_t n = items->len();
+    size_t i;
+    CcInit* arm_item = NULL;
+    VArm* arm = NULL;
+    CCSlice vname = vi->name;
+    if (n == 0) return;
+    if (vt_init_is_zero(in)) {
+        VArmList* av = &vi->arms;
+        VArm* a0 = av->len() ? *av->get_ptr(0) : NULL;
+        CCSlice first = a0 ? a0->name : cc_slice_empty();
+        CCSlice bt = cstr_slice("`");
+        CCString m = @string(`variant '${vname}' requires an explicit arm — ${bt}{0}${bt} zero-initializes to '.${first}', not an empty value`, a);
+        lw_error(L, in->span, m);
+        return;
+    }
+    for (i = 0; i < n; i++) {
+        CcInit* it = *items->get_ptr(i);
+        CCSlice f = vt_first_field(it);
+        VArm* found;
+        if (!f.len) continue;
+        if (cc_slice_eq_cstr(&f, "kind")) {
+            /* the tag-only spelling: a packed value has no tag field to fill */
+            if (vi->packed) {
+                CCString m = @string(`${"@"}variant(packed) '${vname}' has no tag field — name the arm ('{ .arm = ... }') rather than '.kind'`, a);
+                lw_error(L, it->span, m);
+            }
+            return;
+        }
+        found = vt_arm(vi, f);
+        if (!found) {
+            vt_no_arm(st, vi, f, it->span);
+            return;
+        }
+        if (arm) {
+            CCSlice an = arm->name;
+            CCString m = @string(`variant '${vname}' initializer names two arms '.${an}' and '.${f}' — a variant holds exactly one active arm`, a);
+            lw_error(L, it->span, m);
+            return;
+        }
+        arm = found;
+        arm_item = it;
+    }
+    if (!arm) return;
+    vt_check_payload(st, vi, arm, arm_item);
+    if (vi->packed) {
+        vt_packed_ctor(st, in, vi, arm, arm_item);
+        return;
+    }
+    {
+        CcInitList rebuilt = vec_new::[CcInitRef](a);
+        rebuilt.push(vt_init_item(st, cstr_slice("kind"), vt_tag_ident(st, vi, arm->name, arm_item->span), arm_item->span));
+        for (i = 0; i < n; i++) {
+            CcInit* it = *items->get_ptr(i);
+            if (it == arm_item) {
+                CcDesignatorList dv = vec_new::[CcDesignator](a);
+                CcDesignator u;
+                size_t k;
+                size_t nd;
+                if (!arm->type && !arm->payload) continue;  /* `.hup = {}`: the tag says it all */
+                u.field = cstr_slice("u");
+                u.index = NULL;
+                u.index_hi = NULL;
+                dv.push(u);
+                CcDesignatorList* od = &it->designators;
+                nd = od->len();
+                for (k = 0; k < nd; k++) {
+                    CcDesignator d1 = *od->get_ptr(k);
+                    dv.push(d1);
+                }
+                it->designators = dv;
+                if (arm->type) vt_init(st, it, arm->type);
+            }
+            rebuilt.push(it);
+        }
+        in->items = rebuilt;
+    }
+}
+
+/* An initializer of type `t`: the list of a variant is completed; the
+ * designated members of a struct and the elements of an array are visited by their types. */
+static void vt_init(VStep* st, CcInit* in, CcType* t) {
+    Walker* w = st->w;
+    VInfo* vi;
+    bool is_ptr;
+    CcType* top;
+    if (!in || !t) return;
+    if (!in->is_list) {
+        if (in->expr) {
+            CcType* kt = t;
+            VInfo* kv = vt_of_kind_type(st, kt);
+            CcExpr* e = vt_strip(in->expr);
+            if (kv && e) {
+                @switch (e->k) {
+                    case .variant_lit(vl): {
+                        VArm* arm = vt_arm(kv, vl.arm);
+                        if (!arm) vt_no_arm(st, kv, vl.arm, e->span);
+                        else e->k = { .ident = vt_tag(st, kv, vl.arm) };
+                        break;
+                    }
+                    default: break;
+                }
+            }
+        }
+        return;
+    }
+    top = unalias_local(w, t);
+    if (!top) return;
+    vi = vt_of_type(st, t, &is_ptr);
+    if (vi && top->k.kind != CcTypeK_pointer && top->k.kind != CcTypeK_array) {
+        vt_variant_init(st, in, vi);
+        return;
+    }
+    if (top->k.kind == CcTypeK_array) {
+        CcType* elem = elem_of_indexable(top);
+        CcInitList* items = &in->items;
+        size_t n = items->len();
+        size_t i;
+        for (i = 0; i < n; i++) {
+            CcInit* it = *items->get_ptr(i);
+            CcDesignatorList* od = &it->designators;
+            if (!od->len()) vt_init(st, it, elem);
+        }
+        return;
+    }
+    {
+        CcInitList* items = &in->items;
+        size_t n = items->len();
+        size_t i;
+        for (i = 0; i < n; i++) {
+            CcInit* it = *items->get_ptr(i);
+            CCSlice f = vt_first_field(it);
+            CcType* ft;
+            CcDesignatorList* od = &it->designators;
+            if (!f.len || od->len() != 1) continue;
+            ft = field_type(w, t, f);
+            if (ft) vt_init(st, it, ft);
+        }
+    }
+}
+
+/* ---- protection ---------------------------------------------------------------- */
+
+static bool vt_protected(VStep* st, CCSlice subject, CCSlice arm) {
+    VFrameList* fv = &st->frames;
+    size_t i = fv->len();
+    while (i--) {
+        VFrame* f = *fv->get_ptr(i);
+        if (f->arm.len && slice_eq(f->subject, subject) && slice_eq(f->arm, arm)) return true;
+    }
+    return false;
+}
+
+static void vt_push_frame(VStep* st, CcStmt* owner, CCSlice subject, CCSlice arm, VInfo* vi, bool by_case) {
+    CcLowerer* L = st->L;
+    VFrame* f = cc_arena_alloc(L->arena, sizeof(VFrame), _Alignof(VFrame));
+    f->subject = subject;
+    f->arm = arm;
+    f->owner = owner;
+    f->vi = vi;
+    f->by_case = by_case;
+    st->frames.push(f);
+}
+
+static void vt_pending(VStep* st, CcStmt* at, CCSlice subject, CCSlice arm, VInfo* vi, bool by_case) {
+    CcLowerer* L = st->L;
+    VPending* p;
+    if (!at) return;
+    p = cc_arena_alloc(L->arena, sizeof(VPending), _Alignof(VPending));
+    p->stmt = at;
+    p->subject = subject;
+    p->arm = arm;
+    p->vi = vi;
+    p->by_case = by_case;
+    st->pending.push(p);
+}
+
+/* A statement this step wrote is C already: the walk enters it for its
+ * scope and its pending frames, and reads nothing else. */
+static CcStmt* vt_synth(VStep* st, CcStmt* s) {
+    st->synth.push(s);
+    return s;
+}
+
+static bool vt_is_synth(VStep* st, CcStmt* s) {
+    CcStmtList* sv = &st->synth;
+    size_t n = sv->len();
+    size_t i;
+    for (i = 0; i < n; i++)
+        if (*sv->get_ptr(i) == s) return true;
+    return false;
+}
+
+/* The arm a two-armed variant holds when `arm` is inactive. */
+static CCSlice vt_other_arm(VInfo* vi, CCSlice arm) {
+    VArmList* av = &vi->arms;
+    VArm* a0;
+    VArm* a1;
+    if (av->len() != 2) return cc_slice_empty();
+    a0 = *av->get_ptr(0);
+    a1 = *av->get_ptr(1);
+    if (slice_eq(a0->name, arm)) return a1->name;
+    return a0->name;
+}
+
+/* ---- expressions --------------------------------------------------------------- */
+
+static void vt_expr(VStep* st, CcExpr* e);
+
+/* The expressions of an initializer, nested lists included. */
+static void vt_init_exprs(VStep* st, CcInit* in) {
+    CcInitList* items;
+    size_t n;
+    size_t i;
+    if (!in) return;
+    if (in->expr) vt_expr(st, in->expr);
+    items = &in->items;
+    n = items->len();
+    for (i = 0; i < n; i++) vt_init_exprs(st, *items->get_ptr(i));
+}
+
+static void vt_exprs(VStep* st, CcExprList list) {
+    size_t n = list.len();
+    size_t i;
+    for (i = 0; i < n; i++) vt_expr(st, *list.get_ptr(i));
+}
+
+/* A protected projection of a packed arm: the overlay face of the block.
+ *
+ * `x.arm` is an lvalue on the default layout and stays one here -- a method
+ * call takes its address, a member of the arm is written in place -- so the
+ * projection is a cast to the one-field overlay struct rather than the
+ * getter, which is a value. The payload lies at byte 0 of the block, which
+ * is what the overlay's one field names. */
+static void vt_packed_proj(VStep* st, CcExpr* e, CcMember mb, VInfo* vi) {
+    CcLowerer* L = st->L;
+    CCArena a = L->arena;
+    CcSpan sp = e->span;
+    CCSlice ovn = vt_pack_arm_fn(st, vi, cstr_slice("ov"), mb.name);
+    CcType* ovp = cc_type_pointer(cc_type_named(ovn, sp, a), sp, a);
+    CcExpr* base = mb.a;
+    CcExpr* cast = cc__expr_blank(sp, a);
+    CcCast ca;
+    CcMember outer;
+    if (!mb.arrow) base = cc_expr_unary(CC_OP_ADDR, lw_paren(L, mb.a, sp), sp, a);
+    ca.type = ovp;
+    ca.a = base;
+    cast->k = { .cast = ca };
+    outer.a = lw_paren(L, cast, sp);
+    outer.name = mb.name;
+    outer.arrow = true;
+    e->k = { .member = outer };
+}
+
+/* `x.arm` on a variant receiver: the projection, when protected. */
+static void vt_member(VStep* st, CcExpr* e, CcMember mb, bool in_unwrap) {
+    CcLowerer* L = st->L;
+    Walker* w = st->w;
+    CcType* rt = type_of_expr(w, mb.a);
+    VInfo* vi = vt_of_type(st, rt, NULL);
+    CCSlice vname;
+    if (!vi) return;
+    vname = vi->name;
+    if (cc_slice_eq_cstr(&mb.name, "kind")) {
+        /* left standing for the walk; `vt_apply_packed` writes the decode */
+        if (vi->packed) {
+            VKindSite* k = cc_arena_alloc(L->arena, sizeof(VKindSite), _Alignof(VKindSite));
+            k->e = e;
+            k->recv = mb.a;
+            k->arrow = mb.arrow;
+            k->vi = vi;
+            st->kinds.push(k);
+        }
+        return;
+    }
+    if (cc_slice_eq_cstr(&mb.name, "u")) {
+        CCSlice surface = vi->schema ? cstr_slice("schema union") : cstr_slice("variant");
+        if (st->in_codegen) return;
+        if (vi->packed) {
+            CCString pm = @string(`'${vname}' is ${"@"}variant(packed): it has no exposed '.u' union — project an arm ('x.arm') under a kind check or a checked switch instead`, L->arena);
+            lw_error(L, vt_dot_span(e), pm);
+            return;
+        }
+        {
+            CCString m = @string(`cannot reach into ${surface} '${vname}' via '.u' — project an arm ('x.arm') under a kind check or a checked switch instead`, L->arena);
+            lw_error(L, vt_dot_span(e), m);
+        }
+        return;
+    }
+    if (!vt_arm(vi, mb.name)) {
+        /* A schema union is a product as well as a sum: fields a
+         * `@grammar(schema)` binds beside its `one of` are members of the
+         * same struct. This step cannot tell those from a misspelled arm,
+         * so it passes to C, which has the declaration. */
+        if (vi->schema) return;
+        vt_no_arm(st, vi, mb.name, vt_dot_span(e));
+        return;
+    }
+    if (!in_unwrap && !st->in_codegen && !vt_protected(st, vt_spell(st, mb.a), mb.name)) {
+        CCSlice an = mb.name;
+        CCSlice subj = vt_spell(st, mb.a);
+        CCString m = @string(`projection of arm '${an}' is not dominated by a kind check and has no !> handler`, L->arena);
+        CCString note = @string(`protect it: 'if (${subj}.kind == ${vname}_${an}) { ... }' or 'case .${an}:' in a switch on '${subj}', or handle the other arms: '${subj}.${an} !> { ...diverge... }' / '${subj}.${an} ?> fallback'`, L->arena);
+        CCSlice nt = lw_keep(L, &note);
+        vt_error_note(L, vt_dot_span(e), m, nt);
+        return;
+    }
+    if (vi->packed) {
+        vt_packed_proj(st, e, mb, vi);
+        return;
+    }
+    {
+        CcMember inner;
+        CcMember outer;
+        CcExpr* u = cc__expr_blank(e->span, L->arena);
+        inner.a = mb.a;
+        inner.name = cstr_slice("u");
+        inner.arrow = mb.arrow;
+        u->k = { .member = inner };
+        outer.a = u;
+        outer.name = mb.name;
+        outer.arrow = false;
+        e->k = { .member = outer };
+    }
+}
+
+/* The operand of a projection handler or fallback: its receiver is walked
+ * first; a member of a variant arm is the projection (`out` names it);
+ * anything else is walked as itself and NULL comes back. */
+static VInfo* vt_unwrap_operand(VStep* st, CcExpr* a, CcMember* out) {
+    CcExpr* s = vt_strip(a);
+    CcMember mb;
+    bool hit = false;
+    VInfo* vi;
+    if (!s) return NULL;
+    @switch (s->k) {
+        case .member(x): mb = x; hit = true; break;
+        default: break;
+    }
+    if (!hit) {
+        vt_expr(st, a);
+        return NULL;
+    }
+    vt_expr(st, mb.a);
+    vi = vt_of_type(st, type_of_expr(st->w, mb.a), NULL);
+    if (vi && vt_arm(vi, mb.name)) {
+        *out = mb;
+        return vi;
+    }
+    vt_member(st, s, mb, false);
+    return NULL;
+}
+
+/* The tag of a receiver: the member on the default layout, the decode call on
+ * a packed one. `x.kind` reads `Name__cc_kind(&(x))`, `p->kind` reads
+ * `Name__cc_kind(p)`. */
+static CcExpr* vt_kind_of(VStep* st, VInfo* vi, CcExpr* recv, bool arrow, CcSpan sp) {
+    CcLowerer* L = st->L;
+    CCSlice fn;
+    CcExpr* arg;
+    if (!vi->packed) return cc_expr_member(lw_paren(L, recv, sp), cstr_slice("kind"), arrow, sp, L->arena);
+    fn = vt_pack_fn(st, vi, cstr_slice("kind"));
+    arg = recv;
+    if (!arrow) arg = cc_expr_unary(CC_OP_ADDR, lw_paren(L, recv, sp), sp, L->arena);
+    return lw_call1(L, fn, arg, sp);
+}
+
+/* `(x).kind` / `(x)->kind` and `(x).u.arm` / `(x)->u.arm` for a projection. */
+static CcExpr* vt_recv_kind(VStep* st, VInfo* vi, CcMember mb, CcSpan sp) {
+    return vt_kind_of(st, vi, mb.a, mb.arrow, sp);
+}
+
+/* The arm as a value: the union member on the default layout, the getter on a
+ * packed one. Every use of this reads the payload -- the `__typeof__` of a
+ * fallback, the value of a handled projection, the binding of a case -- so
+ * the getter is right here and the overlay is for the lvalue projection. */
+static CcExpr* vt_recv_arm(VStep* st, VInfo* vi, CcMember mb, CcSpan sp) {
+    CcLowerer* L = st->L;
+    CCSlice fn;
+    CcExpr* arg;
+    CcExpr* u;
+    if (!vi->packed) {
+        u = cc_expr_member(lw_paren(L, mb.a, sp), cstr_slice("u"), mb.arrow, sp, L->arena);
+        return cc_expr_member(u, mb.name, false, sp, L->arena);
+    }
+    fn = vt_pack_arm_fn(st, vi, cstr_slice("get"), mb.name);
+    arg = mb.a;
+    if (!mb.arrow) arg = cc_expr_unary(CC_OP_ADDR, lw_paren(L, mb.a, sp), sp, L->arena);
+    return lw_call1(L, fn, arg, sp);
+}
+
+/* a projection with a handler body: `({ if ((x).kind != V_arm) { body } (x).u.arm; })` */
+static void vt_unwrap_body(VStep* st, CcExpr* e, CcUnwrapBody ub) {
+    CcLowerer* L = st->L;
+    CcMember mb;
+    VInfo* vi = vt_unwrap_operand(st, ub.a, &mb);
+    CcSpan sp = e->span;
+    if (!vi) return;
+    if (ub.binder.len) {
+        CCSlice an = mb.name;
+        CCString m = @string(`a projection handler takes no binder: 'x.${an} !> { ... }' runs when the arm is inactive and has no error value`, L->arena);
+        lw_error(L, sp, m);
+        return;
+    }
+    if (!rl_diverges(L, ub.body)) {
+        CCSlice an = mb.name;
+        CCString m = @string(`the handler of projection '.${an}' must diverge (return, goto, break, continue): it runs when the arm is inactive and the projection has no value then`, L->arena);
+        lw_error(L, sp, m);
+        return;
+    }
+    {
+        CcStmt* blk = lw_block(L, sp);
+        CcExpr* cond = cc_expr_binary(CC_OP_NE, vt_recv_kind(st, vi, mb, sp), vt_tag_ident(st, vi, mb.name, sp), sp, L->arena);
+        CcStmt* body = ub.body;
+        CcStmtExpr se;
+        CCSlice other = vt_other_arm(vi, mb.name);
+        if (body->k.kind != CcStmtK_block) {
+            CcStmt* b2 = lw_block(L, sp);
+            lw_push(b2, body);
+            body = b2;
+        }
+        lw_push(blk, vt_synth(st, lw_if(L, cond, body, NULL, sp)));
+        lw_push(blk, vt_synth(st, lw_expr_stmt(L, vt_recv_arm(st, vi, mb, sp), sp)));
+        if (other.len) vt_pending(st, body, vt_spell(st, mb.a), other, vi, false);
+        se.block = blk;
+        e->k = { .stmt_expr = se };
+    }
+}
+
+/* a projection with a fallback v: `({ __typeof__((x).u.arm) __cc_pjN; if ((x).kind == V_arm) {
+ * __cc_pjN = (x).u.arm; } else { __cc_pjN = (v); } __cc_pjN; })` */
+static void vt_unwrap_or(VStep* st, CcExpr* e, CcUnwrapOr uo) {
+    CcLowerer* L = st->L;
+    CcMember mb;
+    VInfo* vi = vt_unwrap_operand(st, uo.a, &mb);
+    CcSpan sp = e->span;
+    if (!vi) {
+        vt_expr(st, uo.fallback);
+        return;
+    }
+    if (uo.binder.len) {
+        CCSlice an = mb.name;
+        CCString m = @string(`a projection fallback takes no binder: 'x.${an} ?> v' has no error value`, L->arena);
+        lw_error(L, sp, m);
+        return;
+    }
+    {
+        uint32_t id = CcLowerer_temp_id(L);
+        CCString nm = @string(`__cc_pj${id}`, L->arena);
+        CCSlice tmp = lw_keep(L, &nm);
+        CcStmt* blk = lw_block(L, sp);
+        CcType* tt = cc__type_blank(sp, L->arena);
+        CcTypeofType tf;
+        CcStmt* then = lw_block(L, sp);
+        CcStmt* els = lw_block(L, sp);
+        CcExpr* cond = cc_expr_binary(CC_OP_EQ, vt_recv_kind(st, vi, mb, sp), vt_tag_ident(st, vi, mb.name, sp), sp, L->arena);
+        CcStmtExpr se;
+        CCSlice other = vt_other_arm(vi, mb.name);
+        tf.expr = vt_recv_arm(st, vi, mb, sp);
+        tf.type = NULL;
+        tt->k = { .typeof_ = tf };
+        lw_push(blk, vt_synth(st, lw_decl_stmt(L, tt, tmp, NULL, sp)));
+        lw_push(then, vt_synth(st, lw_expr_stmt(L, lw_assign(L, lw_ident(L, tmp, sp), vt_recv_arm(st, vi, mb, sp), sp), sp)));
+        /* the fallback is walked as the else-statement, where a two-armed
+         * variant shows it the other arm */
+        lw_push(els, lw_expr_stmt(L, lw_assign(L, lw_ident(L, tmp, sp), lw_paren(L, uo.fallback, sp), sp), sp));
+        if (other.len) vt_pending(st, els, vt_spell(st, mb.a), other, vi, false);
+        lw_push(blk, vt_synth(st, lw_if(L, cond, then, els, sp)));
+        lw_push(blk, vt_synth(st, lw_expr_stmt(L, lw_ident(L, tmp, sp), sp)));
+        se.block = blk;
+        e->k = { .stmt_expr = se };
+    }
+}
+
+/* A bare `.arm` against a partner of the tag type of the variant. */
+static bool vt_resolve_lit(VStep* st, CcExpr* lit, CcType* partner) {
+    VInfo* vi = vt_of_kind_type(st, partner);
+    CcVariantLit vl;
+    bool hit = false;
+    CcExpr* s = vt_strip(lit);
+    if (!vi || !s) return false;
+    @switch (s->k) {
+        case .variant_lit(x): vl = x; hit = true; break;
+        default: break;
+    }
+    if (!hit) return false;
+    if (!vt_arm(vi, vl.arm)) {
+        vt_no_arm(st, vi, vl.arm, s->span);
+        return true;
+    }
+    s->k = { .ident = vt_tag(st, vi, vl.arm) };
+    return true;
+}
+
+static bool vt_is_lit(CcExpr* e) {
+    CcExpr* s = vt_strip(e);
+    if (!s) return false;
+    return s->k.kind == CcExprK_variant_lit;
+}
+
+/* `a == .arm`, `.arm == a`, `a != .arm`: the type of the partner names the variant. */
+static void vt_binary(VStep* st, CcExpr* e, CcBinary bi) {
+    Walker* w = st->w;
+    if (bi.op != CC_OP_EQ && bi.op != CC_OP_NE) return;
+    if (vt_is_lit(bi.b) && !vt_is_lit(bi.a)) vt_resolve_lit(st, bi.b, type_of_expr(w, bi.a));
+    else if (vt_is_lit(bi.a) && !vt_is_lit(bi.b)) vt_resolve_lit(st, bi.a, type_of_expr(w, bi.b));
+    (void)e;
+}
+
+/* `x = { .arm = v }` / `x = (V){ .arm = v }`: construction of the RHS,
+ * and the transition when the variant has a drop helper. */
+static void vt_assign(VStep* st, CcExpr* e, CcBinary as) {
+    CcLowerer* L = st->L;
+    Walker* w = st->w;
+    CcExpr* lhs = vt_strip(as.a);
+    CcExpr* rhs = vt_strip(as.b);
+    CcType* lt;
+    VInfo* lvi;
+    bool lptr = false;
+    CcCompound cl;
+    bool braced = false;
+    if (!lhs || !rhs) return;
+    if (as.op != CC_OP_ASSIGN) return;
+    /* the tag is read-only */
+    @switch (lhs->k) {
+        case .member(mb): {
+            if (cc_slice_eq_cstr(&mb.name, "kind")) {
+                VInfo* kvi = vt_of_type(st, type_of_expr(w, mb.a), NULL);
+                if (kvi && !st->in_codegen) {
+                    CCString m = @string(`variant tag '.kind' is read-only — the tag changes only through construction or whole-variant assignment ('v = (V){ .arm = ... };')`, L->arena);
+                    lw_error(L, vt_dot_span(lhs), m);
+                    return;
+                }
+            }
+            break;
+        }
+        default: break;
+    }
+    lt = type_of_expr(w, lhs);
+    if (vt_is_lit(rhs)) { vt_resolve_lit(st, rhs, lt); return; }
+    @switch (rhs->k) {
+        case .compound(x): cl = x; braced = true; break;
+        default: break;
+    }
+    if (!braced) return;
+    lvi = vt_of_type(st, lt, &lptr);
+    if (lptr) lvi = NULL;
+    if (!cl.type) {
+        /* `lhs = { ... };` is only a variant transition */
+        if (!lvi) {
+            CCSlice subj = vt_spell(st, lhs);
+            CCSlice f = cc_slice_empty();
+            if (cl.init) {
+                CcInitList* items = &cl.init->items;
+                if (items->len()) {
+                    CcInit* first_item = *items->get_ptr(0);
+                    f = vt_first_field(first_item);
+                }
+            }
+            if (f.len && vt_arm_anywhere(st, f)) {
+                CCString m = @string(`braced assignment 'lhs = { ... };' is only defined for ${"@"}variant types — '${subj}' is not a variant (for a plain struct use a compound literal: 'lhs = (T){ ... };')`, L->arena);
+                lw_error(L, lhs->span, m);
+            } else {
+                CCString m = @string(`braced assignment 'lhs = { ... };' is only defined for ${"@"}variant types — '${subj}' does not resolve to a variant and '.${f}' is not an arm of any declared variant (for a plain struct use a compound literal: 'lhs = (T){ ... };')`, L->arena);
+                lw_error(L, lhs->span, m);
+            }
+            return;
+        }
+        cl.type = lw_named_type(L, lvi->name, rhs->span);
+        rhs->k = { .compound = cl };
+        vt_init(st, cl.init, cl.type);
+        vt_packed_compound(st, rhs, cl.type);
+    } else {
+        VInfo* rvi = vt_of_type(st, cl.type, NULL);
+        if (!rvi || rvi != lvi) return;
+    }
+    if (!lvi->has_dtor) return;
+    if (e == st->stmt_root) {
+        st->root_transition = true;
+        st->tr_lhs = lhs;
+        st->tr_rhs = rhs;
+        st->tr_vi = lvi;
+        st->tr_span = e->span;
+        return;
+    }
+    {
+        /* nested in an expression: the same as a statement expression */
+        CcSpan sp = e->span;
+        uint32_t id = CcLowerer_temp_id(L);
+        CCString nm = @string(`__cc_vt${id}`, L->arena);
+        CCSlice tmp = lw_keep(L, &nm);
+        CcStmt* blk = lw_block(L, sp);
+        CcStmtExpr se;
+        lw_push(blk, vt_synth(st, lw_decl_stmt(L, lw_named_type(L, lvi->name, sp), tmp, rhs, sp)));
+        lw_push(blk, vt_synth(st, lw_expr_stmt(L, lw_call1(L, lvi->drop_fn, cc_expr_unary(CC_OP_ADDR, lw_paren(L, lhs, sp), sp, L->arena), sp), sp)));
+        lw_push(blk, vt_synth(st, lw_expr_stmt(L, lw_assign(L, lhs, lw_ident(L, tmp, sp), sp), sp)));
+        se.block = blk;
+        e->k = { .stmt_expr = se };
+    }
+}
+
+/* `{ V __cc_vtN = rhs; V__cc_drop(&(lhs)); lhs = __cc_vtN; }` */
+static void vt_transition_stmt(VStep* st, CcStmt* s) {
+    CcLowerer* L = st->L;
+    CcSpan sp = st->tr_span;
+    VInfo* vi = st->tr_vi;
+    uint32_t id = CcLowerer_temp_id(L);
+    CCString nm = @string(`__cc_vt${id}`, L->arena);
+    CCSlice tmp = lw_keep(L, &nm);
+    CcStmt* blk = lw_block(L, sp);
+    lw_push(blk, vt_synth(st, lw_decl_stmt(L, lw_named_type(L, vi->name, sp), tmp, st->tr_rhs, sp)));
+    lw_push(blk, vt_synth(st, lw_expr_stmt(L, lw_call1(L, vi->drop_fn, cc_expr_unary(CC_OP_ADDR, lw_paren(L, st->tr_lhs, sp), sp, L->arena), sp), sp)));
+    lw_push(blk, vt_synth(st, lw_expr_stmt(L, lw_assign(L, st->tr_lhs, lw_ident(L, tmp, sp), sp), sp)));
+    s->k = blk->k;
+    st->root_transition = false;
+}
+
+static void vt_expr_b(VStep* st, CcExpr* e) {
+    @switch (e->k) {
+        case .type_scoped(ts): vt_exprs(st, ts.args); return;
+        case .generic_fn(gf): vt_exprs(st, gf.args); return;
+        case .unwrap(uw): vt_expr(st, uw.a); return;
+        case .unwrap_body(ub): vt_unwrap_body(st, e, ub); return;
+        case .unwrap_or(uo): vt_unwrap_or(st, e, uo); return;
+        case .unwrap_destroy(ud): vt_expr(st, ud.a); return;
+        case .template(tp): {
+            CcTplPartList* parts = &tp.parts;
+            size_t n = parts->len();
+            size_t i;
+            for (i = 0; i < n; i++) {
+                CcTplPart* part = parts->get_ptr(i);
+                if (part->slot) vt_expr(st, part->slot);
+            }
+            if (tp.direct) vt_expr(st, tp.direct);
+            if (tp.arena) vt_expr(st, tp.arena);
+            return;
+        }
+        case .scratch(sc): vt_expr(st, sc.bytes); return;
+        case .await_(aw): vt_expr(st, aw.a); return;
+        case .comptime(ce): vt_expr(st, ce.a); return;
+        case .create(cr): vt_exprs(st, cr.args); return;
+        case .emit(em): vt_exprs(st, em.args); return;
+        case .variant_lit(vl): vt_exprs(st, vl.args); return;
+        case .call_mode(cmd): vt_expr(st, cmd.a); return;
+        case .range(rg): vt_expr(st, rg.lo); vt_expr(st, rg.hi); return;
+        default: return;
+    }
+}
+
+/* Children first (a receiver is typed after its own rewrite), then the node.
+ * Statement bodies inside expressions are reached by the statement
+ * callbacks, not here. */
+static void vt_expr(VStep* st, CcExpr* e) {
+    if (!e) return;
+    @switch (e->k) {
+        case .ufcs(uf): vt_expr(st, uf.recv); vt_exprs(st, uf.args); return;
+        case .closure: return;
+        case .paren(pa): vt_expr(st, pa.a); return;
+        case .unary(un): vt_expr(st, un.a); return;
+        case .binary(bi): vt_expr(st, bi.a); vt_expr(st, bi.b); vt_binary(st, e, bi); return;
+        case .assign(as): vt_expr(st, as.a); vt_expr(st, as.b); vt_assign(st, e, as); return;
+        case .ternary(te): vt_expr(st, te.c); vt_expr(st, te.a); vt_expr(st, te.b); return;
+        case .call(cl): vt_expr(st, cl.callee); vt_exprs(st, cl.args); return;
+        case .index(ix2): vt_expr(st, ix2.a); vt_expr(st, ix2.i); return;
+        case .member(mb): vt_expr(st, mb.a); vt_member(st, e, mb, false); return;
+        case .cast(ca): vt_expr(st, ca.a); return;
+        case .compound(cl): {
+            /* the expressions of the list first, then its shape */
+            vt_init_exprs(st, cl.init);
+            if (cl.type && cl.init) {
+                vt_init(st, cl.init, cl.type);
+                vt_packed_compound(st, e, cl.type);
+            }
+            return;
+        }
+        case .stmt_expr: return;
+        case .comma(cm): vt_expr(st, cm.a); vt_expr(st, cm.b); return;
+        default: vt_expr_b(st, e); return;
+    }
+}
+
+/* ---- statements ---------------------------------------------------------------- */
+
+/* Which case arm a label names: `.arm` (rewritten to `V_arm`) or the tag. */
+static CCSlice vt_case_arm(VStep* st, VInfo* vi, CcCase c) {
+    CCSlice nm;
+    CCSlice vname = vi->name;
+    (void)st;
+    if (c.arm.len) return c.arm;
+    if (c.is_default || !c.lo) return cc_slice_empty();
+    if (!expr_ident(vt_strip(c.lo), &nm)) return cc_slice_empty();
+    if (nm.len > vname.len + 1 && memcmp(nm.ptr, vname.ptr, vname.len) == 0 && nm.ptr[vname.len] == '_')
+        return cc_slice_from_buffer((char*)nm.ptr + vname.len + 1, nm.len - vname.len - 1);
+    return cc_slice_empty();
+}
+
+static void vt_set_stmts(CcStmtList* into, CcStmtList v) { *into = v; }
+
+/* The direct case statements of a switch body (the labels the check reads). */
+static CcStmtList* vt_switch_cases(CcStmt* body) {
+    if (!body || body->k.kind != CcStmtK_block) return NULL;
+    return lw_block_stmts(body);
+}
+
+static void vt_switch_exhaustive(VStep* st, CcStmt* s, VInfo* vi, CcStmt* body, bool at_word) {
+    CcLowerer* L = st->L;
+    CcStmtList* stmts = vt_switch_cases(body);
+    size_t n = stmts ? stmts->len() : 0;
+    size_t i;
+    VArmList* av = &vi->arms;
+    size_t na = av->len();
+    size_t k;
+    bool has_default = false;
+    CCString missing = cc_string_new();
+    int nmiss = 0;
+    if (!stmts) return;
+    for (k = 0; k < na; k++) {
+        VArm* arm = *av->get_ptr(k);
+        bool seen = false;
+        for (i = 0; i < n && !seen; i++) {
+            CcStmt* t = *stmts->get_ptr(i);
+            @switch (t->k) {
+                case .case_(c): {
+                    if (c.is_default) has_default = true;
+                    else if (slice_eq(vt_case_arm(st, vi, c), arm->name)) seen = true;
+                    break;
+                }
+                default: break;
+            }
+        }
+        if (!seen) {
+            if (nmiss) missing.push_cstr(", ", L->arena);
+            missing.push_cstr("'.", L->arena);
+            missing.push_slice(arm->name, L->arena);
+            missing.push_cstr("'", L->arena);
+            nmiss++;
+        }
+    }
+    if (nmiss && !has_default) {
+        CCSlice vname = vi->name;
+        CCString m = @string(`switch on variant '${vname}' is not exhaustive: missing arms ${missing} (add the missing cases or a 'default:' to opt out)`, L->arena);
+        if (at_word) vt_error_at_word(L, s->span, m);
+        else lw_error(L, s->span, m);
+    }
+}
+
+/* `case .arm(bind):` and the statements to the next label become one
+ * block that declares the binding from the subject. */
+static void vt_switch_cases_rewrite(VStep* st, VInfo* vi, CcStmt* body, CcExpr* subject, bool subj_ptr) {
+    CcLowerer* L = st->L;
+    CcStmtList* stmts = vt_switch_cases(body);
+    CcStmtList out = vec_new::[CcStmtRef](L->arena);
+    size_t n;
+    size_t i;
+    if (!stmts) return;
+    n = stmts->len();
+    for (i = 0; i < n; i++) {
+        CcStmt* t = *stmts->get_ptr(i);
+        CcCase c;
+        bool is_case = false;
+        @switch (t->k) {
+            case .case_(x): c = x; is_case = true; break;
+            default: break;
+        }
+        if (!is_case || !c.arm.len) { out.push(t); continue; }
+        {
+            VArm* arm = vt_arm(vi, c.arm);
+            CcSpan dot = vt_span1(t->span.first + 1);
+            if (!arm) {
+                vt_no_arm(st, vi, c.arm, dot);
+                out.push(t);
+                continue;
+            }
+            c.lo = vt_tag_ident(st, vi, c.arm, dot);
+            if (c.bind.len) {
+                CcStmt* blk = lw_block(L, t->span);
+                CcMember mb;
+                CCSlice an = c.arm;
+                if (!arm->type) {
+                    CCSlice vname = vi->name;
+                    CCString m = @string(`the arm '${an}' of variant '${vname}' has no payload: nothing to bind`, L->arena);
+                    lw_error(L, dot, m);
+                }
+                mb.a = subject;
+                mb.name = c.arm;
+                mb.arrow = subj_ptr;
+                {
+                    CcType* bt = arm->type;
+                    if (!bt) bt = lw_named_type(L, cstr_slice("int"), dot);
+                    lw_push(blk, vt_synth(st, lw_decl_stmt(L, bt, c.bind, vt_recv_arm(st, vi, mb, t->span), t->span)));
+                }
+                if (c.inner) lw_push(blk, c.inner);
+                /* the rest of the statements of this case, up to the next label */
+                while (i + 1 < n) {
+                    CcStmt* nx = *stmts->get_ptr(i + 1);
+                    if (nx->k.kind == CcStmtK_case_) break;
+                    lw_push(blk, nx);
+                    i++;
+                }
+                c.inner = blk;
+                c.bind = cc_slice_empty();
+            }
+            c.arm = cc_slice_empty();
+            t->k = { .case_ = c };
+            out.push(t);
+        }
+    }
+    vt_set_stmts(stmts, out);
+}
+
+/* `switch (x)` on a variant (checked, at-word) or `switch (x.kind)` (the
+ * interop spelling): the tag of the subject, the labels, the check, and the
+ * protection each case gives its arm. */
+static void vt_switch(VStep* st, CcStmt* s, CcSwitch sw) {
+    CcLowerer* L = st->L;
+    Walker* w = st->w;
+    CcExpr* subj = vt_strip(sw.subject);
+    VInfo* vi = NULL;
+    bool is_ptr = false;
+    CcExpr* recv = NULL;      /* the variant value the cases protect */
+    bool recv_ptr = false;
+    CcMember mb;
+    bool subj_is_kind = false;
+    vt_expr(st, sw.subject);
+    if (!subj) return;
+    @switch (subj->k) {
+        case .member(x): mb = x; subj_is_kind = cc_slice_eq_cstr(&x.name, "kind"); break;
+        default: break;
+    }
+    if (subj_is_kind) {
+        vi = vt_of_type(st, type_of_expr(w, mb.a), NULL);
+        if (vi) { recv = mb.a; recv_ptr = mb.arrow; }
+    }
+    if (!vi) {
+        VInfo* kv = vt_of_kind_type(st, type_of_expr(w, subj));
+        if (kv) vi = kv;      /* a tag-typed variable: checked, no projection */
+    }
+    if (!vi && sw.is_variant) {
+        vi = vt_of_type(st, type_of_expr(w, subj), &is_ptr);
+        if (vi) {
+            recv = subj;
+            recv_ptr = is_ptr;
+            sw.subject = vt_kind_of(st, vi, subj, is_ptr, subj->span);
+            sw.is_variant = false;
+            s->k = { .switch_ = sw };
+        }
+    }
+    if (!vi) {
+        /* `case .arm:` needs a variant subject */
+        CcStmtList* stmts = vt_switch_cases(sw.body);
+        size_t n = stmts ? stmts->len() : 0;
+        size_t i;
+        for (i = 0; i < n; i++) {
+            CcStmt* t = *stmts->get_ptr(i);
+            @switch (t->k) {
+                case .case_(c): {
+                    if (c.arm.len) {
+                        CCSlice an = c.arm;
+                        CCSlice sj = vt_spell(st, subj);
+                        CCString m = @string(`designator case label '.${an}' requires a switch on a ${"@"}variant subject — '${sj}' does not resolve to a variant`, L->arena);
+                        lw_error(L, vt_span1(t->span.first + 1), m);
+                    }
+                    break;
+                }
+                default: break;
+            }
+        }
+        if (sw.is_variant) { sw.is_variant = false; s->k = { .switch_ = sw }; }
+        return;
+    }
+    vt_switch_cases_rewrite(st, vi, sw.body, recv, recv_ptr);
+    vt_switch_exhaustive(st, s, vi, sw.body, true);
+    if (recv) vt_pending(st, sw.body, vt_spell(st, recv), cc_slice_empty(), vi, true);
+}
+
+/* `if (x.kind == .arm)` / `if (x.kind == V_arm)` (either side): the
+ * then-branch protects `x.arm`. */
+static void vt_if_guard(VStep* st, CcIf i) {
+    Walker* w = st->w;
+    CcExpr* c = vt_strip(i.cond);
+    CcBinary bi;
+    bool hit = false;
+    CcExpr* side;
+    CcExpr* other;
+    CcMember mb;
+    bool is_kind = false;
+    VInfo* vi;
+    CCSlice tag;
+    CCSlice arm;
+    if (!c) return;
+    @switch (c->k) {
+        case .binary(x): bi = x; hit = x.op == CC_OP_EQ; break;
+        default: break;
+    }
+    if (!hit) return;
+    side = vt_strip(bi.a);
+    other = vt_strip(bi.b);
+    @switch (side->k) {
+        case .member(x): mb = x; is_kind = cc_slice_eq_cstr(&x.name, "kind"); break;
+        default: break;
+    }
+    if (!is_kind) {
+        CcExpr* t = side;
+        side = other;
+        other = t;
+        @switch (side->k) {
+            case .member(x): mb = x; is_kind = cc_slice_eq_cstr(&x.name, "kind"); break;
+            default: break;
+        }
+    }
+    if (!is_kind) return;
+    vi = vt_of_type(st, type_of_expr(w, mb.a), NULL);
+    if (!vi || !expr_ident(other, &tag)) return;
+    {
+        CCSlice vname = vi->name;
+        if (tag.len <= vname.len + 1 || memcmp(tag.ptr, vname.ptr, vname.len) != 0 || tag.ptr[vname.len] != '_') return;
+        arm = cc_slice_from_buffer((char*)tag.ptr + vname.len + 1, tag.len - vname.len - 1);
+    }
+    if (!vt_arm(vi, arm)) return;
+    vt_pending(st, i.then, vt_spell(st, mb.a), arm, vi, false);
+}
+
+/* A local of a variant with a drop helper is dropped on every exit; one
+ * declared without a value starts with no active arm (a tag past the
+ * arms), so its first assignment drops nothing. */
+static void vt_var_decl(VStep* st, CcDecl* d, CcVarDecl v, bool local) {
+    CcLowerer* L = st->L;
+    Walker* w = st->w;
+    CcType* top = v.type ? unalias_local(w, v.type) : NULL;
+    VInfo* vi;
+    if (v.init) {
+        vt_init_exprs(st, v.init);
+        vt_init(st, v.init, v.type);
+    }
+    if (!local || !top) return;
+    if (top->k.kind == CcTypeK_pointer || top->k.kind == CcTypeK_array) return;
+    vi = vt_of_type(st, v.type, NULL);
+    if (!vi || !vi->has_dtor || v.destroy) return;
+    if (vi->packed && !v.init) {
+        /* The tagged layout starts a value with a tag past the arms, so its
+         * first assignment drops nothing. A packed value has no such
+         * encoding: every bit pattern of the block decodes to an arm, so the
+         * scope-exit drop would run the destructor of whatever the block
+         * held. Say so here rather than there. */
+        CCSlice vname = vi->name;
+        CCSlice nm = v.name;
+        CCString m = @string(`${"@"}variant(packed) '${vname}': '${nm}' has to be declared with an arm ('${vname} ${nm} = { .arm = ... };') — the packed layout has no 'no active arm' encoding, so the drop on scope exit would run on whatever the block held`, L->arena);
+        lw_error(L, d->span, m);
+        return;
+    }
+    if (!v.init) {
+        CcSpan sp = d->span;
+        VArmList* av = &vi->arms;
+        int narms = (int)av->len();
+        CCSlice kn = vi->kind_name;
+        CCString none = @string(`(${kn})${narms}`, L->arena);
+        CcInit* in = cc_arena_alloc(L->arena, sizeof(CcInit), _Alignof(CcInit));
+        memset(in, 0, sizeof(*in));
+        in->span = sp;
+        in->designators = vec_new::[CcDesignator](L->arena);
+        in->items = vec_new::[CcInitRef](L->arena);
+        in->items.push(vt_init_item(st, cstr_slice("kind"), lw_text(L, none, sp), sp));
+        in->is_list = true;
+        v.init = in;
+    }
+    v.destroy = true;
+    d->k = { .var = v };
+}
+
+static void vt_decl(VStep* st, CcDecl* d, bool local) {
+    if (!d) return;
+    @switch (d->k) {
+        case .var(v): vt_var_decl(st, d, v, local); return;
+        default: return;
+    }
+}
+
+static void vt_apply_pending(VStep* st, CcStmt* s) {
+    VPendingList* pv = &st->pending;
+    size_t i = 0;
+    while (i < pv->len()) {
+        VPending* p = *pv->get_ptr(i);
+        if (p->stmt == s) {
+            size_t last = pv->len() - 1;
+            VPending* dropped = NULL;
+            vt_push_frame(st, s, p->subject, p->arm, p->vi, p->by_case);
+            if (i != last) *pv->get_ptr(i) = *pv->get_ptr(last);
+            pv->pop(&dropped);
+            continue;
+        }
+        i++;
+    }
+}
+
+/* A case label inside a checked switch body sets the arm of the body frame. */
+static void vt_case_enter(VStep* st, CcStmt* s, CcCase c) {
+    CcStmtList* ev = &st->entered;
+    VFrameList* fv = &st->frames;
+    size_t ne = ev->len();
+    CcStmt* parent = ne >= 2 ? *ev->get_ptr(ne - 2) : NULL;
+    if (!parent || !fv->len()) return;
+    {
+        VFrame* top = *fv->get_ptr(fv->len() - 1);
+        if (top->by_case && top->owner == parent) top->arm = vt_case_arm(st, top->vi, c);
+    }
+    (void)s;
+}
+
+static void vt_stmt_enter(VStep* st, CcStmt* s) {
+    st->entered.push(s);
+    vt_apply_pending(st, s);
+    st->stmt_root = NULL;
+    st->root_transition = false;
+    if (vt_is_synth(st, s)) return;
+    @switch (s->k) {
+        case .expr(es): {
+            st->stmt_root = es.e;
+            vt_expr(st, es.e);
+            if (st->root_transition) vt_transition_stmt(st, s);
+            st->stmt_root = NULL;
+            return;
+        }
+        case .decl(dd): vt_decl(st, dd.d, true); return;
+        case .if_(i): vt_expr(st, i.cond); vt_if_guard(st, i); return;
+        case .while_(wh): vt_expr(st, wh.cond); return;
+        case .do_(dw): vt_expr(st, dw.cond); return;
+        case .for_(f): {
+            vt_decl(st, f.init_decl, true);
+            vt_expr(st, f.init_expr);
+            vt_expr(st, f.cond);
+            vt_expr(st, f.step);
+            return;
+        }
+        case .switch_(sw): vt_switch(st, s, sw); return;
+        case .case_(c): {
+            vt_case_enter(st, s, c);
+            if (!c.arm.len) { vt_expr(st, c.lo); vt_expr(st, c.hi); }
+            return;
+        }
+        case .return_(r): vt_expr(st, r.value); return;
+        case .unwrap(us): vt_expr(st, us.e); return;
+        case .for_in(fi): vt_exprs(st, fi.iterables); return;
+        case .with(wi): vt_expr(st, wi.value); return;
+        default: return;
+    }
+}
+
+static void vt_stmt_leave(VStep* st, CcStmt* s) {
+    VFrameList* fv = &st->frames;
+    CcStmtList* ev = &st->entered;
+    while (fv->len()) {
+        VFrame* top = *fv->get_ptr(fv->len() - 1);
+        VFrame* dropped = NULL;
+        if (top->owner != s) break;
+        fv->pop(&dropped);
+    }
+    if (ev->len()) { CcStmt* dropped = NULL; ev->pop(&dropped); }
+}
+
+static void vt_on_stmt(Walker* w, CcStmt* s, bool enter) {
+    VStep* st = (VStep*)w->env;
+    if (enter) vt_stmt_enter(st, s);
+    else vt_stmt_leave(st, s);
+}
+
+static void vt_on_decl(Walker* w, CcDecl* d) {
+    VStep* st = (VStep*)w->env;
+    st->in_codegen = false;
+    @switch (d->k) {
+        case .func(fd): st->in_codegen = vt_is_codegen(fd.name); break;
+        default: break;
+    }
+    vt_decl(st, d, false);
+}
+
+/* The packed sites the walk left standing.
+ *
+ * A tag read becomes the decode call, a braced construction becomes the
+ * setter call, and the compound literal that carried one becomes that call
+ * outright. Last, each packed type stops advertising the tagged view the walk
+ * borrowed to read `.kind` and `.u.arm` through. */
+static void vt_apply_packed(VStep* st) {
+    CcLowerer* L = st->L;
+    CCArena a = L->arena;
+    VKindSiteList* kv = &st->kinds;
+    VCtorList* cv = &st->ctors;
+    CcExprList* ev = &st->ctor_exprs;
+    VInfoList* vv = &st->variants;
+    size_t n;
+    size_t i;
+    n = kv->len();
+    for (i = 0; i < n; i++) {
+        VKindSite* k = *kv->get_ptr(i);
+        CcExpr* call = vt_kind_of(st, k->vi, k->recv, k->arrow, k->e->span);
+        k->e->k = call->k;
+    }
+    n = cv->len();
+    for (i = 0; i < n; i++) {
+        VCtor* c = *cv->get_ptr(i);
+        CCSlice fn = vt_pack_arm_fn(st, c->vi, cstr_slice("set"), c->arm->name);
+        CcExpr* call;
+        if (c->payload) call = lw_call1(L, fn, c->payload, c->span);
+        else call = lw_call0(L, fn, c->span);
+        c->in->is_list = false;
+        c->in->items = vec_new::[CcInitRef](a);
+        c->in->expr = call;
+    }
+    n = ev->len();
+    for (i = 0; i < n; i++) {
+        CcExpr* e = *ev->get_ptr(i);
+        CcCompound cl;
+        bool hit = false;
+        @switch (e->k) {
+            case .compound(x): cl = x; hit = true; break;
+            default: break;
+        }
+        if (!hit || !cl.init || cl.init->is_list || !cl.init->expr) continue;
+        e->k = cl.init->expr->k;
+    }
+    n = vv->len();
+    for (i = 0; i < n; i++) {
+        VInfo* vi = *vv->get_ptr(i);
+        if (vi->packed && vi->packed_ok) vt_seal_packed(st, vi);
+    }
+}
+
+/* A `.arm` nothing resolved: no partner named the variant. */
+static bool vt_leftover_visit(CcExpr* e, void* env) {
+    VStep* st = (VStep*)env;
+    CcLowerer* L = st->L;
+    @switch (e->k) {
+        case .variant_lit(vl): {
+            CCSlice an = vl.arm;
+            CCString m = @string(`bare designator '.${an}' cannot be resolved from context (no variant type governs this comparison/assignment)`, L->arena);
+            vt_error_note(L, e->span, m, cstr_slice("compare against a variant tag"));
+            break;
+        }
+        default: break;
+    }
+    return true;
+}
+
+void CcLowerer_variants(CcLowerer* L) {
+    Walker w;
+    VStep st;
+    CcVisitor v;
+    memset(&st, 0, sizeof(st));
+    st.L = L;
+    st.w = &w;
+    st.variants = vec_new::[VInfoRef](L->arena);
+    st.frames = vec_new::[VFrameRef](L->arena);
+    st.pending = vec_new::[VPendingRef](L->arena);
+    st.entered = vec_new::[CcStmtRef](L->arena);
+    st.synth = vec_new::[CcStmtRef](L->arena);
+    st.kinds = vec_new::[VKindSiteRef](L->arena);
+    st.ctors = vec_new::[VCtorRef](L->arena);
+    st.ctor_exprs = vec_new::[CcExprRef](L->arena);
+    memset(&w, 0, sizeof(w));
+    w.arena = L->arena;
+    w.ix = L->ix;
+    w.unit = L->unit;
+    w.on_stmt = vt_on_stmt;
+    w.on_decl = vt_on_decl;
+    w.env = &st;
+    vt_collect_schema(&st);
+    vt_collect(&st);
+    if (!st.variants.len()) return;
+    tw_unit(&w);
+    vt_apply_packed(&st);
+    memset(&v, 0, sizeof(v));
+    v.expr = vt_leftover_visit;
+    v.env = &st;
+    CcUnit_walk(L->unit, v);
+}
+
+#endif

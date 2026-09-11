@@ -1,0 +1,122 @@
+/* Lowering: a unit with Concurrent-C nodes → the same unit with C nodes.
+ *
+ * One step per construct family, each rewriting nodes in place. Every node
+ * a step creates copies the span of the node it replaces, so the printer
+ * pins the generated lines to the user's line. Steps consult the index for
+ * every fact about a name; none carries a table of names. The exact C
+ * each construct produces is written down in LOWERING.md.
+ *
+ * A construct a step cannot lower yet is a diagnostic at its position,
+ * never a node left for the host compiler to trip over silently. Steps
+ * after an erroring step still run so a file reports every error it has;
+ * the driver refuses to print C when the sink has errors. */
+/* The unit of module `lower` starts here: what every member relies on
+ * from the standard library opens the unit, ahead of the guard, so it
+ * precedes the declarations the lowering hoists after the opening
+ * includes. */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/vec.cch>
+#include <ccc/std/map.cch>
+#ifndef CC_LOWER_LOWER_CCH
+#define CC_LOWER_LOWER_CCH
+#include "index.cch"
+
+typedef struct CcLowerOpts {
+    bool line_directives;       /* #pragma(@linenumbers) */
+    bool strict_unhandled;      /* a bare call to a Result function is an error (CC_STRICT_RESULT_UNWRAP, default on) */
+    CCSlice repo_root;          /* quoted `.cch` includes become `<rel.h>` relative to it; empty: left as written */
+    CCSlice schema_variants;    /* tagged unions a `@grammar(schema)` declared: one line each, name then arms */
+    CCSlice instantiate;        /* monomorphs `@comptime { cc_instantiate_*(...) }` asked for: one line each,
+                                 * the family then its type spellings */
+    CCSlice factories;          /* families a `@comptime { cc_generic_register(...) }` bound: one line each,
+                                 * the family, its handler, then `extend` for one that appends */
+} CcLowerOpts;
+
+typedef struct CcLowerer {
+    CCArena arena;              /* the unit's arena: generated nodes live with the unit */
+    CcDiags* ds;
+    CcIndex* ix;
+    CcUnit* unit;
+    CcLowerOpts opts;
+    uint32_t next_temp;
+    bool unwraps_used;          /* a scaffold was emitted: the unit needs <ccc/cc_result.h> */
+    CcType* ret_slice;          /* the return type of the function the slice step is in */
+    Vec::[CCSlice] headers;     /* quoted local `.cch` headers this unit includes, resolved; lifetime: the arena */
+    uint32_t depth;             /* 0 for the unit; one deeper for each generic expansion lowered inside it */
+    bool header_mode;           /* lowering a `.cch` to a `.h`: the product is included, not compiled alone */
+    bool fragment;              /* a generic expansion, lowered to be spliced into a unit */
+    Vec::[CcTypeInfoRef] specs; /* the Result specs THIS unit spells: the index's list is every one
+                                 * every unit lowered in this process has named, and a unit that
+                                 * emitted all of them would declare specs above the declarations
+                                 * that say what their types are */
+    Vec::[CCSlice] sinks;       /* `.ufcs_sink` callees this unit emitted a call to; the
+                                 * destination pass picks a per-destination variant of one */
+    Vec::[CcExprRef] res_dests; /* unwrap targets whose own type is the Result: they take it
+                                 * whole. Typed under the walk, before the step rewrites */
+    /* Every short-form `cc_ok(...)` / `cc_err(...)` that a declaration or an
+     * assignment gives a destination, and at the same index the Result that
+     * destination is. Without it the constructor makes the ENCLOSING
+     * function's Result, which the host then refuses to assign. Typed under
+     * the walk, for the same reason `res_dests` is. */
+    CcExprList ctor_sites;
+    Vec::[CcTypeInfoRef] ctor_specs;
+    /* Every call a `x.m(...)` became, and at the same index the `m` the site
+     * wrote. The callee UFCS resolves to can be an overload name
+     * (`cc_nursery_spawn_closure0`) that the program never mentions, so a
+     * message about the call quotes the member instead. */
+    CcExprList ufcs_sites;
+    CcNameList ufcs_meths;
+    CcDeclList dest_bodies;     /* the thunks the dest forms' bodies became. A dest body is a
+                                 * fiber: the frame that wrote it went on, so the handler that
+                                 * frame carries is not reachable from it, and a `!>` inside one
+                                 * has to resolve within the body */
+    bool factories_ready;       /* the compiled factories have been bound to their handlers */
+    bool factories_ok;          /* and the binding worked */
+} CcLowerer;
+
+CcLowerer cc_lowerer_new(CcUnit* u, CcIndex* ix, CcLowerOpts opts, CcDiags* ds);
+
+/* L.lower_unit(): the whole pipeline, in order. Each step is callable alone. */
+void CcLowerer_lower_unit(CcLowerer* L);
+void CcLowerer_results(CcLowerer* L);      /* Result types, cc_ok/cc_err, !> ?> forms, @errhandler, @err */
+void CcLowerer_cleanup(CcLowerer* L);      /* @defer, @cancel_defer, @destroy: scope-exit runs and soft returns */
+void CcLowerer_includes(CcLowerer* L);
+void CcLowerer_own(CcLowerer* L);          /* arena borrows, channel-send stability, unique-slice moves */
+void CcLowerer_generics(CcLowerer* L);     /* `Vec::[T]` -> `CCVec_T` and the factory expansion spliced once */
+void CcLowerer_slices(CcLowerer* L);       /* `T[:]` values: string literals, braced lists, `@slice(...)` */
+void CcLowerer_slice_args(CcLowerer* L);   /* arguments a slice parameter accepts, after UFCS built the call */
+void CcLowerer_strings(CcLowerer* L);      /* `@string(`...`)`: the pushes that build it */
+void CcLowerer_asargs(CcLowerer* L);       /* an argument read through the faces of an `as:` path */
+void CcLowerer_strswitch(CcLowerer* L);    /* `case "lit":` on a slice subject: an ordinal and an integer switch */
+void CcLowerer_closures(CcLowerer* L);     /* `(p) => body`: the environment, the entry, the make */
+void CcLowerer_create(CcLowerer* L);       /* `@create(...)`: the type's own .create hook */
+void CcLowerer_forin(CcLowerer* L);        /* `@for (x in xs)`: the extent the type declares */
+void CcLowerer_deadline(CcLowerer* L);  /* `@with_deadline(d) { }`: the scope pushed for the body */
+static void CcLowerer_parallel(CcLowerer* L);  /* `@parallel { arms }`: a thunk per arm, spawned and joined in the block */
+void CcLowerer_async(CcLowerer* L);     /* `@async Ret f(...)`: the frame, the body, the poll, the factory; `@await e` */
+void CcLowerer_chan(CcLowerer* L);         /* channel endpoints, the pair that creates them, typed sends */
+void CcLowerer_variants(CcLowerer* L);     /* variant declarations, construction, checked switch, protected projection */
+void CcLowerer_ufcs(CcLowerer* L);         /* `x.m(args)` -> the resolved `callee(&x, args)`; `Type.fn(args)` -> `Type_fn(args)` */     /* `#include "x.cch"` -> `#include <rel/x.h>`, the header recorded for lowering */
+
+/* Helpers shared by the steps. */
+uint32_t CcLowerer_temp_id(CcLowerer* L);                          /* the next N */
+
+/* The members of module `lower` (spec 1.7). A tool includes this face and
+ * links the one object the members lower into; what a tool calls is the
+ * exported surface the faces above declare. */
+#include "lex_impl.cch"
+#include "diag_impl.cch"
+#include "ast_impl.cch"
+#include "parse_state.cch"
+#include "parse_fwd.cch"
+#include "parse_exprs.cch"
+#include "parse_stmts.cch"
+#include "parse_types.cch"
+#include "parse_decls.cch"
+#include "parse_walk.cch"
+#include "print_impl.cch"
+#include "index_impl.cch"
+#include "typing.cch"
+#include "lower_impl.cch"
+
+#endif

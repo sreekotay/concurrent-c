@@ -52,9 +52,9 @@ static int write_make_shcc(const char* path, const char* tip) {
 
 int main(void) {
     char out[4096];
-    char cmd[1024];
+    char cmd[2048];
     char root[] = "/tmp/cc_shcc_stem_XXXXXX";
-    char dira[512], dirb[512], patha[512], pathb[512];
+    char dira[512], dirb[512], patha[1024], pathb[1024];
     int ec = 0;
     int failed = 0;
 

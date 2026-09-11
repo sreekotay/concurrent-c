@@ -1,0 +1,59 @@
+/* `#pragma(@linenumbers) off` omits every `#line` from the emitted C,
+ * the one the driver prepends to a comptime stage included; with the
+ * pragma absent, every `#line` names the unit the user wrote, never
+ * the stage under the build cache (spec 1.8). */
+CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
+
+CCCommand off = cc_command(arena, @slice("./cc/bin/ccc"));
+off.arg("--emit-c-only");
+off.arg("--no-cache");
+off.arg("tests/linenumbers_off_fixture.ccs");
+off.arg("-o");
+off.arg("out/linenumbers_off_fixture.c");
+off.inherit_stdio();
+int rc = off.status() !>;
+if (rc != 0) {
+    "emit failed: linenumbers off".println();
+    return 1;
+}
+CCCommand any_line = cc_command(arena, @slice("grep"));
+any_line.arg("-q");
+any_line.arg("^#line");
+any_line.arg("out/linenumbers_off_fixture.c");
+rc = any_line.status() !>;
+if (rc == 0) {
+    "a #line survived #pragma(@linenumbers) off".println();
+    return 1;
+}
+
+CCCommand on = cc_command(arena, @slice("./cc/bin/ccc"));
+on.arg("--emit-c-only");
+on.arg("--no-cache");
+on.arg("tests/linenumbers_on_fixture.ccs");
+on.arg("-o");
+on.arg("out/linenumbers_on_fixture.c");
+on.inherit_stdio();
+rc = on.status() !>;
+if (rc != 0) {
+    "emit failed: linenumbers on".println();
+    return 1;
+}
+CCCommand user_line = cc_command(arena, @slice("grep"));
+user_line.arg("-q");
+user_line.arg("^#line [0-9]* \"[^\"]*linenumbers_on_fixture.ccs\"");
+user_line.arg("out/linenumbers_on_fixture.c");
+rc = user_line.status() !>;
+if (rc != 0) {
+    "no #line names the unit".println();
+    return 1;
+}
+CCCommand stage_line = cc_command(arena, @slice("grep"));
+stage_line.arg("-q");
+stage_line.arg("^#line.*cc-build");
+stage_line.arg("out/linenumbers_on_fixture.c");
+rc = stage_line.status() !>;
+if (rc == 0) {
+    "a #line names the comptime stage instead of the unit".println();
+    return 1;
+}
+return 0;

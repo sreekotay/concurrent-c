@@ -354,14 +354,27 @@ static int cc__match(const char* s, size_t n, size_t i, const char* lit) {
     return i + m <= n && memcmp(s + i, lit, m) == 0;
 }
 
+static int cc__seterr_at(char* err, size_t err_cap, int* err_line,
+                         const char* src, size_t at, const char* msg) {
+    if (err_line) {
+        size_t k;
+        int line = 1;
+        for (k = 0; k < at; k++)
+            if (src[k] == '\n') line++;
+        *err_line = line;
+    }
+    return cc__seterr(err, err_cap, msg);
+}
+
 int cc_file_start_pragmas(const char* src, size_t n,
                           int* prelude_off, int* linenumbers_off,
-                          int* per_tu,
-                          char* err, size_t err_cap) {
+                          char* module, size_t module_cap,
+                          char* err, size_t err_cap, int* err_line) {
     size_t i;
     if (prelude_off) *prelude_off = 0;
     if (linenumbers_off) *linenumbers_off = 0;
-    if (per_tu) *per_tu = 0;
+    if (module && module_cap) module[0] = 0;
+    if (err_line) *err_line = 0;
     if (!src) return 0;
     i = cc_unit_header_skip(src, n);
     i = cc__skip_ws_comments(src, n, i);
@@ -379,41 +392,118 @@ int cc_file_start_pragmas(const char* src, size_t n,
         } else if (rest >= 14 && memcmp(q, "(@linenumbers)", 14) == 0) {
             which = 2;
             q += 14;
-        } else if (rest >= 9 && memcmp(q, "(@per_tu)", 9) == 0) {
+        } else if (rest >= 9 && memcmp(q, "(@module)", 9) == 0) {
             which = 3;
             q += 9;
+        } else if (rest >= 9 && memcmp(q, "(@per_tu)", 9) == 0) {
+            /* A face with bodies is a module (spec 1.7); there is no
+               private-copy form to ask for. */
+            return cc__seterr_at(err, err_cap, err_line, src, i,
+                                 "`#pragma(@per_tu)` is not a file-start pragma: "
+                                 "a face with bodies is a module (spec 1.7); "
+                                 "remove the line");
+        } else if (rest >= 11 && memcmp(q, "(@parallel)", 11) == 0) {
+            /* Steers the lowering, not this scan: recognised here so a
+               `#pragma(@parallel) off` at the top of a file does not end
+               the scan and take the pragmas below it with it, and so a
+               misspelled operand is named rather than ignored. */
+            which = 4;
+            q += 11;
         } else {
             break;
         }
         while (*q == ' ' || *q == '\t') q++;
-        if (which == 3) {
-            if (*q && *q != '\n' && *q != '\r' &&
-                !(*q == '/' && q[1] == '/')) {
-                return cc__seterr(err, err_cap,
-                                  "#pragma(@per_tu) takes no operand");
+        if (which == 4) {
+            size_t olen = 0;
+            if (q[0] == 'o' && q[1] == 'f' && q[2] == 'f') olen = 3;
+            else if (q[0] == 'o' && q[1] == 'n') olen = 2;
+            if (olen == 0) {
+                return cc__seterr_at(err, err_cap, err_line, src, i,
+                                     "#pragma(@parallel) takes 'off' or 'on'");
             }
-            if (per_tu) *per_tu = 1;
-        } else {
-            if (!(q[0] == 'o' && q[1] == 'f' && q[2] == 'f')) {
-                return cc__seterr(err, err_cap,
-                                  which == 1
-                                      ? "#pragma(@prelude) takes 'off'"
-                                      : "#pragma(@linenumbers) takes 'off'");
-            }
-            q += 3;
+            q += olen;
             if (*q && *q != '\n' && *q != '\r' && *q != ' ' && *q != '\t') {
-                return cc__seterr(err, err_cap,
-                                  which == 1
-                                      ? "#pragma(@prelude) takes 'off'"
-                                      : "#pragma(@linenumbers) takes 'off'");
+                return cc__seterr_at(err, err_cap, err_line, src, i,
+                                     "#pragma(@parallel) takes 'off' or 'on'");
             }
             while (*q == ' ' || *q == '\t') q++;
             if (*q && *q != '\n' && *q != '\r' &&
                 !(*q == '/' && q[1] == '/')) {
-                return cc__seterr(err, err_cap,
-                                  which == 1
-                                      ? "#pragma(@prelude) takes 'off'"
-                                      : "#pragma(@linenumbers) takes 'off'");
+                return cc__seterr_at(err, err_cap, err_line, src, i,
+                                     "#pragma(@parallel) takes 'off' or 'on'");
+            }
+        } else if (which == 3) {
+            /* `#pragma(@module) "name"`: the operand is one quoted name,
+               spelled as an identifier (spec 1.8). */
+            const char* s;
+            size_t len;
+            if (*q != '"') {
+                return cc__seterr_at(err, err_cap, err_line, src, i,
+                                     "#pragma(@module) takes a quoted module name");
+            }
+            q++;
+            s = q;
+            while (*q && *q != '"' && *q != '\n' && *q != '\r') q++;
+            len = (size_t)(q - s);
+            if (*q != '"' || len == 0) {
+                return cc__seterr_at(err, err_cap, err_line, src, i,
+                                     "#pragma(@module) takes a quoted module name");
+            }
+            {
+                size_t k;
+                for (k = 0; k < len; k++) {
+                    char c = s[k];
+                    int ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                             (c >= '0' && c <= '9') || c == '_';
+                    if (!ok || (k == 0 && c >= '0' && c <= '9')) {
+                        return cc__seterr_at(err, err_cap, err_line, src, i,
+                                             "#pragma(@module): the module name "
+                                             "is an identifier");
+                    }
+                }
+            }
+            q++;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q && *q != '\n' && *q != '\r' &&
+                !(*q == '/' && q[1] == '/')) {
+                return cc__seterr_at(err, err_cap, err_line, src, i,
+                                     "#pragma(@module) takes a quoted module name");
+            }
+            if (module && module_cap) {
+                if (module[0]) {
+                    return cc__seterr_at(err, err_cap, err_line, src, i,
+                                         "#pragma(@module) given twice; a unit "
+                                         "names at most one module");
+                }
+                if (len + 1 > module_cap) {
+                    return cc__seterr_at(err, err_cap, err_line, src, i,
+                                         "#pragma(@module): the module name is "
+                                         "too long");
+                }
+                memcpy(module, s, len);
+                module[len] = 0;
+            }
+        } else {
+            if (!(q[0] == 'o' && q[1] == 'f' && q[2] == 'f')) {
+                return cc__seterr_at(err, err_cap, err_line, src, i,
+                                     which == 1
+                                         ? "#pragma(@prelude) takes 'off'"
+                                         : "#pragma(@linenumbers) takes 'off'");
+            }
+            q += 3;
+            if (*q && *q != '\n' && *q != '\r' && *q != ' ' && *q != '\t') {
+                return cc__seterr_at(err, err_cap, err_line, src, i,
+                                     which == 1
+                                         ? "#pragma(@prelude) takes 'off'"
+                                         : "#pragma(@linenumbers) takes 'off'");
+            }
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q && *q != '\n' && *q != '\r' &&
+                !(*q == '/' && q[1] == '/')) {
+                return cc__seterr_at(err, err_cap, err_line, src, i,
+                                     which == 1
+                                         ? "#pragma(@prelude) takes 'off'"
+                                         : "#pragma(@linenumbers) takes 'off'");
             }
             if (which == 1 && prelude_off) *prelude_off = 1;
             if (which == 2 && linenumbers_off) *linenumbers_off = 1;

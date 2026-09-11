@@ -1,0 +1,159 @@
+/* The compile-time seam.
+ *
+ * Running compile-time code needs a C compiler, so the executor stays what
+ * it is: a C library the lowerer links (`comptime/executor.c`, on libtcc).
+ * What this file is for is the shape of the call. The lowerer asks about
+ * one construct at a time, naming it by a span of its own tape — not by
+ * handing the engine the whole translation unit as text and reading back
+ * whatever came out.
+ *
+ * Only the entry points the lowerer calls are declared here. They are C,
+ * so they are declared as C: no UFCS, no Result. A failure is a return
+ * code and a message the caller turns into a diagnostic at the span. */
+#ifndef CC_LOWER_COMPTIME_CCH
+#define CC_LOWER_COMPTIME_CCH
+
+#include "diag.cch"
+
+/* Where a construct is, for the engine's own diagnostics and for the
+ * anchors an `@emit` splices at. `site_pos` is a byte offset into the
+ * file; `site_line` is 1-based, 0 when unknown. */
+typedef struct CCComptimeExecOpts {
+    const char* input_path;
+    size_t      site_pos;
+    int         site_line;
+    const char* type_prelude;
+} CCComptimeExecOpts;
+
+/* The `@comptime` function definitions in `src` become callable by the
+ * evaluations below. `_scan` clears what was registered before — one
+ * unit's definitions are not another's — and returns how many it found,
+ * or -1 with `_scan_error()` set. Zero is not a failure: a unit may have
+ * none. */
+extern int  cc_comptime_fn_registry_scan(const char* src, size_t len);
+extern const char* cc_comptime_fn_registry_scan_error(void);
+
+/* Evaluate `expr` and project its value to the text of a C constant
+ * expression — the literal that stands in place of `@comptime(expr)`.
+ * Integers, floating point, bool and strings project; an aggregate or a
+ * pointer into compile-time memory does not.
+ *
+ *    0  `*out_lit` is the literal, in `arena`, NUL-terminated
+ *   -2  it ran, and its value is not a literal
+ *   -1  it did not run: `err_buf` says why */
+extern int cc_comptime_exec_eval_literal(const char* expr,
+                                         const CCComptimeExecOpts* opts,
+                                         char** out_lit, size_t* out_len,
+                                         char* err_buf, size_t err_sz,
+                                         CCArena arena);
+
+/* ---- `.ufcs` hooks that compute their callee ---------------------------
+ *
+ * A `@typehooks .ufcs` handler is a function of the call site: the receiver
+ * type, the method, the mode, and the arguments with their types. Reading
+ * its body as a table of `method -> callee` rules covers a handler that is
+ * one, and says nothing about one that decides from what it was passed —
+ * `toy.mix(4)` and `toy.mix("abc")` are different callees, and no reading
+ * of the body knows which without the site.
+ *
+ * So a handler the index could not read as rules is run. It is compiled
+ * out of the source that declared it, once, and called per site. */
+#define CC_COMPTIME_TYPE_HOOK_UFCS 1
+
+/* A `.create` hook registered with `cc_type_create_hook` is the same shape
+ * of question about a constructor site: `@create(4)` and `@create("hello")`
+ * are different callees, and the arguments with their types are what says
+ * which. It is compiled and called the same way, with the type name where
+ * the receiver type and the method stand for `.ufcs`. */
+#define CC_COMPTIME_TYPE_HOOK_CREATE 0
+
+/* The `typedef` / `struct` declarations of a source, as a prelude: what a
+ * handler's own translation unit needs to name the types it is about. */
+extern char* cc_ct_extract_type_decls_prelude(const char* src, size_t n);
+
+extern int cc_comptime_compile_type_hook_callable(const char* registration_input_path,
+                                                  const char* logical_file,
+                                                  const char* original_src,
+                                                  size_t original_len,
+                                                  const char* expr_src,
+                                                  size_t expr_len,
+                                                  int kind,
+                                                  void** out_owner,
+                                                  const void** out_fn_ptr);
+
+/* What the handler returns is the callee, with two answers that are not a
+ * name: `CC_UFCS_PASS_TAG` ("not mine, keep looking") and the empty slice
+ * ("mine, and refused"). A `cc_ufcs_emit_value` return is tagged so the
+ * receiver goes by value. */
+typedef CCSlice (*CcUfcsHookFn)(CCSlice recv_type, CCSlice method, CCSlice mode,
+                                CCSliceArray argv, CCSliceArray arg_types, CCArena arena);
+
+/* What a computed `.create` hook returns is the constructor, or the empty
+ * slice: no overload for what this site passed. */
+typedef CCSlice (*CcCreateHookFn)(CCSlice type_name, CCSliceArray argv,
+                                  CCSliceArray arg_types, CCArena arena);
+
+/* ---- compiled generic factories ----------------------------------------
+ *
+ * `CC_GENERIC_FACTORY(Name, K) { ... }` is a `@comptime` function that
+ * WRITES the C for one instance: `js_module::[Counter]` is whatever
+ * `__cc_gfac_js_module` returns when it is run with "Counter". A family
+ * whose fragment is a template can be filled by reading the template; one
+ * whose fragment computes anything cannot, and the only honest way to know
+ * what it produces is to run it.
+ *
+ * The sugar lowers to a registration and a `@comptime` function, so the
+ * lowerer replays the same three steps the driver does: rewrite the sugar
+ * to get the handler's definition, scan it into the function registry,
+ * bind the family to the handler, then produce per instance. */
+/* The passes a factory's own source has to go through before the engine
+ * can compile it: the sugar becomes a registration and a `@comptime`
+ * function, and the `@emit` templates in its body become the calls that
+ * build text. A body that still spells `@emit(`...`)` is not C. */
+enum {
+    CC_FAC_PREPARE = 8u | 64u | 32u | 1u | 2u | 4u | 16u   /* factory sugar, templates, comptime if, grammar, module export, type scoped, static map */
+};
+extern int cc_comptime_prepare_source_ex(char** inout_buf, size_t* inout_len,
+                                         const char* input_path, unsigned passes);
+extern void cc_emit_plan_clear_generic_factory_registrations(void);
+extern void cc_emit_plan_register_generic_factory(const char* name,
+                                                  const char* handler_name,
+                                                  size_t site_pos);
+/* The same, for a handler that appends to a family rather than defining it
+ * (`CC_GENERIC_FACTORY_EXTEND`). It runs after the base, in the order the
+ * registrations arrive. */
+extern void cc_emit_plan_register_generic_factory_extend(const char* name,
+                                                         const char* handler_name,
+                                                         size_t site_pos);
+/* The sugar's registration is a `cc_generic_register("Name", handler)`
+ * call inside a `@comptime { }` block, and it is COLLECTED rather than run
+ * — the collector reads the two names out of the call. Running the
+ * rewritten factory text through it is what binds each family to its
+ * handler, an extension included, whose handler symbol carries a sequence
+ * number only the rewrite knows. */
+extern void cc_emit_plan_collect_comptime_emits(const char* src, size_t len);
+extern void cc_emit_plan_clear_comptime_fragments(void);
+
+/* 0 ok; 1 the factory did not compile; 2 it ran and produced nothing.
+ *
+ * `orig_args` is `const char[8][128]` where it is defined. It is declared
+ * here as the pointer that is — an array of arrays decays to a pointer to
+ * its first row, and the row width is a fixed part of the contract
+ * (`CC_FAC_ARG_CAP`), so the caller lays the rows out itself rather than
+ * spelling a type this parser does not read. */
+extern int cc_emit_plan_produce_generic_def(const char* gname, const char* mangled,
+                                            const char* orig_args, int nargs,
+                                            const char* reflect_src, size_t reflect_len,
+                                            const char* input_path,
+                                            CCArena out_ar, char** out_def,
+                                            char* err, size_t err_cap);
+
+/* The row width `orig_args` is laid out at. */
+enum { CC_FAC_MAX_ARGS = 8, CC_FAC_ARG_CAP = 128 };
+
+extern const char* cc_emit_plan_lookup_generic_factory_handler(const char* name);
+
+/* Take-and-clear: did a factory body raise `cc_emit_error`? */
+extern int cc_emit_plan_take_exec_error(void);
+
+#endif

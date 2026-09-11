@@ -81,7 +81,7 @@ int main(void) {
     CCChanRx reply_rx_raw = reply_rx;
     n.spawn(() => [req_tx_raw, reply_rx_raw] { client_loop(req_tx_raw, reply_rx_raw); }) !>;
 
-    cc_nursery_wait(n);
+    (void)cc_nursery_wait(n);
     cc_channel_free(rch);
     cc_channel_free(reply_ch);
     cc_nursery_free(n);

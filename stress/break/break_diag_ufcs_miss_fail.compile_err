@@ -1,0 +1,4 @@
+# an unknown UFCS method is a lowerer diagnostic that names the method and the receiver type, on the method's column
+break_diag_ufcs_miss_fail.ccs:7:15
+nosuch
+CCString

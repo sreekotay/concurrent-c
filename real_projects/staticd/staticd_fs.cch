@@ -1,3 +1,4 @@
+#pragma(@module) "staticd"
 /*
  * Jail, fd cache, directory listing. Policy (403 vs list, encode) stays
  * in staticd.ccs. Include after staticd_block.cch (tick / cull).
@@ -9,7 +10,6 @@
  * Fd cache: pathname revalidate ≤1s (absolute). Hold dups the fd so a
  * swap can close the slot fd while in-flight holds finish.
  */
-#pragma(@per_tu)
 #ifndef STATICD_FS_CCH
 #define STATICD_FS_CCH
 

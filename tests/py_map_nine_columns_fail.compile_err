@@ -1,0 +1,1 @@
+py_map_nine_columns_fail.ccs:19:19: error: a row batch takes at most 8 columns; this one has 9

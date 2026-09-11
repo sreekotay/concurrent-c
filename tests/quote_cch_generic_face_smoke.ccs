@@ -1,4 +1,6 @@
-/* Header type-position Name::[args]: proto, params, vec_from, user Pair. */
+/* Header type-position Name::[args]: proto, params, vec_from, user Pair.
+ * The face is a member of this program module and splices in. */
+#pragma(@module) "generic_face"
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 #include "quote_cch_generic_face.cch"

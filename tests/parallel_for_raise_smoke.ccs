@@ -1,0 +1,173 @@
+/*
+ * A bare `!>` in the body of a bisected `@parallel for` raises into the
+ * frame's handler after the walk joins. A half is a function of its own,
+ * so the body opens under a handler that records the error in the exit
+ * cell and ends the half; the site raises the record once every half is
+ * done. The handler the function carries is emitted once. A walk nested
+ * in a walk raises through both joins.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+
+static int !>(CCError) step(int i) {
+    if (i == 5)
+        return cc_err(CC_ERR_NOT_FOUND, "five");
+    return cc_ok(i);
+}
+
+static int !>(CCError) step0(int i) {
+    if (i == 0)
+        return cc_err(CC_ERR_NOT_FOUND, "zero");
+    return cc_ok(i);
+}
+
+static int !>(CCError) fine(void) { return cc_ok(1); }
+
+/* The failing index sits in a half the runtime may have spawned. */
+static int raise_hi(void) {
+    int i;
+    @errhandler(CCError e) {
+        (void)e;
+        return 3;
+    }
+    @parallel for (i in 0..8) {
+        step(i) !>;
+    } !>.wait()!>;
+    return 0;
+}
+
+/* The failing index is the first: the half the caller walks itself. */
+static int raise_lo(void) {
+    int i;
+    @errhandler(CCError e) {
+        (void)e;
+        return 4;
+    }
+    @parallel for (i in 0..8) {
+        step0(i) !>;
+    } !>.wait()!>;
+    return 0;
+}
+
+/* A walk inside a walk: the inner join raises into the outer half, whose
+ * join raises into the frame. */
+static int nested_raise(void) {
+    int i, j;
+    @errhandler(CCError e) {
+        (void)e;
+        return 5;
+    }
+    @parallel for (i in 0..4) {
+        @parallel for (j in 0..4) {
+            if (i == 2 && j == 2)
+                step(5) !>;
+        } !>.wait()!>;
+    } !>.wait()!>;
+    return 0;
+}
+
+/* The handler falls through: the statement after the walk follows. */
+static int falls_through(void) {
+    int n = 0;
+    int i;
+    @errhandler(CCError e) {
+        (void)e;
+        n += 10;
+    }
+    @parallel for (i in 0..8) {
+        step(i) !>;
+    } !>.wait()!>;
+    return n;
+}
+
+/* Nothing errs: every index ran, nothing was raised. */
+static int ok_path(void) {
+    cc_atomic_int n;
+    int i;
+    @errhandler(CCError e) {
+        (void)e;
+        return -1;
+    }
+    cc_atomic_store(&n, 0);
+    @parallel for (i in 0..16) {
+        int v = fine() !>;
+        cc_atomic_fetch_add(&n, v);
+    } !>.wait()!>;
+    return cc_atomic_load(&n);
+}
+
+/* A frame local the inner walk reads reaches it through the outer walk. */
+static int nested_cap(void) {
+    cc_atomic_int n;
+    int lim = 4;
+    int i, j;
+    @errhandler(CCError e) {
+        (void)e;
+        return -1;
+    }
+    cc_atomic_store(&n, 0);
+    @parallel for (i in 0..lim) {
+        @parallel for (j in 0..lim) {
+            int v = fine() !>;
+            cc_atomic_fetch_add(&n, v);
+        } !>.wait()!>;
+    } !>.wait()!>;
+    return cc_atomic_load(&n);
+}
+
+/* A void function: the handler returns nothing, and so does the site. */
+static int g_void;
+static void raise_void(void) {
+    int i;
+    @errhandler(CCError e) {
+        (void)e;
+        g_void = 6;
+        return;
+    }
+    @parallel for (i in 0..8) {
+        step(i) !>;
+    } !>.wait()!>;
+    g_void = 1;
+}
+
+int main(void) {
+    int r;
+    r = raise_hi();
+    if (r != 3) {
+        eprintln(@string(`FAIL hi r=${r}`, @scratch));
+        return 1;
+    }
+    r = raise_lo();
+    if (r != 4) {
+        eprintln(@string(`FAIL lo r=${r}`, @scratch));
+        return 1;
+    }
+    r = nested_raise();
+    if (r != 5) {
+        eprintln(@string(`FAIL nested r=${r}`, @scratch));
+        return 1;
+    }
+    r = falls_through();
+    if (r != 10) {
+        eprintln(@string(`FAIL fallthrough r=${r}`, @scratch));
+        return 1;
+    }
+    r = ok_path();
+    if (r != 16) {
+        eprintln(@string(`FAIL ok r=${r}`, @scratch));
+        return 1;
+    }
+    r = nested_cap();
+    if (r != 16) {
+        eprintln(@string(`FAIL cap r=${r}`, @scratch));
+        return 1;
+    }
+    g_void = 0;
+    raise_void();
+    if (g_void != 6) {
+        eprintln(@string(`FAIL void g=${g_void}`, @scratch));
+        return 1;
+    }
+    println("parallel_for_raise_smoke: OK");
+    return 0;
+}

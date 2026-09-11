@@ -66,8 +66,6 @@ PREFIX="$PREFIX" "$CCC_WORK/cc-install.sh" --no-editor-tools --no-add-to-path
 export PATH="$PREFIX/bin:$PATH"
 echo "== ccc --version =="
 ccc --version
-echo "== shadow_lower =="
-ls -la "$PREFIX/bin/shadow_lower" 2>/dev/null || ls -la "$(dirname "$(command -v ccc)")/shadow_lower"
 
 echo ""
 echo "== concurrent-c for-in view smokes (--no-cache) =="

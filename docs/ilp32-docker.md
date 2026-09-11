@@ -4,7 +4,7 @@ Build and run Concurrent-C **natively** inside a 32-bit Linux container so
 pointer width, comptime `TARGET_PTR_WIDTH`, and the linked runtime all match
 (`sizeof(void*) == 4`).
 
-**When to run this:** before pushing a new `shadow_lower` `last-good`, or when
+**When to run this:** before pushing a new lowerer `last-good`, or when
 changing the cold build graph — not on every stdlib edit. See
 [build-when.md](build-when.md).
 
@@ -31,7 +31,7 @@ CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh
 ### Runtime smoke — 2026-08-30
 
 **Host:** macOS (Darwin 25), arm64, Docker Desktop, QEMU user-mode  
-**Seed:** `shadow_lower` last-good **0.3.4-259**  
+**Seed:** last-good **0.3.4-259**  
 **Suite:** hello, channel pipeline, fiber spawn, chan task, park/wake, nursery — expect `ELF 32-bit`
 
 | Command | Host CC | Backend | Result |
@@ -43,7 +43,7 @@ CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh
 
 ### Pigz compare — 2026-09-03
 
-**Seed:** `shadow_lower` last-good **0.3.4-294**  
+**Seed:** last-good **0.3.4-294**  
 All three binaries (`pigz`, `pigz_idiomatic`, `pigz_cc`) build, 4 MiB-gunzip, and 20 MB bench on i386 and ARM32 with gcc backend and with TinyCC self-build (`CCC_HOST_CC=tcc`). Receipts: [Pigz compare](#pigz-compare) table below.
 
 ## Pigz compare
@@ -53,7 +53,7 @@ All three binaries (`pigz`, `pigz_idiomatic`, `pigz_cc`) build, 4 MiB-gunzip, an
 **Compile:** original pigz `cc -O3`; `.ccs` via `ccc -O --release`. `CCC_HOST_CC=tcc` builds `ccc` and the product backend with TinyCC; `pigz.c` stays gcc.
 
 `pigz_cc` (~1.3k lines) is the gated large-TU emit stress on ARM32 TCC self-build
-(it caught a TCC-built `shadow_lower` crash in 0.3.4-293, fixed in 0.3.4-294).
+(it caught a TCC-built lowerer crash in 0.3.4-293, fixed in 0.3.4-294).
 Other candidate TUs and when to spot-check them: [build-when.md](build-when.md#verify-cold--second-platform).
 
 All three binaries build and 4 MiB-gunzip on i386 and ARM32 with gcc backend or
@@ -179,7 +179,7 @@ The harness (inside `/work`):
 3. Asserts `libshadow_comptime.a` omits `arena_state.o` (GNU ld ODR)
 4. Runs a curated runtime suite (hello, channels, fibers, atomics, nursery)
 
-Use this before promoting a new `shadow_lower` bootstrap seed.
+Use this before promoting a new bootstrap seed.
 
 On a native 32-bit Linux host you can run the harness in-tree:
 

@@ -1,0 +1,78 @@
+/*
+ * A named `@scratch` product belongs to the scope that declares the name:
+ * its bytes come back when that scope ends, not when the function does.
+ *
+ * Three shapes, and two of them must NOT be reclaimed early:
+ *
+ *   inner   - declared and used inside a block; reclaimed at the block's end.
+ *   nested  - blocks nest, so their allocations nest; the inner one comes
+ *             back first and the outer one still reads correctly after.
+ *   carried - assigned inside a loop to a name declared outside it. The
+ *             bytes are the outer scope's, so the loop must not take them
+ *             back while the name still reads them.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+
+static int g_fail;
+
+static void expect(const char* what, bool ok) {
+    if (ok) return;
+    eprintln(@string(`FAIL ${what}`, @scratch));
+    g_fail = 1;
+}
+
+int main(void) {
+    size_t before;
+    size_t after;
+
+    /* inner: the block's own product is gone once the block is */
+    before = cc_arena_remaining(__cc_str_scratch);
+    {
+        CCString inner = @string(`inner:0123456789abcdef`, @scratch);
+        CCSlice s = inner.as_slice();
+        expect("inner readable in scope", s.len == 22 && s.ptr[0] == 'i');
+    }
+    after = cc_arena_remaining(__cc_str_scratch);
+    expect("inner reclaimed at scope exit", after == before);
+
+    /* nested: the inner block returns its bytes, the outer keeps reading */
+    before = cc_arena_remaining(__cc_str_scratch);
+    {
+        CCString outer = @string(`outer:abcdefghij`, @scratch);
+        size_t mid = cc_arena_remaining(__cc_str_scratch);
+        {
+            CCString deep = @string(`deep:0123456789`, @scratch);
+            CCSlice d = deep.as_slice();
+            expect("deep readable", d.len == 15 && d.ptr[0] == 'd');
+        }
+        expect("deep reclaimed, outer kept",
+               cc_arena_remaining(__cc_str_scratch) == mid);
+        {
+            CCSlice o = outer.as_slice();
+            expect("outer survives inner reclaim", o.len == 16 && o.ptr[0] == 'o');
+        }
+    }
+    expect("outer reclaimed at scope exit",
+           cc_arena_remaining(__cc_str_scratch) == before);
+
+    /* carried: the name outlives the loop that fills it */
+    {
+        CCString carried = @string(`seed`, @scratch);
+        int i;
+        for (i = 0; i < 4; i++) {
+            CCSlice prev = carried.as_slice();
+            expect("carried readable each turn", prev.len >= 4 && prev.ptr[0] == 's');
+            carried = @string(`${prev}-${i}`, @scratch);
+        }
+        {
+            CCSlice c = carried.as_slice();
+            expect("carried intact after the loop",
+                   c.len == 12 && c.ptr[0] == 's' && c.ptr[11] == '3');
+        }
+    }
+
+    if (g_fail) return 1;
+    println("scratch_scope_reclaim_smoke: OK");
+    return 0;
+}

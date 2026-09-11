@@ -1,0 +1,63 @@
+/*
+ * A wait-for dest with `!> @destroy` on the bind: the dest is live inside
+ * the tickets, joined after the statement, and the destroy hook at the
+ * scope exit finds it joined (a no-op wait). Cancel from a ticket stops
+ * enter; a cancelled dest stays joined and cancelled.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    {
+        CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+        CCTurnstile ts@(2, 1, arena) !> @destroy;
+        cc_atomic_int live_in = 0;
+        int i;
+        {
+            CCParallel h = @parallel wait (ts) for (i in 0..6) {
+                if (h.live())
+                    cc_atomic_fetch_add(&live_in, 1);
+            } !> @destroy;
+            if (!h.joined || h.live()) {
+                fprintf(stderr, "FAIL destroy-bound dest joined=%d live=%d\n",
+                        h.joined, h.live());
+                return 1;
+            }
+        }
+        if (cc_atomic_load(&live_in) != 6) {
+            fprintf(stderr, "FAIL live_in=%d\n", cc_atomic_load(&live_in));
+            return 1;
+        }
+    }
+
+    {
+        CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+        CCTurnstile ts@(2, 1, arena) !> @destroy;
+        cc_atomic_int ran = 0;
+        int i;
+        {
+            CCParallel h = @parallel wait (ts) for (i in 0..64) {
+                cc_atomic_fetch_add(&ran, 1);
+                if (i == 0)
+                    h.cancel() !>;
+                cc_sleep_ms(1);
+            } !> @destroy;
+            if (!h.joined || !h.cancelled) {
+                fprintf(stderr, "FAIL cancel joined=%d cancelled=%d\n",
+                        h.joined, h.cancelled);
+                return 1;
+            }
+        }
+        if (cc_atomic_load(&ran) >= 64) {
+            fprintf(stderr, "FAIL cancel did not stop enter ran=%d\n",
+                    cc_atomic_load(&ran));
+            return 1;
+        }
+    }
+
+    printf("parallel_wait_dest_destroy_smoke: OK\n");
+    return 0;
+}

@@ -1,4 +1,7 @@
 #!ccc ccs
+/* document.cch shape: the impl chapter is a member of this program module
+ * and splices in; its interface leaf extracts to a `.h`. */
+#pragma(@module) "splice_doc"
 #include <stdio.h>
 #include "quote_cch_splice_doc.cch"
 

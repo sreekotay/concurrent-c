@@ -1,7 +1,7 @@
 # TCC Patch Architecture
 
 Concurrent-C extends TCC with a small `CONFIG_CC_EXT` surface used by libtcc
-(comptime / `--exe`). Product syntax lowering is native `shadow_lower`.
+(comptime / `--exe`). Product syntax lowering is the lowerer, `cclower_cc`.
 
 > See also: [HOOKS.md](HOOKS.md), [README.md](README.md).
 

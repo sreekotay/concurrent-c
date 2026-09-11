@@ -1,0 +1,14 @@
+#ifndef TESTS_UNOWNED_FACES_DATA_DEF_CCH
+#define TESTS_UNOWNED_FACES_DATA_DEF_CCH
+
+#include <ccc/std/prelude.cch>
+
+/* A face whose only definition is data (spec 1.7): the face is a module
+ * of one. The module unit defines data_def_count once; the lowered .h
+ * declares it extern, and the static inline reader beside it reads the
+ * one definition from every includer. */
+int data_def_count = 3;
+
+static inline int data_def_peek(void) { return data_def_count; }
+
+#endif

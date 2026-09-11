@@ -1,0 +1,15 @@
+#!ccc ccs
+/* A Table::[K,V] typedef in an interface face: the includer reaches the
+ * instance through the face's .h alone. */
+#include <stdio.h>
+#include "quote_cch_table_face.cch"
+
+int main(void) {
+    CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+    Counts c = counts_new(a);
+    if (!c) return 1;
+    if (c->insert(7, 42) != 0) return 2;
+    if (c->len() != 1) return 3;
+    printf("len=%zu\n", c->len());
+    return 0;
+}

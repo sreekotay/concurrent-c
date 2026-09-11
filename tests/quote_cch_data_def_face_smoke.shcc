@@ -1,0 +1,35 @@
+/* A face whose only definition is file-scope data (spec 1.7) is a module
+ * of one: two programs include it, the module object defines the data
+ * once, and the lowered .h declares it extern. */
+CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
+
+CCCommand build = cc_command(arena, @slice("./cc/bin/ccc"));
+build.arg("build");
+build.arg("--no-cache");
+build.arg("tests/quote_cch_data_def_a_mod.ccs");
+build.arg("tests/quote_cch_data_def_b_mod.ccs");
+build.arg("-o");
+build.arg("out/quote_cch_data_def_face_smoke");
+build.inherit_stdio();
+int rc = build.status() !>;
+if (rc != 0) {
+    "build failed: the face's data was not defined once in a module object".println();
+    return 1;
+}
+CCCommand grep_extern = cc_command(arena, @slice("grep"));
+grep_extern.arg("-q");
+grep_extern.arg("extern int data_def_count");
+grep_extern.arg("out/include/tests/unowned_faces/data_def.h");
+rc = grep_extern.status() !>;
+if (rc != 0) {
+    "lowered .h does not declare data_def_count extern".println();
+    return 1;
+}
+CCCommand run = cc_command(arena, @slice("out/quote_cch_data_def_face_smoke"));
+run.inherit_stdio();
+rc = run.status() !>;
+if (rc != 0) {
+    "run failed".println();
+    return 1;
+}
+return 0;

@@ -7,6 +7,6 @@ int extract_then_splice_chapter_add(int a, int b) {
     return a + b;
 }
 
-#include "quote_cch_extract_then_splice_fail.cch"
+#include "quote_cch_extract_twice_rail.cch"
 
 #endif

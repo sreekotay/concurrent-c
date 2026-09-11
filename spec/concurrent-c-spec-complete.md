@@ -16,7 +16,7 @@ This specification defines:
 - Lowering to C
 - Script entry (`.shcc`) and the script library partner to the stdlib (§9.5)
 - Translation-unit headers (`#!ccc ccs|cch`, OS shebang for scripts) (§1.7)
-- File-start `#pragma(@prelude) off` / `#pragma(@linenumbers) off` / `#pragma(@per_tu)` (§1.8)
+- File-start `#pragma(@prelude) off` / `#pragma(@linenumbers) off` / `#pragma(@module) "name"` (§1.8)
 
 The lowering is part of this specification, not an implementation detail. Two conforming implementations must produce lowerings with identical observable behavior. Implementations may emit or inspect the lowered form via `--emit-c-only` (writes lowered C to `out/<stem>.c`) or `--emit-c-inspect` (writes the merged translation unit).
 
@@ -220,8 +220,8 @@ matches `0.3.3-156`). PATCH and SEED tighten the match (`0.3.2` matches
 `0.3.2-121`; `0.3.2-12` does not). A shorter prefix (`0`) also matches.
 The running toolchain lowers an unpinned unit, and also a pin that
 prefixes the running version. Otherwise the newest matching seed's
-prelowered `shadow_lower.c` is host-cc'd. A pin with no matching seed is
-an error.
+prelowered C is host-compiled and lowers the unit. A pin with no matching
+seed is an error.
 
 `--as=ccs|cch|shcc` and `version=` / `--ccc-version=` on the `ccc` command
 line must agree with the file header when both are present. A header that
@@ -232,75 +232,88 @@ pin-era lowerer never sees the magic line. Quoted `#include` of project
 faces still resolves from the original unit's directory (the `#line` path),
 not the cache directory. An included `.ccs` / `.cch` face with a unit
 header is stripped the same way — the bang is not a preprocessor directive.
-A local `.cch` that needs the including unit's pipeline — a non-`static`
-file-scope function definition, `@string`, `@errhandler`, `?>`, and the
-like — is spliced into that unit when the include is written in a `.ccs`
-or inside an already-spliced face. `T !>(E)` on a declaration is result-type
-syntax and does not by itself force a splice. Statement `!>` / `!>(e) {`
-in extractable text (`static inline` helpers) is rewritten in the lowered
-`.h` and does not force a splice. Method-call UFCS in an interface
-header does not force a splice from a `.ccs`. A quoted interface `.cch`
-extracts to a lowered `.h`. The extracted `.h` is host-cc input. A
-member call in an extracted inline that names a declared `Type_method`
-(same face, an included face, or the face that included this one) lowers
-to that call; a field peel is not rewritten to the outer type's method.
-A leftover member call in the `.h` is an error. The
-lowerer still opens the original face from the quote directory (same)
-roots as quoted `#include`) and harvests fields, type views, and
-typehooks — the same original-face read used for `<ccc/…>`. A rewritten
-`#include` of that `.h` is not an ordinary C header for that harvest.
-Nested local includes inside that header
-extract to their own `.h`; they do not splice into the including unit.
-An impl-grade nested face without an owner `.ccs` is an error — move
-the bodies to an owner `.ccs`, or include the face from that `.ccs`.
-The owner is the same-stem sibling (`foo.cch` → `foo.ccs`), a chapter
-face with that prefix (`piece_tree_rb.cch` → `piece_tree.ccs`), a
-same-directory `.ccs` that includes the chapter (`document.ccs`
-includes `utf8.cch`), or a same-directory face included from an owned
-face (`workspace.cch` includes `ui_types.cch` → `workspace.ccs`). When
-both a `.ccs` include and a face-includer exist, the `.ccs` include is
-the owner. Other units extract decls and the owner unit splices the
-bodies after the extracted parent include so names that face defines
-are in scope. One include in one translation unit is either an
-extracted `#include` of the lowered `.h` or a splice of the chapter
-body, not both. A textual include guard does not apply to a splice.
-A file-scope function body has one definition — the owner TU.
-File-scope `static` on a function stays `static`: the owner splice
-keeps the keyword and the body, and the extracted `.h` omits that
-function. A file-scope function without `static` has one definition
-in the owner TU; other TUs see a declaration in the extract. A file-scope data definition (`int xs[] = {1,2}`) becomes
-`extern int xs[];` in the extract; the owner splice keeps the
-initializer. `static` data stays `static` in the extract and is not
-repeated in an owner include-graph splice.
-`#ifdef` / `#if` in an extracted face stay
-in the lowered `.h`; an object-like `#define` in this unit before the
-include is host cpp and selects those arms, including function bodies
-that sit under `#ifdef`. A pointer type in a declaration — a parameter,
-file-scope declarator, or struct field (`Tag *name`) — that the face does
-not already name as a type is not forwarded as `typedef struct Tag Tag` —
-that invents a tagged struct and conflicts with an anonymous
-`typedef struct { … } Tag` or an integer alias already in the unit.
-A multiply in a function body (`d * 100ull`) is not a pointer type.
-`CC_MAP_DECL_ARENA` / `CC_MAP_DECL_UFCS` / `CC_ARRAY_MAP_DECL` /
-`CC_DECL_SLICE_SPEC` / `CC_DECL_RESULT_SPEC` name the type they bind.
-If exactly one same-directory face defines the name and that face
-can extract (not impl-grade without an owner), the extract includes
-that face. If no same-directory face defines it, and exactly one
-face in the including unit's include graph does, extract includes
-that face. Chapter faces of one owner that share the name
-(`piece_tree.cch` and `piece_tree_priv.cch`) are that one face; extract
-includes the stem. Two faces with different owners is an error.
-No same-directory face and no type of that name in the
-including unit is an error. An impl-grade unowned parent already spliced into this
-unit is not extracted from the leaf. Nested quoted includes in an
-extracted `.h` use a path relative to that `.h` (same directory is
-the basename). Nested quoted includes hoist
-only when the included face defines a name this face uses and does
-not define, and they insert after this face's definitions of names
-the included face uses (`RtxBuf` before `ui_types.h`). A consumer
-leaf included last stays in source order. The including unit's `#include` of the face stays
-in source order. Nested local includes inside a spliced face are
-processed the same way.
+
+**Faces and modules.**
+
+A quoted `#include "x.cch"` names a face: a header the program owns. A face
+has one of three grades, decided by the text of its module unit (the face
+with its members and the library faces it includes spliced in). An
+interface face carries declarations, types and `static` helpers, inline
+or not; `T !>(E)` on a declaration, statement `!>` / `!>(e) {` inside a
+`static` body, method-call UFCS, and the built-in generic forms (`Vec`,
+`Map`, `ArrayMap` and their constructors) are interface-grade. It extracts
+to a lowered `.h`, which is host-cc input; a leftover member call in that
+`.h` is an error. A face whose every definition is `static` and whose
+bodies or file-scope items use `@string`, `@errhandler`, `@defer`, `?>`,
+an instance `Name::[…]` of a generic factory family, or other
+unit-pipeline syntax is a library face: each includer compiles its own
+copy, as C does for a `static` body in a header, so the face splices into
+the including unit where its include stands and lowers with it, and it
+has no `.h` and no object. An interface face that a library face includes
+splices with it: the types it names may live on the library face, and a
+name resolved without them can land on a declaration that merely shares
+the spelling. A face with a file-scope function definition
+that is not `static`, or a file-scope data definition with an initializer
+that is not `static`, is an implementation face. `@comptime` blocks,
+`@comptime` functions and generic factories decide nothing: the header
+lowering harvests them into every includer.
+
+An implementation face is a module. A module is one translation unit: its
+members lower into one C file, `<face>_cch.c`, compile into one object, and
+present one lowered header, `<face>.h`. The face is the module's public
+surface. A unit joins a module by declaring membership at file start
+(§1.8): `#pragma(@module) "x"` names the module `x`, whose public face is
+`x.cch` in the unit's directory when that file exists. A member is a
+`.cch` or a `.ccs`; a program whose main unit declares membership is that
+module, and the module's object is the program's. A module with a program
+and no face is the program: it has no lowered header and no unit outside
+it includes it. A face with no members is a module of one; a module with
+neither a face nor a program is an error. Membership is
+declared, never inferred from includes, directory layout or file names; a
+unit belongs to at most one module, and a face that includes another face
+includes it as any unit does.
+
+`static` at file scope in any member is module-private: one definition,
+shared by every member, visible to no unit outside the module; the lowered
+`.h` omits it, except `static const` data, which it keeps: an includer's
+copy of an immutable table is the same table, and the `static inline`
+helpers the `.h` keeps may read it. A file-scope function or data definition without `static` is
+exported under its C name: the module defines it once and the lowered `.h`
+declares it (`extern` for data). A unit outside the module that includes
+the face receives the declarations and the object: the lowered `.h` carries
+a link marker naming `<face>_cch.c`, and the implementation compiles that
+file once per configuration and adds its object to the link of every
+program whose include closure reaches the marker. A marker whose file
+cannot be found is an error. A quoted include of a member from a unit
+outside its module is an error: include the face. Two modules that export
+one name are a duplicate definition.
+
+The lowered `.h` keeps `#ifdef` / `#if` arms; an object-like `#define` in
+the including unit before the include is host cpp and selects those arms.
+A module compiles its bodies once, under its own defines: a body under
+`#if` presents in the lowered `.h` as a prototype under the same `#if`,
+so the arms an includer selects are `static inline` bodies and
+declarations. A pointer type in a
+declaration — a parameter, file-scope declarator, or struct field
+(`Tag *name`) — that the face does not already name as a type is not
+forwarded as `typedef struct Tag Tag`: that invents a tagged struct and
+conflicts with an anonymous `typedef struct { … } Tag` or an integer alias
+already in the unit. A multiply in a function body (`d * 100ull`) is not a
+pointer type. `CC_MAP_DECL_ARENA` / `CC_MAP_DECL_UFCS` / `CC_ARRAY_MAP_DECL`
+/ `CC_DECL_SLICE_SPEC` / `CC_DECL_RESULT_SPEC` name the type they bind. If
+exactly one same-directory face defines the name, the extract includes that
+face. If no same-directory face defines it, and exactly one face in the
+including unit's include graph does, the extract includes that face.
+Members of one module that define the name are that module; the extract
+includes the face. Two definers in different modules is an error. No
+same-directory face and no type of that name in the including unit is an
+error. Nested quoted includes in an extracted `.h` use a path relative to
+that `.h` (same directory is the basename). Nested quoted includes hoist
+only when the included face defines a name this face uses and does not
+define, and they insert after this face's definitions of names the included
+face uses (`RtxBuf` before `ui_types.h`). A consumer leaf included last
+stays in source order. The including unit's `#include` of the face stays in
+source order.
 
 ### 1.8 File-start pragmas
 
@@ -310,7 +323,7 @@ begin with:
 ```
 #pragma(@prelude) off
 #pragma(@linenumbers) off
-#pragma(@per_tu)
+#pragma(@module) "name"
 ```
 
 File-start means after the header and after leading blank lines and comments.
@@ -328,16 +341,10 @@ it does not affect compilation.
 `--no-line` on the `ccc` command line has the same effect and overrides the
 pragma when both are present.
 
-An unowned impl-grade face whose file-scope functions are all `static`
-may splice into every translation unit as a private copy. A second splice
-of an unowned face that has a non-`static` file-scope function is an
-error — make those functions `static`, or give the face an owner `.ccs`.
-Extract of an owned face whose owner `.ccs` is not in the link set is an
-error.
-
-`#pragma(@per_tu)` is optional. Presence (no `off`) requires every
-file-scope function on that face to be `static`, even when only one
-translation unit includes it.
+`#pragma(@module) "name"` declares the unit a member of module `name`
+(§1.7). The operand is a name; the
+module's public face, when it has one, is `name.cch` in the unit's
+directory. A unit names at most one module.
 
 ---
 
@@ -428,7 +435,7 @@ bugs.
 | `#pragma(@parallel) off` / `on` | Static denial: `@parallel` lowers sequentially (§8.11.8)  | `#pragma(@parallel) off`                   |
 | `#pragma(@prelude) off` | No automatic prolog (§1.8) | `#pragma(@prelude) off` |
 | `#pragma(@linenumbers) off` | Omit `#line` / `CC_LN` from emit (§1.8) | `#pragma(@linenumbers) off` |
-| `#pragma(@per_tu)` | Optional: require all file-scope fns `static` (§1.8) | `#pragma(@per_tu)` |
+| `#pragma(@module) "name"` | This unit is a member of module `name` (§1.7, §1.8) | `#pragma(@module) "staticd"` |
 
 **Call-site annotation forms** (see §8.2 for precedence):
 
@@ -1249,7 +1256,7 @@ CCRes(MyData, MyError) my_function(int arg);
   - At **statement position** the body may fall through. Forms: `CALL !>;`, `CALL !> STMT;`, `CALL !> { BODY };`, `CALL !>(e) STMT;`, `CALL !>(e) { BODY };`.
   - At **expression position** the body must *visibly diverge*. Forms: `CALL !>(e) DIVERGENT_STMT;`, `CALL !>(e) { …; DIVERGENT_STMT };`, `CALL !> DIVERGENT_STMT;`, `CALL !> { …; DIVERGENT_STMT };`, and the bare `CALL !>;` which synthesizes a binder and inlines the matching `@errhandler` body for Result `E` (which must itself diverge). A non-divergent body at expression position is diagnosed with `expression-position '!>' body must diverge (return/break/continue/goto/@err/exit/abort/etc.)`. A bare `CALL !>;` at expression position with no matching `@errhandler` for `E` is ill-formed.
 3. Error values are accessible only via an explicit `(ident)` binder on `?>` or `!>`. Neither operator creates an implicit `e` / `err` binding. The bare expression-position `!>;` form synthesizes a fresh internal binder that threads the error value through the inlined handler body.
-4. `CALL !>;` at statement position runs a matching in-scope `@errhandler`, or the success path if the call succeeded. Candidates are `@errhandler` declarations in the current function whose declaration point is textually before the unwrap (block-nested, not hoisted); there is no cross-function search — that locality is why same-`E` re-entry is a compile error. From the unwrap outward, the first handler whose parameter type is exactly the call's Result error type `E` wins; if none, the first whose parameter `F` is reachable from `E` by a unique `@typeview` `as:` path wins (hop count is not a rank; two such face-matching handlers in the same block are ill-formed). No match is ill-formed: the diagnostic names the call's `T !>(E)` and the in-scope `@errhandler` parameter type(s) at the `!>` site. If that matching handler's body textually contains the call (same-`E` re-entry), the program is ill-formed — report via a helper such as `cc_error_log` / `cc_error_exit`, or an inline `!> { abort(); }`, not bare `!>;` inside the same-`E` handler.
+4. `CALL !>;` at statement position runs a matching in-scope `@errhandler`, or the success path if the call succeeded. Candidates are `@errhandler` declarations in the current function whose declaration point is textually before the unwrap (block-nested, not hoisted); there is no cross-function search — that locality is why same-`E` re-entry is a compile error. From the unwrap outward, the first handler whose parameter type is exactly the call's Result error type `E` wins; if none, the first whose parameter `F` is reachable from `E` by a unique `@typeview` `as:` path wins (hop count is not a rank; two such face-matching handlers in the same block are ill-formed). No match is ill-formed: the diagnostic names the call's `T !>(E)` and the in-scope `@errhandler` parameter type(s) at the `!>` site. A `.shcc` unit's synthetic `main` and each `@task` body declare a default `@errhandler(CCError)` (§9.5); each is a candidate of its own body under this rule, reaches no other function, and is not file-scope. If that matching handler's body textually contains the call (same-`E` re-entry), the program is ill-formed — report via a helper such as `cc_error_log` / `cc_error_exit`, or an inline `!> { abort(); }`, not bare `!>;` inside the same-`E` handler.
 5. `@err(IDENT);` inside a `!>` body forwards the bound error to the matching `@errhandler` for that unwrap's `E`. It is a **structured control-flow transfer** (not a returning call): any statement textually following it in the same block is unreachable and is a compile error.
 6. `@errhandler(E e) STMT;` or `@errhandler(E e) { ... }` registers a block-local handler for Result error type `E`. A handler is in scope for a use only after its declaration point (same candidate set as invariant 4). The statement form is a thin forward (typically `cc_error_exit(e);`); the block form holds multiple statements. `CALL !>;` is the hoist of `CALL !>(e) STMT` when `STMT` is that handler body. When reached via `CALL !>;` at statement position, the handler body runs and control returns to the statement after the call — the handler may end in any statement. When reached via an `@err(e);` forward, via a bare expression-position `!>;`, or via an expression-position `!>` whose body inlines the handler, control never returns, so the handler body **must visibly diverge**. A `return` (or other soft-return) from the handler body discharges the enclosing function’s `@defer` / `@destroy` ledger via the same epilogue as any other return in that function (§5.1). Concretely: if any `@err(e);` targets a handler, or any expression-position `!>;` inlines a handler, that handler's body must end in one of:
   - `return EXPR;` / `return;`
@@ -5779,13 +5786,15 @@ This section defines the core standard library using **UFCS-first design**: meth
 
 **Rule (naked calls and print aliases, normative):** A call `name(args)` is C: it dispatches to the declared function or macro named `name`, or is ill-formed. Exactly six names alias when `<ccc/stdio.cch>` is visible and the translation unit binds none of them itself: `print`, `println`, `eprint`, `eprintln` at call position dispatch to `cc_print` / `cc_println` / `cc_eprint` / `cc_eprintln` (`_Generic` over the data argument); `fprint` / `fprintln` dispatch to `cc_fprint` / `cc_fprintln` with **fd first, then data** (`fprintln(STDERR_FILENO, path)` — fprintf-shaped). Member UFCS stays data-first (`path.fprintln(STDERR_FILENO)`). A translation-unit binding of one of these names — function, function-like macro, or declaration shape — takes the call unchanged, and member position (`s.println()`) never aliases. Prefix spellings for other functions come by declaration: a declared `f(T, …)` is callable as `f(x, …)` by C and as `x.f(…)` by the bare-name tier — one declaration, both spellings. Method families reach prefix position through an imported handle whose type carries them (`CCStdio io = cc_stdio_create(&a); io.println(x)`).
 
-**Rule (universal bare-name tier, normative):** When every family composition for `recv.f(args)` fails to name a declared function, `f` itself is the final candidate: the call dispatches to a declared function `f` whose first parameter takes the receiver — `u.mean(6.0)` lowers to `mean(u, 6.0)`; `pp->get_x()` lowers to `get_x(pp)`. Compatibility is uniform where lossless and exact where lossy. A value receiver of type `T` matches a first parameter of type `T` exactly (no arithmetic conversions — dispatch never converts the receiver's value), or of type `T*` / `const T*` via `&recv` (addressable receivers only). A pointer receiver of type `T*` matches pointer parameters under C's pointer rules — exact `T*`, qualifier-adding `const T*`, and `void*` / `const void*` — one-way: a `const T*` receiver matches only const-qualified parameters. A dereference is never synthesized: pointer receivers match pointer parameters only. A first parameter of `void*` never matches a value receiver (the address synthesis and the type erasure are not combined implicitly). Zero-parameter functions never capture a receiver. Members, composed family spellings, and a receiver type's registered dynamic sink all outrank the bare name — a sink-registered type's unresolved methods belong to its sink, and a later-declared ambient function cannot capture them. Declarations participate from the translation unit, included headers, and the parse's symbol table — which sees system headers, so `d.fabs()` with `math.h` included dispatches to `fabs(d)`. Unprototyped (old-style) declarations never participate. A composed callee that is not verifiably declared is never emitted while a bare-name match exists.
+**Rule (universal bare-name tier, normative):** When every family composition for `recv.f(args)` fails to name a declared function, `f` itself is the final candidate: the call dispatches to a declared function `f` whose first parameter takes the receiver — `u.mean(6.0)` lowers to `mean(u, 6.0)`; `pp->get_x()` lowers to `get_x(pp)`. Compatibility is uniform where lossless and exact where lossy. A value receiver of type `T` matches a first parameter of type `T` exactly (no arithmetic conversions — dispatch never converts the receiver's value), or of type `T*` / `const T*` via `&recv` (addressable receivers only). A pointer receiver of type `T*` matches pointer parameters under C's pointer rules — exact `T*`, qualifier-adding `const T*`, and `void*` / `const void*` — one-way: a `const T*` receiver matches only const-qualified parameters. A dereference is never synthesized: pointer receivers match pointer parameters only. A first parameter of `void*` never matches a value receiver (the address synthesis and the type erasure are not combined implicitly). Zero-parameter functions never capture a receiver. Members, composed family spellings, and a receiver type's registered dynamic sink all outrank the bare name — a sink-registered type's unresolved methods belong to its sink, and a later-declared ambient function cannot capture them. Declarations participate from the translation unit and included faces. When no visible declaration names `f` and the receiver's type has no method set — no methods, no typehooks, no registered sink — the call is emitted as `f(recv, args)` with the receiver as written, and the host compiler's declarations decide: `d.fabs()` with `<math.h>` included is `fabs(d)`, and a name no declaration provides is a compile error at the call site, not a link error. A receiver whose type has a method set is ill-formed when nothing resolves. Unprototyped (old-style) declarations never participate. A composed callee that is not verifiably declared is never emitted while a bare-name match exists.
 
 **Rule (family member sets, normative):** A generic family instance's method set derives from the family's declaration form: the `##_<member>` tokens of the family macro's body are the members (`Name##_push` declares `push`; `NAME##_sub` declares `sub`). Factory-emitted families derive their member set from the emitted fragment's `<mangled>_<member>` definitions. Dispatch trusts composed spellings exactly for this derived set — members are macro-generated and invisible to textual declaration checks — and an unresolved method on an instance enumerates it. Instances are extensible by declaration: a visible function spelling the composed name (`CCVec_double_median(CCVec_double*, …)`, `CCSlice_double_sum(CCSlice_double*, …)`) makes `v.median(…)` / `s.sum(…)` dispatch to it, with no change to the family header or the compiler.
 
 **Rule (method chains, normative):** A UFCS call whose receiver is itself a call expression is well-formed when the receiver's return type is known — derived from the family declaration form for instance members, read from the visible declaration otherwise. The chain lowers as if the receiver were first bound to a temporary of that type; each subsequent link then resolves against that variable under the ordinary rules (members, extensions, `@typeview` `as:` face retry, the strict ladder), so `xs.sub(1, 3).len()`, `ps.at(2).y`, and scalar chains like `d.halve().twice()` mean exactly what their bound-temporary spellings mean. A trailing field access binds to the last link's result. A failing link diagnoses against its own receiver type, enumerating that instance's installed methods.
 
 **Rule (fallible chains, normative):** `!>` links hops whose calls return a Result: `py.a()!>.b()!>;` unwraps each hop and dispatches the next method on the unwrapped value, and `py.a()!>(e){ … }.b()` recovers that hop alone with the handler's written control flow. Each linked hop lowers to its own statement binding a temporary of the hop's ok type, so a bare `!>` targets the enclosing `@errhandler` and the final hop keeps the original destination, including destination-typed extraction. Fallible chains live where statements do: at statement position or as the whole right-hand side of a declaration or assignment. `?>` never links; parenthesize a fallback to continue from it.
+
+**Rule (argument address, normative):** At a UFCS call, an argument of type `T` matches a parameter of type `T*` or `const T*` by its address, and the call passes `&arg`: `s.index_of(needle, found)` with `bool found` and a `bool *` parameter passes `&found`. The parameter's pointee is exactly the argument's type — the address is taken, never a conversion of the value, and adding `const` is the only qualifier hop. An argument that is already a pointer matches pointer parameters under C's pointer rules and is passed as written; a dereference is never synthesized. A `void*` parameter never takes the address of a value argument, on the same ground as the receiver: the address synthesis and the type erasure are not combined implicitly. An argument with no address does not match, and neither does one whose parameter this call cannot name — a callee reached through a function-like macro declares no parameter types to match against.
 
 **UFCS Equivalence (Normative):**
 
@@ -6159,19 +6168,21 @@ int main(void) {
 - Overflow follows `CC_ARENA_STACK` (stack-first, then ordinary growth / `String` poison rules).
 - Freestanding `@scratch` (or use outside `@string`) is a compile error. Prefer `CC_ARENA_STACK` / `cc_arena_heap` for named or long-lived arenas.
 
-**Call-local reclaim.** A call-local `@string(..., @scratch)` is one consumed by a call in a statement that binds nothing: a call statement, an assignment, a UFCS call, or a `!>` unwrap (e.g. `println(@string(\`…\`, @scratch))`, `f(@string(\`…\`, @scratch))`, `n += f(@string(\`…\`, @scratch))`). The statement checkpoints the shared scratch before building the temp and restores after the consuming call. A declaration initializer (`size_t n = f(@string(..., @scratch))`) is a bound form. Earlier bound products in the same function remain valid; the temp's bump (and any extent growth for that temp) is reclaimed. Bound forms (`CCString s = @string(..., @scratch)`) keep their bytes for the function/closure lifetime and do not restore around the initializer.
+**Call-local reclaim.** A call-local `@string(..., @scratch)` is one consumed by a call in a statement that binds nothing: a call statement, an assignment, a UFCS call, or a `!>` unwrap (e.g. `println(@string(\`…\`, @scratch))`, `f(@string(\`…\`, @scratch))`, `n += f(@string(\`…\`, @scratch))`). The statement checkpoints the shared scratch before building the temp and restores after the consuming call. A declaration initializer (`size_t n = f(@string(..., @scratch))`) is a bound form. Earlier bound products in the same function remain valid; the temp's bump (and any extent growth for that temp) is reclaimed.
+
+**Bound reclaim.** A bound `@string(..., @scratch)` is one whose product is given a name: a declaration initializer (`CCString s = @string(..., @scratch)`) or an assignment to a declared name (`row = @string(..., @scratch)`). The product keeps its bytes until the end of the block that declares that name, and nothing restores around the initializer or the assignment. A name declared in an outer block and assigned in an inner one (a loop body building a row the outer block reads) has the outer block's lifetime: the inner block reclaims nothing of it. Blocks nest, so their products nest; when an inner block ends, the products its own names hold are reclaimed and every product of an enclosing block still reads.
 
 A product that must outlive the consuming call — including an argument of `return` (`cc_script_sh`, `cc_script_sh_read`, `@destroy` return-rewrite) — is bound to a local first (`CCString line = @string(\`…\`, @scratch); return f(line);`). `return f(@string(\`…\`, @scratch))` is call-local: the temp is reclaimed after `f` returns, and that nesting does not compose with `@destroy` return-rewrite.
 
 Newlines after the comma are whitespace — a wrapped `@scratch` is the same operand. `@scratch` is not a `CCArena` binding; there is no `scratch.destroy()`.
 
-**Escape (normative).** Products of `@string(..., @scratch)` have function/closure lifetime. It is a compile-time error to:
+**Escape (normative).** A product of `@string(..., @scratch)` lives until the end of the block that declares its name, or until the consuming call returns when nothing names it. It is a compile-time error to:
 
 - `return` that `String` (or a slice/view derived from it),
-- assign it into a variable declared in an **outer** block,
-- capture it into a closure or task that may outlive the enclosing function or closure.
+- store a slice or view derived from it into a variable declared in an **outer** block, or otherwise read it after the block that declares its name has ended,
+- capture it into a closure or task that may outlive the block that declares its name.
 
-Same-scope use (`CCString s = @string(..., @scratch); println(s);`) is fine. Call-local borrows (`println(@string(..., @scratch))`) are fine.
+Same-scope use (`CCString s = @string(..., @scratch); println(s);`) is fine. Assigning the product itself to a name declared in an outer block is the bound form for that name, and is fine. Call-local borrows (`println(@string(..., @scratch))`) are fine.
 
 `@string(...)` templated construction follows the same contract: if the destination arena cannot hold the output, the result is a failed `String` — never partial bytes.
 
@@ -6419,7 +6430,11 @@ Concurrent-C pipeline:
    (for example `CCIoError`) coexists with the default; a user
    `@errhandler(CCError)` in the same scope overrides the default for
    `CCError`. `CCIoError` Results reach this handler via `@typeview` `as: base`;
-   Io constructors fill the face message so the print is not blank.
+   Io constructors fill the face message so the print is not blank. The
+   injection is a declaration at the top of that body, so invariant 4 reads
+   it as it reads a written one: it is in scope for the unwraps that follow
+   it in the same body, and a `.ccs` unit, a file scope, and a function the
+   injection does not name have no handler from it.
 5. Token-gated script predecls `stdin` / `arena` / `args` (same bindings as
    one-liner mode; see `draft_script_oneliners.md` §1.1) are injected into
    the synthetic `main` wrap only — the top-level statement body — when the
@@ -7598,7 +7613,14 @@ The factory body has implicit parameters and returns the definition text via
 
 **Sugar ergonomics.** The implicit parameters are auto-voided, so a body that
 ignores one needn't write `(void)…`. `arg(i)` is shorthand for
-`type_args.items[i]` (available inside factory bodies). The optional integer
+`type_args.items[i]` (available inside factory bodies), and `arg_mangled(i)`
+is that argument's identifier-safe spelling, the one the concrete name is
+built from (`long long` → `long_long`, `Pair*` → `Pairptr`, `T[:]` →
+`Tslice`): what a template names a macro or a function after. A factory
+whose `@emit` template mentions only `${mangled}`, `${arg(i)}`,
+`${arg_mangled(i)}` and locals bound to those is a pure template: the
+compiler fills it from the type arguments without running the body, and
+the C preprocessor makes any remaining choice. The optional integer
 arity in `CC_GENERIC_FACTORY(Name, N)` injects the standard guard
 `if (type_args.len < N || !mangled.ptr) return cc_slice_empty();` so the body
 needn't repeat it; omit it (`CC_GENERIC_FACTORY(Name)`) to do your own argument

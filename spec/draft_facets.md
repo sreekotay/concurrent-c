@@ -1,6 +1,6 @@
 # Type views (`@typeview`)
 
-Status: draft — implemented in shadow_lower (`tests/restricted_*`,
+Status: draft — implemented (`tests/restricted_*`,
 `tests/typeview_as_ufcs_smoke.ccs`). Viewed faces (`(Mode)field` in `as:`)
 — not implemented.
 

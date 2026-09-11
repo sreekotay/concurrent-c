@@ -1,2 +1,4 @@
 #!ccc ccs
+/* Same-stem includer of the chapter face: no longer an owner, just a
+ * unit whose include closure reaches the module. */
 #include "quote_cch_chapter_owner_mod_leaf.cch"

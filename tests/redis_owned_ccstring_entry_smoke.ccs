@@ -12,6 +12,7 @@ typedef struct {
 } OwnedEntry;
 
 static int clone_owned_string(CCString* out, CCArena* out_arena, CCSlice src) {
+    @errhandler(CCError e) cc_error_exit(e);
     size_t arena_size = src.len + ENTRY_ARENA_OVERHEAD;
     if (arena_size < ENTRY_ARENA_OVERHEAD) arena_size = ENTRY_ARENA_OVERHEAD;
 

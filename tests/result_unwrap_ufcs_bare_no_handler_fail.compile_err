@@ -1,0 +1,2 @@
+result_unwrap_ufcs_bare_no_handler_fail.ccs:10:
+a bare unwrap ('!>;' or '@err') with no local handler requires an enclosing '@errhandler'

@@ -27,7 +27,7 @@ void* outer_task(void* arg) {
     cc_nursery_spawn(inner, inner_task, (void*)(intptr_t)iter);
     eprintln(@string(`DEBUG: iter ${iter} - inner spawned, waiting`, @scratch));
     fflush(stderr);
-    cc_nursery_wait(inner);
+    (void)cc_nursery_wait(inner);
     eprintln(@string(`DEBUG: iter ${iter} - inner done`, @scratch));
     fflush(stderr);
     inner.free();
@@ -50,7 +50,7 @@ int main(void) {
         cc_nursery_spawn(outer, outer_task, (void*)(intptr_t)i);
         eprintln(@string(`DEBUG: iter ${i} - outer spawned, waiting`, @scratch));
         fflush(stderr);
-        cc_nursery_wait(outer);
+        (void)cc_nursery_wait(outer);
         eprintln(@string(`DEBUG: iter ${i} - outer done`, @scratch));
         fflush(stderr);
         outer.free();

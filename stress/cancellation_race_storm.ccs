@@ -77,7 +77,7 @@ Failed to create nursery!`, @scratch)) !>;
         }
 
         // 4. Wait for the target nursery to finish and clean up
-        cc_nursery_wait(n);
+        (void)cc_nursery_wait(n);
         n.free();
 
         //  verification

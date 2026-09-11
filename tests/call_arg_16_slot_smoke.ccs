@@ -1,0 +1,16 @@
+/* A 16-slot template inlined into a call argument.
+ *
+ * `eprintln(@string(`…`))` is the call-argument rewrite path. The rule this
+ * pins is that every slot reaches the output: a lowerer that assembles the
+ * rewrite in a fixed buffer runs out partway through and has to choose
+ * between refusing and emitting a cut mid-literal. Nothing here may be lost.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+
+int main(void) {
+    int n0 = 0, n1 = 1, n2 = 2, n3 = 3, n4 = 4, n5 = 5, n6 = 6, n7 = 7;
+    int n8 = 8, n9 = 9, n10 = 10, n11 = 11, n12 = 12, n13 = 13, n14 = 14, n15 = 15;
+    eprintln(@string(`v ${n0} ${n1} ${n2} ${n3} ${n4} ${n5} ${n6} ${n7} ${n8} ${n9} ${n10} ${n11} ${n12} ${n13} ${n14} ${n15}`, @scratch));
+    return 0;
+}

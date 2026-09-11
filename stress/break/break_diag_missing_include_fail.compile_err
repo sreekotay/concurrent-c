@@ -1,0 +1,10 @@
+# The rule: a declaration whose header was never included is diagnosed at the
+# user .ccs coordinates of the declaration, not inside the generated C.
+# The row calls cc_string_len directly rather than through UFCS `s.len()`.
+# A UFCS receiver whose type is undeclared has no installed methods, so a
+# lowerer that resolves UFCS against the index refuses the call first and the
+# host compile never runs -- that is break_diag_ufcs_miss_fail's subject, and
+# pinning it here made this row depend on a lowerer that guesses the family
+# spelling and defers the whole question to the host.
+break_diag_missing_include_fail.ccs:5:5
+CCString

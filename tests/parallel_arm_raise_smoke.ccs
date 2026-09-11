@@ -1,0 +1,146 @@
+/*
+ * A bare `!>` in an arm of an immediate-wait join raises into the frame's
+ * handler after the join. The handler is emitted once: an arm that errs
+ * records the error in the exit cell and leaves the arm, and the block
+ * raises the record where it stands once every arm has finished. So a
+ * label inside the handler is one label, a construct an earlier step
+ * rewrote in the handler stays rewritten, and a handler that falls
+ * through continues with the statement after the block.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+
+static int !>(CCError) boom(void) { return cc_err(CC_ERR_NOT_FOUND, "boom"); }
+static int !>(CCError) fine(void) { return cc_ok(1); }
+
+/* The first arm, on the caller, raises. The handler carries a label. */
+static int first_raises(int* out) {
+    int n = 0;
+    @errhandler(CCError e) {
+        (void)e;
+    again:
+        if (n++ < 20)
+            goto again;
+        *out = n;
+        return 3;
+    }
+    @parallel {
+        boom() !>;
+        @serial { n += 10; }
+    } !>.wait()!>;
+    return 0;
+}
+
+/* A spawned arm raises: the join runs before the handler does. */
+static int spawned_raises(int* out) {
+    int n = 0;
+    @errhandler(CCError e) {
+        (void)e;
+        *out = n;
+        return 4;
+    }
+    @parallel {
+        @serial { n += 1; }
+        @serial { boom() !>; n += 100; (void)out; }
+    } !>.wait()!>;
+    return 0;
+}
+
+/* The handler falls through: the statement after the block follows. */
+static int falls_through(void) {
+    int n = 0;
+    @errhandler(CCError e) {
+        (void)e;
+        n += 10;
+    }
+    @parallel {
+        boom() !>;
+        @serial { n += 1; }
+    } !>.wait()!>;
+    return n;
+}
+
+/* Both arms raise: the handler runs once. */
+static int both_raise(void) {
+    int hits = 0;
+    @errhandler(CCError e) {
+        (void)e;
+        hits += 1;
+        return hits;
+    }
+    @parallel {
+        boom() !>;
+        @serial { boom() !>; hits += 0; }
+    } !>.wait()!>;
+    return 0;
+}
+
+/* The handler body holds a form an earlier step rewrites in place. */
+static int deadline_in_handler(void) {
+    int got = 0;
+    @errhandler(CCError e) {
+        (void)e;
+        @with_deadline(millis(40)) {
+            got = 7;
+        }
+        return got;
+    }
+    @parallel {
+        boom() !>;
+        @serial { got += 0; }
+    } !>.wait()!>;
+    return 0;
+}
+
+/* Nothing errs: nothing is raised, and both arms ran. */
+static int ok_path(void) {
+    int a = 0;
+    int b = 0;
+    @errhandler(CCError e) {
+        (void)e;
+        return -1;
+    }
+    @parallel {
+        @serial { a = fine() !>; }
+        @serial { b = fine() !>; }
+    } !>.wait()!>;
+    return a + b;
+}
+
+int main(void) {
+    int r;
+    int n = 0;
+    r = first_raises(&n);
+    if (r != 3 || n != 21) {
+        eprintln(@string(`FAIL first r=${r} n=${n}`, @scratch));
+        return 1;
+    }
+    n = 0;
+    r = spawned_raises(&n);
+    if (r != 4 || n != 1) {
+        eprintln(@string(`FAIL spawned r=${r} n=${n}`, @scratch));
+        return 1;
+    }
+    r = falls_through();
+    if (r != 11) {
+        eprintln(@string(`FAIL fallthrough r=${r}`, @scratch));
+        return 1;
+    }
+    r = both_raise();
+    if (r != 1) {
+        eprintln(@string(`FAIL both r=${r}`, @scratch));
+        return 1;
+    }
+    r = deadline_in_handler();
+    if (r != 7) {
+        eprintln(@string(`FAIL deadline r=${r}`, @scratch));
+        return 1;
+    }
+    r = ok_path();
+    if (r != 2) {
+        eprintln(@string(`FAIL ok r=${r}`, @scratch));
+        return 1;
+    }
+    println("parallel_arm_raise_smoke: OK");
+    return 0;
+}

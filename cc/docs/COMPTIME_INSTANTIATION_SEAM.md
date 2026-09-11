@@ -1,8 +1,8 @@
 # Comptime Instantiation Seam — unified design
 
-> **Note:** Default `ccc` is native (`shadow_lower`). Comptime still shares
-> prepare/exec/splice seams with the legacy front; product holes are tracked
-> in [cc/shadow/README.md](../../cc/shadow/README.md) (Next gaps).
+> **Note:** The driver owns the comptime pipeline: harvest, prepare, execute
+> compile-time blocks with libtcc, splice the fragments (`cc/src/comptime/`).
+> The lowerer reads the staged unit that pipeline produces.
 
 **Status:** proposal (2026-05-29); product updated as the factory seam landed.  
 **Goal:** Make `@comptime` as complete as the language allows, retire `CC_PARSER_MODE` stubs, and converge built-in generics (Vec/Map/Result), protocol hooks (UFCS/create/destroy), and `cc_type_info` introspection on **one compile-time seam**.

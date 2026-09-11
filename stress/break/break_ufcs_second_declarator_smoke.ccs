@@ -1,0 +1,15 @@
+/* A UFCS call as the initializer of the second declarator of one
+ * declaration (`uint32_t lo = 0, hi = v.len();`) is a call like any other. */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/vec.cch>
+#include <stdio.h>
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    Vec::[int] v = vec_new::[int](a);
+    v.push(1);
+    v.push(2);
+    uint32_t lo = 0, hi = (uint32_t)v.len();
+    printf("%u %u\n", (unsigned)lo, (unsigned)hi);
+    return 0;
+}

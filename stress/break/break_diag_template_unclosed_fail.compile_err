@@ -1,0 +1,3 @@
+# an unterminated slot names the slot at its column
+break_diag_template_unclosed_fail.ccs:7:32
+${

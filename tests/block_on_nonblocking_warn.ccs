@@ -5,6 +5,7 @@
 
 /* This function has a loop with channel ops - NOT @nonblocking */
 @async int producer(CCChanTx tx, int count) {
+    @errhandler(CCIoError e) { cc_error_exit(e.base); }
     for (int i = 0; i < count; i++) {
         @await tx.send(i) !>;
     }
@@ -13,6 +14,7 @@
 
 /* This function has NO loop with channel ops - implicitly @nonblocking */
 @async int single_send(CCChanTx tx, int val) {
+    @errhandler(CCIoError e) { cc_error_exit(e.base); }
     @await tx.send(val) !>;
     return 0;
 }

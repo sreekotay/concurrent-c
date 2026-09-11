@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # smoke_ubuntu24.sh — Ubuntu 24.04 amd64 emit probe via Docker (raytext CI parity).
 #
-# Reproduce Linux-only shadow_lower / @for + .sub() failures on a Mac host.
+# Reproduce Linux-only lowering / @for + .sub() failures on a Mac host.
 #
 #   ./scripts/smoke_ubuntu24.sh
 #   RAYTEXT_ROOT=/path/to/raytext ./scripts/smoke_ubuntu24.sh

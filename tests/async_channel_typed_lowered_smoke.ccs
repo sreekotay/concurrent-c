@@ -4,6 +4,7 @@
 #include <stdio.h>
 
 @async int sender(CCChanTx tx) {
+    @errhandler(CCIoError e) { cc_error_exit(e.base); }
     int val = 42;
     @await tx.send(val) !>;
     printf("typed sender: sent %d\n", val);
@@ -11,6 +12,7 @@
 }
 
 @async int receiver(CCChanRx rx) {
+    @errhandler(CCIoError e) { cc_error_exit(e.base); }
     int val = 0;
     @await rx.recv(&val) !>;
     printf("typed receiver: received %d\n", val);

@@ -1,10 +1,11 @@
 /*
  * Implementation-grade local header: carries statement-level CC constructs
  * (@variant, @errhandler, @defer, !> unwraps) that the interface .cch -> .h
- * lowering cannot handle.  The preprocessor splices this file's raw source
- * into each including TU (C header-library semantics) so the full pipeline
- * lowers it in context — including comptime niche registration for the
- * packed variant below.
+ * lowering cannot handle.  It is a module of one (spec 1.7): the full
+ * pipeline lowers this file once as a unit, and the .h that includers see
+ * carries the types and the prototypes of the exported functions — the
+ * packed variant among the types, sized from the comptime niche
+ * registration the prelude declares.
  */
 #ifndef IMPL_CCH_HEADER_HELPER_CCH
 #define IMPL_CCH_HEADER_HELPER_CCH
@@ -17,7 +18,7 @@
     flag: int;
 };
 
-/* Packed variant with a runtime-sized arm (needs the TU's comptime type
+/* Packed variant with a runtime-sized arm (needs the comptime type
  * registry — the original failure mode for headers like this). */
 @variant(packed) HelperCell {
     str: CCString;
@@ -31,8 +32,9 @@ static int64_t !>(CCError) helper_parse(char[:] s) {
     return cc_ok(v);
 }
 
-/* @defer + UFCS + designated variant init + projection unwrap. */
-static int64_t helper_sum(char[:] a, char[:] b) {
+/* @defer + UFCS + designated variant init + projection unwrap. Exported:
+ * the program calls it through the .h. */
+int64_t helper_sum(char[:] a, char[:] b) {
     HelperVal pv = { .num = 0 };
     @defer (void)pv;
     int64_t x = helper_parse(a) !> { return -1; };
@@ -42,7 +44,7 @@ static int64_t helper_sum(char[:] a, char[:] b) {
     return out;
 }
 
-static int64_t helper_cell_roundtrip(int64_t v) {
+int64_t helper_cell_roundtrip(int64_t v) {
     HelperCell c = { .num = v };
     int64_t got = c.num !> { return -1; };
     return got;

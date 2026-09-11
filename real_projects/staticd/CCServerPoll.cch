@@ -1,13 +1,14 @@
 /*
- * Dest waiter face. Bodies: CCServerPoll.ccs (kqueue / epoll / poll).
- * Pulls CCServer.cch so the published .h is self-contained (emit may
- * reorder includes ahead of the owner's CCServer.cch).
+ * Dest waiter face, a member of module CCServer (spec 1.7). Bodies:
+ * CCServerPoll.ccs (kqueue / epoll / poll), a member as well. Both splice
+ * into the module unit that CCServer.cch roots.
  *
  * Connections live in Table::[int, CCConnRow] keyed by WaitId (≥1).
  * Kernel udata / wake hits name WaitId — never dense pack index.
  * `id_di` is WaitId → dense index for O(1) row(). `cc_tape_close` requires
  * an empty table (abort otherwise); worker exit is `worker_tape_exit` only.
  */
+#pragma(@module) "CCServer"
 #ifndef CC_SERVER_POLL_CCH
 #define CC_SERVER_POLL_CCH
 

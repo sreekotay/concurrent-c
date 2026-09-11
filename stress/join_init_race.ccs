@@ -48,7 +48,7 @@ int main(void) {
         for (int o = 0; o < NUM_OBSERVERS; o++) {
             cc_nursery_spawn(n, observer_task, NULL);
         }
-        cc_nursery_wait(n);
+        (void)cc_nursery_wait(n);
         n.free();
         
         int obs = cc_atomic_load(&observers_done);

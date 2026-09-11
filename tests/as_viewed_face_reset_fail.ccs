@@ -10,6 +10,11 @@ typedef struct {
 };
 
 int main(void) {
+    /* The unwrap below is at expression position (right of `=`), where a bare
+     * `!>;` inlines the matching handler; spec 3.1 invariant 4 makes a unit
+     * with none ill-formed, and a UFCS callee is no exception.  Written out so
+     * this row refuses for the reason it is named for. */
+    @errhandler(CCError e) cc_error_exit(e);
     Box b;
     CCArena tmp = cc_arena_heap(256) @destroy;
     b.arena = tmp.detach() !>;

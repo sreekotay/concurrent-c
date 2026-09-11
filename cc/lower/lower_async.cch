@@ -1,0 +1,1319 @@
+#pragma(@module) "lower"
+/* Clean lowerer, step: asynchronous functions. `@async Ret f(a)` is a
+ * function that hands back a task instead of a value: the caller gets a
+ * `CCTaskIntptr` it can poll, block on, or hand to a nursery.
+ *
+ * The shape is a frame the task owns, the body as an ordinary function
+ * over that frame, a poll that runs the body once and reports the result,
+ * and a drop that releases both. The frame is heap-allocated because it
+ * outlives the call that made it: the caller returns, the task does not.
+ *
+ * A parameter is copied into the frame at the call and read back into a
+ * local of the same name at the top of the body, so the body is the code
+ * the user wrote, over the names they wrote.
+ *
+ * A task carries one `intptr_t`, so a value wider than that -- a Result --
+ * travels boxed: the poll heap-allocates what the body returned and the
+ * task carries the box, which the wait reads out and frees.
+ *
+ * `@await e` waits for the task `e` yields and takes its value; the value
+ * type is the awaited function's declared return type, so the wait knows
+ * what it is unwrapping. An await whose type cannot be read is a
+ * diagnostic, never a guess: reading a task's payload at the wrong width
+ * is a wrong value that still compiles.
+ *
+ * Inside an `@async` body a call that may block is handed to a pool and
+ * waited on, so the thread the fiber polls on stays free. Which calls
+ * those are is the edge: the call site's own `@blocking` / `@nonblocking`
+ * first, then what the callee declares, then the block, then the function,
+ * and blocking when nobody said (spec 8.2.2). Lifetime: the lowerer arena. */
+#ifndef CC_LOWER_ASYNC_CCH
+#define CC_LOWER_ASYNC_CCH
+#include "lower.cch"
+#include "typing.cch"
+
+typedef struct AStep {
+    CcLowerer* L;
+    Walker* w;
+    CcNameList async_fns;       /* every function the index names, filed under the */
+    CcNameList block_fns;       /* scheduling word its declaration carried: read once, */
+    CcNameList noblock_fns;     /* before a lowered prototype gives that word up */
+    CcDeclList from_async;      /* the declarations an `@async` one was lowered into: by the time
+                                 * the awaits are walked, nothing on them still says `@async` */
+    bool in_async;              /* the walk is inside one of those */
+} AStep;
+
+/* Did this function come out of an `@async` declaration? */
+static bool as_from_async(AStep* st, CcDecl* d) {
+    CcDeclList* v = &st->from_async;
+    size_t n = v->len();
+    size_t i;
+    for (i = 0; i < n; i++) if (*v->get_ptr(i) == d) return true;
+    return false;
+}
+
+static bool as_func_of(CcDecl* d, CcFuncDecl* out) {
+    @switch (d->k) {
+        case .func(f): *out = f; return true;
+        default: return false;
+    }
+}
+
+static CcFuncType* as_func_type(CcType* t) {
+    if (!t) return NULL;
+    @switch (t->k) {
+        case .func: return &t->k.func;
+        default: return NULL;
+    }
+}
+
+static bool as_is_void(CcType* t) {
+    CCSlice nm;
+    if (!t) return true;
+    @switch (t->k) {
+        case .named(n): nm = n.name; break;
+        default: return false;
+    }
+    return cc_slice_eq_cstr(&nm, "void");
+}
+
+static bool as_is_result(CcType* t) {
+    if (!t) return false;
+    @switch (t->k) {
+        case .result: return true;
+        default: return false;
+    }
+}
+
+/* The value a `T !>(E)` carries. */
+static CcType* as_result_value(CcType* t) {
+    if (!t) return NULL;
+    @switch (t->k) {
+        case .result(r): return r.value;
+        default: return NULL;
+    }
+}
+
+/* A canonical spelling this step can stand a declaration on. The index
+ * answers `?` for a type it cannot spell, and an array or function
+ * parameter wants a declarator suffix no environment field has: either way
+ * there is no name to write, and the step says so rather than write one
+ * that is not the type. A type keeps the pointer stars the canonical form
+ * carries; a plain name -- a Result's own -- keeps none. */
+static bool as_plain_name(CCSlice s) {
+    size_t i;
+    if (!s.len) return false;
+    if (s.ptr[0] >= '0' && s.ptr[0] <= '9') return false;
+    for (i = 0; i < s.len; i++) {
+        char c = s.ptr[i];
+        bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == '_';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+static bool as_plain_type(CCSlice s) {
+    size_t i;
+    if (!s.len) return false;
+    for (i = 0; i < s.len; i++) {
+        char c = s.ptr[i];
+        bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == '_' || c == ' ' || c == '*';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+/* The C spelling of a type, as a declaration of `name`. */
+static CCString as_spell(CcLowerer* L, CcType* t, CCSlice name) {
+    return CcType_spell(t, name, &L->unit->tape, L->arena);
+}
+
+/* A generic parameter type, resolved to the instance the generics step
+ * would name it by.
+ *
+ * The frame fields and the factory signature are SPELLED here, into text,
+ * and the generics step runs after this one. A `BufReader::[CCSocket]*`
+ * left as written therefore freezes into the frame as a spelling no C
+ * compiler reads, and every field after it in the struct goes with it.
+ * Asking the index for the canonical name instantiates the instance
+ * exactly as a later use of it would, and the node the body reads is this
+ * same one, so the frame and the body agree on the type. */
+static bool as_mono_type(CcType* t, void* env) {
+    CcLowerer* L = (CcLowerer*)env;
+    CcIndex* ix = L->ix;
+    bool is_generic = false;
+    @switch (t->k) {
+        case .generic: is_generic = true; break;
+        default: break;
+    }
+    if (!is_generic) return true;
+    {
+        CCSlice name = ix->canon(t);
+        if (!name.len) return true;
+        if (gn_instance_is_pointer(L, name)) {
+            /* a family whose constructor returns `Instance*`: the spelled type is the pointer */
+            CcType* base = cc_type_named(name, t->span, L->arena);
+            CcPointerType pt;
+            pt.pointee = base;
+            t->k = { .pointer = pt };
+        } else {
+            CcNamedType nt;
+            memset(&nt, 0, sizeof(nt));
+            nt.name = name;
+            t->k = { .named = nt };
+        }
+    }
+    return false;
+}
+
+static void as_mono_params(CcLowerer* L, CcParamList* ps) {
+    CcVisitor v;
+    size_t n = ps->len();
+    size_t i;
+    memset(&v, 0, sizeof(v));
+    v.env = L;
+    v.type = as_mono_type;
+    for (i = 0; i < n; i++) {
+        CcParam* p = ps->get_ptr(i);
+        if (p->type) walk_type(&v, p->type);
+    }
+}
+
+/* `int v, char* p` as written, or `void` for a function of none. */
+static CCString as_param_list(CcLowerer* L, CcParamList* ps) {
+    CCString out = cc_string_new();
+    size_t n = ps->len();
+    size_t i;
+    if (!n) { cc_string_push_cstr(&out, "void", L->arena); return out; }
+    for (i = 0; i < n; i++) {
+        CcParam* p = ps->get_ptr(i);
+        CCString one = as_spell(L, p->type, p->name);
+        if (i) cc_string_push_cstr(&out, ", ", L->arena);
+        cc_string_push_slice(&out, one.as_slice(), L->arena);
+    }
+    return out;
+}
+
+/* The frame's fields: one per named parameter. */
+static CCString as_frame_fields(CcLowerer* L, CcParamList* ps) {
+    CCString out = cc_string_new();
+    size_t n = ps->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CcParam* p = ps->get_ptr(i);
+        CCString slot;
+        CCString one;
+        if (!p->name.len || !p->type) continue;
+        slot = @string(`__p_${p->name}`, L->arena);
+        one = as_spell(L, p->type, slot.as_slice());
+        cc_string_push_cstr(&out, "    ", L->arena);
+        cc_string_push_slice(&out, one.as_slice(), L->arena);
+        cc_string_push_cstr(&out, ";\n", L->arena);
+    }
+    return out;
+}
+
+/* The call filling the frame from the arguments the caller passed. */
+static CCString as_frame_fills(CcLowerer* L, CcParamList* ps) {
+    CCString out = cc_string_new();
+    size_t n = ps->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CcParam* p = ps->get_ptr(i);
+        CCSlice nm = p->name;
+        CCString one;
+        if (!nm.len || !p->type) continue;
+        one = @string(`    __f->__p_${nm} = ${nm};
+`, L->arena);
+        cc_string_push_slice(&out, one.as_slice(), L->arena);
+    }
+    return out;
+}
+
+/* `static <Ret> <base>_body(<base>_frame* __f)`: the body the user wrote,
+ * over locals named as they named their parameters. */
+static CcDecl* as_body_decl(CcLowerer* L, CcFuncDecl fd, CcParamList* ps, CCSlice base, CcSpan sp) {
+    CcStmt* body = lw_block(L, sp);
+    CcParamList params = vec_new::[CcParam](L->arena);
+    CcType* fn_type = cc__type_blank(sp, L->arena);
+    CcFuncType* src = as_func_type(fd.type);
+    CcFuncType ft;
+    CcFuncDecl out;
+    CcDecl* d;
+    size_t n = ps->len();
+    size_t i;
+    CCString fname = @string(`${base}_frame`, L->arena);
+    for (i = 0; i < n; i++) {
+        CcParam* p = ps->get_ptr(i);
+        CCString slot;
+        CcExpr* read;
+        if (!p->name.len || !p->type) continue;
+        slot = @string(`__p_${p->name}`, L->arena);
+        read = cc_expr_member(lw_ident(L, cstr_slice("__f"), sp), lw_keep(L, &slot), true, sp, L->arena);
+        lw_push(body, lw_decl_stmt(L, p->type, p->name, read, sp));
+    }
+    if (fd.body) lw_push(body, fd.body);
+    {
+        CcParam p0;
+        memset(&p0, 0, sizeof(p0));
+        p0.span = sp;
+        p0.type = cc_type_pointer(cc_type_named(lw_keep(L, &fname), sp, L->arena), sp, L->arena);
+        p0.name = cstr_slice("__f");
+        p0.attrs = vec_new::[CcAttr](L->arena);
+        params.push(p0);
+    }
+    memset(&ft, 0, sizeof(ft));
+    ft.ret = src ? src->ret : NULL;
+    ft.params = params;
+    ft.has_prototype = true;
+    { CcTypeK tk = { .func = ft }; fn_type->k = tk; }
+    memset(&out, 0, sizeof(out));
+    out.type = fn_type;
+    {
+        CCString bn = @string(`${base}_body`, L->arena);
+        out.name = lw_keep(L, &bn);
+    }
+    out.body = body;
+    d = cc_arena_alloc(L->arena, sizeof(CcDecl), _Alignof(CcDecl));
+    memset(d, 0, sizeof(*d));
+    d->span = sp;
+    d->specs = CC_SPEC_STATIC;
+    d->attrs = vec_new::[CcAttr](L->arena);
+    { CcDeclK dk = { .func = out }; d->k = dk; }
+    return d;
+}
+
+/* The poll, the drop, and the function the caller still calls by name. */
+/* What case 1 of the poll runs, and where it leaves the value. A task
+ * carries one `intptr_t`: a Result is wider than that, so the poll boxes
+ * what the body returned and carries the box. The wait owns the box. */
+static CCString as_run_text(CcLowerer* L, CCSlice base, CCSlice rname, bool is_void) {
+    if (rname.len) {
+        CCString s = @string(`${rname} __cc_ar = ${base}_body(__f);
+                ${rname}* __cc_arp = (${rname}*)cc__heap_alloc(sizeof(*__cc_arp));
+                if (__cc_arp) *__cc_arp = __cc_ar;
+                __f->__r = (intptr_t)(void*)__cc_arp;`, L->arena);
+        return s;
+    }
+    if (is_void) {
+        CCString s = @string(`${base}_body(__f);
+                __f->__r = 0;`, L->arena);
+        return s;
+    }
+    {
+        CCString s = @string(`__f->__r = (intptr_t)${base}_body(__f);`, L->arena);
+        return s;
+    }
+}
+
+static CCString as_tail_text(CcLowerer* L, CCSlice base, CCSlice name, CCString plist,
+                             CCString fills, CCSlice rname, bool is_void, bool is_static) {
+    CCString run = as_run_text(L, base, rname, is_void);
+    CCSlice stat = is_static ? cstr_slice("static ") : cc_slice_empty();
+    CCString out = @string(`static CCFutureStatus ${base}_poll(void* __p, intptr_t* __o, int* __e) {
+    ${base}_frame* __f = (${base}_frame*)__p;
+    (void)__e;
+    if (!__f) return CC_FUTURE_ERR;
+    for (;;) {
+        switch (__f->__st) {
+            case 0:
+                __f->__st = 1;
+                /* falls through */
+            case 1: {
+                ${run}
+                __f->__st = 999;
+                continue;
+            }
+            case 999: {
+                if (__o) *__o = __f->__r;
+                return CC_FUTURE_READY;
+            }
+            default:
+                return CC_FUTURE_ERR;
+        }
+    }
+}
+
+static void ${base}_drop(void* __p) {
+    ${base}_frame* __f = (${base}_frame*)__p;
+    if (!__f) return;
+    cc_task_intptr_free(&__f->__t[0]);
+    cc__heap_free(__f);
+}
+
+${stat}CCTaskIntptr ${name}(${plist}) {
+    ${base}_frame* __f = (${base}_frame*)cc__heap_calloc(1, sizeof(${base}_frame));
+    if (!__f) {
+        CCTaskIntptr __t;
+        cc__bytes_zero(&__t, sizeof(__t));
+        return __t;
+    }
+    __f->__st = 0;
+${fills}    return cc_task_intptr_make_poll_ex(${base}_poll, NULL, __f, ${base}_drop);
+}
+`, L->arena);
+    return out;
+}
+
+/* A declaration without a body: the caller only needs to know it hands
+ * back a task. */
+static void as_prototype(CcLowerer* L, CcDecl* d, CcFuncDecl fd, CcSpan sp) {
+    CcFuncType* ft = as_func_type(fd.type);
+    if (!ft) return;
+    ft->ret = cc_type_named(cstr_slice("CCTaskIntptr"), sp, L->arena);
+    d->specs &= ~(uint32_t)CC_SPEC_ASYNC;
+}
+
+/* ---- blocking edges inside an @async body ------------------------------- */
+
+/* What one call edge does with the thread the fiber polls on: a blocking
+ * edge hands the call to a pool and waits for it, so that thread stays
+ * free; a non-blocking edge runs the call where it stands; an `@async`
+ * callee is neither, since it hands back a task and returns. */
+enum { AS_EDGE_ASYNC = 0, AS_EDGE_NOBLOCK = 1, AS_EDGE_BLOCKING = 2 };
+
+/* `@blocking` / `@nonblocking` / `@noblock` at a call site or on a block,
+ * as the specifier bits the same words carry on a declaration. */
+static uint32_t as_mode_bits(CCSlice w) {
+    if (cc_slice_eq_cstr(&w, "blocking")) return (uint32_t)CC_SPEC_BLOCKING;
+    if (cc_slice_eq_cstr(&w, "nonblocking") || cc_slice_eq_cstr(&w, "noblock"))
+        return (uint32_t)CC_SPEC_NONBLOCKING;
+    return 0;
+}
+
+/* Every function the index names, filed under the scheduling word its
+ * declaration carried. Read before the step rewrites anything: a prototype
+ * gives up `@async` the moment it is lowered, and a body lowered after it
+ * would then read the wrong edge for a call it makes. */
+static void as_scan_specs(AStep* st) {
+    CcIndex* ix = st->L->ix;
+    CcSymList* syms = &ix->syms;
+    CcNameList* av = &st->async_fns;
+    CcNameList* bv = &st->block_fns;
+    CcNameList* nv = &st->noblock_fns;
+    size_t n = syms->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CcSym* s = *syms->get_ptr(i);
+        uint32_t sp;
+        if (s->kind != CC_SYM_FUNC || !s->decl) continue;
+        sp = s->decl->specs;
+        if (sp & (uint32_t)CC_SPEC_ASYNC) av->push(s->name);
+        if (sp & (uint32_t)CC_SPEC_BLOCKING) bv->push(s->name);
+        if (sp & (uint32_t)CC_SPEC_NONBLOCKING) nv->push(s->name);
+    }
+}
+
+static bool as_name_in(CcNameList* v, CCSlice name) {
+    size_t n = v->len();
+    size_t i;
+    for (i = 0; i < n; i++)
+        if (slice_eq(*v->get_ptr(i), name)) return true;
+    return false;
+}
+
+static uint32_t as_callee_specs(AStep* st, CCSlice name) {
+    uint32_t out = 0;
+    if (as_name_in(&st->async_fns, name)) out |= (uint32_t)CC_SPEC_ASYNC;
+    if (as_name_in(&st->block_fns, name)) out |= (uint32_t)CC_SPEC_BLOCKING;
+    if (as_name_in(&st->noblock_fns, name)) out |= (uint32_t)CC_SPEC_NONBLOCKING;
+    return out;
+}
+
+/* The runtime's own entry points and the print family belong to the
+ * scheduler, not to a pool it would be run from. */
+static bool as_skip_callee(CCSlice n) {
+    if (!n.len) return true;
+    if (n.len >= 3 && memcmp(n.ptr, "cc_", 3) == 0) return true;
+    return cc_slice_eq_cstr(&n, "println") || cc_slice_eq_cstr(&n, "eprintln") ||
+           cc_slice_eq_cstr(&n, "fprintln");
+}
+
+/* The edge one call is on. The call site's own word is read first, then
+ * what the callee declares, then the block the call stands in, then the
+ * function -- and blocking when nobody said, because a call whose
+ * scheduling is unstated may block, and a polling thread that blocks
+ * stalls every other task on it. */
+static int as_edge(AStep* st, CCSlice callee, uint32_t site, uint32_t block, uint32_t owner) {
+    uint32_t ce = as_callee_specs(st, callee);
+    if (site & (uint32_t)CC_SPEC_BLOCKING) return AS_EDGE_BLOCKING;
+    if (site & (uint32_t)CC_SPEC_NONBLOCKING) return AS_EDGE_NOBLOCK;
+    if (ce & (uint32_t)CC_SPEC_ASYNC) return AS_EDGE_ASYNC;
+    if (ce & (uint32_t)CC_SPEC_NONBLOCKING) return AS_EDGE_NOBLOCK;
+    if (ce & (uint32_t)CC_SPEC_BLOCKING) return AS_EDGE_BLOCKING;
+    if (block & (uint32_t)CC_SPEC_NONBLOCKING) return AS_EDGE_NOBLOCK;
+    if (block & (uint32_t)CC_SPEC_BLOCKING) return AS_EDGE_BLOCKING;
+    if (owner & (uint32_t)CC_SPEC_NONBLOCKING) return AS_EDGE_NOBLOCK;
+    if (owner & (uint32_t)CC_SPEC_BLOCKING) return AS_EDGE_BLOCKING;
+    return AS_EDGE_BLOCKING;
+}
+
+/* ---- the node shapes the edges are read off ----------------------------- */
+
+static bool as_call_of(CcExpr* e, CcCall* out) {
+    if (!e) return false;
+    @switch (e->k) {
+        case .call(c): *out = c; return true;
+        default: return false;
+    }
+}
+
+static bool as_mode_of(CcExpr* e, CcCallMode* out) {
+    if (!e) return false;
+    @switch (e->k) {
+        case .call_mode(m): *out = m; return true;
+        default: return false;
+    }
+}
+
+/* A `@defer` body runs at scope exit, on whichever fiber leaves the scope:
+ * the edges of the calls in it are that exit's, not this statement's. */
+static bool as_is_defer(CcStmt* s) {
+    @switch (s->k) {
+        case .defer: return true;
+        default: return false;
+    }
+}
+
+/* `@nonblocking { }` says how the calls inside it are dispatched. C has no
+ * such word, so once the mode has been read the block is an ordinary one --
+ * left as written, the printer keeps it whole and the word reaches the C. */
+static bool as_flatten_mode(CcStmt* s, uint32_t* mode) {
+    CcBlock b;
+    bool hit = false;
+    @switch (s->k) {
+        case .mode_block(mb): {
+            b.stmts = mb.stmts;
+            *mode = as_mode_bits(mb.mode);
+            hit = true;
+            break;
+        }
+        default: break;
+    }
+    if (!hit) return false;
+    { CcStmtK sk = { .block = b }; s->k = sk; }
+    return true;
+}
+
+static CcSym* as_func_sym(CcIndex* ix, CCSlice name) {
+    CcSym* s = sym_any(ix, name);
+    while (s && s->kind != CC_SYM_FUNC) s = s->same_name;
+    return s;
+}
+
+static CcExpr* as_cast(CcLowerer* L, CcType* t, CcExpr* a, CcSpan sp) {
+    CcExpr* e = cc__expr_blank(sp, L->arena);
+    CcCast ca;
+    ca.type = t;
+    ca.a = a;
+    { CcExprK ek = { .cast = ca }; e->k = ek; }
+    return e;
+}
+
+/* ---- the wrap --------------------------------------------------------- */
+
+/* How many calls in a row one dispatch carries. */
+enum { AS_AB_BATCH_MAX = 8 };
+
+typedef struct ABlk {
+    AStep* st;
+    uint32_t owner;             /* the scheduling words on the `@async` function itself */
+    uint32_t block;             /* and on the `@nonblocking { }` the statement stands in */
+} ABlk;
+
+/* The callee of `e`, when the edge blocks and the step can build an
+ * environment for it: a plain call, a name the index declares, a prototype
+ * of the same arity, and parameters the canonical spellings can be
+ * declared from. A name from a system header is C's and has no parameter
+ * types here; a call the index cannot resolve is left where it stands. */
+static bool as_ab_ready(ABlk* ab, CcExpr* e, CcCall* out, CcParamList** ps, CcType** ret) {
+    AStep* st = ab->st;
+    CcIndex* ix = st->L->ix;
+    CcExpr* inner = strip_parens_expr(e);
+    CcCallMode cm;
+    uint32_t site = 0;
+    CcCall cl;
+    CCSlice fn;
+    CcSym* sym;
+    CcFuncType* ft;
+    CcParamList* pv;
+    CcExprList* av;
+    size_t n;
+    size_t i;
+    if (as_mode_of(inner, &cm)) {
+        site = as_mode_bits(cm.mode);
+        inner = strip_parens_expr(cm.a);
+    }
+    if (!as_call_of(inner, &cl)) return false;
+    if (!expr_ident(strip_parens_expr(cl.callee), &fn)) return false;
+    if (as_skip_callee(fn)) return false;
+    if (as_edge(st, fn, site, ab->block, ab->owner) != AS_EDGE_BLOCKING) return false;
+    sym = as_func_sym(ix, fn);
+    ft = sym ? as_func_type(sym->type) : NULL;
+    if (!ft || !ft->has_prototype || ft->variadic) return false;
+    pv = &ft->params;
+    av = &cl.args;
+    n = pv->len();
+    if (n != av->len()) return false;
+    for (i = 0; i < n; i++) {
+        CcParam* p = pv->get_ptr(i);
+        CCSlice ty;
+        if (!p->type) return false;
+        ty = ix->canon(p->type);
+        if (!as_plain_type(ty)) return false;
+    }
+    *out = cl;
+    *ps = pv;
+    *ret = ft->ret;
+    return true;
+}
+
+static bool as_expr_of(CcStmt* s, CcExpr** e) {
+    @switch (s->k) {
+        case .expr(es): {
+            if (es.body) return false;   /* a macro loop: the call is its head, not a statement */
+            *e = es.e;
+            return true;
+        }
+        default: return false;
+    }
+}
+
+static bool as_return_of(CcStmt* s, CcExpr** e) {
+    @switch (s->k) {
+        case .return_(r): *e = r.value; return true;
+        default: return false;
+    }
+}
+
+static bool as_assign_of(CcExpr* e, CcExpr** lhs, CcExpr** rhs) {
+    @switch (e->k) {
+        case .assign(b): {
+            if (b.op != CC_OP_ASSIGN) return false;
+            *lhs = b.a;
+            *rhs = b.b;
+            return true;
+        }
+        default: return false;
+    }
+}
+
+/* A statement whose call the batch took: the block the batch became stands
+ * where the first of them did, and the rest are nothing. */
+static void as_ab_blank(CcStmt* s) {
+    CcExprStmt es;
+    es.e = NULL;
+    es.body = NULL;
+    { CcStmtK sk = { .expr = es }; s->k = sk; }
+}
+
+/* A statement that is a call and nothing else, on an edge that blocks. */
+static bool as_ab_probe(ABlk* ab, CcStmt* s, CcCall* cl, CcParamList** ps) {
+    CcExpr* e = NULL;
+    CcType* ret = NULL;
+    if (!s) return false;
+    if (as_is_defer(s)) return false;
+    if (!as_expr_of(s, &e) || !e) return false;
+    return as_ab_ready(ab, e, cl, ps, &ret);
+}
+
+/* `return f(a);` or `x = f(a);` closing a run of them. The value the pool
+ * computes comes back through a local the closure writes, so the callee's
+ * return type has to be one this step can declare -- and not `void`, which
+ * is no value at all. `*lhs` is the assignment's left side, or NULL for a
+ * return. */
+static bool as_ab_tail(ABlk* ab, CcStmt* s, CcCall* cl, CcParamList** ps,
+                       CcType** ret, CcExpr** lhs) {
+    CcIndex* ix = ab->st->L->ix;
+    CcExpr* e = NULL;
+    CcExpr* rhs = NULL;
+    *lhs = NULL;
+    if (!s) return false;
+    if (as_is_defer(s)) return false;
+    if (as_return_of(s, &e)) {
+        if (!e) return false;
+        if (!as_ab_ready(ab, e, cl, ps, ret)) return false;
+    } else {
+        if (!as_expr_of(s, &e) || !e) return false;
+        if (!as_assign_of(e, lhs, &rhs)) return false;
+        if (!as_ab_ready(ab, rhs, cl, ps, ret)) return false;
+    }
+    if (as_is_void(*ret)) return false;
+    {
+        CCSlice rt = ix->canon(*ret);
+        return as_plain_type(rt);
+    }
+}
+
+/* One call of a batch: its arguments in locals of the callee's parameter
+ * types, and the call over those locals.
+ *
+ * The arguments are read into locals at the site because that is what the
+ * call means: `&x` names the caller's `x`, and a closure that captured `x`
+ * itself would hand the callee the address of the copy it carries. The
+ * closure step turns the closure into its environment, so the types these
+ * locals are declared at are the types that environment holds. */
+static CcExpr* as_ab_args(ABlk* ab, CcStmt* blk, CcCall cl, CcParamList* ps,
+                          uint32_t id, size_t k, CcSpan sp) {
+    CcLowerer* L = ab->st->L;
+    CcIndex* ix = L->ix;
+    CcExpr* call = cc_expr_call(cl.callee, sp, L->arena);
+    CcExprList* ia = lw_call_args(call);
+    CcExprList* av = &cl.args;
+    size_t n = av->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CcParam* p = ps->get_ptr(i);
+        CcExpr* arg = *av->get_ptr(i);
+        CCString an = @string(`__cc_ab_a${id}_${(int)k}_${(int)i}`, L->arena);
+        CCSlice a_n = lw_keep(L, &an);
+        CCSlice ty = ix->canon(p->type);
+        CcType* lt = lw_named_type(L, ty, sp);
+        lw_push(blk, lw_decl_stmt(L, lt, a_n, arg, sp));
+        ia->push(lw_ident(L, a_n, sp));
+    }
+    return call;
+}
+
+/* The batch: `n` call statements in a row and, when `tail` is set, the
+ * `return` or assignment after them, as one closure the pool runs once and
+ * the site waits on.
+ *
+ * One dispatch is one thread, so calls written in a row still see each
+ * other's thread-bound state -- splitting them across dispatches would put
+ * neighbours on different threads, which is not what the source says. */
+static void as_ab_emit(ABlk* ab, CcStmtList stmts, size_t at, size_t n, bool tail) {
+    CcLowerer* L = ab->st->L;
+    CcIndex* ix = L->ix;
+    uint32_t id = L->temp_id();
+    CcStmt* head = *stmts.get_ptr(at);
+    CcSpan sp = head->span;
+    CcStmt* blk = lw_block(L, sp);
+    CcStmt* cb = lw_block(L, sp);
+    CcStmt* fin = NULL;
+    CCString rn = @string(`__cc_ab_r${id}`, L->arena);
+    CCString on = @string(`__cc_ab_o${id}`, L->arena);
+    CCString tn = @string(`__cc_ab_t${id}`, L->arena);
+    CCSlice r_n = lw_keep(L, &rn);
+    CCSlice o_n = lw_keep(L, &on);
+    CCSlice t_n = lw_keep(L, &tn);
+    size_t k;
+    for (k = 0; k < n; k++) {
+        CcStmt* s = *stmts.get_ptr(at + k);
+        CcCall cl;
+        CcParamList* ps;
+        CcExpr* call;
+        if (!as_ab_probe(ab, s, &cl, &ps)) return;
+        call = as_ab_args(ab, blk, cl, ps, id, k, sp);
+        lw_push(cb, lw_expr_stmt(L, call, sp));
+    }
+    if (tail) {
+        CcStmt* ts = *stmts.get_ptr(at + n);
+        CcCall cl;
+        CcParamList* ps;
+        CcType* ret = NULL;
+        CcExpr* lhs = NULL;
+        CcExpr* call;
+        CCSlice rt;
+        CcType* vt;
+        CcType* pt;
+        if (!as_ab_tail(ab, ts, &cl, &ps, &ret, &lhs)) return;
+        rt = ix->canon(ret);
+        vt = lw_named_type(L, rt, sp);
+        pt = cc_type_pointer(lw_named_type(L, rt, sp), sp, L->arena);
+        call = as_ab_args(ab, blk, cl, ps, id, n, sp);
+        lw_push(blk, lw_decl_stmt(L, vt, r_n, NULL, sp));
+        {
+            CcExpr* addr = cc_expr_unary(CC_OP_ADDR, lw_ident(L, r_n, sp), sp, L->arena);
+            lw_push(blk, lw_decl_stmt(L, pt, o_n, addr, sp));
+        }
+        {
+            CcExpr* slot = cc_expr_unary(CC_OP_DEREF, lw_ident(L, o_n, sp), sp, L->arena);
+            lw_push(cb, lw_expr_stmt(L, lw_assign(L, slot, call, sp), sp));
+        }
+        if (lhs) fin = lw_expr_stmt(L, lw_assign(L, lhs, lw_ident(L, r_n, sp), sp), sp);
+        else fin = cc_stmt_return(lw_ident(L, r_n, sp), sp, L->arena);
+    }
+    {
+        CcExpr* clo = cc__expr_blank(sp, L->arena);
+        CcClosure kc;
+        CcExpr* run;
+        CcType* tt = lw_named_type(L, cstr_slice("CCTask"), sp);
+        memset(&kc, 0, sizeof(kc));
+        kc.params = vec_new::[CcParam](L->arena);
+        kc.captures = vec_new::[CcCapture](L->arena);
+        kc.body = cb;
+        { CcExprK ek = { .closure = kc }; clo->k = ek; }
+        run = lw_call1(L, cstr_slice("cc_run_blocking_task_intptr"), clo, sp);
+        lw_push(blk, lw_decl_stmt(L, tt, t_n, run, sp));
+    }
+    {
+        CcExpr* h = lw_ident(L, t_n, sp);
+        CcExpr* w = lw_call1(L, cstr_slice("cc_block_on_intptr"), h, sp);
+        CcType* vt = lw_named_type(L, cstr_slice("void"), sp);
+        CcExpr* dropped = as_cast(L, vt, lw_paren(L, w, sp), sp);
+        lw_push(blk, lw_expr_stmt(L, dropped, sp));
+    }
+    if (fin) lw_push(blk, fin);
+    for (k = 1; k < n; k++) {
+        CcStmt* s = *stmts.get_ptr(at + k);
+        as_ab_blank(s);
+    }
+    if (tail) {
+        CcStmt* ts = *stmts.get_ptr(at + n);
+        as_ab_blank(ts);
+    }
+    head->k = blk->k;
+}
+
+/* `T x = f(a);` where `f` is a blocking edge.
+ *
+ * The wrap is one statement expression rather than a block, so the
+ * declaration keeps the scope it was written in: a block in its place would
+ * take `x` with it, and every later use of `x` would be a name the host
+ * compiler has never seen. */
+static bool as_ab_decl_init(CcStmt* s, CcInit** out) {
+    CcDecl* d = NULL;
+    CcVarDecl v;
+    bool is_var = false;
+    if (!s || !stmt_is_decl(s, &d) || !d) return false;
+    @switch (d->k) {
+        case .var(x): v = x; is_var = true; break;
+        default: break;
+    }
+    if (!is_var || v.destroy || v.detach || v.init_is_decl) return false;
+    if (!v.init || v.init->is_list || !v.init->expr) return false;
+    *out = v.init;
+    return true;
+}
+
+static void as_ab_emit_decl(ABlk* ab, CcStmt* s, CcInit* init) {
+    CcLowerer* L = ab->st->L;
+    CcIndex* ix = L->ix;
+    uint32_t id = L->temp_id();
+    CcSpan sp = s->span;
+    CcStmt* blk = lw_block(L, sp);
+    CcStmt* cb = lw_block(L, sp);
+    CcCall cl;
+    CcParamList* ps;
+    CcType* ret = NULL;
+    CcExpr* call;
+    CCSlice rt;
+    CcType* vt;
+    CcType* pt;
+    CCString rn = @string(`__cc_ab_r${id}`, L->arena);
+    CCString on = @string(`__cc_ab_o${id}`, L->arena);
+    CCString tn = @string(`__cc_ab_t${id}`, L->arena);
+    CCSlice r_n = lw_keep(L, &rn);
+    CCSlice o_n = lw_keep(L, &on);
+    CCSlice t_n = lw_keep(L, &tn);
+    if (!as_ab_ready(ab, init->expr, &cl, &ps, &ret)) return;
+    if (as_is_void(ret)) return;
+    rt = ix->canon(ret);
+    if (!as_plain_type(rt)) return;
+    vt = lw_named_type(L, rt, sp);
+    pt = cc_type_pointer(lw_named_type(L, rt, sp), sp, L->arena);
+    call = as_ab_args(ab, blk, cl, ps, id, 0, sp);
+    lw_push(blk, lw_decl_stmt(L, vt, r_n, NULL, sp));
+    {
+        CcExpr* addr = cc_expr_unary(CC_OP_ADDR, lw_ident(L, r_n, sp), sp, L->arena);
+        lw_push(blk, lw_decl_stmt(L, pt, o_n, addr, sp));
+    }
+    {
+        CcExpr* slot = cc_expr_unary(CC_OP_DEREF, lw_ident(L, o_n, sp), sp, L->arena);
+        lw_push(cb, lw_expr_stmt(L, lw_assign(L, slot, call, sp), sp));
+    }
+    {
+        CcExpr* clo = cc__expr_blank(sp, L->arena);
+        CcClosure kc;
+        CcExpr* run;
+        CcType* tt = lw_named_type(L, cstr_slice("CCTask"), sp);
+        memset(&kc, 0, sizeof(kc));
+        kc.params = vec_new::[CcParam](L->arena);
+        kc.captures = vec_new::[CcCapture](L->arena);
+        kc.body = cb;
+        { CcExprK ek = { .closure = kc }; clo->k = ek; }
+        run = lw_call1(L, cstr_slice("cc_run_blocking_task_intptr"), clo, sp);
+        lw_push(blk, lw_decl_stmt(L, tt, t_n, run, sp));
+    }
+    {
+        CcExpr* h = lw_ident(L, t_n, sp);
+        CcExpr* w = lw_call1(L, cstr_slice("cc_block_on_intptr"), h, sp);
+        CcType* vd = lw_named_type(L, cstr_slice("void"), sp);
+        CcExpr* dropped = as_cast(L, vd, lw_paren(L, w, sp), sp);
+        lw_push(blk, lw_expr_stmt(L, dropped, sp));
+    }
+    /* the last statement is what the statement expression is worth */
+    lw_push(blk, lw_expr_stmt(L, lw_ident(L, r_n, sp), sp));
+    {
+        CcExpr* se = cc__expr_blank(sp, L->arena);
+        CcStmtExpr sx;
+        sx.block = blk;
+        { CcExprK ek = { .stmt_expr = sx }; se->k = ek; }
+        init->expr = se;
+    }
+}
+
+static void as_ab_stmts(ABlk* ab, CcStmtList stmts);
+
+/* A call standing alone as the unbraced body of an `if` or a loop: a batch
+ * of one, since there is no list around it to run along. */
+static void as_ab_one(ABlk* ab, CcStmt* s) {
+    CcLowerer* L = ab->st->L;
+    CcCall cl;
+    CcParamList* ps;
+    CcType* ret = NULL;
+    CcExpr* lhs = NULL;
+    CcStmtList one;
+    bool plain = as_ab_probe(ab, s, &cl, &ps);
+    bool tail = false;
+    if (!plain) tail = as_ab_tail(ab, s, &cl, &ps, &ret, &lhs);
+    if (!plain && !tail) {
+        CcInit* init = NULL;
+        if (as_ab_decl_init(s, &init)) as_ab_emit_decl(ab, s, init);
+        return;
+    }
+    one = vec_new::[CcStmtRef](L->arena);
+    one.push(s);
+    as_ab_emit(ab, one, 0, plain ? 1 : 0, tail);
+}
+
+static void as_ab_stmt(ABlk* ab, CcStmt* s) {
+    StmtView v;
+    uint32_t saved;
+    uint32_t mode = 0;
+    if (!s) return;
+    if (as_is_defer(s)) return;
+    saved = ab->block;
+    if (as_flatten_mode(s, &mode) && mode) ab->block = mode;
+    view_stmt(&v, s);
+    if (v.body) { as_ab_stmt(ab, v.body); as_ab_one(ab, v.body); }
+    if (v.else_body) { as_ab_stmt(ab, v.else_body); as_ab_one(ab, v.else_body); }
+    if (v.has_stmts) as_ab_stmts(ab, v.stmts);
+    if (v.has_then) as_ab_stmts(ab, v.then_stmts);
+    if (v.has_else) as_ab_stmts(ab, v.else_stmts);
+    ab->block = saved;
+}
+
+/* One list: what each statement holds inside it first, then the runs of
+ * calls across it. A run that a `return` or an assignment of a call closes
+ * takes that statement too. */
+static void as_ab_stmts(ABlk* ab, CcStmtList stmts) {
+    size_t n = stmts.len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CcStmt* one = *stmts.get_ptr(i);
+        as_ab_stmt(ab, one);
+    }
+    i = 0;
+    while (i < n) {
+        CcCall cl;
+        CcParamList* ps;
+        size_t k = 0;
+        bool tail = false;
+        while (i + k < n && k < AS_AB_BATCH_MAX) {
+            CcStmt* s = *stmts.get_ptr(i + k);
+            if (!as_ab_probe(ab, s, &cl, &ps)) break;
+            k++;
+        }
+        if (i + k < n) {
+            CcStmt* ts = *stmts.get_ptr(i + k);
+            CcCall tc;
+            CcParamList* tp;
+            CcType* tr;
+            CcExpr* lhs;
+            tail = as_ab_tail(ab, ts, &tc, &tp, &tr, &lhs);
+        }
+        /* A statement whose value goes somewhere is an edge on its own: it
+         * needs no plain call ahead of it to be worth a pool thread, and the
+         * block the wrap becomes assigns to a name the enclosing scope
+         * already holds. */
+        if (!k && !tail) {
+            CcStmt* one = *stmts.get_ptr(i);
+            CcInit* init = NULL;
+            if (as_ab_decl_init(one, &init)) as_ab_emit_decl(ab, one, init);
+            i++;
+            continue;
+        }
+        as_ab_emit(ab, stmts, i, k, tail);
+        i += k;
+        if (tail) i++;
+    }
+}
+
+/* A `@blocking` this step did not turn into a wrapped edge. The wrap is a
+ * block of statements over locals of the callee's parameter types, so the
+ * call has to stand alone as a statement and its callee has to be one
+ * whose parameters can be spelled. Where neither holds, the word asked for
+ * a pool thread and would not get one. */
+static bool as_left_blocking_visit(CcExpr* e, void* env) {
+    AStep* st = (AStep*)env;
+    CcLowerer* L = st->L;
+    CcCallMode cm;
+    CcCall cl;
+    CCSlice fn;
+    if (!as_mode_of(e, &cm)) return true;
+    if (as_mode_bits(cm.mode) != (uint32_t)CC_SPEC_BLOCKING) return true;
+    if (!as_call_of(strip_parens_expr(cm.a), &cl)) return true;
+    if (!expr_ident(strip_parens_expr(cl.callee), &fn)) return true;
+    if (as_skip_callee(fn)) return true;
+    if (!as_func_sym(L->ix, fn)) return true;
+    {
+        CCString m = @string(`'${"@"}blocking' on '${fn}' here is not lowered by the clean lowerer yet: the wrap is a block of statements over locals of the callee's parameter types, so the call has to stand alone as its own statement and every parameter has to have a name the environment can be declared at`, L->arena);
+        lw_error(L, e->span, m);
+    }
+    return true;
+}
+
+/* `chan_send` / `chan_recv` are the blocking macros: they park the calling
+ * OS thread until the channel answers. An `@async` body does not own its
+ * thread -- it is one state machine among many on a worker -- so parking
+ * there stalls every other task the worker holds, and the resulting C
+ * shows nothing of it. The task-returning forms an `@await` can suspend on
+ * (`cc_chan_send_task` / `cc_chan_recv_task`) are what belongs here.
+ *
+ * The name is read as written: the macro is expanded by the host compiler,
+ * so by the time anything else could see it the evidence is gone. */
+static bool as_chan_op_name(CCSlice nm, CCSlice* op) {
+    if (cc_slice_eq_cstr(&nm, "chan_send")) { *op = CC_SLICE_LIT("chan_send"); return true; }
+    if (cc_slice_eq_cstr(&nm, "chan_recv")) { *op = CC_SLICE_LIT("chan_recv"); return true; }
+    return false;
+}
+
+static bool as_chan_block_visit(CcExpr* e, void* env) {
+    AStep* st = (AStep*)env;
+    CcLowerer* L = st->L;
+    CCSlice fn = cc_slice_empty();
+    CCSlice op = cc_slice_empty();
+    CcCall cl;
+    if (!as_call_of(e, &cl)) return true;
+    if (!expr_ident(strip_parens_expr(cl.callee), &fn)) return true;
+    if (!as_chan_op_name(fn, &op)) return true;
+    {
+        CCString m = @string(`async: channel operation '${op}' must be awaited in ${"@"}async function`, L->arena);
+        CCString hint = @string(`use '${"@"}await cc_${op}_task(...)': the blocking macro parks the worker thread the task is running on`, L->arena);
+        CCSlice note = cc_string_persist_slice(L->arena, &hint);
+        CcUnit* u = L->unit;
+        CcLoc loc = u->loc(e->span);
+        CcDiag dg = CcDiag_error(loc, cc_string_persist_slice(L->arena, &m));
+        CcDiags* ds = L->ds;
+        dg = CcDiag_with_note(dg, note);
+        ds->push(dg);
+    }
+    return true;
+}
+
+static void as_check_chan_ops(AStep* st, CcStmt* body) {
+    CcVisitor v;
+    if (!body) return;
+    memset(&v, 0, sizeof(v));
+    v.expr = as_chan_block_visit;
+    v.env = st;
+    CcStmt_walk(body, v);
+}
+
+/* The blocking edges of one `@async` body. */
+static void as_autoblock(AStep* st, CcDecl* d, CcFuncDecl fd) {
+    ABlk ab;
+    CcVisitor v;
+    if (!fd.body) return;
+    memset(&ab, 0, sizeof(ab));
+    ab.st = st;
+    ab.owner = d->specs;
+    as_ab_stmt(&ab, fd.body);
+    memset(&v, 0, sizeof(v));
+    v.expr = as_left_blocking_visit;
+    v.env = st;
+    CcStmt_walk(fd.body, v);
+}
+
+/* One `@async` function, as the frame, the body, and the factory. */
+static bool as_lower_one(AStep* st, CcDecl* d, CcDeclList* into) {
+    CcLowerer* L = st->L;
+    CcIndex* ix = L->ix;
+    CcFuncDecl fd;
+    CcFuncType* ft;
+    CcSpan sp = d->span;
+    CCSlice rname = cc_slice_empty();
+    uint32_t id;
+    if (!as_func_of(d, &fd)) return false;
+    ft = as_func_type(fd.type);
+    if (!ft) return false;
+    if (!fd.body) { as_prototype(L, d, fd, sp); return false; }
+    if (as_is_result(ft->ret)) {
+        /* the box the task carries is declared at the Result's own name */
+        rname = ix->canon(ft->ret);
+        if (!as_plain_name(rname)) {
+            CCString m = @string(`an ${"@"}async function returning a Result the index cannot name is not lowered: the task carries the value boxed, and the box has to be declared at a type`, L->arena);
+            lw_error(L, sp, m);
+            return false;
+        }
+    }
+    as_check_chan_ops(st, fd.body);
+    as_autoblock(st, d, fd);
+    id = L->temp_id();
+    {
+        CcParamList ps = ft->params;
+        CCString bn = @string(`__cc_async_${fd.name}_${id}`, L->arena);
+        CCSlice base = lw_keep(L, &bn);
+        CCString fields;
+        as_mono_params(L, &ps);
+        fields = as_frame_fields(L, &ps);
+        CCString plist = as_param_list(L, &ps);
+        CCString fills = as_frame_fills(L, &ps);
+        CCString frame = @string(`typedef struct ${base}_frame {
+    int __st;
+    intptr_t __r;
+${fields}    CCTaskIntptr __t[1];
+} ${base}_frame;
+`, L->arena);
+        CCString tail = as_tail_text(L, base, fd.name, plist, fills, rname,
+                                     as_is_void(ft->ret), (d->specs & CC_SPEC_STATIC) != 0);
+        into->push(lw_raw_decl(L, frame, sp));
+        into->push(as_body_decl(L, fd, &ps, base, sp));
+        into->push(lw_raw_decl(L, tail, sp));
+    }
+    return true;
+}
+
+/* What the wait finds in the task: nothing it can name, a value of the
+ * width the callee returns, or a boxed Result -- and a boxed Result whose
+ * value is `void`, which has nothing to read out of the box. */
+enum { AS_AWAIT_UNKNOWN = 0, AS_AWAIT_VALUE = 1, AS_AWAIT_BOXED = 2, AS_AWAIT_BOXED_VOID = 3 };
+
+/* The value type an await unwraps: what the awaited function declares it
+ * returns. */
+static int as_await_type(AStep* st, CcExpr* operand, CCString* out, CCSlice* rname) {
+    CcLowerer* L = st->L;
+    CcIndex* ix = L->ix;
+    CcExpr* s = strip_parens_expr(operand);
+    CCSlice fn;
+    CcSym* sym;
+    CcType* ret = NULL;
+    CcFuncType* ft;
+    CcCall cl;
+    *rname = cc_slice_empty();
+    if (!s) return AS_AWAIT_UNKNOWN;
+    if (!as_call_of(s, &cl)) return AS_AWAIT_UNKNOWN;
+    if (!expr_ident(strip_parens_expr(cl.callee), &fn)) return AS_AWAIT_UNKNOWN;
+    sym = as_func_sym(ix, fn);
+    if (!sym || !sym->type) return AS_AWAIT_UNKNOWN;
+    ft = as_func_type(sym->type);
+    if (ft) ret = ft->ret;
+    if (!ret) return AS_AWAIT_UNKNOWN;
+    if (as_is_result(ret)) {
+        /* the task carries the box, not the Result: the wait is told the
+         * box's type by name rather than a width to read */
+        CcType* rv = as_result_value(ret);
+        CCSlice rn = ix->canon(ret);
+        if (!as_plain_name(rn)) return AS_AWAIT_UNKNOWN;
+        *rname = rn;
+        if (as_is_void(rv)) return AS_AWAIT_BOXED_VOID;
+        return AS_AWAIT_BOXED;
+    }
+    {
+        /* A callee that already answers with a task handle -- `..._task(...)`
+         * -- is not awaited at the handle's own type: the handle IS the
+         * wait, and what it yields is the payload it carries. Reading it at
+         * `CCTaskIntptr` casts the wait's result to a struct. */
+        CCSlice rn = ix->canon(ret);
+        if (rn.len >= 6 && memcmp(rn.ptr, "CCTask", 6) == 0) {
+            *out = @string(`intptr_t`, L->arena);
+            return AS_AWAIT_VALUE;
+        }
+    }
+    *out = as_spell(L, ret, cc_slice_empty());
+    return AS_AWAIT_VALUE;
+}
+
+/* `({ RT* p = (RT*)(void*)cc_block_on_intptr(t); RT v; zero v; if (p) { v =
+ * *p; free p; } v; })`: the wait, the box the task carried, and the value
+ * read out of it. The poll allocated the box, so the wait is what frees
+ * it -- there is no other reader, and the task is gone after this. */
+static CcExpr* as_unbox(CcLowerer* L, CCSlice rname, CcExpr* task, CcSpan sp) {
+    uint32_t id = L->temp_id();
+    CcStmt* blk = lw_block(L, sp);
+    CcStmt* got = lw_block(L, sp);
+    CcExpr* out = cc__expr_blank(sp, L->arena);
+    CcStmtExpr se;
+    CCString pn = @string(`__cc_ap${id}`, L->arena);
+    CCString vn = @string(`__cc_av${id}`, L->arena);
+    CCSlice p_n = lw_keep(L, &pn);
+    CCSlice v_n = lw_keep(L, &vn);
+    CcType* vt = lw_named_type(L, rname, sp);
+    CcType* pt = cc_type_pointer(lw_named_type(L, rname, sp), sp, L->arena);
+    CcType* voidp = cc_type_pointer(lw_named_type(L, cstr_slice("void"), sp), sp, L->arena);
+    CcExpr* wait = lw_call1(L, cstr_slice("cc_block_on_intptr"), task, sp);
+    CcExpr* box = as_cast(L, pt, as_cast(L, voidp, wait, sp), sp);
+    CCString zero = @string(`cc__bytes_zero(&${v_n}, sizeof(${v_n}))`, L->arena);
+    lw_push(blk, lw_decl_stmt(L, pt, p_n, box, sp));
+    lw_push(blk, lw_decl_stmt(L, vt, v_n, NULL, sp));
+    lw_push(blk, lw_expr_stmt(L, lw_text(L, zero, sp), sp));
+    {
+        CcExpr* read = cc_expr_unary(CC_OP_DEREF, lw_ident(L, p_n, sp), sp, L->arena);
+        CcExpr* store = lw_assign(L, lw_ident(L, v_n, sp), read, sp);
+        CcExpr* freed = lw_call1(L, cstr_slice("cc__heap_free"), lw_ident(L, p_n, sp), sp);
+        lw_push(got, lw_expr_stmt(L, store, sp));
+        lw_push(got, lw_expr_stmt(L, freed, sp));
+    }
+    lw_push(blk, lw_if(L, lw_ident(L, p_n, sp), got, NULL, sp));
+    lw_push(blk, lw_expr_stmt(L, lw_ident(L, v_n, sp), sp));
+    se.block = blk;
+    { CcExprK ek = { .stmt_expr = se }; out->k = ek; }
+    return out;
+}
+
+/* `@await f() !>` awaits the task and unwraps what it carried. The tail
+ * binds to the call in the grammar, so the unwrap parses under the await;
+ * the Result is the task's payload and not the handle, so the two swap
+ * places here: `uw` takes `e`'s place and a fresh await takes the operand
+ * `uw` had. The walk reaches that await where it now stands and lowers it.
+ * An operand that is not an unwrap is left alone. */
+static bool as_reassoc(CcLowerer* L, CcExpr* e, CcExpr* uw) {
+    CcExpr* nw;
+    CcExpr** slot = NULL;
+    CcAwait na;
+    if (!uw) return false;
+    @switch (uw->k) {
+        case .unwrap: slot = &uw->k.unwrap.a; break;
+        case .unwrap_body: slot = &uw->k.unwrap_body.a; break;
+        case .unwrap_or: slot = &uw->k.unwrap_or.a; break;
+        case .unwrap_destroy: slot = &uw->k.unwrap_destroy.a; break;
+        default: break;
+    }
+    if (!slot) return false;
+    nw = cc__expr_blank(e->span, L->arena);
+    na.a = *slot;
+    { CcExprK ak = { .await_ = na }; nw->k = ak; }
+    *slot = nw;
+    e->k = uw->k;
+    return true;
+}
+
+/* `@blocking` / `@nonblocking` at a call site is a fact about how the task
+ * the call runs on is dispatched, and every edge inside an `@async` body
+ * has been resolved by the time this runs. What is left stands where no
+ * task does -- an ordinary function's body -- so the call is an ordinary
+ * call, and C carries no such word for the printer to keep. */
+static bool as_call_mode_visit(CcExpr* e, void* env) {
+    CcCallMode cm;
+    int guard = 0;
+    (void)env;
+    while (guard++ < 4 && as_mode_of(e, &cm) && cm.a) e->k = cm.a->k;
+    return true;
+}
+
+/* The same for a `@nonblocking { }` outside an `@async` body. */
+static bool as_mode_block_visit(CcStmt* s, void* env) {
+    uint32_t mode = 0;
+    (void)env;
+    (void)as_flatten_mode(s, &mode);
+    return true;
+}
+
+static bool as_await_visit(CcExpr* e, void* env) {
+    AStep* st = (AStep*)env;
+    CcLowerer* L = st->L;
+    CcAwait aw;
+    bool hit = false;
+    int kind;
+    CCString ty = cc_string_new();
+    CCSlice rname = cc_slice_empty();
+    @switch (e->k) {
+        case .await_(x): aw = x; hit = true; break;
+        default: break;
+    }
+    if (!hit) return true;
+    if (as_reassoc(L, e, aw.a)) return true;
+    kind = as_await_type(st, aw.a, &ty, &rname);
+    if (kind == AS_AWAIT_UNKNOWN) {
+        if (!st->in_async) {
+            /* Outside an `@async` body the only wait there is names a
+             * function whose task the index can type -- everything else is
+             * the keyword written where it does not belong, and the rule it
+             * broke is the one to say. Inside one, the site is legal and it
+             * is the operand that cannot be read. */
+            CCString m = @string(`'await' is only valid inside ${"@"}async functions`, L->arena);
+            lw_error(L, e->span, m);
+            return true;
+        }
+        {
+            CCString m = @string(`cannot tell what this ${"@"}await unwraps: name the ${"@"}async function it waits on, so the wait reads the task's value at the width the function returns`, L->arena);
+            lw_error(L, e->span, m);
+        }
+        return true;
+    }
+    if (kind == AS_AWAIT_BOXED_VOID) {
+        CCString m = @string(`an ${"@"}await of an ${"@"}async returning 'void !>(E)' is not lowered by the clean lowerer yet: the box the task carries holds only the error, and the unwrap reads a value out of it`, L->arena);
+        lw_error(L, e->span, m);
+        return true;
+    }
+    if (kind == AS_AWAIT_BOXED) {
+        CcExpr* u = as_unbox(L, rname, aw.a, e->span);
+        e->k = u->k;
+        return true;
+    }
+    {
+        CcExpr* c = lw_call2(L, cstr_slice("cc_block_on"), lw_text(L, ty, e->span), aw.a, e->span);
+        e->k = c->k;
+    }
+    return true;
+}
+
+/* A function declaration opens (or closes) the `@async` scope the awaits
+ * below it are read in. Only a function: a `.var` inside a body is a
+ * declaration too, and it does not change where the body stands. */
+static bool as_scope_visit(CcDecl* d, void* env) {
+    AStep* st = (AStep*)env;
+    CcFuncDecl f;
+    if (!as_func_of(d, &f)) return true;
+    st->in_async = as_from_async(st, d);
+    return true;
+}
+
+void CcLowerer_async(CcLowerer* L) {
+    CcDeclList* decls = &L->unit->decls;
+    CcDeclList with = vec_new::[CcDeclRef](L->arena);
+    size_t n = decls->len();
+    size_t i;
+    bool any = false;
+    AStep st;
+    CcVisitor v;
+    memset(&st, 0, sizeof(st));
+    st.L = L;
+    st.async_fns = vec_new::[CCSlice](L->arena);
+    st.block_fns = vec_new::[CCSlice](L->arena);
+    st.noblock_fns = vec_new::[CCSlice](L->arena);
+    st.from_async = vec_new::[CcDeclRef](L->arena);
+    as_scan_specs(&st);   /* first: a lowered prototype no longer says `@async` */
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *decls->get_ptr(i);
+        size_t before;
+        size_t k;
+        size_t after;
+        if (!(d->specs & CC_SPEC_ASYNC)) { with.push(d); continue; }
+        any = true;
+        before = with.len();
+        if (!as_lower_one(&st, d, &with)) with.push(d);
+        after = with.len();
+        for (k = before; k < after; k++) {
+            CcDecl* made = *with.get_ptr(k);
+            st.from_async.push(made);
+        }
+    }
+    if (any) *decls = with;
+    memset(&v, 0, sizeof(v));
+    v.expr = as_await_visit;
+    v.decl = as_scope_visit;
+    v.env = &st;
+    CcUnit_walk(L->unit, v);
+    memset(&v, 0, sizeof(v));
+    v.expr = as_call_mode_visit;
+    v.stmt = as_mode_block_visit;
+    v.env = &st;
+    CcUnit_walk(L->unit, v);
+}
+
+#endif

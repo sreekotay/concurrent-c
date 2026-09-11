@@ -1,0 +1,3085 @@
+#pragma(@module) "lower"
+/* Clean lowerer, step: UFCS. `x.m(args)` and `p->m(args)` become the call
+ * the index resolves for the receiver's type, `callee(<recv>, args)`, with
+ * the receiver passed to fit the callee's first parameter: by address when
+ * the callee takes a pointer and the receiver is a value, itself when both
+ * agree, dereferenced when the callee takes a value and the receiver is a
+ * pointer. `Type.fn(args)` is the declared `Type_fn(args)`. What the
+ * index cannot type or resolve is a diagnostic at the site carrying its
+ * resolution ladder; nothing is guessed. Lifetime: the lowerer arena. */
+#ifndef CC_LOWER_UFCS_CCH
+#define CC_LOWER_UFCS_CCH
+#include "lower.cch"
+#include "comptime.cch"
+#include "typing.cch"
+#include <ccc/cc_ufcs_families.h>
+
+static int cl_destroy_chain(CcLowerer* L, CCSlice canon, CcExpr* subject, CcStmt* into, CcSpan sp, int depth);
+static CcStmt* cl_pre_destroy(CcLowerer* L, CCSlice canon, CcExpr* subject, CcSpan sp);
+
+/* The `.ufcs` handler's argv, as the hook contract fixes it. */
+enum { UF_HOOK_ARG_MAX = 8 };
+
+typedef struct UStep {
+    CcLowerer* L;
+    int n_sites;
+    CcExprList formal_at;       /* a `.method` site a declaration types */
+    CcTypeList formal_ty;       /* what that declaration declared, by the same index */
+    CCSlice trusted;            /* the base whose own method body this is: its unnamed view does not bind here */
+    CCSlice trusted_ret;        /* the base this body constructs: a `T T_empty(void)` is T's own code too */
+    CcExprList stores;          /* `x.f` nodes standing where a store lands */
+    bool restrict_diag;         /* one restrict refusal per unit: the rest are the same mistake */
+} UStep;
+
+/* The view a receiver is written through says which methods this binding
+ * has. Defined with the rest of the restrict machinery, called from the
+ * rewrite that runs ahead of it. */
+static bool uf_check_method_view(Walker* w, UStep* st, CcExpr* e, CcUfcs uf, CcType* rt);
+
+/* The mode a cast on an `as:` face puts the embed under. Same place, same
+ * reason: the machinery it reads lives with the rest of the restrict code. */
+static bool uf_check_face_view(Walker* w, UStep* st, CcExpr* e, CcUfcs uf, CCSlice tn, CcMethod* m);
+
+/* Is the receiver itself a pointer? Its own shape decides, so aliases are
+ * followed but nothing is peeled: peeling a pointer away first would make
+ * every receiver a value. */
+static bool uf_type_is_pointer(Walker* w, CcType* rt) {
+    UStep* st = (UStep*)w->env;
+    CcLowerer* L = st->L;
+    CcIndex* ix = w->ix;
+    CcType* t = rt;
+    int depth = 0;
+    while (t && depth++ < 8) {
+        CcType* a;
+        CCSlice cn;
+        CcSym* sym;
+        if (t->k.kind == CcTypeK_pointer || t->k.kind == CcTypeK_array) return true;
+        a = unalias_local(w, t);
+        if (a && a != t) { t = a; continue; }
+        cn = ix->canon(t);
+        if (!cn.len) return false;
+        if (cn.ptr[cn.len - 1] == '*') return true;
+        /* a generic instance whose factory hands back a pointer is spelled as
+         * one, in this unit and in every header that names it */
+        if (gn_instance_is_pointer(L, cn)) return true;
+        sym = sym_any(ix, cn);
+        if (!sym || sym->kind != CC_SYM_TYPE || !sym->type || sym->type == t) return false;
+        t = sym->type;
+    }
+    return false;
+}
+
+/* A receiver that is not a simple name is parenthesized before `&` / `*`. */
+static CcExpr* uf_wrap(CcLowerer* L, CcExpr* recv, CcSpan sp) {
+    bool simple = false;
+    @switch (recv->k) {
+        case .ident: simple = true; break;
+        case .member: simple = true; break;
+        case .index: simple = true; break;
+        case .call: simple = true; break;
+        case .paren: simple = true; break;
+        default: break;
+    }
+    return simple ? recv : lw_paren(L, recv, sp);
+}
+
+/* An expression with an address: a name, a member, an element, a
+ * dereference, or one of those in parentheses. */
+static bool uf_is_lvalue(const CcExpr* e) {
+    if (!e) return false;
+    @switch (e->k) {
+        case .ident: return true;
+        case .member: return true;
+        case .index: return true;
+        case .paren(pa): return uf_is_lvalue(pa.a);
+        case .unary(un): return un.op == CC_OP_DEREF;
+        default: return false;
+    }
+}
+
+/* The canonical spelling of a receiver's type, through local aliases. */
+static CCSlice ix_canon_of(Walker* w, CcType* rt) {
+    CcType* t = peel(unalias_local(w, peel(rt)));
+    CcIndex* ix = w->ix;
+    return ix->canon(t ? t : rt);
+}
+
+/* `(T[1]){ e }`: an rvalue given an address.
+ *
+ * Not `&(T){ e }` — a brace-enclosed initializer for a struct initializes
+ * its FIRST MEMBER from `e`, so a `T` value there is a type error and a
+ * `T` whose first member happens to accept it is silently the wrong
+ * object. An array of one is initialized element-wise, so `e` initializes
+ * the whole `T`, and the literal decays to the `T*` the callee wants. */
+static CcExpr* uf_compound(CcLowerer* L, CcType* t, CcExpr* e, CcSpan sp) {
+    CcExpr* r = cc__expr_blank(sp, L->arena);
+    CcCompound cl;
+    CcInit* in = cc_arena_alloc(L->arena, sizeof(CcInit), _Alignof(CcInit));
+    CcInit* item = cc_arena_alloc(L->arena, sizeof(CcInit), _Alignof(CcInit));
+    memset(in, 0, sizeof(*in));
+    memset(item, 0, sizeof(*item));
+    item->span = sp;
+    item->designators = vec_new::[CcDesignator](L->arena);
+    item->items = vec_new::[CcInitRef](L->arena);
+    item->expr = e;
+    in->span = sp;
+    in->designators = vec_new::[CcDesignator](L->arena);
+    in->items = vec_new::[CcInitRef](L->arena);
+    in->items.push(item);
+    in->is_list = true;
+    {
+        CcType* arr = cc__type_blank(sp, L->arena);
+        CcArrayType at;
+        at.elem = t;
+        at.size = lw_text(L, @string(`1`, L->arena), sp);
+        at.is_static = false;
+        at.is_star = false;
+        arr->k = { .array = at };
+        cl.type = arr;
+    }
+    cl.init = in;
+    r->k = { .compound = cl };
+    return r;
+}
+
+/* A char pointer is the one receiver a `.` reaches through: `"s".len()`,
+ * `buf.copy(...)` on a `char*`, where the pointer is the value. */
+static bool uf_char_pointer(Walker* w, CcType* rt) {
+    CcType* t = peel(unalias_local(w, peel(rt)));
+    CCSlice nm;
+    if (!t || !type_named_name(t, &nm)) return false;
+    return slice_eq(nm, cstr_slice("char")) || slice_eq(nm, cstr_slice("unsigned char")) ||
+           slice_eq(nm, cstr_slice("signed char")) || slice_eq(nm, cstr_slice("void"));
+}
+
+/* A pointer to a type the program never defines is a handle: there are no
+ * fields to reach through it, so `.` and `->` name the same thing and `.`
+ * is the one that reads. `CCChan*` is the runtime's channel, not a struct
+ * the user opens. A pointer to a struct with fields is not: there `.` and
+ * `->` differ, and writing the wrong one means the wrong thing. */
+static bool uf_opaque_pointer(Walker* w, CcLowerer* L, CcType* rt) {
+    CcType* t = peel(unalias_local(w, peel(rt)));
+    CcIndex* ix = L->ix;
+    CcTypeInfo* info;
+    CCSlice nm;
+    CcSym* sym;
+    if (!t) return false;
+    nm = cc__strip_tag(ix->canon(t));
+    if (!nm.len || nm.ptr[nm.len - 1] == '*') return false;
+    info = ix->type_get(nm);
+    if (info && info->sym) return !info->sym->is_definition;
+    sym = sym_any(ix, nm);
+    while (sym && sym->kind != CC_SYM_TYPE) sym = sym->same_name;
+    return sym != NULL && !sym->is_definition;
+}
+
+/* A receiver written as an unwrap: `f()!>.m()` is one chain, and `!>.` is
+ * how the language spells the next hop of it. */
+static bool uf_recv_is_hop(CcExpr* e) {
+    if (!e) return false;
+    @switch (e->k) {
+        case .paren(pa): return uf_recv_is_hop(pa.a);
+        case .unwrap: return true;
+        case .unwrap_body: return true;
+        case .unwrap_or: return true;
+        case .unwrap_destroy: return true;
+        default: return false;
+    }
+}
+
+/* The operator follows the receiver: a pointer takes `->`, a value takes `.`.
+ * Writing the other one is a diagnostic, not a silent coercion. */
+static bool uf_operator_matches(Walker* w, CcLowerer* L, CcExpr* e, CcUfcs uf, CcType* rt, CCSlice tn) {
+    bool is_ptr = uf_type_is_pointer(w, rt);
+    CcSpan sp = e->span;
+    if (is_ptr == uf.arrow) return true;
+    if (uf_char_pointer(w, rt)) return true;
+    if (is_ptr && !uf.arrow && uf_opaque_pointer(w, L, rt)) return true;
+    /* A chain hop has no operator to choose: `!>.` is the whole spelling,
+     * and whether the Result held a value or the pointer the hop before
+     * answered with is the callee's business, not a shape the site wrote. */
+    if (is_ptr && !uf.arrow && uf_recv_is_hop(uf.recv)) return true;
+    if (is_ptr) {
+        CCString msg = @string(`type: UFCS on pointer type '${tn}' uses '->', not '.'`, L->arena);
+        lw_error(L, sp, msg);
+    } else {
+        CCString msg = @string(`type: UFCS on value type '${tn}' uses '.', not '->'`, L->arena);
+        lw_error(L, sp, msg);
+    }
+    return false;
+}
+
+/* Is the member the `as:` path ends on a pointer? `CCBox::[H]` holds its
+ * host as `H* p`, so `w.bump()` projected through it already IS the
+ * pointer the callee takes; taking its address again hands the callee an
+ * `H**` that only the host compiler would name, and only as a type error
+ * about a member the author never wrote. A value member ends the path as a
+ * value, which is the ordinary case. */
+static bool uf_face_path_ptr(CcLowerer* L, CCSlice owner, CCSlice path) {
+    CcIndex* ix = L->ix;
+    size_t i = 0;
+    bool ptr = false;
+    while (i < path.len) {
+        size_t start = i;
+        CCSlice step;
+        CcRecordType st;
+        CcType* ft;
+        while (i < path.len && path.ptr[i] != '.') i++;
+        step = cc_slice_from_buffer((char*)path.ptr + start, i - start);
+        if (i < path.len) i++;
+        if (!step.len) continue;
+        if (!cc__struct_of(ix, owner, 0, &st)) return false;
+        ft = field_of_record(st, step);
+        if (!ft) return false;
+        ptr = ft->k.kind == CcTypeK_pointer;
+        owner = ix->canon(ft);
+    }
+    return ptr;
+}
+
+/* The receiver the callee actually takes: the written receiver projected
+ * through the `as:` faces the resolution walked (`w` -> `w.file`). */
+static CcExpr* uf_project_faces(CcLowerer* L, CcExpr* recv, CCSlice path, bool arrow, CcSpan sp) {
+    size_t i = 0;
+    bool first = true;
+    if (!path.len) return recv;
+    while (i < path.len) {
+        size_t start = i;
+        CCSlice step;
+        while (i < path.len && path.ptr[i] != '.') i++;
+        step = cc_slice_from_buffer((char*)path.ptr + start, i - start);
+        if (i < path.len) i++;
+        if (!step.len) continue;
+        recv = cc_expr_member(first ? uf_wrap(L, recv, sp) : recv, step, first && arrow, sp, L->arena);
+        first = false;
+    }
+    return recv;
+}
+
+/* How many parameters a declared function takes, or -1 when the index
+ * cannot read the declaration. */
+/* The declared type of parameter `at` of `callee`, or NULL when the callee
+ * declares none this call can read -- a function-like macro has no parameter
+ * types, and an unprototyped declaration has no parameters at all. */
+static CcType* uf_param_type(CcIndex* ix, CCSlice callee, size_t at) {
+    CcSym* sym = sym_any(ix, callee);
+    while (sym && sym->kind != CC_SYM_FUNC) sym = sym->same_name;
+    if (!sym || !sym->type) return NULL;
+    @switch (sym->type->k) {
+        case .func(ft): {
+            CcParamList ps = ft.params;
+            if (!ft.has_prototype || at >= ps.len()) return NULL;
+            return ps.get_ptr(at)->type;
+        }
+        default: return NULL;
+    }
+}
+
+/* An argument of type `T` at a parameter of type `T*`: the call passes its
+ * address, the way a value receiver reaches a pointer-style callee. The
+ * pointee is exactly the argument's type -- `const` is the only qualifier
+ * this adds, a `void*` parameter is never reached this way, and an argument
+ * that is already a pointer is passed as written. */
+static CcExpr* uf_arg_addr(Walker* w, CcLowerer* L, CCSlice callee, size_t at, CcExpr* a) {
+    CcIndex* ix = w->ix;
+    CcType* want = uf_param_type(ix, callee, at);
+    CcType* have;
+    CcType* pointee = NULL;
+    if (!want || !a) return NULL;
+    if (want->k.kind != CcTypeK_pointer) return NULL;
+    @switch (want->k) {
+        case .pointer(pt): pointee = pt.pointee; break;
+        default: break;
+    }
+    if (!pointee || CcType_is_void(pointee)) return NULL;
+    if (!uf_is_lvalue(a)) return NULL;
+    have = type_of_expr(w, a);
+    if (!have || have->k.kind == CcTypeK_pointer) return NULL;
+    if (!slice_eq(ix->canon(have), ix->canon(pointee))) return NULL;
+    return cc_expr_unary(CC_OP_ADDR, lw_paren(L, a, a->span), a->span, L->arena);
+}
+
+static CCSlice uf_ident_name_or_empty(CcExpr* e) {
+    CCSlice nm;
+    if (e && expr_ident(strip_parens_expr(e), &nm)) return nm;
+    return cc_slice_empty();
+}
+
+static int uf_param_count(CcIndex* ix, CCSlice callee) {
+    CcSym* sym = sym_any(ix, callee);
+    while (sym && sym->kind != CC_SYM_FUNC) sym = sym->same_name;
+    if (!sym || !sym->type) return -1;
+    @switch (sym->type->k) {
+        case .func(ft): {
+            CcParamList ps = ft.params;
+            return (int)ps.len();
+        }
+        default: return -1;
+    }
+}
+
+/* Where the receiver goes.
+ *
+ * `x.m(a)` writes the receiver first, and the C twin need not take it
+ * first: `cc_slice_packed_release(CCArena, CCSlicePacked*)` is arena-first.
+ * The receiver goes to the first parameter that names its type, and the
+ * written arguments fill the rest in order -- parameter 0 naming it is the
+ * ordinary case and moves nothing. Only for a declaration whose arity is
+ * exactly the receiver plus what the site wrote: anything else leaves the
+ * positions ambiguous, and a receiver silently passed as somebody else's
+ * argument is a call the host explains about a line the program does not
+ * contain. */
+static size_t uf_recv_slot(Walker* w, CCSlice callee, CCSlice tn, size_t nargs) {
+    CcIndex* ix = w->ix;
+    int np = uf_param_count(ix, callee);
+    size_t i;
+    if (np <= 1 || (size_t)np != nargs + 1 || !tn.len) return 0;
+    for (i = 0; i < (size_t)np; i++) {
+        CcType* p = uf_param_type(ix, callee, i);
+        CcType* base = p;
+        if (!p) return 0;
+        if (p->k.kind == CcTypeK_pointer) {
+            @switch (p->k) {
+                case .pointer(pt): base = pt.pointee; break;
+                default: break;
+            }
+        }
+        if (base && slice_eq(ix->canon(base), tn)) return i;
+    }
+    return 0;
+}
+
+/* The receiver as the parameter at `at` takes it: its address when that
+ * parameter is a pointer, the value itself when it is not. */
+static CcExpr* uf_recv_at(CcLowerer* L, Walker* w, CCSlice callee, size_t at,
+                          CcExpr* recv, bool recv_ptr, CcSpan sp) {
+    CcType* p = uf_param_type(w->ix, callee, at);
+    bool want_ptr = p != NULL && p->k.kind == CcTypeK_pointer;
+    if (want_ptr) return recv_ptr ? recv : cc_expr_unary(CC_OP_ADDR, uf_wrap(L, recv, sp), sp, L->arena);
+    return recv_ptr ? cc_expr_unary(CC_OP_DEREF, uf_wrap(L, recv, sp), sp, L->arena) : recv;
+}
+
+
+/* A candidate whose parameters cannot take this call is not the method.
+ * The declared set may hold one named for the argument it does take:
+ * the resolved name, then the argument's type in the same snake spelling
+ * the index composes method names with, without its `cc_` prefix. So a
+ * `CCClosure0` argument reaches `..._closure0`. */
+static CCSlice uf_overload_for_args(Walker* w, CcLowerer* L, CcUfcs uf, CcMethod* m) {
+    CcIndex* ix = w->ix;
+    int want = 1 + (int)uf.args.len();
+    int have = uf_param_count(ix, m->callee);
+    CcExprList* av = &uf.args;
+    size_t n = av->len();
+    size_t i;
+    if (have < 0 || have == want) return m->callee;
+    for (i = 0; i < n; i++) {
+        CcExpr* a = *av->get_ptr(i);
+        CcType* at = type_of_expr(w, a);
+        CCSlice snake;
+        CCSlice bare;
+        if (!at) continue;
+        snake = ix->snake(ix->canon(at));
+        bare = snake;
+        if (bare.len > 3 && memcmp(bare.ptr, "cc_", 3) == 0)
+            bare = cc_slice_from_buffer((char*)bare.ptr + 3, bare.len - 3);
+        if (!bare.len) continue;
+        {
+            CCSlice base = m->callee;
+            CCString cand = @string(`${base}_${bare}`, L->arena);
+            CCSlice name = lw_keep(L, &cand);
+            if (uf_param_count(ix, name) == want) return name;
+        }
+    }
+    return m->callee;
+}
+
+/* Whether the receiver goes in as `&recv`.
+ *
+ * A declared function says so in its first parameter, and the index reads
+ * it. A function-like macro has no parameters to read, and where a macro
+ * and a function share a name the macro is what the host compiler sees.
+ * What the macro does with its first argument answers it: one that hands
+ * it straight to the call it expands to wants what that call wants — an
+ * address; one that converts it first (`CC__ARENA_HOST(a)`) wants the
+ * value, and `CC__ARENA_HOST(&a)` is a pointer no association in it
+ * matches. */
+static CcMacroDef* uf_macro_of(CcIndex* ix, CCSlice name) {
+    CcSym* sym = sym_any(ix, name);
+    while (sym) {
+        if (sym->kind == CC_SYM_MACRO && sym->macro) return sym->macro;
+        sym = sym->same_name;
+    }
+    return NULL;
+}
+
+/* The `)` that closes the `(` at i, or the length when it is unbalanced. */
+static size_t uf_close_paren(CCSlice s, size_t i) {
+    int depth = 0;
+    for (; i < s.len; i++) {
+        if (s.ptr[i] == '(') depth++;
+        else if (s.ptr[i] == ')') { depth--; if (!depth) return i; }
+    }
+    return s.len;
+}
+
+static bool uf_macro_passes_recv(CcMacroDef* md, size_t recv_at) {
+    CCSlice body = md->body;
+    CcNameList* ps = &md->params;
+    CCSlice p0;
+    size_t open = 0;
+    size_t i;
+    size_t start;
+    size_t end;
+    int depth = 0;
+    bool have = false;
+    if (!md->function_like || ps->len() <= recv_at) return true;
+    p0 = *ps->get_ptr(recv_at);
+    /* the argument list of the call the body expands to: the last group
+     * that opens at the body's own depth */
+    for (i = 0; i < body.len; i++) {
+        char c = body.ptr[i];
+        if (c == '(') { if (depth == 0) { open = i; have = true; } depth++; }
+        else if (c == ')') { if (depth) depth--; }
+    }
+    if (!have) return true;
+    start = open + 1;
+    end = body.len;
+    depth = 0;
+    for (i = start; i < body.len; i++) {
+        char c = body.ptr[i];
+        if (c == '(' || c == '[') depth++;
+        else if (c == ')' || c == ']') { if (!depth) { end = i; break; } depth--; }
+        else if (c == ',' && !depth) { end = i; break; }
+    }
+    for (;;) {
+        if (start >= end) return false;
+        if (body.ptr[start] == ' ' || body.ptr[start] == '\t') { start++; continue; }
+        if (body.ptr[end - 1] == ' ' || body.ptr[end - 1] == '\t') { end--; continue; }
+        if (body.ptr[start] == '(' &&
+            uf_close_paren(cc_slice_from_buffer((char*)body.ptr, end), start) == end - 1) {
+            start++;
+            end--;
+            continue;
+        }
+        break;
+    }
+    return slice_eq(cc_slice_from_buffer((char*)body.ptr + start, end - start), p0);
+}
+
+/* `ntargs` is how many type arguments the site wrote: a method that takes a
+ * type takes it as the macro's leading parameter, so the receiver is that
+ * many parameters along. */
+static bool uf_recv_by_ptr(CcLowerer* L, CcMethod* m, size_t ntargs) {
+    CcMacroDef* md;
+    if (!m->recv_by_ptr) return false;
+    md = uf_macro_of(L->ix, m->callee);
+    if (md) return uf_macro_passes_recv(md, ntargs);
+    return true;
+}
+
+
+/* ---- an arity-dispatching macro ---------------------------------------- */
+
+/* The C idiom that gives one surface name a different callee per argument
+ * count:
+ *
+ *     #define CC__X_PICK(_1, _2, _3, NAME, ...) NAME
+ *     #define cc_x(...) CC__X_PICK(__VA_ARGS__, x_with, x_bad, x1)(__VA_ARGS__)
+ *
+ * A macro carries no parameter types, so `cc_x` alone says neither which
+ * call the site makes nor how the receiver reaches it, and the address-style
+ * default is right only where the picked function happens to take a pointer.
+ * The two defines say both: reading them names the function this argument
+ * count selects, and that function is a declaration whose first parameter is
+ * read the way every other callee is read.
+ */
+static CCSlice uf_pick_trim(CCSlice s) {
+    size_t a = 0;
+    size_t b = s.len;
+    while (a < b && (s.ptr[a] == ' ' || s.ptr[a] == '\t' || s.ptr[a] == '\n')) a++;
+    while (b > a && (s.ptr[b - 1] == ' ' || s.ptr[b - 1] == '\t' || s.ptr[b - 1] == '\n')) b--;
+    return cc_slice_from_buffer((char*)s.ptr + a, b - a);
+}
+
+static bool uf_pick_is_ident(CCSlice s) {
+    size_t i;
+    if (!s.len) return false;
+    for (i = 0; i < s.len; i++) {
+        char c = s.ptr[i];
+        if (c >= 'a' && c <= 'z') continue;
+        if (c >= 'A' && c <= 'Z') continue;
+        if (c == '_') continue;
+        if (i > 0 && c >= '0' && c <= '9') continue;
+        return false;
+    }
+    return true;
+}
+
+/* The item at `at` of a comma-separated list, at depth 0. */
+static CCSlice uf_pick_item(CCSlice s, size_t at) {
+    size_t start = 0;
+    size_t i;
+    size_t k = 0;
+    int depth = 0;
+    for (i = 0; i < s.len; i++) {
+        char c = s.ptr[i];
+        if (c == '(' || c == '[') depth++;
+        else if (c == ')' || c == ']') { if (depth) depth--; }
+        else if (c == ',' && depth == 0) {
+            if (k == at) return uf_pick_trim(cc_slice_from_buffer((char*)s.ptr + start, i - start));
+            k = k + 1;
+            start = i + 1;
+        }
+    }
+    if (k == at) return uf_pick_trim(cc_slice_from_buffer((char*)s.ptr + start, s.len - start));
+    return cc_slice_empty();
+}
+
+/* The name `callee` dispatches to for a call of `nargs` arguments, or the
+ * empty slice when `callee` is not an arity macro of the shape above or the
+ * pick lands on one of the arguments rather than on a name. */
+static CCSlice uf_macro_pick_callee(CcIndex* ix, CCSlice callee, size_t nargs) {
+    CcMacroDef* md = uf_macro_of(ix, callee);
+    CcMacroDef* pd;
+    CcNameList* pp;
+    CCSlice body;
+    CCSlice head;
+    CCSlice tail;
+    CCSlice inner;
+    CCSlice pbody;
+    CCSlice first;
+    CCSlice picked;
+    size_t open = 0;
+    size_t close;
+    size_t i;
+    size_t sel = 0;
+    bool found = false;
+    if (!md || !md->function_like || !md->variadic) return cc_slice_empty();
+    body = uf_pick_trim(md->body);
+    while (open < body.len && body.ptr[open] != '(') open++;
+    if (open == 0 || open >= body.len) return cc_slice_empty();
+    head = uf_pick_trim(cc_slice_from_buffer((char*)body.ptr, open));
+    if (!uf_pick_is_ident(head)) return cc_slice_empty();
+    close = uf_close_paren(body, open);
+    if (close >= body.len) return cc_slice_empty();
+    /* what the dispatcher expands to is called: the body ends in its own
+     * argument list */
+    tail = uf_pick_trim(cc_slice_from_buffer((char*)body.ptr + close + 1, body.len - close - 1));
+    if (!tail.len || tail.ptr[0] != '(') return cc_slice_empty();
+    pd = uf_macro_of(ix, head);
+    if (!pd || !pd->function_like) return cc_slice_empty();
+    /* the dispatcher body names one of its own parameters: which one is the
+     * position the selected name arrives at */
+    pbody = uf_pick_trim(pd->body);
+    pp = &pd->params;
+    for (i = 0; i < pp->len(); i++) {
+        if (slice_eq(*pp->get_ptr(i), pbody)) { sel = i; found = true; break; }
+    }
+    if (!found) return cc_slice_empty();
+    inner = cc_slice_from_buffer((char*)body.ptr + open + 1, close - open - 1);
+    /* the forwarded pack is first and stands for `nargs` items; the names
+     * follow it, so the pick lands on a name only past the pack */
+    first = uf_pick_item(inner, 0);
+    if (!slice_eq(first, cstr_slice("__VA_ARGS__"))) return cc_slice_empty();
+    if (sel < nargs) return cc_slice_empty();
+    picked = uf_pick_item(inner, sel - nargs + 1);
+    if (!uf_pick_is_ident(picked)) return cc_slice_empty();
+    return picked;
+}
+
+/* ---- a `.ufcs` handler that decides from the call site ------------------ */
+
+/* The handler, compiled. Once: one that does not compile is not tried
+ * again, and the site falls back to what the index could read. The
+ * compile itself is the compile-time seam's (`lc_hook_fn`), which the
+ * `@create` step shares. */
+static CcUfcsHookFn uf_hook_fn(Walker* w, CcLowerer* L, CcHookReg* hook) {
+    const void* fn;
+    (void)w;
+    if (hook->ufcs_compile_tried) return (CcUfcsHookFn)hook->ufcs_callable;
+    hook->ufcs_compile_tried = true;
+    fn = lc_hook_fn(L, hook->unit, hook->ufcs_fn, CC_COMPTIME_TYPE_HOOK_UFCS);
+    hook->ufcs_callable = (void*)fn;
+    return (CcUfcsHookFn)fn;
+}
+
+/* The method a computed handler names for this site, or NULL.
+ *
+ * Only for a handler the index could not read as rules: one it could read
+ * has already answered, and running it again would say the same thing more
+ * slowly. What comes back is a callee, `__cc_ufcs_pass__` (not mine), or
+ * the empty slice (mine, and refused) — the last two leave the site to the
+ * diagnostic that was going to be raised anyway. */
+static CcMethod* uf_hook_site(Walker* w, CcLowerer* L, CCSlice tn, CcUfcs uf, CcSpan sp) {
+    CcIndex* ix = w->ix;
+    CcHookReg* hook = cc__hook_match(ix, tn, true);
+    CcUfcsHookFn fn;
+    CcExprList* av = &uf.args;
+    size_t n = av->len();
+    size_t i;
+    CCSlice* argv_items;
+    CCSlice* type_items;
+    CCSliceArray argv;
+    CCSliceArray arg_types;
+    CCSlice out;
+    CCSlice callee;
+    bool by_value = false;
+    CcSym* cs;
+    if (!hook || !hook->ufcs_opaque) return NULL;
+    /* Not `@typehooks on *`. A wildcard handler is the fallback every
+     * unresolved method reaches, so compiling one that cannot be compiled
+     * — a stdlib handler over runtime symbols the hook dylib does not link
+     * — would report that failure at every such site, about a handler that
+     * was not going to be the answer. A handler that names its type is
+     * being asked about that type. */
+    if (hook->any) return NULL;
+    fn = uf_hook_fn(w, L, hook);
+    if (!fn) return NULL;
+    argv_items = cc_arena_alloc(L->arena, (n ? n : 1) * sizeof(CCSlice), _Alignof(CCSlice));
+    type_items = cc_arena_alloc(L->arena, (n ? n : 1) * sizeof(CCSlice), _Alignof(CCSlice));
+    for (i = 0; i < n; i++) {
+        CcExpr* arg = *av->get_ptr(i);
+        CcType* at = arg ? type_of_expr(w, arg) : NULL;
+        bool is_str = false;
+        @switch (arg->k) {
+            case .string: is_str = true; break;
+            default: break;
+        }
+        argv_items[i] = cc__span_text(ix, L->unit, arg->span.first, arg->span.last);
+        /* A string literal is spelled to the handler as `const char*`. That
+         * is the shape the argument has where the handler picks an overload
+         * by it, and it is the spelling every handler already written was
+         * written against; typing it `char *` here would answer a question
+         * about the site with a fact about the type system, and the
+         * handler's `const char*` arm would never be taken. */
+        if (is_str) type_items[i] = cstr_slice("const char*");
+        else type_items[i] = at ? ix->canon(at) : cc_slice_empty();
+    }
+    if (!n) { argv_items = NULL; type_items = NULL; }
+    argv = (CCSliceArray){ argv_items, n };
+    arg_types = (CCSliceArray){ type_items, n };
+    /* `mode` is the name of a `@typeview Mode on T` the receiver was
+     * written through, and this step does not carry one yet: every handler
+     * in the stdlib discards it, so passing empty is what they see either
+     * way. A handler that branches on it would need the view here. */
+    out = fn(tn, uf.method, cc_slice_empty(), argv, arg_types, L->arena);
+    if (!out.ptr || !out.len) return NULL;
+    if (cc_slice_eq_cstr(&out, CC_UFCS_PASS_TAG)) return NULL;
+    callee = out;
+    {
+        size_t vt = sizeof(CC_UFCS_VALUE_TAG) - 1;
+        if (callee.len > vt && memcmp(callee.ptr, CC_UFCS_VALUE_TAG, vt) == 0) {
+            callee = cc_slice_from_buffer((char*)callee.ptr + vt, callee.len - vt);
+            by_value = true;
+        }
+    }
+    cs = cc__callee_sym(ix, callee);
+    if (!cs) {
+        CCSlice hn = hook->ufcs_fn;
+        CCString msg = @string(`type: the '${"."}ufcs' handler '${hn}' names '${callee}' for '${"."}${uf.method}' on '${tn}', and nothing declares it`, L->arena);
+        lw_error(L, sp, msg);
+        return NULL;
+    }
+    return cc__method_plain(ix, uf.method, callee, "typehooks",
+                            cc__cat3(ix, "@" "typehooks .ufcs -> ", cc__sym_origin(ix, cs), " (run)"),
+                            cs, by_value);
+}
+
+/* An ambient namespace: `cc_std_out.write(x)` -> `cc_std_out_write_auto(x)`.
+ *
+ * The receiver names no value — it is the namespace the callee lives in —
+ * so there is nothing for the receiver typing to find and no receiver
+ * argument to pass. The pairs are the table `cc_ufcs_families.h` holds for
+ * every lowerer, so neither invents a name the other does not know. The
+ * callee it names is a `_Generic` that picks the overload from the one
+ * argument's type, which is why the argument is passed as written. */
+static bool uf_ambient(Walker* w, CcLowerer* L, CcExpr* e, CcUfcs uf, CcSpan sp) {
+    CcExprList* av = &uf.args;
+    CCSlice recv;
+    CcExpr* a0;
+    size_t i;
+    if (uf.arrow || !uf.recv) return false;
+    if (!expr_ident(strip_parens_expr(uf.recv), &recv) || !recv.len) return false;
+    if (av->len() != 1) return false;
+    if (sc_lookup(w, recv)) return false;   /* a local of that name is a value, not a namespace */
+    a0 = *av->get_ptr(0);
+    for (i = 0; cc_ufcs_ambient_rows[i].recv; i++) {
+        const CcUfcsAmbientRow* row = &cc_ufcs_ambient_rows[i];
+        CCSlice rn = cstr_slice(row->recv);
+        CCSlice mn = cstr_slice(row->meth);
+        CcCall call;
+        if (!slice_eq(recv, rn) || !slice_eq(uf.method, mn)) continue;
+        call.callee = lw_ident(L, cstr_slice(row->callee), sp);
+        call.args = vec_new::[CcExprRef](L->arena);
+        call.args.push(a0);
+        e->k = { .call = call };
+        return true;
+    }
+    return false;
+}
+
+/* `x.m::[T](args)`: the type arguments the site wrote, as the leading
+ * arguments of the call.
+ *
+ * A method that takes a type takes it as a macro parameter -- the header
+ * spells `cc_py_obj_as_list(T, obj, arena)`, and the C it expands to pastes
+ * `T` into a name -- so the type travels as the spelling the site wrote and
+ * not as a canonical one. The macro's own arity says the call has this
+ * shape: one parameter per type argument, then the receiver, then the
+ * written arguments. A callee that is not such a macro has nowhere to put
+ * them, and that is a diagnostic at the site rather than a call carrying an
+ * argument the callee never declared. */
+/* The free-name spelling of a member site that wears `::[...]`:
+ * `py.expose::[T](...)` is the registered generic factory `py_expose`, so
+ * a member with no type formal names that factory as the other thing that
+ * could have resolved it. Just the member when the receiver is not a name. */
+static CCSlice uf_targ_factory_name(CcLowerer* L, CcUfcs uf) {
+    CCSlice recv = uf_ident_name_or_empty(uf.recv);
+    CCString sb = cc_string_new();
+    if (!recv.len) return uf.method;
+    cc_string_push_slice(&sb, recv, L->arena);
+    cc_string_push_char(&sb, '_', L->arena);
+    cc_string_push_slice(&sb, uf.method, L->arena);
+    return cc_string_persist_slice(L->arena, &sb);
+}
+
+static bool uf_targs_lead(Walker* w, CcLowerer* L, CcUfcs uf, CcMethod* m,
+                          CcSpan sp, CcExprList* out) {
+    CcTypeList* tv = &uf.targs;
+    size_t nt = tv->len();
+    CcMacroDef* md;
+    size_t i;
+    if (!nt) return true;
+    md = uf_macro_of(w->ix, m->callee);
+    if (md) {
+        CcNameList* ps = &md->params;
+        if (!md->function_like || ps->len() != nt + 1 + uf.args.len()) md = NULL;
+    }
+    if (!md) {
+        CCSlice mn = uf.method;
+        CCSlice cn = m->callee;
+        CCSlice fam = uf_targ_factory_name(L, uf);
+        CCString msg = @string(`type: no type-formal member '${mn}': it resolves to '${cn}', which declares no type formal to bind — '::[...]' binds a member that declares one (allocT, block_on, as_list, as_map, map), or a registered generic factory named '${fam}'`, L->arena);
+        lw_error(L, sp, msg);
+        return false;
+    }
+    for (i = 0; i < nt; i++) {
+        CcType* ta = *tv->get_ptr(i);
+        CCString spelled = CcType_spell(ta, cc_slice_empty(), &L->unit->tape, L->arena);
+        out->push(lw_text(L, spelled, sp));
+    }
+    return true;
+}
+
+/* ---- members that carry a type formal ----------------------------------
+ *
+ * `arena.allocT(n)` and `task.block_on()` name a type the call site does
+ * not spell in an argument: the lowered callee takes it as a leading macro
+ * argument. `::[T]` after the member binds it; otherwise the declared
+ * destination does — for `allocT` the destination is a pointer and the
+ * element is its pointee, for `block_on` it is the destination itself.
+ *
+ * The set is closed. A member outside it that wears `::[...]` has no formal
+ * to bind, and the ordinary resolution says so. */
+
+/* The receiver's name without a trailing `*`: the same type answers whether
+ * it was written as a value or a pointer. */
+static CCSlice uf_base_name(CCSlice tn) {
+    size_t n = tn.len;
+    while (n && (tn.ptr[n - 1] == '*' || tn.ptr[n - 1] == ' ')) n--;
+    return cc_slice_from_buffer((char*)tn.ptr, n);
+}
+
+static bool uf_is_formal_member(CCSlice tn, CCSlice method, bool* is_alloc) {
+    CCSlice base = uf_base_name(tn);
+    if (slice_eq(method, cstr_slice("allocT")) && slice_eq(base, cstr_slice("CCArena"))) {
+        *is_alloc = true;
+        return true;
+    }
+    if (slice_eq(method, cstr_slice("block_on")) &&
+        (slice_eq(base, cstr_slice("CCAsyncVoidRet")) ||
+         (base.len >= 6 && memcmp(base.ptr, "CCTask", 6) == 0))) {
+        *is_alloc = false;
+        return true;
+    }
+    return false;
+}
+
+/* Through the unwrap tails to the UFCS call a destination is filled from. */
+static CcExpr* uf_ufcs_under(CcExpr* e) {
+    CcExpr* inner = NULL;
+    if (!e) return NULL;
+    @switch (e->k) {
+        case .ufcs: return e;
+        case .paren(u): inner = u.a; break;
+        case .unwrap(u): inner = u.a; break;
+        case .unwrap_body(u): inner = u.a; break;
+        case .unwrap_or(u): inner = u.a; break;
+        case .unwrap_destroy(u): inner = u.a; break;
+        default: return NULL;
+    }
+    return uf_ufcs_under(inner);
+}
+
+/* The pointee of a pointer destination, aliases followed: `double* xs` says
+ * the element is `double`. NULL when the destination is not a pointer. */
+static CcType* uf_pointee(Walker* w, CcType* t) {
+    CcType* u = unalias_local(w, t);
+    if (!u) u = t;
+    if (!u) return NULL;
+    @switch (u->k) {
+        case .pointer(pt): return pt.pointee;
+        default: break;
+    }
+    return NULL;
+}
+
+/* The declared type of an assignment's target, so `p = a.allocT(8)` types
+ * its formal the same way `char* p = a.allocT(8)` does. */
+static void uf_formal_assign(Walker* w, UStep* st, CcStmt* s) {
+    CcExpr* e = NULL;
+    CcBinary a;
+    bool is_assign = false;
+    CcExpr* u;
+    @switch (s->k) {
+        case .expr(es): e = es.e; break;
+        default: return;
+    }
+    if (!e) return;
+    @switch (e->k) {
+        case .assign(x): a = x; is_assign = true; break;
+        default: break;
+    }
+    if (!is_assign || a.op != CC_OP_ASSIGN || !a.a || !a.b) return;
+    u = uf_ufcs_under(a.b);
+    if (!u) return;
+    {
+        CcType* t = type_of_expr(w, a.a);
+        if (!t) return;
+        st->formal_at.push(u);
+        st->formal_ty.push(t);
+    }
+}
+
+static void uf_formal_stmt(Walker* w, CcStmt* s, bool enter) {
+    UStep* st = (UStep*)w->env;
+    CcDecl* d = NULL;
+    CcVarDecl v;
+    bool is_var = false;
+    CcExpr* u;
+    if (!enter) return;
+    if (!stmt_is_decl(s, &d) || !d) { uf_formal_assign(w, st, s); return; }
+    @switch (d->k) {
+        case .var(x): v = x; is_var = true; break;
+        default: break;
+    }
+    if (!is_var || !v.type || !v.init || v.init->is_list || !v.init->expr) return;
+    u = uf_ufcs_under(v.init->expr);
+    if (!u) return;
+    st->formal_at.push(u);
+    st->formal_ty.push(v.type);
+}
+
+/* Declarations, before the rewrite: a type formal reads the destination as
+ * written, and the rewrite replaces the node it is recorded against. */
+static void uf_formal_pass(CcLowerer* L, UStep* st) {
+    Walker w;
+    memset(&w, 0, sizeof(w));
+    w.arena = L->arena;
+    w.ix = L->ix;
+    w.unit = L->unit;
+    w.on_stmt = uf_formal_stmt;
+    w.env = st;
+    tw_unit(&w);
+}
+
+static CcType* uf_formal_dest(UStep* st, CcExpr* e) {
+    CcExprList* av = &st->formal_at;
+    CcTypeList* tv = &st->formal_ty;
+    size_t n = av->len();
+    size_t i;
+    for (i = 0; i < n; i++) if (*av->get_ptr(i) == e) return *tv->get_ptr(i);
+    return NULL;
+}
+
+/* ---- `f.map::[T](arena, cols...)`: one crossing, a row at a time -------
+ *
+ * A dynamic family (`CCPyObj`, `CCJsVal`) crosses into its host once per
+ * call, and a row batch is the one shape where that cost is the whole
+ * question: `map` hands the worker the columns and the worker calls `f`
+ * per row on the far side. The worker takes the result element as a size
+ * and a floatness rather than a type token, so what `::[T]` -- or a typed
+ * slice destination -- names is resolved here and the rewritten call
+ * carries no type at all.
+ *
+ * A bare `.map(f)` with neither is a JS array's own `map`: a dynamic
+ * member call, and this step leaves it alone. */
+
+/* The result element as the worker reads it: bytes, and whether it floats.
+ * A type outside the scalar set answers false, and the site stays what it
+ * was. */
+static bool uf_map_elem_desc(CCSlice t, int* esz, int* isf) {
+    if (cc_slice_eq_cstr(&t, "double")) { *esz = 8; *isf = 1; return true; }
+    if (cc_slice_eq_cstr(&t, "float")) { *esz = 4; *isf = 1; return true; }
+    if (cc_slice_eq_cstr(&t, "int64_t") || cc_slice_eq_cstr(&t, "long long") ||
+        cc_slice_eq_cstr(&t, "long")) { *esz = 8; *isf = 0; return true; }
+    if (cc_slice_eq_cstr(&t, "int") || cc_slice_eq_cstr(&t, "int32_t")) { *esz = 4; *isf = 0; return true; }
+    if (cc_slice_eq_cstr(&t, "short") || cc_slice_eq_cstr(&t, "int16_t")) { *esz = 2; *isf = 0; return true; }
+    if (cc_slice_eq_cstr(&t, "char") || cc_slice_eq_cstr(&t, "int8_t")) { *esz = 1; *isf = 0; return true; }
+    return false;
+}
+
+/* `CC_PY_ARG` -> `CCPyArg`: the argument struct a wrap macro builds. The
+ * first part is verbatim and every later part is title-cased, which is the
+ * convention both embeddings already spell. */
+static CCSlice uf_map_arg_type(CcLowerer* L, CCSlice wrap) {
+    CCString sb = cc_string_new();
+    size_t i;
+    int part = 0;
+    int at = 0;
+    for (i = 0; i < wrap.len; i++) {
+        char c = wrap.ptr[i];
+        if (c == '_') { part++; at = 0; continue; }
+        if (part && at) c = (char)(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+        cc_string_push_char(&sb, c, L->arena);
+        at++;
+    }
+    return lw_keep(L, &sb);
+}
+
+/* `(const CCPyArg[]){ CC_PY_ARG(xs), ... }`: the columns, each through the
+ * wrap macro the sink registration named. An array with no size so the
+ * initializer says how many. */
+static CcExpr* uf_map_cols(CcLowerer* L, CCSlice argty, CCSlice wrap, CcExprList* av, CcSpan sp) {
+    CcExpr* r = cc__expr_blank(sp, L->arena);
+    CcCompound cl;
+    CcInit* in = cc_arena_alloc(L->arena, sizeof(CcInit), _Alignof(CcInit));
+    size_t n = av->len();
+    size_t i;
+    memset(in, 0, sizeof(*in));
+    in->span = sp;
+    in->designators = vec_new::[CcDesignator](L->arena);
+    in->items = vec_new::[CcInitRef](L->arena);
+    in->is_list = true;
+    for (i = 1; i < n; i++) {
+        CcInit* item = cc_arena_alloc(L->arena, sizeof(CcInit), _Alignof(CcInit));
+        CcExpr* col = *av->get_ptr(i);
+        memset(item, 0, sizeof(*item));
+        item->span = sp;
+        item->designators = vec_new::[CcDesignator](L->arena);
+        item->items = vec_new::[CcInitRef](L->arena);
+        item->expr = lw_call1(L, wrap, col, sp);
+        in->items.push(item);
+    }
+    {
+        CcType* elem = cc_type_named(argty, sp, L->arena);
+        CcType* arr = cc__type_blank(sp, L->arena);
+        CcArrayType at;
+        elem->quals = elem->quals | CC_QUAL_CONST;
+        at.elem = elem;
+        at.size = NULL;
+        at.is_static = false;
+        at.is_star = false;
+        arr->k = { .array = at };
+        cl.type = arr;
+    }
+    cl.init = in;
+    r->k = { .compound = cl };
+    return r;
+}
+
+/* The `.ufcs_sink` registration that governs a receiver named by `tn`. */
+static CcHookReg* uf_sink_of(CcLowerer* L, CCSlice tn) {
+    CcIndex* ix = L->ix;
+    CcTypeInfo* !>(CcDiag) r = ix->type(uf_base_name(tn));
+    if (!r.is_ok()) return NULL;
+    return cc__sink_reg(ix, r.value());
+}
+
+static bool uf_map_rows(Walker* w, UStep* st, CcExpr* e, CcUfcs uf, CCSlice tn, CcSpan sp) {
+    CcLowerer* L = st->L;
+    CcIndex* ix = L->ix;
+    CcHookReg* ds;
+    CcExprList* av = &uf.args;
+    CcTypeList* tv = &uf.targs;
+    size_t na = av->len();
+    CCSlice et = cc_slice_empty();
+    CCSlice dslice = cc_slice_empty();
+    CCSlice snake;
+    CCSlice worker;
+    CCSlice argty;
+    int esz = 0;
+    int isf = 0;
+    CcCall call;
+    bool recv_ptr;
+    if (uf.arrow || !cc_slice_eq_cstr(&uf.method, "map")) return false;
+    /* arena, then one column at least: fewer is not a row batch */
+    if (na < 2) return false;
+    ds = uf_sink_of(L, tn);
+    if (!ds || !ds->sink_arg.len) return false;
+    if (tv->len() == 1) {
+        CCString sp1 = CcType_spell(*tv->get_ptr(0), cc_slice_empty(), &L->unit->tape, L->arena);
+        et = lw_keep(L, &sp1);
+    } else if (!tv->len()) {
+        CcType* dest = uf_formal_dest(st, e);
+        if (dest) et = ix->canon(dest);
+    }
+    if (!et.len) return false;
+    /* a typed-slice spelling in either place names both the element and
+     * the typed worker the destination binds through */
+    if (cc__has_prefix(et, "CCSlice_")) { dslice = et; et = cc__skip(et, 8); }
+    if (!uf_map_elem_desc(et, &esz, &isf)) return false;
+    /* The worker takes at most eight columns (`argc > 8` is refused in
+     * `cc__*_map_raw`). A ninth is not a reason to stop reading the site
+     * as a row batch and hand it to the plain path, which would resolve
+     * `.map` to something else or to nothing: it is refused here, at the
+     * site that wrote the columns. */
+    if (na - 1 > 8) {
+        int ncol = (int)(na - 1);
+        CCString msg = @string(`a row batch takes at most 8 columns; this one has ${ncol}`, L->arena);
+        lw_error(L, sp, msg);
+        return true;
+    }
+    snake = ix->snake(uf_base_name(tn));
+    if (!cc__has_prefix(snake, "cc_") || snake.len <= 3) return false;
+    {
+        CCSlice stem = cc__skip(snake, 3);
+        CCString raw = @string(`cc__${stem}_map_raw`, L->arena);
+        worker = lw_keep(L, &raw);
+        if (dslice.len) {
+            CCString tryw = @string(`cc__${stem}_map_${dslice}`, L->arena);
+            CCSlice tn2 = lw_keep(L, &tryw);
+            if (sym_any(ix, tn2)) worker = tn2;
+        }
+    }
+    recv_ptr = uf.arrow || uf_type_is_pointer(w, type_of_expr(w, uf.recv));
+    if (!recv_ptr && !uf_is_lvalue(uf.recv)) return false;
+    argty = uf_map_arg_type(L, ds->sink_arg);
+    call.callee = lw_ident(L, worker, sp);
+    call.args = vec_new::[CcExprRef](L->arena);
+    call.args.push(recv_ptr ? uf.recv : cc_expr_unary(CC_OP_ADDR, uf_wrap(L, uf.recv, sp), sp, L->arena));
+    {
+        CcExpr* arena_arg = *av->get_ptr(0);
+        call.args.push(arena_arg);
+    }
+    {
+        size_t ncol = na - 1;
+        CCString es = @string(`${esz}`, L->arena);
+        CCString fs = @string(`${isf}`, L->arena);
+        CCString ns = @string(`${(int)ncol}`, L->arena);
+        call.args.push(lw_text(L, es, sp));
+        call.args.push(lw_text(L, fs, sp));
+        call.args.push(lw_text(L, ns, sp));
+    }
+    call.args.push(uf_map_cols(L, argty, ds->sink_arg, av, sp));
+    e->k = { .call = call };
+    return true;
+}
+
+/* True when the site was a type-formal member and is now the call it lowers
+ * to — or when it was one and could not be lowered, which is reported here
+ * rather than left to the ordinary resolution, whose candidates are the
+ * unspecialized name and say nothing about the missing type. */
+static bool uf_formal_rewrite(Walker* w, UStep* st, CcExpr* e, CcUfcs uf,
+                              CcType* rt, CCSlice tn, CcSpan sp) {
+    CcLowerer* L = st->L;
+    bool is_alloc = false;
+    CcType* ty = NULL;
+    CcTypeList* tv = &uf.targs;
+    CcExprList* av = &uf.args;
+    size_t nt = tv->len();
+    size_t na = av->len();
+    CcCall call;
+    CCSlice callee;
+    bool recv_ptr;
+    if (!uf_is_formal_member(tn, uf.method, &is_alloc)) return false;
+    if (nt > 1) {
+        CCSlice mn = uf.method;
+        CCString msg = @string(`type: '.${mn}' binds one type formal, and this site spells ${nt}`, L->arena);
+        lw_error(L, sp, msg);
+        return true;
+    }
+    if (nt == 1) ty = *tv->get_ptr(0);
+    else {
+        CcType* dest = uf_formal_dest(st, e);
+        ty = (dest && is_alloc) ? uf_pointee(w, dest) : dest;
+    }
+    if (!ty) {
+        CCString msg = is_alloc
+            ? @string(`type: arena.allocT needs its element type: declare a typed pointer destination (T* p = arena.allocT(n)) or spell it (arena.allocT::[T](n))`, L->arena)
+            : @string(`type: 'task.block_on' needs its result type: declare a typed destination (T v = task.block_on()) or spell it (task.block_on::[T]())`, L->arena);
+        lw_error(L, sp, msg);
+        return true;
+    }
+    if (is_alloc && na > 1) {
+        CCString msg = @string(`type: 'arena.allocT' takes one count at most, and this site passes ${na}`, L->arena);
+        lw_error(L, sp, msg);
+        return true;
+    }
+    if (!is_alloc && na) {
+        CCString msg = @string(`type: 'task.block_on' takes no arguments, and this site passes ${na}`, L->arena);
+        lw_error(L, sp, msg);
+        return true;
+    }
+    recv_ptr = uf.arrow || uf_type_is_pointer(w, rt);
+    callee = is_alloc ? (na ? cstr_slice("cc_arena_alloc_T_count") : cstr_slice("cc_arena_alloc_T"))
+                      : cstr_slice("cc_block_on");
+    call.callee = lw_ident(L, callee, sp);
+    call.args = vec_new::[CcExprRef](L->arena);
+    {
+        CCString spelled = CcType_spell(ty, cc_slice_empty(), &L->unit->tape, L->arena);
+        call.args.push(lw_text(L, spelled, sp));
+    }
+    if (is_alloc) {
+        /* `cc_arena_alloc` takes a `CCArena` by value and peels a handle
+         * itself, so the arena goes as written */
+        CcExpr* r = uf_wrap(L, uf.recv, sp);
+        call.args.push(r);
+        if (na) { CcExpr* cnt = *av->get_ptr(0); call.args.push(cnt); }
+    } else {
+        /* `cc_block_on` waits on the handle itself, so a pointer receiver is
+         * read through */
+        CcExpr* r = uf_wrap(L, uf.recv, sp);
+        call.args.push(recv_ptr ? cc_expr_unary(CC_OP_DEREF, r, sp, L->arena) : r);
+    }
+    e->k = { .call = call };
+    return true;
+}
+
+/* Did the `.ufcs` handler answer this site? The hook's other entries
+ * (`.destroy`, `.create`) share the source, so the origin says which. */
+static bool uf_from_ufcs_hook(CcMethod* m) {
+    CCSlice o;
+    size_t i;
+    if (!m || !cc_slice_eq_cstr(&m->source, "typehooks")) return false;
+    o = m->origin;
+    for (i = 0; i + 5 <= o.len; i++)
+        if (memcmp(o.ptr + i, ".ufcs", 5) == 0) return true;
+    return false;
+}
+
+/* Does this type name a `.ufcs` handler of its own? A wildcard handler is
+ * the fallback every unresolved method reaches, not an answer about this
+ * type. */
+static bool uf_has_ufcs_hook(CcIndex* ix, CCSlice tn) {
+    CcHookReg* hook = cc__hook_match(ix, tn, true);
+    if (!hook || hook->any) return false;
+    return hook->ufcs_fn.len > 0 && hook->ufcs_fn.ptr[0] != '<';
+}
+
+/* `n.spawn_async(task(...))` carries the task's name to the fiber.
+ *
+ * `cc_nursery_spawn_async` is the arity the program spells; the runtime
+ * also declares `_named`, which stamps the callee name and the spawn site
+ * onto the fiber so anything running inside it can answer what task it is
+ * (`cc_rt_diag_current_async_info`). Only the site knows the name the user
+ * wrote, so it is attached here; a spawn that resolved to any other callee
+ * is left as it is. */
+static void uf_spawn_named(CcLowerer* L, CcCall* call, CcSpan sp) {
+    CCSlice cn = uf_ident_name_or_empty(call->callee);
+    CCSlice nm = cstr_slice("<async>");
+    CcExpr* a0;
+    CCString q;
+    if (!cc_slice_eq_cstr(&cn, "cc_nursery_spawn_async")) return;
+    if (call->args.len() != 2) return;
+    a0 = *call->args.get_ptr(1);
+    {
+        CcExpr* inner = strip_parens_expr(a0);
+        CcCall cl;
+        bool is_call = false;
+        @switch (inner->k) {
+            case .call(c): cl = c; is_call = true; break;
+            default: break;
+        }
+        if (is_call && cl.callee) {
+            CCSlice who;
+            if (expr_ident(strip_parens_expr(cl.callee), &who) && who.len) nm = who;
+        }
+    }
+    q = cc_string_new();
+    cc_string_push_char(&q, '"', L->arena);
+    cc_string_push_slice(&q, nm, L->arena);
+    cc_string_push_char(&q, '"', L->arena);
+    call->callee = lw_ident(L, cstr_slice("cc_nursery_spawn_async_named"), sp);
+    call->args.push(lw_text(L, q, sp));
+    call->args.push(lw_ident(L, cstr_slice("__FILE__"), sp));
+    call->args.push(lw_ident(L, cstr_slice("__LINE__"), sp));
+}
+
+/* Whether an unresolved method on this receiver is the host compiler to
+ * judge rather than the lowerer: a C arithmetic type, behind any pointers
+ * and a leading `const`, or a type the index does not know, or a known
+ * type with no method set -- no declared methods, no typehooks, no sink.
+ * A type with a method set is refused here instead, with the candidates,
+ * because a name nothing resolves is far more often a misspelled method
+ * than a bare C function. */
+static bool uf_recv_host_decides(CcLowerer* L, CCSlice tn) {
+    CcIndex* ix = L->ix;
+    CCSlice base = uf_base_name(tn);
+    CcTypeInfo* info = NULL;
+    CcMethodList ms;
+    if (cc__has_prefix(base, "const ")) base = cc__skip(base, 6);
+    if (cc__is_arith(base)) return true;
+    {
+        CcTypeInfo* !>(CcDiag) r = ix->type(base);
+        if (!r.is_ok()) return true;
+        info = r.value();
+    }
+    if (cc__hook_match(ix, tn, true)) return false;
+    if (cc__sink_reg(ix, info)) return false;
+    ms = ix->methods_of(info);
+    return ms.len() == 0;
+}
+
+static void uf_rewrite(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m, CCSlice tn, CCSlice reason) {
+    UStep* st = (UStep*)w->env;
+    CcLowerer* L = st->L;
+    CcSpan sp = e->span;
+    CcExpr* recv_arg;
+    CcCall call;
+    bool recv_ptr;
+    st->n_sites++;
+    {
+        /* recorded before the rewrite: after it, nothing in the node says
+         * which member the site spelled */
+        CcExprList* sv = &L->ufcs_sites;
+        CcNameList* mv = &L->ufcs_meths;
+        sv->push(e);
+        mv->push(uf.method);
+    }
+    if (!rt && uf_ambient(w, L, e, uf, sp)) return;
+    if (!rt) {
+        CCSlice kind = uf.recv ? CcExpr_kind_name(uf.recv) : cc_slice_empty();
+        CCSlice who = cc_slice_empty();
+        CCString msg;
+        /* name the receiver when it has one: 'nosuchvar' says more than 'a ident' */
+        if (uf.recv && expr_ident(strip_parens_expr(uf.recv), &who) && who.len)
+            msg = @string(`type: cannot type the receiver '${who}' of '.${uf.method}'; declare it with a type the index can see`, L->arena);
+        else
+            msg = @string(`type: cannot type the receiver of '.${uf.method}' (a ${kind}); declare it with a type the index can see`, L->arena);
+        lw_error(L, sp, msg);
+        return;
+    }
+    if (uf_check_method_view(w, st, e, uf, rt)) return;
+    if (uf_check_face_view(w, st, e, uf, tn, m)) return;
+    if (uf_formal_rewrite(w, st, e, uf, rt, tn, sp)) return;
+    /* before the resolved callee: a row batch is not the member the name
+     * resolves to, it is the worker the family installed for it */
+    if (uf_map_rows(w, st, e, uf, tn, sp)) return;
+    /* The `.ufcs` handler's argv is a fixed-width row: the contract gives
+     * it UF_HOOK_ARG_MAX slots and no length it could grow. Describing only
+     * the first eight of a longer call would have the handler name a callee
+     * for a call the user did not write, and the arguments past the row
+     * would reach that callee unmentioned. */
+    if (uf.args.len() > UF_HOOK_ARG_MAX && (uf_from_ufcs_hook(m) || (!m && uf_has_ufcs_hook(w->ix, tn)))) {
+        int cap = UF_HOOK_ARG_MAX;
+        CCSlice meth = uf.method;
+        CCString msg = @string(`type: ${"."}ufcs hook for '${tn}${"."}${meth}' exceeds ${cap} args; refusing silent truncate`, L->arena);
+        lw_error(L, sp, msg);
+        return;
+    }
+    /* A `.ufcs` handler the index could not read as rules decides from the
+     * site -- the arguments as well as the method -- so it decides before
+     * the composed names do. `stdin.read_line(&line)` is `read_line_into`
+     * because the handler says so, and `BufReader_CCStdin_read_line`, which
+     * is also declared, is its answer to the call that passes nothing.
+     * Letting the composed name win would hand the site a callee of the
+     * wrong arity that the handler was written to prevent. A handler that
+     * passes or refuses leaves `m` as the index resolved it. */
+    {
+        CcMethod* hm = uf_hook_site(w, L, tn, uf, sp);
+        if (hm) m = hm;
+    }
+    if (!m && uf.targs.len() == 0 && !sym_any(L->ix, uf.method) && uf_recv_host_decides(L, tn)) {
+        /* Nothing the lowerer read names the method -- no declaration of
+         * the bare name at all, not one that does not fit -- and the
+         * receiver has no method set a misspelling could have meant: the
+         * call is the bare name with the receiver as written, and the host
+         * decides from its own declarations. `<math.h>` makes `sqrt(d)`
+         * legal; a name no declaration provides is a compile error at this
+         * line, since the host build refuses an implicit declaration. A
+         * declared name the ladder rejected stays refused here, with the
+         * reason: the lowerer read that declaration and the host would
+         * only say less. */
+        CcCall call;
+        CcExprList* av = &uf.args;
+        size_t i;
+        size_t na = av->len();
+        call.callee = lw_ident(L, uf.method, sp);
+        call.args = vec_new::[CcExprRef](L->arena);
+        call.args.push(uf.recv);
+        for (i = 0; i < na; i++) {
+            CcExpr* a = *av->get_ptr(i);
+            call.args.push(a);
+        }
+        e->k = { .call = call };
+        return;
+    }
+    if (!m) {
+        CCString msg = @string(`type: ${reason}`, L->arena);
+        lw_error(L, sp, msg);
+        return;
+    }
+    if (!uf_operator_matches(w, L, e, uf, rt, tn)) return;
+    /* An arity macro answers with a declaration: the name it selects for
+     * this many arguments, and that name says how the receiver goes in.
+     * A pick that lands on a name nothing declares is the arity the macro
+     * refuses -- said here, at the site that wrote it, rather than left to
+     * the host compiler as an undeclared identifier. */
+    if (!m->recv_path.len) {
+        CCSlice pick = uf_macro_pick_callee(w->ix, m->callee, 1 + uf.args.len());
+        if (pick.len) {
+            CcSym* ps = cc__callee_sym(w->ix, pick);
+            if (!ps) {
+                CCSlice mn = uf.method;
+                CCSlice cn = m->callee;
+                CCString msg = @string(`type: '${tn}${"."}${mn}' resolves to the arity macro '${cn}', which selects '${pick}' for this many arguments, and nothing declares it`, L->arena);
+                lw_error(L, sp, msg);
+                return;
+            }
+            m = cc__method_plain(w->ix, uf.method, pick, "macro_arity_pick",
+                                 cc__sym_origin(w->ix, ps), ps, false);
+        }
+    }
+    recv_ptr = uf.arrow || uf_type_is_pointer(w, rt);
+    if (m->recv_path.len) {
+        /* after the projection the receiver is the face member, whatever
+         * the written receiver was -- a value when the member is one, and
+         * the pointer itself when the member is a pointer */
+        bool face_ptr = uf_face_path_ptr(L, tn, m->recv_path);
+        uf.recv = uf_project_faces(L, uf.recv, m->recv_path, recv_ptr, sp);
+        recv_ptr = face_ptr;
+    }
+    /* A sink call is not this shape -- the method is a string and the
+     * arguments go by count -- so it builds its own, and the receiver with
+     * no address is given one below rather than here. */
+    if (m->recv_by_ptr && !recv_ptr && !uf_is_lvalue(uf.recv) && !cc_slice_eq_cstr(&m->source, "ufcs_sink")) {
+        /* a value with no address (`xs.sub(1, 3).len()`): the call's result
+         * lives in a compound literal of its own type for the callee to point at */
+        CCSlice tn2 = ix_canon_of(w, rt);
+        CcType* lit_t = cc_type_named(tn2, sp, L->arena);
+        CcExpr* lit = uf_compound(L, lit_t, uf.recv, sp);
+        CcCall call2;
+        call2.callee = lw_ident(L, m->callee, sp);
+        call2.args = vec_new::[CcExprRef](L->arena);
+        if (!uf_targs_lead(w, L, uf, m, sp, &call2.args)) return;
+        call2.args.push(lit);   /* the array literal is the pointer */
+        {
+            CcExprList* args = &uf.args;
+            size_t n = args->len();
+            size_t i;
+            for (i = 0; i < n; i++) {
+                CcExpr* a = *args->get_ptr(i);
+                call2.args.push(a);
+            }
+        }
+        e->k = { .call = call2 };
+        return;
+    }
+    if (cc_slice_eq_cstr(&uf.method, "destroy") && cc_slice_eq_cstr(&m->source, "typehooks") && !uf.args.len()) {
+        /* `x.destroy()` is the whole chain, and the whole chain starts with
+         * the pre-destroy phase a type registers: the site spells the same
+         * teardown `@destroy` schedules, so it runs the same steps in the
+         * same order -- pre hook, hook, then the value members. Running only
+         * the tail here would let a type whose pre phase is what closes it
+         * report a clean teardown that never happened. */
+        CcStmt* blk = lw_block(L, sp);
+        CcExpr* subject = recv_ptr ? cc_expr_unary(CC_OP_DEREF, uf_wrap(L, uf.recv, sp), sp, L->arena) : uf.recv;
+        CcStmtExpr se;
+        CcStmt* pre = cl_pre_destroy(L, tn, subject, sp);
+        if (pre) lw_push(blk, pre);
+        cl_destroy_chain(L, tn, subject, blk, sp, 0);
+        se.block = blk;
+        e->k = { .stmt_expr = se };
+        return;
+    }
+    if (uf_recv_by_ptr(L, m, uf.targs.len())) {
+        if (recv_ptr) recv_arg = uf.recv;
+        else if (uf_is_lvalue(uf.recv)) recv_arg = cc_expr_unary(CC_OP_ADDR, uf_wrap(L, uf.recv, sp), sp, L->arena);
+        else {
+            /* a value with no address -- an unwrap chain the site wrote as
+             * a receiver: `&` on it is not C, and the value the callee has
+             * to point at lives in a compound literal of its own type */
+            CCSlice tnl = ix_canon_of(w, rt);
+            CcType* lit_t = cc_type_named(tnl, sp, L->arena);
+            recv_arg = uf_compound(L, lit_t, uf.recv, sp);
+        }
+    }
+    else recv_arg = recv_ptr ? cc_expr_unary(CC_OP_DEREF, uf_wrap(L, uf.recv, sp), sp, L->arena) : uf.recv;
+    call.callee = lw_ident(L, uf_overload_for_args(w, L, uf, m), sp);
+    call.args = vec_new::[CcExprRef](L->arena);
+    if (cc_slice_eq_cstr(&m->source, "ufcs_sink")) {
+        /* The sink takes the method as a string and the arguments by
+         * count: there is no formal for `::[...]` to bind, and passing the
+         * call on without it would drop what the site wrote. */
+        if (uf.targs.len()) {
+            CCSlice mn = uf.method;
+            CCSlice cn = m->callee;
+            CCSlice fam = uf_targ_factory_name(L, uf);
+            CCString msg = @string(`type: no type-formal member '${mn}': it resolves to the '.ufcs_sink' '${cn}', a dynamic call with no type formal to bind — '::[...]' binds a member that declares one (allocT, block_on, as_list, as_map, map), or a registered generic factory named '${fam}'`, L->arena);
+            lw_error(L, sp, msg);
+            return;
+        }
+        /* A dynamic family resolves nothing at compile time: the method is
+         * a string the callee looks up, and the arguments are a run of
+         * values it reads by count. So the call carries what the name no
+         * longer says -- the method, then how many arguments follow, then
+         * each one through the macro the registration named. */
+        CcExprList* av = &uf.args;
+        size_t na = av->len();
+        size_t ai;
+        CCString mq = cc_string_new();
+        CCString cnt = @string(`${(int)na}`, L->arena);
+        cc_string_push_char(&mq, '"', L->arena);
+        cc_string_push_slice(&mq, uf.method, L->arena);
+        cc_string_push_char(&mq, '"', L->arena);
+        call.args.push(recv_arg);
+        call.args.push(lw_text(L, mq, sp));
+        call.args.push(lw_text(L, cnt, sp));
+        for (ai = 0; ai < na; ai++) {
+            CcExpr* a = *av->get_ptr(ai);
+            if (m->sink_arg.len) a = lw_call1(L, m->sink_arg, a, sp);
+            call.args.push(a);
+        }
+        e->k = { .call = call };
+        {
+            CcNameList* sv = &L->sinks;
+            size_t sn = sv->len();
+            size_t si;
+            bool seen = false;
+            for (si = 0; si < sn; si++) if (slice_eq(*sv->get_ptr(si), m->callee)) { seen = true; break; }
+            if (!seen) sv->push(m->callee);
+        }
+        return;
+    }
+    if (!uf_targs_lead(w, L, uf, m, sp, &call.args)) return;
+    {
+        CcExprList* args = &uf.args;
+        size_t n = args->len();
+        size_t i;
+        size_t k = 0;
+        size_t lead = call.args.len();
+        CCSlice cn = uf_ident_name_or_empty(call.callee);
+        size_t slot = (cn.len && !lead) ? uf_recv_slot(w, cn, tn, n) : 0;
+        if (slot) recv_arg = uf_recv_at(L, w, cn, slot, uf.recv, recv_ptr, sp);
+        for (i = 0; i <= n; i++) {
+            if (i == slot) { call.args.push(recv_arg); continue; }
+            {
+                CcExpr* a = *args->get_ptr(k);
+                CcExpr* ad = cn.len ? uf_arg_addr(w, L, cn, lead + i, a) : NULL;
+                if (ad) a = ad;
+                call.args.push(a);
+                k++;
+            }
+        }
+    }
+    uf_spawn_named(L, &call, sp);
+    e->k = { .call = call };
+}
+
+/* `Type.fn(args)` -> `Type_fn(args)`, when that function is declared. */
+static bool uf_type_scoped_visit(CcExpr* e, void* env) {
+    UStep* st = (UStep*)env;
+    CcLowerer* L = st->L;
+    CcTypeScoped ts;
+    bool hit = false;
+    @switch (e->k) {
+        case .type_scoped(x): ts = x; hit = true; break;
+        default: break;
+    }
+    if (!hit) return true;
+    {
+        CcIndex* ix = L->ix;
+        CCSlice tn = ts.type ? ix->canon(ts.type) : cc_slice_empty();
+        CCString nm = @string(`${tn}_${ts.fn}`, L->arena);
+        CCSlice fname = lw_keep(L, &nm);
+        CcSym* sym = ix->sym(fname) ?> NULL;
+        CcCall call;
+        if (!tn.len || !sym) {
+            CCString msg = @string(`type: no function '${fname}' for '${tn}.${ts.fn}(...)'`, L->arena);
+            lw_error(L, e->span, msg);
+            return true;
+        }
+        call.callee = lw_ident(L, fname, e->span);
+        call.args = ts.args;
+        e->k = { .call = call };
+    }
+    return true;
+}
+
+/* ---- the `as:` face graph ------------------------------------------------ */
+
+/* The type of an `as:` field of `owner`, and whether it is written as a
+ * pointer. Empty when the owner has no such member. */
+static CCSlice uf_face_field(CcLowerer* L, CCSlice owner, CCSlice face, bool* is_ptr) {
+    CcIndex* ix = L->ix;
+    CcRecordType st;
+    CcFieldList* fieldv;
+    size_t k;
+    size_t nf;
+    *is_ptr = false;
+    if (!cc__struct_of(ix, owner, 0, &st)) return cc_slice_empty();
+    fieldv = &st.fields;
+    nf = fieldv->len();
+    for (k = 0; k < nf; k++) {
+        CcField* f = fieldv->get_ptr(k);
+        if (!f->name.len || !f->type || !slice_eq(f->name, face)) continue;
+        *is_ptr = f->type->k.kind == CcTypeK_pointer;
+        return ix->canon(f->type);
+    }
+    return cc_slice_empty();
+}
+
+/* Every type reachable from `from` through `as:` faces, itself included.
+ * A type met twice on one path is a cycle. */
+static void uf_face_reach(CcLowerer* L, CCSlice from, CcNameList* out, CcNameList* seen, bool* cycle, int depth) {
+    CcIndex* ix = L->ix;
+    CcNameList faces;
+    size_t n;
+    size_t i;
+    if (!from.len || depth > 8) return;
+    {
+        size_t ns = seen->len();
+        for (i = 0; i < ns; i++)
+            if (slice_eq(*seen->get_ptr(i), from)) { *cycle = true; return; }
+    }
+    out->push(from);
+    seen->push(from);
+    faces = cc__view_faces(ix, from);
+    n = faces.len();
+    for (i = 0; i < n; i++) {
+        CCSlice face = *faces.get_ptr(i);
+        bool is_ptr = false;
+        CCSlice fty = uf_face_field(L, from, face, &is_ptr);
+        if (!fty.len || is_ptr) continue;
+        uf_face_reach(L, fty, out, seen, cycle, depth + 1);
+    }
+    {
+        CCSlice dropped = cc_slice_empty();
+        seen->pop(&dropped);
+    }
+}
+
+/* Every name a restrict list may mention: the type's fields and its
+ * methods. */
+static CcNameList uf_surface_of(CcLowerer* L, CCSlice tn) {
+    CcIndex* ix = L->ix;
+    CcNameList out = vec_new::[CCSlice](L->arena);
+    CcRecordType st;
+    CcTypeInfo* info = ix->type_get(tn);
+    if (cc__struct_of(ix, tn, 0, &st)) {
+        CcFieldList* fieldv = &st.fields;
+        size_t n = fieldv->len();
+        size_t i;
+        for (i = 0; i < n; i++) {
+            CcField* f = fieldv->get_ptr(i);
+            if (f->name.len) out.push(f->name);
+        }
+    }
+    if (info) {
+        CcMethodList ms = ix->methods_of(info);
+        size_t n = ms.len();
+        size_t i;
+        for (i = 0; i < n; i++) {
+            CcMethod* m = *ms.get_ptr(i);
+            if (m->method.len) out.push(m->method);
+        }
+    }
+    return out;
+}
+
+/* `out_*`, `*_len` and `*` stand for a set; anything else names one member. */
+static bool uf_item_is_glob(CCSlice name) {
+    size_t i;
+    for (i = 0; i < name.len; i++)
+        if (name.ptr[i] == '*') return true;
+    return false;
+}
+
+/* One `*` in a restrict item matches any run of characters. */
+static bool uf_glob_match(CCSlice pat, CCSlice name) {
+    size_t star = pat.len;
+    size_t i;
+    size_t head;
+    size_t tail;
+    for (i = 0; i < pat.len; i++)
+        if (pat.ptr[i] == '*') { star = i; break; }
+    if (star == pat.len) return slice_eq(pat, name);
+    head = star;
+    tail = pat.len - star - 1;
+    if (name.len < head + tail) return false;
+    if (head && memcmp(name.ptr, pat.ptr, head) != 0) return false;
+    if (tail && memcmp(name.ptr + name.len - tail, pat.ptr + star + 1, tail) != 0) return false;
+    return true;
+}
+
+/* A member the type does not have may live in an `as:` embed. The search
+ * walks the faces one hop at a time and counts every way it reaches the
+ * field: exactly one is the answer, two is ambiguous. */
+static bool uf_field_path(CcLowerer* L, CCSlice owner, CCSlice field, CcNameList* path, int* found, int depth) {
+    CcIndex* ix = L->ix;
+    CcNameList faces;
+    CcRecordType st;
+    size_t n;
+    size_t i;
+    bool set = false;
+    if (!owner.len || depth > 6) return false;
+    faces = cc__view_faces(ix, owner);
+    n = faces.len();
+    if (!n) return false;
+    {
+        CcNameList* fv = &faces;
+        (void)fv;
+    }
+    if (!cc__struct_of(ix, owner, 0, &st)) return false;
+    for (i = 0; i < n; i++) {
+        CcNameList* facev = &faces;
+        CCSlice face = *facev->get_ptr(i);
+        bool is_ptr = false;
+        CCSlice fty = uf_face_field(L, owner, face, &is_ptr);
+        CcRecordType fst;
+        if (!fty.len || is_ptr) continue;
+        if (cc__struct_of(ix, fty, 0, &fst) && field_of_record(fst, field)) {
+            (*found)++;
+            if (!set) { path->push(face); set = true; }
+            continue;
+        }
+        {
+            CcNameList sub = vec_new::[CCSlice](L->arena);
+            CcNameList* subv = &sub;
+            if (uf_field_path(L, fty, field, &sub, found, depth + 1) && !set) {
+                size_t j;
+                size_t ns = subv->len();
+                path->push(face);
+                for (j = 0; j < ns; j++) {
+                    CCSlice step = *subv->get_ptr(j);
+                    path->push(step);
+                }
+                set = true;
+            }
+        }
+    }
+    return set;
+}
+
+/* `w.label` where `Wrap` has no `label` and its `base` member does. No
+ * `as:` face reaches it, so nothing hops the miss -- but the peel the
+ * author has to write is right there, and naming it is the difference
+ * between a diagnostic and a hunt through the typedefs. Exactly one member
+ * one level down may have the field: two is not a suggestion, it is a
+ * choice this step has no grounds to make. A pointer member is not a peel
+ * (`.p.f` is not `.p->f`), and a type the index cannot see is not a miss.  */
+static void uf_field_miss(CcLowerer* L, CcExpr* e, CcMember mb, CCSlice owner) {
+    CcIndex* ix = L->ix;
+    CcRecordType st;
+    CcFieldList* fieldv;
+    CCSlice hit = cc_slice_empty();
+    size_t n;
+    size_t i;
+    int nhit = 0;
+    if (!cc__struct_of(ix, owner, 0, &st)) return;
+    if (field_of_record(st, mb.name)) return;
+    fieldv = &st.fields;
+    n = fieldv->len();
+    for (i = 0; i < n; i++) {
+        CcField* f = fieldv->get_ptr(i);
+        CcRecordType inner;
+        if (!f->name.len || !f->type) continue;
+        if (f->type->k.kind == CcTypeK_pointer) continue;
+        if (!cc__struct_of(ix, cc__strip_tag(ix->canon(f->type)), 0, &inner)) continue;
+        if (!field_of_record(inner, mb.name)) continue;
+        nhit++;
+        if (nhit == 1) hit = f->name;
+    }
+    if (nhit != 1) return;
+    {
+        CCSlice f = mb.name;
+        CCString m = @string(`field not found: ${f} — member '${hit}' has it; spell '.${hit}.${f}'`, L->arena);
+        lw_error(L, vt_dot_span(e), m);
+    }
+}
+
+/* `x.f` where `f` is not a member of x's type: the face chain that reaches
+ * it, spliced in. */
+static void uf_member(Walker* w, CcExpr* e, CcMember mb, CcType* rt) {
+    UStep* st = (UStep*)w->env;
+    CcLowerer* L = st->L;
+    CCSlice owner;
+    CcNameList path;
+    int found = 0;
+    if (!rt || !mb.name.len) return;
+    if (field_type(w, rt, mb.name)) return;              /* the type has it */
+    owner = cc__strip_tag(ix_canon_of(w, rt));
+    if (!owner.len) return;
+    path = vec_new::[CCSlice](L->arena);
+    if (!uf_field_path(L, owner, mb.name, &path, &found, 0)) { uf_field_miss(L, e, mb, owner); return; }
+    if (found > 1) {
+        CCSlice f = mb.name;
+        CCString m = @string(`type: ambiguous field '${f}' on '${owner}': two ${"@"}typeview as: embeds reach it`, L->arena);
+        lw_error(L, vt_dot_span(e), m);
+        return;
+    }
+    {
+        CcExpr* recv = mb.a;
+        CcNameList* pathv = &path;
+        size_t n = pathv->len();
+        size_t i;
+        bool first = true;
+        for (i = 0; i < n; i++) {
+            recv = cc_expr_member(first ? uf_wrap(L, recv, e->span) : recv, *pathv->get_ptr(i), first && mb.arrow, e->span, L->arena);
+            first = false;
+        }
+        {
+            CcMember out;
+            out.a = recv;
+            out.name = mb.name;
+            out.arrow = false;
+            e->k = { .member = out };
+        }
+    }
+}
+
+/* One pattern, one verdict. `r: secret, ^secret;` says the field is
+ * readable and in the same breath that it is not, and neither reading is
+ * the one the author meant; a repeat that agrees with itself is a name
+ * written twice. The groups are read as one list, so a pattern that shows
+ * up in two of them is still one pattern. */
+static void uf_check_dup_items(CcLowerer* L, CcDecl* d, CcTypeview tv, CCSlice tn) {
+    CcHookEntryList* entryv = &tv.entries;
+    size_t ne = entryv->len();
+    size_t i;
+    CCSlice view = tv.view.len ? tv.view : cstr_slice("(default)");
+    CcNameList allowed = vec_new::[CCSlice](L->arena);
+    CcNameList denied = vec_new::[CCSlice](L->arena);
+    for (i = 0; i < ne; i++) {
+        CcHookEntry* e = entryv->get_ptr(i);
+        CcViewItemList* itemv = &e->items;
+        size_t nj = itemv->len();
+        size_t j;
+        if (!cc_slice_eq_cstr(&e->key, "r") && !cc_slice_eq_cstr(&e->key, "w") &&
+            !cc_slice_eq_cstr(&e->key, "rw")) continue;
+        for (j = 0; j < nj; j++) {
+            CcViewItem* it = itemv->get_ptr(j);
+            CCSlice nm = it->name;
+            CcNameList* same = it->deny ? &denied : &allowed;
+            CcNameList* other = it->deny ? &allowed : &denied;
+            size_t k;
+            size_t ns;
+            bool hit = false;
+            if (!nm.len) continue;
+            ns = same->len();
+            for (k = 0; k < ns && !hit; k++)
+                if (slice_eq(*same->get_ptr(k), nm)) hit = true;
+            if (hit) {
+                const char* mark = it->deny ? "^" : "";
+                CCString m = @string(`${"@"}typeview ${view} on ${tn}: duplicate allow-list pattern '${mark}${nm}'`, L->arena);
+                lw_error(L, d->span, m);
+                return;
+            }
+            ns = other->len();
+            for (k = 0; k < ns && !hit; k++)
+                if (slice_eq(*other->get_ptr(k), nm)) hit = true;
+            if (hit) {
+                CCString m = @string(`${"@"}typeview ${view} on ${tn}: pattern '${nm}' disagrees with '^${nm}'`, L->arena);
+                lw_error(L, d->span, m);
+                return;
+            }
+            same->push(nm);
+        }
+    }
+}
+
+/* One `@typeview T { r: a, ^b; }`: every name in the list matches a field
+ * or a method, and `^*` denies nothing at all. */
+static void uf_check_restrict(CcLowerer* L, CcDecl* d, CcTypeview tv, CCSlice tn, CcHookEntry* e) {
+    CcViewItemList* itemv = &e->items;
+    size_t n = itemv->len();
+    size_t i;
+    CcNameList surface = uf_surface_of(L, tn);
+    CCSlice view = tv.view.len ? tv.view : cstr_slice("(default)");
+    for (i = 0; i < n; i++) {
+        CcViewItem* it = itemv->get_ptr(i);
+        CCSlice nm = it->name;
+        CCSlice near;
+        size_t k;
+        size_t ns = surface.len();
+        bool found = false;
+        if (!nm.len) continue;
+        if (it->deny && nm.len == 1 && nm.ptr[0] == '*') {
+            CCString m = @string(`${"@"}typeview ${view} on ${tn}: '^*' is ill-formed`, L->arena);
+            lw_error(L, d->span, m);
+            continue;
+        }
+        if (nm.len == 1 && nm.ptr[0] == '*') continue;      /* the whole surface */
+        if (uf_item_is_glob(nm)) {
+            for (k = 0; k < ns && !found; k++)
+                if (uf_glob_match(nm, *surface.get_ptr(k))) found = true;
+            if (found) continue;
+        }
+        for (k = 0; k < ns && !found; k++)
+            if (slice_eq(*surface.get_ptr(k), nm)) found = true;
+        if (found) continue;
+        near = lw_closest(surface, nm);
+        {
+            const char* kind = it->deny ? "deny-list '^" : "allow-list '";
+            CCString m = @string(`${"@"}typeview ${view} on ${tn}: ${kind}${nm}' matches no field or method on ${tn}`, L->arena);
+            if (near.len) {
+                CCString note = @string(`did you mean '${near}'?`, L->arena);
+                vt_error_note(L, d->span, m, lw_keep(L, &note));
+            } else {
+                lw_error(L, d->span, m);
+            }
+        }
+    }
+}
+
+/* One `@typeview T { as: f, g; }`: each face names a value member, the
+ * graph is acyclic, and no type is reachable through two faces. */
+static void uf_check_view(CcLowerer* L, CcDecl* d, CcTypeview tv) {
+    CcIndex* ix = L->ix;
+    CCSlice tn;
+    CcHookEntryList* entryv = &tv.entries;
+    size_t ne = entryv->len();
+    size_t i;
+    CcNameList seen_types = vec_new::[CCSlice](L->arena);
+    CcNameList reached = vec_new::[CCSlice](L->arena);
+    if (!tv.target) return;
+    tn = cc__strip_tag(ix->canon(tv.target));
+    if (!tn.len) return;
+    uf_check_dup_items(L, d, tv, tn);                    /* the lists read as one, glob subject or not */
+    if (tn.ptr[tn.len - 1] == '*') return;               /* a family glob has no one struct */
+    for (i = 0; i < ne; i++) {
+        CcHookEntry* e = entryv->get_ptr(i);
+        CcViewItemList* itemv = &e->items;
+        size_t nj = itemv->len();
+        size_t j;
+        if (!cc_slice_eq_cstr(&e->key, "as")) {
+            if (cc_slice_eq_cstr(&e->key, "r") || cc_slice_eq_cstr(&e->key, "w") ||
+                cc_slice_eq_cstr(&e->key, "rw")) uf_check_restrict(L, d, tv, tn, e);
+            continue;
+        }
+        for (j = 0; j < nj; j++) {
+            CcViewItem* it = itemv->get_ptr(j);
+            bool is_ptr = false;
+            CCSlice fty;
+            CcNameList mine = vec_new::[CCSlice](L->arena);
+            CcNameList path = vec_new::[CCSlice](L->arena);
+            bool cycle = false;
+            size_t k;
+            size_t nm;
+            if (!it->name.len) continue;
+            fty = uf_face_field(L, tn, it->name, &is_ptr);
+            if (is_ptr) {
+                CCSlice fname = it->name;
+                CCString m = @string(`type: as: field '${fname}' on '${tn}' must be a value embed, not a pointer`, L->arena);
+                lw_error(L, d->span, m);
+                continue;
+            }
+            if (!fty.len) continue;
+            uf_face_reach(L, fty, &mine, &path, &cycle, 0);
+            if (cycle || slice_eq(fty, tn)) {
+                CCString m = @string(`cyclic as: on '${tn}'`, L->arena);
+                lw_error(L, d->span, m);
+                continue;
+            }
+            nm = mine.len();
+            for (k = 0; k < nm; k++) {
+                CCSlice got = *mine.get_ptr(k);
+                size_t q;
+                size_t nr = reached.len();
+                bool dup = false;
+                for (q = 0; q < nr && !dup; q++)
+                    if (slice_eq(*reached.get_ptr(q), got)) dup = true;
+                if (dup) {
+                    CCString m = @string(`type: ambiguous as: embed of '${got}' on '${tn}'`, L->arena);
+                    lw_error(L, d->span, m);
+                } else {
+                    reached.push(got);
+                }
+            }
+        }
+    }
+    (void)seen_types;
+}
+
+/* The view a binding is restricted to, or empty. `@typeview(V) T*` puts
+ * the annotation on the `T` the declarator built the pointer from, so the
+ * pointers are peeled looking for it. */
+static CCSlice uf_view_attr(CcType* t) {
+    while (t) {
+        CcAttrList* av = &t->attrs;
+        size_t n = av->len();
+        size_t i;
+        CcType* inner = NULL;
+        for (i = 0; i < n; i++) {
+            CcAttr* a = av->get_ptr(i);
+            if (cc_slice_eq_cstr(&a->name, "typeview")) return a->value;
+        }
+        @switch (t->k) {
+            case .pointer(pt): inner = pt.pointee; break;
+            default: break;
+        }
+        t = inner;
+    }
+    return cc_slice_empty();
+}
+
+/* A restricted binding does not widen. `@typeview(V) T*` names what the
+ * view lets through; a parameter declared as the whole `T*` would hand
+ * the callee everything the view withheld, and there is no cast that
+ * makes that safe. */
+static void uf_check_widen(Walker* w, CcExpr* e, CcCall cl) {
+    UStep* st = (UStep*)w->env;
+    CcLowerer* L = st->L;
+    CcIndex* ix = L->ix;
+    CcExprList* av = &cl.args;
+    CcParamList* ps = NULL;
+    CCSlice fn;
+    CcSym* sym;
+    size_t n = av->len();
+    size_t np;
+    size_t i;
+    if (!expr_ident(strip_parens_expr(cl.callee), &fn)) return;
+    sym = sym_any(ix, fn);
+    while (sym && sym->kind != CC_SYM_FUNC) sym = sym->same_name;
+    if (!sym || !sym->type) return;
+    @switch (sym->type->k) {
+        case .func: ps = &sym->type->k.func.params; break;
+        default: break;
+    }
+    if (!ps) return;
+    np = ps->len();
+    for (i = 0; i < n && i < np; i++) {
+        CcExpr* a = *av->get_ptr(i);
+        CcType* at = type_of_expr(w, a);
+        CCSlice have = uf_view_attr(at);
+        CcParam* pa = ps->get_ptr(i);
+        CCSlice want;
+        if (!have.len) continue;
+        want = uf_view_attr(pa->type);
+        if (want.len && slice_eq(want, have)) continue;
+        {
+            CCSlice on = cc__strip_tag(ix->canon(peel(at)));
+            CCSlice to = pa->type ? ix->canon(pa->type) : cc_slice_empty();
+            CCString m = @string(`restricted mode '${have}' on '${on}': cannot widen to '${to}' (const-shaped; no cast)`, L->arena);
+            lw_error(L, e->span, m);
+        }
+    }
+}
+
+/* ---- what a restricted binding may read and write ------------------------ */
+
+/* The `@typeview` a declaration is, or false. */
+static bool uf_decl_typeview(CcDecl* d, CcTypeview* out) {
+    @switch (d->k) {
+        case .typeview(tv): *out = tv; return true;
+        default: return false;
+    }
+}
+
+/* Does `@typeview ... on <subj>` govern the type `base`? A subject ending
+ * in `*` names a family by its prefix; anything else names one type. The
+ * score ranks two subjects that both match, so the exact name wins over the
+ * family it belongs to. */
+static bool uf_subject_matches(CCSlice subj, CCSlice base, size_t* score) {
+    size_t pre;
+    if (!subj.len || !base.len) return false;
+    if (subj.ptr[subj.len - 1] != '*') {
+        if (!slice_eq(subj, base)) return false;
+        *score = subj.len + 1024;
+        return true;
+    }
+    pre = subj.len - 1;
+    if (base.len < pre) return false;
+    if (pre && memcmp(base.ptr, subj.ptr, pre) != 0) return false;
+    *score = pre;
+    return true;
+}
+
+/* The `@typeview` that governs `base` under `view` (an empty view is the
+ * unnamed one). Every unit the index read is searched: a view declared in a
+ * header binds the bindings this unit writes. */
+static bool uf_view_for(CcIndex* ix, CCSlice base, CCSlice view, CcTypeview* out) {
+    CcUnitList* unitv = &ix->units;
+    size_t nu = unitv->len();
+    size_t i;
+    size_t best = 0;
+    bool found = false;
+    for (i = 0; i < nu; i++) {
+        CcUnit* u = *unitv->get_ptr(i);
+        CcDeclList* declv = &u->decls;
+        size_t nd = declv->len();
+        size_t k;
+        for (k = 0; k < nd; k++) {
+            CcDecl* d = *declv->get_ptr(k);
+            CcTypeview tv;
+            CCSlice subj;
+            size_t score = 0;
+            if (!uf_decl_typeview(d, &tv)) continue;
+            if (!slice_eq(tv.view, view)) continue;
+            subj = cc__hook_subject_text(ix, u, d->span);
+            if (!uf_subject_matches(subj, base, &score)) continue;
+            if (found && score <= best) continue;
+            best = score;
+            found = true;
+            *out = tv;
+        }
+    }
+    return found;
+}
+
+/* `r:` / `w:` / `rw:` as the bits the group grants: 1 read, 2 store. */
+static int uf_group_kind(CCSlice key) {
+    if (cc_slice_eq_cstr(&key, "r")) return 1;
+    if (cc_slice_eq_cstr(&key, "w")) return 2;
+    if (cc_slice_eq_cstr(&key, "rw")) return 3;
+    return 0;
+}
+
+/* An `as:`-only view hands out faces and restricts nothing. */
+static bool uf_view_restricts(CcTypeview tv) {
+    CcHookEntryList* entryv = &tv.entries;
+    size_t n = entryv->len();
+    size_t i;
+    for (i = 0; i < n; i++)
+        if (uf_group_kind(entryv->get_ptr(i)->key)) return true;
+    return false;
+}
+
+/* How specific a pattern is: a glob ranks below the name it stands for. */
+static size_t uf_pat_score(CCSlice pat) {
+    if (!uf_item_is_glob(pat)) return pat.len;
+    return pat.len ? pat.len - 1 : 0;
+}
+
+static bool uf_item_matches(CCSlice pat, CCSlice name) {
+    if (uf_item_is_glob(pat)) return uf_glob_match(pat, name);
+    return slice_eq(pat, name);
+}
+
+/* What a view grants `name`: bit 1 read, bit 2 store; 0 when nothing in its
+ * lists reaches the name. The best-scoring allow pattern wins, and then
+ * every matching deny subtracts its own group's bits -- so a group written
+ * as denies alone stands for the whole surface minus what it names. */
+static int uf_view_kind(CcTypeview tv, CCSlice name) {
+    CcHookEntryList* entryv = &tv.entries;
+    size_t ne = entryv->len();
+    size_t i;
+    int kind = 0;
+    long best = -1;
+    for (i = 0; i < ne; i++) {
+        CcHookEntry* e = entryv->get_ptr(i);
+        CcViewItemList* itemv = &e->items;
+        size_t nj = itemv->len();
+        size_t j;
+        int gk = uf_group_kind(e->key);
+        bool any_allow = false;
+        bool any_deny = false;
+        if (!gk) continue;
+        for (j = 0; j < nj; j++) {
+            CcViewItem* it = itemv->get_ptr(j);
+            if (!it->name.len) continue;
+            if (it->deny) { any_deny = true; continue; }
+            any_allow = true;
+            if (!uf_item_matches(it->name, name)) continue;
+            {
+                long sc = (long)uf_pat_score(it->name);
+                if (sc > best) { best = sc; kind = gk; }
+            }
+        }
+        if (!any_allow && any_deny && best < 0) { best = 0; kind = gk; }
+    }
+    if (!kind) return 0;
+    for (i = 0; i < ne; i++) {
+        CcHookEntry* e = entryv->get_ptr(i);
+        CcViewItemList* itemv = &e->items;
+        size_t nj = itemv->len();
+        size_t j;
+        int gk = uf_group_kind(e->key);
+        if (!gk) continue;
+        for (j = 0; j < nj; j++) {
+            CcViewItem* it = itemv->get_ptr(j);
+            if (!it->deny || !it->name.len) continue;
+            if (!uf_item_matches(it->name, name)) continue;
+            kind = kind & ~gk;
+        }
+    }
+    return kind;
+}
+
+/* The slice family shares one unnamed facet, so an instance must not fork
+ * it: `CCSlice_<T>` and the marker aliases are the same subject as
+ * `CCSlice`. */
+static CCSlice uf_family_root(CCSlice leaf) {
+    static const char* const fam[6] = { "CCSlice", "CCSliceUnique", "CCSliceShared",
+                                        "CCSlicePacked", "CCSliceHdr", "CCSliceArray" };
+    size_t i;
+    if (!leaf.len) return leaf;
+    for (i = 0; i < 6; i++)
+        if (cc_slice_eq_cstr(&leaf, fam[i])) return cstr_slice("CCSlice");
+    if (leaf.len > 8 && memcmp(leaf.ptr, "CCSlice_", 8) == 0) return cstr_slice("CCSlice");
+    return leaf;
+}
+
+/* The unnamed facets the language fixes rather than a header. An
+ * angle-include is host-C passthrough, so no `@typeview on CCSlice` or
+ * `on CCString` ever reaches the index -- written live in `cc_slice.cch`
+ * it would be stripped from the `.h` the consuming unit reads. The bits
+ * are `uf_view_kind`'s (1 read, 2 store); -1 is "no builtin governs this
+ * base", which is not the same answer as "governed, and denied".
+ *
+ * Slice: every field readable, none writable (`r: *`) -- `.len` is the
+ * extent the slice was measured with, and a store to it re-measures the
+ * owner's memory behind its back. String: the SSO union is not a pointer,
+ * so `own` / `data` / the inline buffer are not fields to read at all
+ * (`as_slice()` / `data()` / `cstr()` answer that question honestly). */
+static int uf_builtin_kind(CCSlice base, CCSlice name) {
+    static const char* const hidden[4] = { "own", "data", "inline_buf", "_inline_word" };
+    size_t i;
+    if (cc_slice_eq_cstr(&base, "CCSlice")) return 1;
+    if (cc_slice_eq_cstr(&base, "CCString")) {
+        for (i = 0; i < 4; i++)
+            if (cc_slice_eq_cstr(&name, hidden[i])) return 0;
+        return 1;
+    }
+    return -1;
+}
+
+/* The view a binding's type is seen through, and the base it is a view
+ * onto. False when nothing restricts that type. */
+static bool uf_restrict_of(CcIndex* ix, CcType* rt, CCSlice* base, CCSlice* view, CcTypeview* out) {
+    CCSlice b;
+    CcTypeview tv;
+    if (!rt) return false;
+    b = cc__strip_tag(ix->canon(peel(rt)));
+    if (!b.len || b.ptr[b.len - 1] == '*') return false;
+    *view = uf_view_attr(rt);
+    if (!uf_view_for(ix, b, *view, &tv)) return false;
+    if (!uf_view_restricts(tv)) return false;
+    *base = b;
+    *out = tv;
+    return true;
+}
+
+/* The `x.f` a store lands on: the left of an assignment, or the operand of
+ * an increment. NULL for everything else -- `m.ptr[i] = v` stores through
+ * the field, and `buf[s.len] = v` reads one. */
+static CcExpr* uf_store_target(CcExpr* e) {
+    CcExpr* t = NULL;
+    @switch (e->k) {
+        case .assign(as): t = as.a; break;
+        case .unary(un): {
+            bool inc = un.op == CC_OP_PREINC || un.op == CC_OP_PREDEC ||
+                       un.op == CC_OP_POSTINC || un.op == CC_OP_POSTDEC;
+            if (inc) t = un.a;
+            break;
+        }
+        default: break;
+    }
+    return t ? strip_parens_expr(t) : NULL;
+}
+
+static bool uf_is_member_expr(CcExpr* e) {
+    @switch (e->k) {
+        case .member: return true;
+        default: return false;
+    }
+}
+
+/* A field access does not know its parent, so the store positions are
+ * collected first and looked up by node. */
+static bool uf_store_visit(CcExpr* e, void* env) {
+    UStep* st = (UStep*)env;
+    CcExpr* t = uf_store_target(e);
+    if (t && uf_is_member_expr(t)) st->stores.push(t);
+    return true;
+}
+
+static bool uf_is_store(UStep* st, const CcExpr* e) {
+    CcExprList* v = &st->stores;
+    size_t n = v->len();
+    size_t i;
+    for (i = 0; i < n; i++)
+        if (*v->get_ptr(i) == e) return true;
+    return false;
+}
+
+static bool uf_decl_func(CcDecl* d, CcFuncDecl* out) {
+    @switch (d->k) {
+        case .func(f): *out = f; return true;
+        default: return false;
+    }
+}
+
+static CcParamList* uf_func_params(CcType* t) {
+    CcParamList* ps = NULL;
+    if (!t) return NULL;
+    @switch (t->k) {
+        case .func: ps = &t->k.func.params; break;
+        default: break;
+    }
+    return ps;
+}
+
+static CcType* uf_func_return(CcType* t) {
+    CcType* r = NULL;
+    if (!t) return NULL;
+    @switch (t->k) {
+        case .func: r = t->k.func.ret; break;
+        default: break;
+    }
+    return r;
+}
+
+/* The type whose own bodies these statements are: a function's first
+ * parameter names the receiver, and an unnamed view does not bind inside
+ * the methods that implement the type -- it would leave the type unusable
+ * by the code that owns it. A named view is asked for at the binding, so
+ * it binds everywhere it is written. */
+static void uf_trusted_decl(Walker* w, CcDecl* d) {
+    UStep* st = (UStep*)w->env;
+    CcFuncDecl f;
+    CcParamList* ps;
+    CcType* rt;
+    st->trusted = cc_slice_empty();
+    st->trusted_ret = cc_slice_empty();
+    if (!uf_decl_func(d, &f)) return;
+    /* A constructor takes no receiver -- it hands one back (`T T_empty(void)`,
+     * `T T_from_host(H*)`). Its body is the type's own code just as much as a
+     * method's is, and it is the only code that can fill the fields the view
+     * withholds; without this the type could not be built at all. */
+    rt = uf_func_return(f.type);
+    if (rt) st->trusted_ret = uf_family_root(cc__strip_tag(w->ix->canon(peel(rt))));
+    ps = uf_func_params(f.type);
+    if (!ps || !ps->len()) return;
+    {
+        CcParam* p0 = ps->get_ptr(0);
+        if (!p0->type) return;
+        st->trusted = uf_family_root(cc__strip_tag(w->ix->canon(peel(p0->type))));
+    }
+}
+
+/* `typedef @typeview(V) T* Alias;` is the same binding written once: the
+ * sugar sits on the `T` the declarator built the pointer from, and the
+ * alias name carries none of it. Resolving the alias is what keeps the
+ * view from escaping through a second spelling. */
+static CcType* uf_view_through_alias(Walker* w, CcType* rt) {
+    CcType* t = rt;
+    int depth = 0;
+    while (t && !uf_view_attr(t).len && depth++ < 8) {
+        CCSlice nm;
+        CcSym* sym;
+        CcType* a = unalias_local(w, t);
+        if (a && a != t) { t = a; continue; }
+        if (!type_named_name(t, &nm) || !nm.len) break;
+        sym = sym_any(w->ix, nm);
+        while (sym && sym->kind != CC_SYM_TYPE) sym = sym->same_name;
+        if (!sym || !sym->type || sym->type == t) break;
+        t = sym->type;
+    }
+    return (t && uf_view_attr(t).len) ? t : rt;
+}
+
+/* `x.f` through a restricted binding: the view's lists say whether that
+ * field may be read or written here. A method call is not this step's --
+ * resolution owns those -- and the lowerer's own locals are not the user's
+ * program.
+ *
+ * One refusal per unit: past the first, every later site is the same view
+ * refusing the same mistake, and the first is the one that names it. */
+static void uf_check_field(Walker* w, CcExpr* e, CcMember mb, CcType* rt) {
+    UStep* st = (UStep*)w->env;
+    CcLowerer* L = st->L;
+    CcIndex* ix = w->ix;
+    CCSlice base = cc_slice_empty();
+    CCSlice view = cc_slice_empty();
+    CCSlice recv;
+    CcTypeview tv;
+    int kind;
+    bool store;
+    if (st->restrict_diag || !mb.name.len) return;
+    if (!expr_ident(strip_parens_expr(mb.a), &recv)) return;
+    if (recv.len >= 5 && memcmp(recv.ptr, "__cc_", 5) == 0) return;
+    rt = uf_view_through_alias(w, rt);
+    if (uf_restrict_of(ix, rt, &base, &view, &tv)) {
+        kind = uf_view_kind(tv, mb.name);
+    } else {
+        CCSlice leaf;
+        if (!rt) return;
+        if (uf_view_attr(rt).len) return;   /* a named view is a header's list, not the language's */
+        leaf = cc__strip_tag(ix->canon(peel(rt)));
+        base = uf_family_root(leaf);
+        /* `CCSlice_<T>.base` is the instance's own erasure spelling -- the
+         * member the factory body constructs the instance through. Only the
+         * erased core's own fields are the family facet's to withhold. */
+        if (!slice_eq(base, leaf) && leaf.len > 8 && memcmp(leaf.ptr, "CCSlice_", 8) == 0 &&
+            field_type(w, rt, mb.name)) return;
+        kind = uf_builtin_kind(base, mb.name);
+        if (kind < 0) return;
+    }
+    if (!view.len && (slice_eq(base, st->trusted) || slice_eq(base, st->trusted_ret))) return;
+    store = uf_is_store(st, e);
+    if (store && (kind & 2)) return;
+    if (!store && (kind & 1)) return;
+    st->restrict_diag = true;
+    {
+        CCSlice label = view.len ? view : cstr_slice("(default)");
+        CCSlice f = mb.name;
+        if (store) {
+            CCString m = @string(`restricted mode '${label}' on '${base}' does not allow store to field '${f}'`, L->arena);
+            lw_error(L, e->span, m);
+        } else {
+            CCString m = @string(`restricted mode '${label}' on '${base}' does not allow field '${f}'`, L->arena);
+            lw_error(L, e->span, m);
+        }
+    }
+}
+
+/* `enc->flush()` where the view never named `flush`: a named view is a
+ * capability list, and a method it does not name is not this binding's to
+ * call. An unnamed facet hides fields, not methods -- `s.data()` is how a
+ * caller asks the question `s.data` may not -- so only a named view speaks
+ * here. */
+static bool uf_check_method_view(Walker* w, UStep* st, CcExpr* e, CcUfcs uf, CcType* rt) {
+    CcLowerer* L = st->L;
+    CcIndex* ix = w->ix;
+    CCSlice base = cc_slice_empty();
+    CCSlice view = cc_slice_empty();
+    CcTypeview tv;
+    if (st->restrict_diag || !uf.method.len) return false;
+    rt = uf_view_through_alias(w, rt);
+    if (!uf_view_attr(rt).len) return false;
+    if (!uf_restrict_of(ix, rt, &base, &view, &tv)) return false;
+    if (!view.len) return false;
+    if (uf_view_kind(tv, uf.method) & 1) return false;
+    st->restrict_diag = true;
+    {
+        CCSlice meth = uf.method;
+        CCString m = @string(`restricted mode '${view}' on '${base}' does not allow method '${meth}' (flush-under-hold / capability deny)`, L->arena);
+        lw_error(L, e->span, m);
+    }
+    return true;
+}
+
+/* `@typeview on Box { as: (Region)arena; }`: the cast is the mode the embed
+ * is reached under, so a method the mode does not name is not this face to
+ * call. The binding carries no annotation of its own -- the face does -- so
+ * this reads the `as:` path the resolution actually walked, one hop at a
+ * time, and asks each hop that carries a cast whether it grants the method.
+ *
+ * Without it a container that hands out a restricted view of a field it owns
+ * hands out the whole field: `b.reset()` on an `as: (Region)arena` would
+ * reset an arena the face exists precisely to keep the caller off. */
+static bool uf_face_cast_mode(CcIndex* ix, CCSlice owner, CCSlice face, CCSlice* mode) {
+    CcUnitList* unitv = &ix->units;
+    size_t nu = unitv->len();
+    size_t i;
+    *mode = cc_slice_empty();
+    for (i = 0; i < nu; i++) {
+        CcUnit* u = *unitv->get_ptr(i);
+        CcDeclList* declv = &u->decls;
+        size_t nd = declv->len();
+        size_t k;
+        for (k = 0; k < nd; k++) {
+            CcDecl* d = *declv->get_ptr(k);
+            CcTypeview tv;
+            CCSlice subj;
+            size_t score = 0;
+            CcHookEntryList* entryv;
+            size_t ne;
+            size_t q;
+            if (!uf_decl_typeview(d, &tv)) continue;
+            subj = cc__hook_subject_text(ix, u, d->span);
+            if (!uf_subject_matches(subj, owner, &score)) continue;
+            entryv = &tv.entries;
+            ne = entryv->len();
+            for (q = 0; q < ne; q++) {
+                CcHookEntry* en = entryv->get_ptr(q);
+                CcViewItemList* itemv = &en->items;
+                size_t ni = itemv->len();
+                size_t j;
+                if (!cc_slice_eq_cstr(&en->key, "as")) continue;
+                for (j = 0; j < ni; j++) {
+                    CcViewItem* it = itemv->get_ptr(j);
+                    CCSlice nm = cc_slice_empty();
+                    if (!it->name.len || !it->cast) continue;
+                    if (!slice_eq(it->name, face)) continue;
+                    if (!type_named_name(it->cast, &nm) || !nm.len) continue;
+                    *mode = nm;
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/* One dot-separated hop of a `recv_path`, from `at`. */
+static CCSlice uf_path_hop(CCSlice path, size_t at, size_t* next) {
+    size_t i = at;
+    while (i < path.len && path.ptr[i] != '.') i++;
+    *next = (i < path.len) ? i + 1 : path.len;
+    return cc_slice_from_buffer((char*)path.ptr + at, i - at);
+}
+
+static bool uf_check_face_view(Walker* w, UStep* st, CcExpr* e, CcUfcs uf, CCSlice tn, CcMethod* m) {
+    CcLowerer* L = st->L;
+    CcIndex* ix = w->ix;
+    CCSlice owner = tn;
+    CCSlice path;
+    size_t at = 0;
+    int hops = 0;
+    if (st->restrict_diag || !m || !uf.method.len) return false;
+    path = m->recv_path;
+    if (!path.len || !owner.len) return false;
+    while (at < path.len && hops < 8) {
+        CCSlice face = uf_path_hop(path, at, &at);
+        CCSlice mode = cc_slice_empty();
+        CCSlice fty;
+        bool is_ptr = false;
+        hops++;
+        if (!face.len) continue;
+        fty = uf_face_field(L, owner, face, &is_ptr);
+        if (!fty.len) return false;
+        if (uf_face_cast_mode(ix, owner, face, &mode) && mode.len) {
+            CcTypeview tv;
+            if (uf_view_for(ix, fty, mode, &tv) && uf_view_restricts(tv) &&
+                !(uf_view_kind(tv, uf.method) & 1)) {
+                CCSlice meth = uf.method;
+                CCString msg = @string(`restricted mode '${mode}' on '${fty}' does not allow method '${meth}' (viewed face)`, L->arena);
+                st->restrict_diag = true;
+                lw_error(L, e->span, msg);
+                return true;
+            }
+        }
+        owner = fty;
+    }
+    return false;
+}
+
+/* `CCBox` and its instances. The teaching typedef of one is not one. */
+static bool uf_is_box_instance(CCSlice n) {
+    if (cc_slice_eq_cstr(&n, "CCBox")) return true;
+    return n.len > 6 && memcmp(n.ptr, "CCBox_", 6) == 0;
+}
+
+/* A factory alias: a name for what a factory hands back. `CCArena` and a
+ * `typedef CCBox::[H] Name` are read as the type they stand for at every
+ * use, but they are not spelled as it, and the box they name is minted --
+ * never cast into being. `CCBox::[H]` itself is the instance and does
+ * mint. */
+static bool uf_is_factory_alias(CcIndex* ix, CcType* t, CCSlice* spelled) {
+    CCSlice nm;
+    int depth;
+    if (!t || !type_named_name(t, &nm) || !nm.len) return false;
+    *spelled = nm;
+    if (cc_slice_eq_cstr(&nm, "CCArena")) return true;
+    if (nm.len > 17 && memcmp(nm.ptr, "CCArena_Restrict_", 17) == 0) return true;
+    if (uf_is_box_instance(nm)) return false;
+    /* `canon` keeps a typedef's own spelling -- that is the point of the
+     * name -- so the chain has to be walked to see what it stands for. */
+    for (depth = 0; depth < 8; depth++) {
+        CcSym* sym = sym_any(ix, nm);
+        while (sym && sym->kind != CC_SYM_TYPE) sym = sym->same_name;
+        if (!sym || !sym->type) return false;
+        if (!type_named_name(sym->type, &nm) || !nm.len) return false;
+        if (uf_is_box_instance(cc__strip_tag(nm))) return true;
+    }
+    return false;
+}
+
+/* `CCArena a = &host;` -- the destination does not mint. A pointer handed
+ * straight to a factory alias would install a box whose contents were
+ * never made, and the cell would read as live. The value has to come from
+ * the factory that owns it, so the refusal lands here rather than at the
+ * first use that finds the box empty. A pointer-shaped right side that is
+ * not bare (a call, a field, an index) is a value the site computed and
+ * this rule has nothing to say about it. */
+static void uf_check_mint(Walker* w, CcStmt* s, bool enter) {
+    UStep* st = (UStep*)w->env;
+    CcLowerer* L = st->L;
+    CcIndex* ix = w->ix;
+    CcDecl* d = NULL;
+    CcVarDecl v;
+    bool is_var = false;
+    bool bare = false;
+    CCSlice dest = cc_slice_empty();
+    CcExpr* rhs;
+    CcType* at;
+    CCSlice src;
+    if (!enter || !stmt_is_decl(s, &d) || !d) return;
+    @switch (d->k) {
+        case .var(x): v = x; is_var = true; break;
+        default: break;
+    }
+    if (!is_var || !v.init || v.init->is_list || !v.init->expr) return;
+    if (!uf_is_factory_alias(ix, v.type, &dest)) return;
+    rhs = strip_parens_expr(v.init->expr);
+    if (!rhs) return;
+    @switch (rhs->k) {
+        case .unary(un): if (un.op == CC_OP_ADDR) bare = true; break;
+        case .ident: bare = true; break;
+        default: break;
+    }
+    if (!bare) return;
+    at = type_of_expr(w, rhs);
+    if (!at) return;
+    src = ix->canon(at);
+    if (!src.len || src.ptr[src.len - 1] != '*') return;
+    {
+        CCString m = @string(`type: no implicit convert from '${src}' to '${dest}' (factory alias; dest does not mint)`, L->arena);
+        lw_error(L, rhs->span, m);
+    }
+}
+
+static void uf_widen_pass(CcLowerer* L, UStep* st) {
+    Walker w;
+    CcVisitor sv;
+    memset(&sv, 0, sizeof(sv));
+    sv.expr = uf_store_visit;
+    sv.env = st;
+    CcUnit_walk(L->unit, sv);
+    memset(&w, 0, sizeof(w));
+    w.arena = L->arena;
+    w.ix = L->ix;
+    w.unit = L->unit;
+    w.on_call = uf_check_widen;
+    w.on_field = uf_check_field;
+    w.on_decl = uf_trusted_decl;
+    w.on_stmt = uf_check_mint;
+    w.env = st;
+    tw_unit(&w);
+}
+
+/* `@typeview(V) X*` attaches a named view to one concrete type. `X` that
+ * no declaration introduced is a family prefix the writer meant as a glob
+ * (`Fam_alpha` where `Fam_alpha1` is the type): the annotation binds
+ * nothing, and every call through the parameter then fails about a method
+ * the type never had instead of about the type that does not exist. */
+static void uf_check_view_use(CcLowerer* L, CcType* t, CcSpan sp) {
+    CcIndex* ix = L->ix;
+    CCSlice view = cc_slice_empty();
+    CCSlice canon;
+    CCSlice base;
+    CcSym* s;
+    size_t i;
+    while (t) {
+        CcAttrList* av = &t->attrs;
+        size_t n = av->len();
+        CcType* inner = NULL;
+        bool has = false;
+        for (i = 0; i < n; i++) {
+            CcAttr* a = av->get_ptr(i);
+            if (!cc_slice_eq_cstr(&a->name, "typeview")) continue;
+            view = a->value;
+            has = true;
+        }
+        if (has) break;
+        @switch (t->k) {
+            case .pointer(pt): inner = pt.pointee; break;
+            default: break;
+        }
+        t = inner;
+    }
+    if (!t || !view.len) return;
+    canon = ix->canon(t);
+    base = cc__strip_tag(canon);
+    /* Only a plain name is checkable here: a tagged or compound spelling
+     * (`struct Foo`, `unsigned long`) names no typedef symbol either way. */
+    if (!base.len || !slice_eq(base, canon)) return;
+    for (i = 0; i < base.len; i++) {
+        char c = base.ptr[i];
+        if (c == ' ' || c == '*' || c == '[') return;
+    }
+    if (cc__ty_is_scalar(base)) return;
+    s = ix->sym(base) ?> NULL;
+    while (s && s->kind != CC_SYM_TYPE) s = s->same_name;
+    if (s) return;
+    {
+        CcNameList known = ix->known_types();
+        CCString near = cc_string_new();
+        size_t n = known.len();
+        for (i = 0; i < n; i++) {
+            CCSlice k = *known.get_ptr(i);
+            if (k.len <= base.len || memcmp(k.ptr, base.ptr, base.len) != 0) continue;
+            if (cc_string_len(&near)) cc_string_push_cstr(&near, ", ", L->arena);
+            cc_string_push_slice(&near, k, L->arena);
+        }
+        {
+            CCString m = @string(`type: ${"@"}typeview(${view}) ${base}*: '${base}' is not a declared type — a named view attaches to a concrete type, not a family prefix`, L->arena);
+            if (cc_string_len(&near)) {
+                CCSlice nn = cc_string_persist_slice(L->arena, &near);
+                CCString note = @string(`declared types whose name begins with '${base}': ${nn}`, L->arena);
+                vt_error_note(L, sp, m, lw_keep(L, &note));
+            } else {
+                lw_error(L, sp, m);
+            }
+        }
+    }
+}
+
+static void uf_check_views(CcLowerer* L) {
+    CcUnit* u = L->unit;
+    CcDeclList* declv = &u->decls;
+    size_t n = declv->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *declv->get_ptr(i);
+        CcFuncDecl f;
+        CcParamList* ps;
+        @switch (d->k) {
+            case .typeview(tv): uf_check_view(L, d, tv); break;
+            default: break;
+        }
+        if (!uf_decl_func(d, &f)) continue;
+        ps = uf_func_params(f.type);
+        if (!ps) continue;
+        {
+            size_t np = ps->len();
+            size_t k;
+            for (k = 0; k < np; k++) {
+                CcParam* p = ps->get_ptr(k);
+                if (p->type) uf_check_view_use(L, p->type, p->span);
+            }
+        }
+    }
+}
+
+/* `println(x)` / `eprintln(x)`: free sugar for `cc_println` / `cc_eprintln`.
+ *
+ * Both are language spellings, not declared functions — `cc_println` is a
+ * `_Generic` macro the prelude defines — so nothing in the index resolves
+ * the bare name, and leaving it as written hands C an undeclared call. The
+ * name is the whole difference; the arguments and the Result the macro
+ * yields are untouched. */
+static bool uf_print_sugar(CcExpr* e, void* env) {
+    CcLowerer* L = (CcLowerer*)env;
+    @switch (e->k) {
+        case .call(cl): {
+            CCSlice fn;
+            CcExpr* callee = strip_parens_expr(cl.callee);
+            if (!expr_ident(callee, &fn)) break;
+            if (cc_slice_eq_cstr(&fn, "println")) callee->k = { .ident = cstr_slice("cc_println") };
+            else if (cc_slice_eq_cstr(&fn, "eprintln")) callee->k = { .ident = cstr_slice("cc_eprintln") };
+            break;
+        }
+        default: break;
+    }
+    return true;
+}
+
+/* `double d = py.eval(src) !>;`
+ *
+ * A dynamic family's plain callee answers with the family's own value --
+ * a `CCPyObj`, a `CCQjsVal` -- and the site wants what it declared. Such a
+ * family declares one callee per destination type, so the destination
+ * picks it: `cc_py_callm_double` where the cell is a `double`. Only a
+ * variant the headers actually declare is taken, so a family that has none
+ * keeps the callee it had and the host compiler still says the value does
+ * not fit. */
+static CCSlice uf_dest_mangle(CcLowerer* L, CCSlice canon) {
+    CCString m = cc_string_new();
+    size_t i;
+    if (!canon.len) return cc_slice_empty();
+    for (i = 0; i < canon.len; i++) {
+        char c = canon.ptr[i];
+        if (c == '*') return cc_slice_empty();   /* a pointer destination names no variant */
+        cc_string_push_char(&m, c == ' ' ? '_' : c, L->arena);
+    }
+    return lw_keep(L, &m);
+}
+
+/* Through the unwrap tails to the call a destination is filled from. */
+static CcExpr* uf_call_under(CcExpr* e) {
+    CcExpr* inner = NULL;
+    if (!e) return NULL;
+    @switch (e->k) {
+        case .call: return e;
+        case .paren(u): inner = u.a; break;
+        case .unwrap(u): inner = u.a; break;
+        case .unwrap_body(u): inner = u.a; break;
+        case .unwrap_or(u): inner = u.a; break;
+        case .unwrap_destroy(u): inner = u.a; break;
+        default: return NULL;
+    }
+    return uf_call_under(inner);
+}
+
+/* A scalar destination the family never installed. The plain sink answers
+ * with a Result of the family's own value -- a `CCPyObj`, a `CCQjsVal` --
+ * which can never initialize a scalar cell, so the site is provably
+ * ill-formed here rather than a host-C conversion error about a struct the
+ * user never named. Enumerating what *is* installed is the difference
+ * between a refusal and a riddle. Silence stays the answer when the family
+ * installs no destinations at all: then the plain sink is all there is,
+ * and this step has nothing to say the host compiler will not say better. */
+static void uf_dest_missing(CcLowerer* L, CCSlice callee, CCSlice dest, CCSlice mang, CcSpan sp) {
+    static const char* const scalars[17] = { "int", "long_long", "int64_t", "int32_t", "uint64_t",
+                                             "double", "float", "bool", "size_t", "char", "short",
+                                             "long", "unsigned", "unsigned_int", "unsigned_long",
+                                             "signed_char", "unsigned_char" };
+    CcIndex* ix = L->ix;
+    CcSymList* symv = &ix->syms;
+    size_t n = symv->len();
+    size_t i;
+    bool scalar = false;
+    CcNameList seen = vec_new::[CCSlice](L->arena);
+    CCString list = cc_string_new();
+    for (i = 0; i < 17; i++)
+        if (cc_slice_eq_cstr(&mang, scalars[i])) scalar = true;
+    if (!scalar) return;
+    {
+        /* Only a Result-returning plain sink makes the site provably wrong:
+         * a sink that answers with a scalar of its own may be exactly the
+         * scalar the destination asked for, and the fallback is the answer. */
+        CcSym* plain = sym_any(ix, callee);
+        CcType* ret;
+        while (plain && plain->kind != CC_SYM_FUNC) plain = plain->same_name;
+        ret = return_type_of_sym(plain);
+        if (!ret || !CcType_is_result(ret)) return;
+    }
+    for (i = 0; i < n; i++) {
+        CcSym* s = *symv->get_ptr(i);
+        CCSlice nm;
+        CCSlice tail;
+        size_t k;
+        size_t ns;
+        bool dup = false;
+        if (!s || s->kind != CC_SYM_FUNC) continue;
+        nm = s->name;
+        if (nm.len <= callee.len + 1) continue;
+        if (memcmp(nm.ptr, callee.ptr, callee.len) != 0 || nm.ptr[callee.len] != '_') continue;
+        tail = cc_slice_from_buffer((char*)nm.ptr + callee.len + 1, nm.len - callee.len - 1);
+        ns = seen.len();
+        for (k = 0; k < ns && !dup; k++)
+            if (slice_eq(*seen.get_ptr(k), tail)) dup = true;
+        if (dup) continue;
+        if (seen.len()) cc_string_push_cstr(&list, ", ", L->arena);
+        cc_string_push_slice(&list, tail, L->arena);
+        seen.push(tail);
+    }
+    if (!seen.len()) return;
+    {
+        CCSlice ls = lw_keep(L, &list);
+        CCString m = @string(`destination '${dest}' is not an installed destination of ${callee}`, L->arena);
+        CCString note = @string(`installed destinations (mangled): ${ls}`, L->arena);
+        vt_error_note(L, sp, m, lw_keep(L, &note));
+    }
+}
+
+/* True when the call the destination governs was retargeted to one of the
+ * family's installed destinations. */
+static bool uf_dest_call(CcLowerer* L, CcType* want, CcExpr* init) {
+    CcIndex* ix = L->ix;
+    CcExpr* call = uf_call_under(init);
+    CCSlice callee = cc_slice_empty();
+    CCSlice mang;
+    CcNameList* sv = &L->sinks;
+    size_t sn = sv->len();
+    size_t si;
+    bool is_sink = false;
+    if (!want || !call) return false;
+    {
+        CcCall c;
+        bool ok = false;
+        @switch (call->k) {
+            case .call(x): c = x; ok = true; break;
+            default: break;
+        }
+        if (!ok || !c.callee) return false;
+        if (!expr_ident(strip_parens_expr(c.callee), &callee)) return false;
+    }
+    if (!callee.len) return false;
+    for (si = 0; si < sn; si++) if (slice_eq(*sv->get_ptr(si), callee)) { is_sink = true; break; }
+    if (!is_sink) return false;
+    mang = uf_dest_mangle(L, ix->canon(want));
+    if (!mang.len) return false;
+    {
+        CCString cand = @string(`${callee}_${mang}`, L->arena);
+        CCSlice name = lw_keep(L, &cand);
+        CcSym* sym = sym_any(ix, name);
+        while (sym && sym->kind != CC_SYM_FUNC) sym = sym->same_name;
+        if (!sym) { uf_dest_missing(L, callee, ix->canon(want), mang, call->span); return false; }
+        {
+            CcCall c2;
+            @switch (call->k) {
+                case .call(x): c2 = x; break;
+                default: return false;
+            }
+            c2.callee = lw_ident(L, name, call->span);
+            call->k = { .call = c2 };
+        }
+    }
+    return true;
+}
+
+/* `d = w.foo(6.0);` names a destination too: the declared type of the
+ * lvalue is what the value has to fit, exactly as at the declaration that
+ * introduced it. Only a plain `=` to a bare name -- a compound assignment
+ * reads the old value first, so what the call answers with is not by
+ * itself the destination, and a member or an index is a place whose type
+ * this step does not have in hand. */
+static CcExpr* uf_dest_assign_rhs(CcStmt* s, CCSlice* name) {
+    CcExpr* e = NULL;
+    CcBinary as;
+    bool is_assign = false;
+    @switch (s->k) {
+        case .expr(x): e = x.e; break;
+        default: break;
+    }
+    e = strip_parens_expr(e);
+    if (!e) return NULL;
+    @switch (e->k) {
+        case .assign(x): as = x; is_assign = true; break;
+        default: break;
+    }
+    if (!is_assign || as.op != CC_OP_ASSIGN || !as.a || !as.b) return NULL;
+    if (!expr_ident(strip_parens_expr(as.a), name) || !name->len) return NULL;
+    return as.b;
+}
+
+static void uf_dest_stmt(Walker* w, CcStmt* s, bool enter) {
+    CcLowerer* L = (CcLowerer*)w->env;
+    CcDecl* d = NULL;
+    if (!enter) return;
+    if (stmt_is_decl(s, &d) && d) {
+        CcVarDecl v;
+        bool is_var = false;
+        @switch (d->k) {
+            case .var(x): v = x; is_var = true; break;
+            default: break;
+        }
+        if (is_var && v.init && !v.init->is_list && v.init->expr)
+            uf_dest_call(L, v.type, v.init->expr);
+        return;
+    }
+    {
+        CCSlice nm = cc_slice_empty();
+        CcExpr* rhs = uf_dest_assign_rhs(s, &nm);
+        if (rhs) uf_dest_call(L, sc_lookup(w, nm), rhs);
+    }
+}
+
+/* A call under nothing but parentheses. An unwrap or a `@destroy` tail
+ * between the cast and the call is a step of its own, and the cast is
+ * about what that step answers with, not about the call. */
+static CcExpr* uf_paren_call(CcExpr* e) {
+    CcExpr* a = strip_parens_expr(e);
+    if (!a) return NULL;
+    @switch (a->k) {
+        case .call: return a;
+        default: return NULL;
+    }
+}
+
+/* `(double)w.foo(5.5)` -- a cast that directly wraps the call spells the
+ * destination as plainly as a declaration does, and the variant it picks
+ * already answers with that type, so the cast is absorbed rather than
+ * left to convert a value that is already right. A cast whose type the
+ * family installed no destination for keeps its ordinary C meaning. */
+static bool uf_dest_cast_visit(CcExpr* e, void* env) {
+    CcLowerer* L = (CcLowerer*)env;
+    CcCast ct;
+    bool is_cast = false;
+    CcExpr* call;
+    @switch (e->k) {
+        case .cast(x): ct = x; is_cast = true; break;
+        default: break;
+    }
+    if (!is_cast || !ct.type || !ct.a) return true;
+    call = uf_paren_call(ct.a);
+    if (!call) return true;
+    if (!uf_dest_call(L, ct.type, call)) return true;
+    e->k = call->k;
+    return true;
+}
+
+static void uf_dest_pass(CcLowerer* L) {
+    Walker w;
+    CcVisitor v;
+    if (!L->sinks.len()) return;
+    memset(&w, 0, sizeof(w));
+    w.arena = L->arena;
+    w.ix = L->ix;
+    w.unit = L->unit;
+    w.on_stmt = uf_dest_stmt;
+    w.env = L;
+    tw_unit(&w);
+    /* after the statement destinations: a cast inside one has already been
+     * governed by the declaration or assignment it sits in */
+    memset(&v, 0, sizeof(v));
+    v.expr = uf_dest_cast_visit;
+    v.env = L;
+    CcUnit_walk(L->unit, v);
+}
+
+/* ---- `.cast`: a destination that mints ---------------------------------
+ *
+ * `CCBox::[H] b = &host;` is not an assignment C can make: the cell is the
+ * box and the right side is the host pointer the box is a name for. A
+ * type's `.cast` hook is what turns one into the other -- it is handed the
+ * source and destination spellings and answers with the function that
+ * mints (`CCBox_H_from_host`), with `__cc_ufcs_pass__` (nothing to
+ * convert), or with the empty slice (mine, and refused). Read the
+ * registration and never call it and the site reaches the host compiler
+ * unconverted, as `invalid initializer` on a line the language accepts.
+ *
+ * Slice destinations (`char[:] s = str;`, `int[:] xs = v;`) are converted
+ * by the slice lowering, which knows the shapes it builds; this step
+ * leaves them to it so that no site is wrapped twice. */
+static CCSlice uf_cast_handler(CcIndex* ix, CCSlice dest) {
+    CcHookReg* hook = cc__hook_match(ix, dest, false);
+    if (hook && hook->has_cast && hook->cast_fn.len) return hook->cast_fn;
+    /* Bare `CCBox` is the erased core: it names no family, so the
+     * `CCBox_*` registration does not match it, and it casts by the same
+     * hook its instances do. */
+    if (uf_is_box_instance(dest)) return cstr_slice("cc_box_cast_lower_c");
+    return cc_slice_empty();
+}
+
+/* A destination this step can be about: a value of a named type. A pointer
+ * cell takes the pointer as written, and a Result cell is filled by the
+ * unwrap steps, not by a conversion. */
+static bool uf_cast_dest(CCSlice dest) {
+    size_t i;
+    if (!dest.len) return false;
+    for (i = 0; i < dest.len; i++) if (dest.ptr[i] == '*') return false;
+    return !cc__has_prefix(dest, "CCResult_");
+}
+
+/* The minting call for one destination, or NULL when the site already is
+ * what it should be. */
+static CcExpr* uf_cast_wrap(Walker* w, CcLowerer* L, CcType* want, CcExpr* rhs) {
+    CcIndex* ix = L->ix;
+    CCSlice dest;
+    CCSlice src = cc_slice_empty();
+    CCSlice handler;
+    CCSlice out;
+    CcType* at;
+    CcSpan sp;
+    if (!want || !rhs) return NULL;
+    sp = rhs->span;
+    dest = ix->canon(want);
+    if (!uf_cast_dest(dest)) return NULL;
+    handler = uf_cast_handler(ix, dest);
+    if (!handler.len) return NULL;
+    if (cc_slice_eq_cstr(&handler, "cc_slice_cast_lower_c")) return NULL;
+    if (!cc_slice_eq_cstr(&handler, "cc_box_cast_lower_c")) {
+        /* A hook the lowerer cannot run is not a hook that had nothing to
+         * say: emitting the right side unconverted would look exactly like
+         * a site that needed no conversion. */
+        CCString m = @string(`type: ${"."}cast handler '${handler}' for '${dest}' is not compiled`, L->arena);
+        lw_error(L, sp, m);
+        return NULL;
+    }
+    at = type_of_expr(w, rhs);
+    if (at) src = ix->canon(at);
+    if (src.len && slice_eq(src, dest)) return NULL;
+    out = cc_box_cast_lower_c(src, dest, cstr_slice("implicit"), L->arena);
+    if (!out.len) {
+        CCString m = @string(`type: ${"."}cast hook rejected implicit convert to '${dest}'`, L->arena);
+        lw_error(L, sp, m);
+        return NULL;
+    }
+    if (cc_slice_eq_cstr(&out, CC_UFCS_PASS_TAG)) return NULL;
+    return lw_call1(L, out, rhs, sp);
+}
+
+/* `b = &host;` mints exactly as `CCBox::[H] b = &host;` does: the cell is
+ * the box, the right side is the host pointer, and the declared type of
+ * the lvalue is the destination. Only a plain `=` to a bare name -- a
+ * compound assignment reads the old value first, and a member or an index
+ * is a place whose type this step does not have in hand. Leave it to the
+ * host compiler and the site reaches it as `incompatible types`, on a line
+ * the language accepts. */
+static void uf_cast_assign(Walker* w, CcLowerer* L, CcStmt* s) {
+    CcExpr* e = NULL;
+    CcBinary as;
+    bool is_assign = false;
+    CCSlice nm = cc_slice_empty();
+    CcExpr* wrap;
+    @switch (s->k) {
+        case .expr(x): e = x.e; break;
+        default: break;
+    }
+    e = strip_parens_expr(e);
+    if (!e) return;
+    @switch (e->k) {
+        case .assign(x): as = x; is_assign = true; break;
+        default: break;
+    }
+    if (!is_assign || as.op != CC_OP_ASSIGN || !as.a || !as.b) return;
+    if (!expr_ident(strip_parens_expr(as.a), &nm) || !nm.len) return;
+    wrap = uf_cast_wrap(w, L, sc_lookup(w, nm), as.b);
+    if (!wrap) return;
+    as.b = wrap;
+    e->k = { .assign = as };
+}
+
+static void uf_cast_stmt(Walker* w, CcStmt* s, bool enter) {
+    CcLowerer* L = (CcLowerer*)w->env;
+    CcDecl* d = NULL;
+    CcVarDecl v;
+    CcInit* init;
+    CcExpr* wrap;
+    bool is_var = false;
+    if (!enter) return;
+    if (!stmt_is_decl(s, &d) || !d) { uf_cast_assign(w, L, s); return; }
+    @switch (d->k) {
+        case .var(x): v = x; is_var = true; break;
+        default: break;
+    }
+    if (!is_var) return;
+    init = v.init;
+    if (!init || init->is_list || !init->expr) return;
+    wrap = uf_cast_wrap(w, L, v.type, init->expr);
+    if (wrap) init->expr = wrap;
+}
+
+static void uf_cast_pass(CcLowerer* L) {
+    Walker w;
+    memset(&w, 0, sizeof(w));
+    w.arena = L->arena;
+    w.ix = L->ix;
+    w.unit = L->unit;
+    w.on_stmt = uf_cast_stmt;
+    w.env = L;
+    tw_unit(&w);
+}
+
+void CcLowerer_ufcs(CcLowerer* L) {
+    Walker w;
+    UStep st;
+    CcVisitor v;
+    memset(&st, 0, sizeof(st));
+    st.L = L;
+    memset(&w, 0, sizeof(w));
+    w.arena = L->arena;
+    w.ix = L->ix;
+    w.unit = L->unit;
+    st.formal_at = vec_new::[CcExprRef](L->arena);
+    st.formal_ty = vec_new::[CcTypeRef](L->arena);
+    st.stores = vec_new::[CcExprRef](L->arena);
+    st.trusted = cc_slice_empty();
+    st.trusted_ret = cc_slice_empty();
+    uf_widen_pass(L, &st);      /* before the rewrite: the arguments are as written */
+    uf_formal_pass(L, &st);
+    w.on_ufcs = uf_rewrite;
+    w.on_field = uf_member;
+    w.env = &st;
+    tw_unit(&w);
+    memset(&v, 0, sizeof(v));
+    v.expr = uf_type_scoped_visit;
+    v.env = &st;
+    CcUnit_walk(L->unit, v);
+    memset(&v, 0, sizeof(v));
+    v.expr = uf_print_sugar;
+    v.env = L;
+    CcUnit_walk(L->unit, v);
+    uf_dest_pass(L);   /* last: the calls are built, so a destination can pick one */
+    uf_cast_pass(L);   /* after it: the right side is the expression the cast is about */
+    uf_check_views(L);
+}
+
+#endif

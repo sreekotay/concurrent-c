@@ -1,0 +1,1764 @@
+#pragma(@module) "lower"
+/* Clean lowerer, step: generic instances. `Vec::[T]` in a type position is
+ * its instance name (`CCVec_int`); `snake(Family)_member::[args](call-args)`
+ * is `<Instance>_member(call-args)`; and every instance the unit mentions
+ * gets the family factory's expansion, as the index instantiated it, spliced
+ * after the leading includes under a guard, type arguments' instances first.
+ * A hand-declared instance (a header's `CC_VEC_DECL_ARENA(...)`) suppresses
+ * the splice. Lifetime: the lowerer arena. */
+#ifndef CC_LOWER_GENERICS_CCH
+#define CC_LOWER_GENERICS_CCH
+#include "lower.cch"
+#include "parse.cch"
+#include "typing.cch"
+
+typedef struct GStep {
+    CcLowerer* L;
+    CcNameList order;           /* instance names in emission order */
+    CcNameList bad_keys;        /* map key types already refused: one report each */
+} GStep;
+
+/* ---- map keys --------------------------------------------------------- */
+
+/* A map key type is installed by declaring `cc_map_key_hash_<K>` and
+ * `cc_map_key_eq_<K>` for it. The family header installs a fixed set that
+ * way, as macros; anything else is the program's own to declare.
+ *
+ * Without the pair the instance still expands and still compiles: the
+ * factory reaches whatever `<Instance>_key_hash` resolves to, and what it
+ * resolves to for an uninstalled key is a hash of the first bytes of the
+ * key -- a `double` that compares equal to another `double` lands in a
+ * different bucket, and the map answers "not present" for a key it holds.
+ * Nothing about that shows up at runtime as an error, so it is said here. */
+static bool gn_key_has(CCSlice hay, const char* needle) {
+    CCSlice n = cstr_slice(needle);
+    size_t i;
+    if (!n.len || hay.len < n.len) return false;
+    for (i = 0; i + n.len <= hay.len; i++)
+        if (memcmp(hay.ptr + i, n.ptr, n.len) == 0) return true;
+    return false;
+}
+
+static bool gn_key_builtin(CCSlice k) {
+    static const char* names[11] = {
+        "int", "long", "long_long", "size_t", "ptrdiff_t",
+        "unsigned_long", "unsigned_long_long", "CCSliceHdr",
+        "CCSlicePacked", "CCSlice", "charslice"
+    };
+    size_t i;
+    for (i = 0; i < 11; i++)
+        if (cc_slice_eq_cstr(&k, names[i])) return true;
+    /* Every slice spelling hashes as a slice, and every 64-bit-wide
+     * spelling (`uint64_t`, `int64_t`, ...) as a word: the family header
+     * installs those families rather than each name. */
+    if (gn_key_has(k, "slice")) return true;
+    if (gn_key_has(k, "Slice")) return true;
+    if (gn_key_has(k, "64")) return true;
+    return false;
+}
+
+static bool gn_key_declared(CcLowerer* L, CCSlice key) {
+    CcIndex* ix = L->ix;
+    CCString nm = @string(`cc_map_key_hash_${key}`, L->arena);
+    CCSlice fname = lw_keep(L, &nm);
+    CcSym* sym = ix->sym(fname) ?> NULL;
+    return sym != NULL;
+}
+
+static bool gn_key_reported(GStep* st, CCSlice key) {
+    CcNameList* v = &st->bad_keys;
+    size_t n = v->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CCSlice s = *v->get_ptr(i);
+        if (cc_slice_eq(&s, key)) return true;
+    }
+    return false;
+}
+
+static void gn_check_map_key(GStep* st, CcTypeList* args, CcSpan sp) {
+    CcLowerer* L = st->L;
+    CcIndex* ix = L->ix;
+    CCSlice key;
+    if (!args->len()) return;
+    {
+        CcType* kt = *args->get_ptr(0);
+        if (!kt) return;
+        key = cc__mangle(ix, ix->canon(kt));
+    }
+    if (!key.len) return;
+    if (gn_key_builtin(key)) return;
+    if (gn_key_declared(L, key)) return;
+    if (gn_key_reported(st, key)) return;
+    {
+        CcNameList* v = &st->bad_keys;
+        CCString m = @string(`map key type '${key}' has no installed hash/eq
+declare cc_map_key_hash_${key} and cc_map_key_eq_${key} to install it`, L->arena);
+        v->push(key);
+        lw_error(L, sp, m);
+    }
+}
+
+/* The families whose first type argument is the key. */
+static bool gn_is_map_family(CCSlice fam) {
+    if (cc_slice_eq_cstr(&fam, "Map")) return true;
+    if (cc_slice_eq_cstr(&fam, "ArrayMap")) return true;
+    return false;
+}
+
+static bool gn_seen(GStep* st, CCSlice name) {
+    CcNameList* o = &st->order;
+    size_t n = o->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CCSlice s = *o->get_ptr(i);
+        if (cc_slice_eq(&s, name)) return true;
+    }
+    return false;
+}
+
+/* Note an instance for emission, its type arguments' instances first. */
+static void gn_note(GStep* st, CcTypeInfo* info, int depth) {
+    CcIndex* ix = st->L->ix;
+    CcTypeList* targv;
+    size_t n;
+    size_t i;
+    if (!info || !info->family.len || depth > 8) return;
+    if (gn_seen(st, info->name)) return;
+    targv = &info->targs;
+    n = targv->len();
+    for (i = 0; i < n; i++) {
+        CcType* at = *targv->get_ptr(i);
+        CCSlice an = ix->canon(at);
+        CcTypeInfo* ai = ix->type_get(an);
+        gn_note(st, ai, depth + 1);
+    }
+    st->order.push(info->name);
+}
+
+/* Does the instance's constructor return a pointer to it? `cc__<name>_new`
+ * (the factory's wrapper) or `<name>_init` (the declaration macro's). */
+static bool gn_instance_is_pointer(CcLowerer* L, CCSlice name) {
+    CcIndex* ix = L->ix;
+    const char* suffixes[2];
+    const char* prefixes[2];
+    int i;
+    suffixes[0] = "_new"; prefixes[0] = "cc__";
+    suffixes[1] = "_init"; prefixes[1] = "";
+    for (i = 0; i < 2; i++) {
+        CCString nm = @string(`${prefixes[i]}${name}${suffixes[i]}`, L->arena);
+        CCSlice fname = lw_keep(L, &nm);
+        CcSym* sym = ix->sym(fname) ?> NULL;
+        while (sym && sym->kind != CC_SYM_FUNC) sym = sym->same_name;
+        if (!sym || !sym->type) continue;
+        @switch (sym->type->k) {
+            case .func(ft): return ft.ret && ft.ret->k.kind == CcTypeK_pointer;
+            default: break;
+        }
+    }
+    return false;
+}
+
+static bool gn_type_visit(CcType* t, void* env) {
+    GStep* st = (GStep*)env;
+    CcIndex* ix = st->L->ix;
+    bool is_generic = false;
+    @switch (t->k) {
+        case .generic(g): {
+            CCSlice fam = g.family;
+            CcTypeList ga = g.args;
+            is_generic = true;
+            if (gn_is_map_family(fam)) gn_check_map_key(st, &ga, t->span);
+            break;
+        }
+        /* `T[:]` is an instance of the slice family, named by the same
+         * canonical spelling: `CCSlice` for the char family, `CCSlice_T`
+         * for anything else */
+        case .slice: is_generic = true; break;
+        default: break;
+    }
+    /* `Note_int` written out, where the unit never spells `Note::[int]`:
+     * the index reads the family and its arguments back off the name, so
+     * the instance is the one the spelled type names and it is emitted the
+     * same way. A name the index cannot read that way has no family, and
+     * this is the plain type it looks like.
+     *
+     * An expansion is read for what it declares, not for what it asks for:
+     * its text names the very instance being expanded, and reading that as
+     * a request is the recursion the depth guard reports. */
+    if (!is_generic) {
+        CCSlice nm = cc_slice_empty();
+        if (st->L->fragment) return true;
+        if (type_named_name(t, &nm) && nm.len) {
+            CcTypeInfo* info = ix->type_get(nm);
+            if (info) gn_note(st, info, 0);
+        }
+        return true;
+    }
+    {
+        CCSlice name = ix->canon(t);      /* instantiates on first use */
+        CcTypeInfo* info = ix->type_get(name);
+        CcNamedType nt;
+        gn_note(st, info, 0);
+        memset(&nt, 0, sizeof(nt));
+        nt.name = name;
+        if (gn_instance_is_pointer(st->L, name)) {
+            /* a family whose constructor returns `Instance*` (Map, ArrayMap):
+             * the spelled type is the pointer */
+            CcType* base = cc_type_named(name, t->span, st->L->arena);
+            CcPointerType pt;
+            pt.pointee = base;
+            t->k = { .pointer = pt };
+        } else {
+            t->k = { .named = nt };
+        }
+    }
+    return false;
+}
+
+/* `snake(Family)`: lowercased, `_` before an uppercase letter that follows a lowercase one. */
+static CCSlice gn_snake(CcLowerer* L, CCSlice fam) {
+    CCString sb = cc_string_new();
+    size_t i;
+    for (i = 0; i < fam.len; i++) {
+        char c = fam.ptr[i];
+        if (c >= 'A' && c <= 'Z') {
+            if (i > 0 && fam.ptr[i - 1] >= 'a' && fam.ptr[i - 1] <= 'z') cc_string_push_char(&sb, '_', L->arena);
+            cc_string_push_char(&sb, (char)(c - 'A' + 'a'), L->arena);
+        } else {
+            cc_string_push_char(&sb, c, L->arena);
+        }
+    }
+    return lw_keep(L, &sb);
+}
+
+/* The family a request line names, and how many type spellings it carries.
+ * A Result specialization is not here: that is the Result step's, not a
+ * factory family's. */
+static bool gn_request_family(CCSlice word, CCSlice* family, size_t* nargs) {
+    if (slice_eq(word, cstr_slice("vec")))  { *family = cstr_slice("Vec");    *nargs = 1; return true; }
+    if (slice_eq(word, cstr_slice("map")))  { *family = cstr_slice("Map");    *nargs = 2; return true; }
+    if (slice_eq(word, cstr_slice("chan"))) { *family = cstr_slice("CCChan"); *nargs = 1; return true; }
+    return false;
+}
+
+/* `@comptime { cc_instantiate_vec("int"); }` asks for a monomorph the unit
+ * never spells as `Vec::[int]` — the body that follows names only the
+ * mangled `CCVec_int`. The request IS the use, and the blocks are blanked
+ * before this tool reads the source, so the driver collects the requests
+ * while they are still there and hands them over as `--instantiate`.
+ * Registering one here makes the instance exactly as a spelled type does,
+ * so the expansion lands and those names resolve.
+ *
+ * A line this does not understand is a request that would silently produce
+ * nothing: the body's mangled names would be undeclared with no hint where
+ * they were to come from, so it says so instead. */
+static void gn_collect_requests(GStep* st) {
+    CcLowerer* L = st->L;
+    CcIndex* ix = L->ix;
+    CCArena a = L->arena;
+    CCSlice text = L->opts.instantiate;
+    CcSpan sp0;
+    size_t i = 0;
+    sp0.first = 0;
+    sp0.last = 0;
+    /* The requests are the unit's. An expansion is lowered with the unit's
+     * options, and asking again there would ask for the instance being
+     * expanded — the recursion the depth guard would then report. */
+    if (L->fragment) return;
+    while (i < text.len) {
+        size_t line_end = i;
+        size_t k;
+        CCSlice family = cc_slice_empty();
+        size_t want = 0;
+        size_t nseen = 0;
+        bool bad = false;
+        CcType tmp;
+        CcGenericType g;
+        while (line_end < text.len && text.ptr[line_end] != '\n') line_end++;
+        memset(&tmp, 0, sizeof(tmp));
+        tmp.span = sp0;
+        g.family = cc_slice_empty();
+        g.args = vec_new::[CcTypeRef](a);
+        k = i;
+        while (k < line_end) {
+            size_t w0;
+            size_t w1;
+            CCSlice word;
+            while (k < line_end && (text.ptr[k] == ' ' || text.ptr[k] == '\t' || text.ptr[k] == '\r')) k++;
+            w0 = k;
+            while (k < line_end && text.ptr[k] != ' ' && text.ptr[k] != '\t' && text.ptr[k] != '\r') k++;
+            w1 = k;
+            if (w1 == w0) continue;
+            word = cc_slice_from_buffer((char*)text.ptr + w0, w1 - w0);
+            if (!family.len) {
+                if (!gn_request_family(word, &family, &want)) {
+                    CCString m = @string(`a comptime instantiation request names the family '${word}', which is not one this lowering makes`, L->arena);
+                    lw_error(L, sp0, m);
+                    bad = true;
+                    break;
+                }
+                g.family = family;
+                continue;
+            }
+            g.args.push(cc_type_named(word, sp0, a));
+            nseen++;
+        }
+        i = line_end < text.len ? line_end + 1 : text.len;
+        if (bad || !family.len) continue;
+        if (nseen != want) {
+            CCString m = @string(`an instance of '${family}' takes ${want} type spellings, and this request carries ${nseen}`, L->arena);
+            lw_error(L, sp0, m);
+            continue;
+        }
+        tmp.k = { .generic = g };
+        {
+            CCSlice mangled = ix->canon(&tmp);
+            CcTypeInfo* info = ix->type_get(mangled);
+            gn_note(st, info, 0);
+        }
+    }
+}
+
+/* The end of the line that starts at `i`. */
+static size_t gn_line_end(CCSlice text, size_t i) {
+    while (i < text.len && text.ptr[i] != '\n') i++;
+    return i;
+}
+
+/* The next space-separated word of the line that ends at `line_end`, taken
+ * from `*at`; empty once the line is spent. */
+static CCSlice gn_line_word(CCSlice text, size_t line_end, size_t* at) {
+    size_t k = *at;
+    size_t w0;
+    while (k < line_end && (text.ptr[k] == ' ' || text.ptr[k] == '\t' || text.ptr[k] == '\r')) k++;
+    w0 = k;
+    while (k < line_end && text.ptr[k] != ' ' && text.ptr[k] != '\t' && text.ptr[k] != '\r') k++;
+    *at = k;
+    if (k == w0) return cc_slice_empty();
+    return cc_slice_from_buffer((char*)text.ptr + w0, k - w0);
+}
+
+/* Does a factory declared for family `fam` write instances of `want`?
+ *
+ * A family names its instances by a prefix that need not be its own name
+ * (`Vec` writes `CCVec_<T>`), and that prefix is a second spelling of the
+ * family: `CCVec::[uint64_t]` and `Vec::[uint64_t]` are one instance, with
+ * one instance name. Matching on the family name alone leaves the prefix
+ * spelling with no factory at all — an empty guard, and a type the host
+ * compiler is then asked to use undeclared. */
+static bool gn_family_matches(CCSlice want, CCSlice fam) {
+    CCSlice pfx;
+    if (cc_slice_eq(&want, fam)) return true;
+    pfx = cc__family_prefix(fam);
+    return cc_slice_eq(&want, pfx);
+}
+
+/* Does a handed-over registration bind this family? Its factory is a
+ * `@comptime` function of the unit, not a declaration this step can read a
+ * template out of, so what one of its instances is, is what running that
+ * function writes. */
+static bool gn_registration_binds(CcLowerer* L, CCSlice fam) {
+    CCSlice text = L->opts.factories;
+    size_t i = 0;
+    while (i < text.len) {
+        size_t line_end = gn_line_end(text, i);
+        size_t k = i;
+        CCSlice name = gn_line_word(text, line_end, &k);
+        if (name.len && gn_family_matches(fam, name)) return true;
+        i = line_end < text.len ? line_end + 1 : text.len;
+    }
+    return false;
+}
+
+/* Bind each family a `cc_generic_register` named to the handler that writes
+ * its instances.
+ *
+ * The `CC_GENERIC_FACTORY` sugar writes that call itself, and this step
+ * rewrites the sugar to get it back. A registration written by hand is in a
+ * `@comptime { }` block, and the blocks are blanked before this tool reads
+ * the source, so the driver collects those while they are still there and
+ * hands them over as `--factories`.
+ *
+ * A line that names no handler binds nothing, and the instance it was to
+ * write would come out an empty guard, so it is reported at the use site
+ * that asked for the run. */
+/* An error with a second line: where to look for what produced it. */
+static void gn_error_note(CcLowerer* L, CcSpan span, CCString msg, CCSlice note) {
+    CcUnit* u = L->unit;
+    CcLoc loc = u->loc(span);
+    CcDiag d = CcDiag_error(loc, cc_string_persist_slice(L->arena, &msg));
+    CcDiags* ds = L->ds;
+    if (note.len) d = CcDiag_with_note(d, note);
+    ds->push(d);
+}
+
+static void gn_bind_registrations(CcLowerer* L, CcSpan sp) {
+    CCSlice text = L->opts.factories;
+    size_t i = 0;
+    while (i < text.len) {
+        size_t line_end = gn_line_end(text, i);
+        size_t k = i;
+        CCSlice fam = gn_line_word(text, line_end, &k);
+        CCSlice handler = gn_line_word(text, line_end, &k);
+        CCSlice mode = gn_line_word(text, line_end, &k);
+        i = line_end < text.len ? line_end + 1 : text.len;
+        if (!fam.len) continue;
+        if (!handler.len) {
+            CCString m = @string(`the registration of generic family '${fam}' names no handler, so nothing writes its instances`, L->arena);
+            lw_error(L, sp, m);
+            continue;
+        }
+        if (mode.len && !slice_eq(mode, cstr_slice("extend"))) {
+            CCString m = @string(`the registration of generic family '${fam}' carries '${mode}', and the only word that follows a handler is 'extend'`, L->arena);
+            lw_error(L, sp, m);
+            continue;
+        }
+        {
+            CCString fs = @string(`${fam}`, L->arena);
+            CCString hs = @string(`${handler}`, L->arena);
+            const char* fz = fs.cstr(L->arena);
+            const char* hz = hs.cstr(L->arena);
+            if (mode.len) {
+                cc_emit_plan_register_generic_factory_extend(fz, hz, 0);
+            } else {
+                cc_emit_plan_register_generic_factory(fz, hz, 0);
+            }
+        }
+    }
+}
+
+static CCSlice gn_decl_text(CcUnit* fu, CcDecl* d);
+
+/* Does `hay` hold `needle`? */
+static bool gn_text_has(CCSlice hay, CCSlice needle) {
+    size_t i;
+    if (!needle.len || hay.len < needle.len) return false;
+    for (i = 0; i + needle.len <= hay.len; i++)
+        if (memcmp(hay.ptr + i, needle.ptr, needle.len) == 0) return true;
+    return false;
+}
+
+/* The mangled type arguments of an instance: what is left of its name once
+ * the family's prefix comes off (`ArrayMap_int_int` -> `int_int`). */
+static CCSlice gn_arg_mangle(CCSlice instance, CCSlice family) {
+    CCSlice pre = cc__family_prefix(family);
+    if (instance.len > pre.len + 1 && memcmp(instance.ptr, pre.ptr, pre.len) == 0 &&
+        instance.ptr[pre.len] == '_')
+        return cc_slice_from_buffer((char*)instance.ptr + pre.len + 1, instance.len - pre.len - 1);
+    return cc_slice_empty();
+}
+
+/* `snake(Family)_member::[args](...)` is one of two names, and which one is
+ * the factory's to say: `vec_new::[int]` is the instance's own
+ * `CCVec_int_new`, while `array_map_new_count::[int,int]` is the free
+ * `array_map_new_count_int_int`. The family's template writes whichever it
+ * writes, so it is read rather than assumed. */
+static CCString gn_instance_text(CcLowerer* L, CcTypeInfo* info, CcSpan sp, bool* ok);
+
+static CCSlice gn_member_callee(CcLowerer* L, CcDecl* fd, CcUnit* fu, CCSlice name,
+                                CCSlice member, CCSlice mangled, CCSlice family,
+                                CcTypeInfo* info, CcSpan sp) {
+    CCSlice body = gn_decl_text(fu, fd);
+    CCSlice args = gn_arg_mangle(mangled, family);
+    if (args.len) {
+        CCString free_probe = @string(`${name}_${"$"}{arg_mangled(0)}`, L->arena);
+        CCSlice probe = cc_string_as_slice(&free_probe);
+        if (gn_text_has(body, probe)) {
+            CCString callee = @string(`${name}_${args}`, L->arena);
+            return lw_keep(L, &callee);
+        }
+    }
+    if (args.len && info) {
+        /* The template spells neither: the name is one the factory body
+         * computes (`${"$"}{newcfn}` in Table), so what it wrote for this
+         * instance is read from the expansion itself. The expansion is the
+         * same text the step emits for the instance later, so what it
+         * declares is what the call reaches. */
+        bool ok = false;
+        CCString inst = gn_instance_text(L, info, sp, &ok);
+        if (ok) {
+            CCString free_def = @string(`${name}_${args}(`, L->arena);
+            CCSlice fdef = cc_string_as_slice(&free_def);
+            if (gn_text_has(inst.as_slice(), fdef)) {
+                CCString callee = @string(`${name}_${args}`, L->arena);
+                return lw_keep(L, &callee);
+            }
+        }
+    }
+    {
+        CCString callee = @string(`${mangled}_${member}`, L->arena);
+        return lw_keep(L, &callee);
+    }
+}
+
+static bool gn_expr_visit(CcExpr* e, void* env) {
+    GStep* st = (GStep*)env;
+    CcLowerer* L = st->L;
+    CcIndex* ix = L->ix;
+    CcGenericFn gf;
+    bool hit = false;
+    CCSlice name;
+    CcDeclList* factv;
+    CcUnitList* funitv;
+    size_t nf;
+    size_t f;
+    @switch (e->k) {
+        case .generic_fn(x): gf = x; hit = true; break;
+        default: break;
+    }
+    if (!hit) return true;
+    name = gf.name;
+    if (name.len > 3 && memcmp(name.ptr, "cc_", 3) == 0) name = cc_slice_from_buffer((char*)name.ptr + 3, name.len - 3);
+    factv = &ix->factories;
+    funitv = &ix->factory_units;
+    nf = factv->len();
+    for (f = 0; f < nf; f++) {
+        CcDecl* d = *factv->get_ptr(f);
+        CCSlice fam = cc__factory_name(d);
+        CCSlice snake;
+        if (!fam.len || cc__factory_is_extend(d)) continue;
+        snake = gn_snake(L, fam);
+        /* `family::[T](args)`: the family itself, not one of its members.
+         * What the factory writes for that instance IS the function, so
+         * the instance name is the callee — `js_module::[Counter](…)` is
+         * `js_module_Counter(…)`. */
+        if (slice_eq(name, snake)) {
+            CcType tmp;
+            CcGenericType g;
+            CCSlice mangled;
+            CcTypeInfo* info;
+            CcCall call;
+            memset(&tmp, 0, sizeof(tmp));
+            tmp.span = e->span;
+            g.family = fam;
+            g.args = gf.targs;
+            tmp.k = { .generic = g };
+            mangled = ix->canon(&tmp);
+            info = ix->type_get(mangled);
+            gn_note(st, info, 0);
+            call.callee = lw_ident(L, mangled, e->span);
+            call.args = gf.args;
+            e->k = { .call = call };
+            return true;
+        }
+        if (name.len > snake.len + 1 && memcmp(name.ptr, snake.ptr, snake.len) == 0 && name.ptr[snake.len] == '_') {
+            CCSlice member = cc_slice_from_buffer((char*)name.ptr + snake.len + 1, name.len - snake.len - 1);
+            CcType tmp;
+            CcGenericType g;
+            CCSlice mangled;
+            CcTypeInfo* info;
+            CCSlice callee;
+            CcCall call;
+            memset(&tmp, 0, sizeof(tmp));
+            tmp.span = e->span;
+            g.family = fam;
+            g.args = gf.targs;
+            tmp.k = { .generic = g };
+            mangled = ix->canon(&tmp);
+            info = ix->type_get(mangled);
+            gn_note(st, info, 0);
+            callee = gn_member_callee(L, d, *funitv->get_ptr(f), name, member, mangled, fam, info, e->span);
+            call.callee = lw_ident(L, callee, e->span);
+            call.args = gf.args;
+            e->k = { .call = call };
+            return true;
+        }
+    }
+    {
+        CCString fams = cc_string_new();
+        for (f = 0; f < nf; f++) {
+            CcDecl* d = *factv->get_ptr(f);
+            CCSlice fam = cc__factory_name(d);
+            if (!fam.len || cc__factory_is_extend(d)) continue;
+            if (cc_string_len(&fams)) cc_string_push_cstr(&fams, ", ", L->arena);
+            cc_string_push_slice(&fams, fam, L->arena);
+        }
+        {
+            CCSlice gname = gf.name;
+            CCString m = @string(`unknown generic name '${gname}' before '::[...]': it matches no registered generic family (registered: ${fams})`, L->arena);
+            lw_error(L, e->span, m);
+        }
+    }
+    return true;
+}
+
+/* Is the instance declared by hand (a header's declaration macro), not by
+ * the factory expansion? */
+static bool gn_hand_declared(CcLowerer* L, CCSlice name) {
+    CcIndex* ix = L->ix;
+    CcSym* s = ix->sym(name) ?> NULL;
+    while (s && s->kind != CC_SYM_TYPE) s = s->same_name;
+    if (!s || !s->unit) return false;
+    {
+        CCSlice p = s->unit->tape.path;
+        return !(p.len > 20 && memcmp(p.ptr, "<CC_GENERIC_FACTORY", 19) == 0);
+    }
+}
+
+static CCString gn_upper(CcLowerer* L, CCSlice s) {
+    CCString sb = cc_string_new();
+    size_t i;
+    for (i = 0; i < s.len; i++) {
+        char c = s.ptr[i];
+        cc_string_push_char(&sb, (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c, L->arena);
+    }
+    return sb;
+}
+
+/* The `@emit` template of a factory declaration: the template token that
+ * follows `@emit (`. NULL when the factory has none. */
+static const CcToken* gn_emit_template(CcUnit* fu, CcDecl* d) {
+    uint32_t i;
+    for (i = d->span.first; i <= d->span.last; i++) {
+        const CcToken* t = cc__tok(fu, i);
+        const CcToken* p1;
+        const CcToken* p2;
+        if (!t || t->kind != CC_TK_TEMPLATE || i < 2) continue;
+        p1 = cc__tok(fu, i - 1);
+        p2 = cc__tok(fu, i - 2);
+        if (p1 && p2 && p1->kind == CC_TK_PUNCT && p1->punct == CC_P_LPAREN && p2->kind == CC_TK_AT_WORD &&
+            p2->text.len == 5 && memcmp(p2->text.ptr, "@emit", 5) == 0)
+            return t;
+    }
+    return NULL;
+}
+
+/* A slot the index cannot fill: not `${mangled}`, `${arg(i)}`, a type
+ * argument or a factory local bound to one. Returns its spelling, empty
+ * when every slot is fillable. */
+/* A factory whose body is one `return @emit(...)` is a template this step
+ * can fill. One that composes several `@emit`s, or builds text around them,
+ * is whatever its body writes -- and reading only its first template splices
+ * a fragment of the instance and calls it the whole instance. */
+static bool gn_template_is_whole(CcUnit* fu, CcDecl* d, const CcToken* t) {
+    uint32_t i;
+    uint32_t emits = 0;
+    bool returned = false;
+    for (i = d->span.first; i <= d->span.last; i++) {
+        const CcToken* k = cc__tok(fu, i);
+        const CcToken* p1;
+        const CcToken* p2;
+        const CcToken* p3;
+        if (!k || k->kind != CC_TK_TEMPLATE || i < 3) continue;
+        p1 = cc__tok(fu, i - 1);
+        p2 = cc__tok(fu, i - 2);
+        if (!p1 || !p2 || p1->kind != CC_TK_PUNCT || p1->punct != CC_P_LPAREN) continue;
+        if (p2->kind != CC_TK_AT_WORD || p2->text.len != 5 ||
+            memcmp(p2->text.ptr, "@emit", 5) != 0) continue;
+        emits++;
+        p3 = cc__tok(fu, i - 3);
+        if (k == t && p3 && p3->kind == CC_TK_IDENT && p3->text.len == 6 &&
+            memcmp(p3->text.ptr, "return", 6) == 0) returned = true;
+    }
+    return emits == 1 && returned;
+}
+
+static CCSlice gn_computed_slot(CcLowerer* L, const CcToken* t, CcSlotBindList* binds, CcNameList* args) {
+    const char* text = t->text.ptr + 1;
+    size_t len = t->text.len - 2;
+    size_t i = 0;
+    while (i < len) {
+        if (text[i] == '$' && i + 1 < len && text[i + 1] == '{') {
+            size_t j = i + 2;
+            size_t depth = 1;
+            const char* inner;
+            size_t inner_len;
+            bool found = false;
+            while (j < len && depth) {
+                if (text[j] == '{') depth++;
+                else if (text[j] == '}') depth--;
+                if (depth) j++;
+            }
+            inner = text + i + 2;
+            inner_len = j - (i + 2);
+            while (inner_len && (inner[0] == ' ' || inner[0] == '\t')) { inner++; inner_len--; }
+            while (inner_len && (inner[inner_len - 1] == ' ' || inner[inner_len - 1] == '\t')) inner_len--;
+            if (!(inner_len == 7 && memcmp(inner, "mangled", 7) == 0) &&
+                !(inner_len > 4 && memcmp(inner, "arg(", 4) == 0) &&
+                !(inner_len > 12 && memcmp(inner, "arg_mangled(", 12) == 0) &&
+                !(inner_len > 16 && memcmp(inner, "type_args.items[", 16) == 0)) {
+                cc__bind_lookup(binds, inner, inner_len, args, &found);
+                if (!found) return cc_slice_from_buffer((char*)inner, inner_len);
+            }
+            i = j + 1;
+            continue;
+        }
+        i++;
+    }
+    (void)L;
+    return cc_slice_empty();
+}
+
+/* A non-negative decimal index at `s`, or -1 when one does not start there.
+ * `${arg(i)}` names a factory local, not argument zero. */
+static int gn_slot_index(const char* s, size_t len) {
+    size_t k = 0;
+    int n = 0;
+    if (!len || s[0] < '0' || s[0] > '9') return -1;
+    while (k < len && s[k] >= '0' && s[k] <= '9') {
+        n = n * 10 + (s[k] - '0');
+        k++;
+    }
+    return n;
+}
+
+/* The first `${arg(N)}`-shaped slot of a template whose index this instance
+ * has no type argument for, as the slot spells itself. Empty when every one
+ * of them is in range.
+ *
+ * An out-of-range index is not an empty interpolation: the filler writes the
+ * slot's own text back out, so `${arg(3)}` becomes the word `arg(3)` in the
+ * emitted C — a constraint violation of the factory reported, if at all, as
+ * a host-compiler error about a word the user never wrote. */
+static CCSlice gn_oob_slot(const CcToken* t, size_t nargs) {
+    const char* text = t->text.ptr + 1;
+    size_t len = t->text.len - 2;
+    size_t i = 0;
+    while (i < len) {
+        if (text[i] == '$' && i + 1 < len && text[i + 1] == '{') {
+            size_t j = i + 2;
+            size_t depth = 1;
+            const char* inner;
+            size_t inner_len;
+            int n = -1;
+            while (j < len && depth) {
+                if (text[j] == '{') depth++;
+                else if (text[j] == '}') depth--;
+                if (depth) j++;
+            }
+            inner = text + i + 2;
+            inner_len = j - (i + 2);
+            while (inner_len && (inner[0] == ' ' || inner[0] == '\t')) { inner++; inner_len--; }
+            while (inner_len && (inner[inner_len - 1] == ' ' || inner[inner_len - 1] == '\t')) inner_len--;
+            if (inner_len > 4 && memcmp(inner, "arg(", 4) == 0)
+                n = gn_slot_index(inner + 4, inner_len - 4);
+            else if (inner_len > 12 && memcmp(inner, "arg_mangled(", 12) == 0)
+                n = gn_slot_index(inner + 12, inner_len - 12);
+            else if (inner_len > 16 && memcmp(inner, "type_args.items[", 16) == 0)
+                n = gn_slot_index(inner + 16, inner_len - 16);
+            if (n >= 0 && (size_t)n >= nargs) return cc_slice_from_buffer((char*)inner, inner_len);
+            i = j + 1;
+            continue;
+        }
+        i++;
+    }
+    return cc_slice_empty();
+}
+
+/* ---- running a compiled factory ---------------------------------------- */
+
+/* The file the engine reads its prelude and its diagnostics from.
+ *
+ * The source this lowerer was handed is a staged copy under the build
+ * directory, and the engine compiles a translation unit out of the file it
+ * is given — so it has to be the file the user wrote, which the staged
+ * copy's `#line` names. Handing it the staged path compiles a TU whose
+ * includes were already rewritten once. */
+static const char* gn_unit_path(CcLowerer* L, CcSpan sp) {
+    CcLoc at = L->unit->loc(sp);
+    CCSlice p = at.path.len ? at.path : L->unit->tape.path;
+    CCString s = @string(`${p}`, L->arena);
+    return s.cstr(L->arena);
+}
+
+static const char* gn_family_cstr(CcLowerer* L, CcTypeInfo* info) {
+    CCSlice f = info->family;
+    CCString s = @string(`${f}`, L->arena);
+    return s.cstr(L->arena);
+}
+
+/* The source text of one factory declaration, as written.
+ *
+ * The tokens of a span point into the unit's own source, so the first
+ * token's start and the last token's end bracket the text — which is what
+ * the sugar rewrite has to be handed, since it reads `CC_GENERIC_FACTORY`
+ * and not an AST. */
+static CCSlice gn_decl_text(CcUnit* fu, CcDecl* d) {
+    const CcToken* a = cc__tok(fu, d->span.first);
+    const CcToken* b = cc__tok(fu, d->span.last);
+    if (!a || !b || !a->text.ptr || !b->text.ptr) return cc_slice_empty();
+    if (b->text.ptr < a->text.ptr) return cc_slice_empty();
+    return cc_slice_from_buffer((char*)a->text.ptr,
+                                (size_t)(b->text.ptr - a->text.ptr) + b->text.len);
+}
+
+/* Bind every family that has a compiled factory to its handler, once.
+ *
+ * The `CC_GENERIC_FACTORY` sugar lowers to a registration block and a
+ * `@comptime` function, so the three steps are: rewrite the sugar to get
+ * both, scan the result so the handler's definition is in the function
+ * registry, then RUN the registration blocks — which is what binds the
+ * family, extensions included, whose handler symbol carries a sequence
+ * number only the rewrite knows.
+ *
+ * The scan takes this unit's source too: it clears what was registered
+ * before, and the unit's own `@comptime` functions have to survive it.
+ *
+ * A family bound by a hand-written `cc_generic_register` has no declaration
+ * to rewrite: the driver hands the binding over instead, and it is applied
+ * after the clear, which would otherwise take it with the rest. */
+static bool gn_factories_ready(CcLowerer* L, CcSpan sp) {
+    CcIndex* ix = L->ix;
+    CcDeclList* factv = &ix->factories;
+    CcUnitList* funitv = &ix->factory_units;
+    size_t nf = factv->len();
+    size_t f;
+    CCString text = cc_string_new();
+    CCSlice usrc = L->unit->tape.src;
+    char* expanded;
+    char* prepared = NULL;
+    if (L->factories_ready) return L->factories_ok;
+    L->factories_ready = true;
+    L->factories_ok = false;
+    if (!nf && !L->opts.factories.len) return false;
+    for (f = 0; f < nf; f++) {
+        CcDecl* d = *factv->get_ptr(f);
+        CcUnit* fu = *funitv->get_ptr(f);
+        CCSlice t = gn_decl_text(fu, d);
+        if (!t.len) continue;
+        cc_string_push_slice(&text, t, L->arena);
+        cc_string_push_cstr(&text, "\n", L->arena);
+    }
+    {
+        CCSlice raw = text.as_slice();
+        size_t elen = raw.len;
+        expanded = malloc(elen + 1);
+        if (!expanded) return false;
+        if (elen) memcpy(expanded, raw.ptr, elen);
+        expanded[elen] = '\0';
+        if (elen && cc_comptime_prepare_source_ex(&expanded, &elen, gn_unit_path(L, sp), CC_FAC_PREPARE) != 0) {
+            free(expanded);
+            return false;
+        }
+    }
+    /* A handler the sugar wrote is in the text just prepared. One a
+     * `cc_generic_register` names by hand is in the unit, where an `@emit`
+     * template is still a template -- the stage this tool reads leaves the
+     * templates for its own steps -- and a template is not what the engine
+     * compiles. So the unit's copy goes through the same passes before the
+     * definitions are scanned out of it. */
+    if (L->opts.factories.len) {
+        size_t ulen = usrc.len;
+        prepared = malloc(ulen + 1);
+        if (!prepared) { free(expanded); return false; }
+        if (ulen) memcpy(prepared, usrc.ptr, ulen);
+        prepared[ulen] = '\0';
+        if (cc_comptime_prepare_source_ex(&prepared, &ulen, gn_unit_path(L, sp), CC_FAC_PREPARE) != 0) {
+            free(prepared);
+            free(expanded);
+            return false;
+        }
+        usrc = cc_slice_from_buffer(prepared, ulen);
+    }
+    {
+        CCString all = cc_string_new();
+        cc_string_push_slice(&all, usrc, L->arena);
+        cc_string_push_cstr(&all, "\n", L->arena);
+        cc_string_push_cstr(&all, expanded, L->arena);
+        {
+            CCSlice a = all.as_slice();
+            if (cc_comptime_fn_registry_scan(a.ptr, a.len) < 0) {
+                free(prepared);
+                free(expanded);
+                return false;
+            }
+            cc_emit_plan_clear_generic_factory_registrations();
+            /* the registrations only: the unit's own `@comptime` blocks are
+             * the comptime step's, and collecting their emits here would
+             * queue a second copy of every fragment it already spliced */
+            cc_emit_plan_collect_comptime_emits(expanded, strlen(expanded));
+            cc_emit_plan_clear_comptime_fragments();
+            gn_bind_registrations(L, sp);
+        }
+    }
+    free(prepared);
+    free(expanded);
+    L->factories_ok = true;
+    return true;
+}
+
+/* The `@comptime` function registered to write a family's instances, out of
+ * the `family handler [mode]` table the registrations were bound from. */
+static CCSlice gn_family_handler(CcLowerer* L, CCSlice fam) {
+    CCSlice text = L->opts.factories;
+    size_t i = 0;
+    while (i < text.len) {
+        size_t line_end = gn_line_end(text, i);
+        size_t k = i;
+        CCSlice f = gn_line_word(text, line_end, &k);
+        CCSlice handler = gn_line_word(text, line_end, &k);
+        i = line_end < text.len ? line_end + 1 : text.len;
+        if (f.len && slice_eq(f, fam)) return handler;
+    }
+    return cc_slice_empty();
+}
+
+/* Which factory wrote the text that would not compile, and where it is
+ * defined: the failing C is generated, so the file the user can open is the
+ * factory body, not the expansion. */
+static CCSlice gn_factory_note(CcLowerer* L, CCSlice fam) {
+    CcIndex* ix = L->ix;
+    CCSlice handler = gn_family_handler(L, fam);
+    CcSym* sym;
+    CCString sb = cc_string_new();
+    if (!handler.len) {
+        /* A `CC_GENERIC_FACTORY(Fam, n)` written in the source registers no
+         * line in the options text -- that registry carries what was passed
+         * in from outside. The declaration is in the index, though, and it is
+         * the thing that wrote the text, so its own position is the answer.
+         * `loc` reads it through any `#line` in force, which is what makes
+         * the note name the file the factory was written in. */
+        CcDeclList* factv = &ix->factories;
+        CcUnitList* funitv = &ix->factory_units;
+        size_t nf = factv->len();
+        size_t f;
+        for (f = 0; f < nf; f++) {
+            CcDecl* fd = *factv->get_ptr(f);
+            CcUnit* fu = *funitv->get_ptr(f);
+            CCString nm2;
+            CCSlice fname;
+            if (!gn_family_matches(fam, cc__factory_name(fd))) continue;
+            if (cc__factory_is_extend(fd)) continue;
+            nm2 = @string(`__cc_gfac_${fam}`, L->arena);
+            fname = lw_keep(L, &nm2);
+            {
+                CcLoc fl = fu->loc(fd->span);
+                const char* at_comptime2 = "@" "comptime";
+                CCString head2 = @string(`in ${at_comptime2} factory '${fname}' at `, L->arena);
+                cc_string_push_slice(&sb, head2.as_slice(), L->arena);
+                if (fl.path.len) {
+                    uint32_t fline = fl.line;
+                    CCString tail2 = @string(`${fl.path}:${fline}`, L->arena);
+                    cc_string_push_slice(&sb, tail2.as_slice(), L->arena);
+                } else {
+                    cc_string_push_cstr(&sb, "an unknown place", L->arena);
+                }
+                return cc_string_persist_slice(L->arena, &sb);
+            }
+        }
+        return cc_slice_empty();
+    }
+    sym = ix->sym(handler) ?> NULL;
+    while (sym && sym->kind != CC_SYM_FUNC) sym = sym->same_name;
+    {
+        const char* at_comptime = "@" "comptime";
+        CCString head = @string(`in ${at_comptime} factory '${handler}' at `, L->arena);
+        cc_string_push_slice(&sb, head.as_slice(), L->arena);
+    }
+    if (sym) {
+        CcLoc l = CcSym_loc(sym);
+        if (l.path.len) {
+            uint32_t line = l.line;
+            CCString tail = @string(`${l.path}:${line}`, L->arena);
+            cc_string_push_slice(&sb, tail.as_slice(), L->arena);
+            return cc_string_persist_slice(L->arena, &sb);
+        }
+    }
+    cc_string_push_cstr(&sb, "an unknown position: no declaration of it is visible here", L->arena);
+    return cc_string_persist_slice(L->arena, &sb);
+}
+
+/* One instance, written by its factory. Empty when the factory could not
+ * be run or produced nothing — the caller reports at the use site. */
+static CCString gn_run_factory(CcLowerer* L, CcTypeInfo* info, CcSpan sp, bool* ok) {
+    CcIndex* ix = L->ix;
+    CcTypeList* targv = &info->targs;
+    size_t nt = targv->len();
+    size_t i;
+    char* args;
+    char err[512];
+    char* def = NULL;
+    int rc;
+    CCString out = cc_string_new();
+    *ok = false;
+    if (nt > CC_FAC_MAX_ARGS) return out;
+    args = cc_arena_alloc(L->arena, CC_FAC_MAX_ARGS * CC_FAC_ARG_CAP, 1);
+    memset(args, 0, CC_FAC_MAX_ARGS * CC_FAC_ARG_CAP);
+    for (i = 0; i < nt; i++) {
+        CcType* at = *targv->get_ptr(i);
+        CCSlice asp = cc__type_arg_spelling(ix, at);
+        char* row = args + i * CC_FAC_ARG_CAP;
+        size_t cap = CC_FAC_ARG_CAP - 1;
+        size_t n = asp.len < cap ? asp.len : cap;
+        if (asp.ptr) memcpy(row, asp.ptr, n);
+        row[n] = '\0';
+    }
+    err[0] = '\0';
+    {
+        CCSlice usrc = L->unit->tape.src;
+        CCString mangled = @string(`${info->name}`, L->arena);
+        const char* mz = mangled.cstr(L->arena);
+        rc = cc_emit_plan_produce_generic_def(gn_family_cstr(L, info), mz,
+                                              args, (int)nt,
+                                              usrc.ptr, usrc.len, gn_unit_path(L, sp),
+                                              L->arena, &def, err, sizeof(err));
+    }
+    if (rc != 0 || !def || !def[0]) {
+        CCSlice fam = info->family;
+        CCSlice nm = info->name;
+        CCSlice why = err[0] ? cc_slice_from_buffer(err, strlen(err)) : cstr_slice("it produced nothing");
+        CCString m = @string(`type: compiled generic factory '${fam}' failed to compile '${nm}': ${why}`, L->arena);
+        CCSlice note = gn_factory_note(L, fam);
+        gn_error_note(L, sp, m, note);
+        return out;
+    }
+    cc_string_push_cstr(&out, def, L->arena);
+    *ok = true;
+    return out;
+}
+
+/* The expansion text of one instance: the family factory's `@emit`
+ * template (then each extension's), filled by the index's rules. Empty,
+ * after the diagnostic, when a slot needs the factory body run. */
+static CCString gn_instance_text(CcLowerer* L, CcTypeInfo* info, CcSpan sp, bool* ok) {
+    CcIndex* ix = L->ix;
+    CcDeclList* factv = &ix->factories;
+    CcUnitList* funitv = &ix->factory_units;
+    size_t nf = factv->len();
+    size_t f;
+    CCString text = cc_string_new();
+    CcNameList args = vec_new::[CCSlice](L->arena);
+    CcTypeList* targv = &info->targs;
+    size_t nt = targv->len();
+    size_t i;
+    size_t taken = 0;           /* factory declarations this instance's text came from */
+    size_t matched_base = 0;    /* CC_GENERIC_FACTORY declarations for this family */
+    size_t matched_ext = 0;     /* CC_GENERIC_FACTORY_EXTEND declarations for it */
+    CCSlice oob = cc_slice_empty();
+    CCString up = gn_upper(L, info->family);
+    CCString guard = @string(`CC_HEADER_${up}_${info->name}`, L->arena);
+    bool needs_run = false;
+    CCString head = @string(`#ifndef ${guard}
+#define ${guard}
+`, L->arena);
+    *ok = true;
+    for (i = 0; i < nt; i++) { CcType* at = *targv->get_ptr(i); CCSlice asp = cc__type_arg_spelling(ix, at); args.push(asp); }
+    cc_string_push_slice(&text, head.as_slice(), L->arena);
+    cc_string_push_cstr(&text, "/" "* generic ", L->arena);
+    cc_string_push_slice(&text, info->name, L->arena);
+    cc_string_push_cstr(&text, " *" "/\n", L->arena);
+    /* the base factory first, then the extensions, in declaration order */
+    for (f = 0; f < 2 * nf; f++) {
+        size_t fi = f < nf ? f : f - nf;
+        bool want_extend = f >= nf;
+        CcDecl* d = *factv->get_ptr(fi);
+        CcUnit* fu = *funitv->get_ptr(fi);
+        const CcToken* t;
+        CcSlotBindList binds;
+        CCSlice computed;
+        if (!gn_family_matches(info->family, cc__factory_name(d))) continue;
+        if (cc__factory_is_extend(d) != want_extend) continue;
+        if (want_extend) matched_ext++; else matched_base++;
+        t = gn_emit_template(fu, d);
+        if (!t) continue;
+        binds = vec_new::[CcSlotBind](L->arena);
+        cc__factory_bindings(ix, fu, cc__factory_body(d), &binds);
+        computed = gn_computed_slot(L, t, &binds, &args);
+        if (!oob.len) oob = gn_oob_slot(t, nt);
+        if (computed.len || !gn_template_is_whole(fu, d, t)) needs_run = true;
+        {
+            CCSlice frag = cc__template_instance(ix, t->text.ptr + 1, t->text.len - 2, info, &binds, &args);
+            cc_string_push_slice(&text, frag, L->arena);
+            if (frag.len && frag.ptr[frag.len - 1] != '\n') cc_string_push_char(&text, '\n', L->arena);
+        }
+        taken++;
+    }
+    /* A family bound by a hand-written `cc_generic_register` declares no
+     * factory here, so there was no template to take: what the instance is,
+     * is what its handler writes, and the guard alone would declare nothing
+     * while looking like an instance that needed nothing. */
+    if (!taken && gn_registration_binds(L, info->family)) needs_run = true;
+    /* Nothing says what an instance of this family IS.
+     *
+     * The guard alone is a well-formed translation unit that declares
+     * nothing, so the unit lowers, the type stays undeclared, and the
+     * host compiler is left to explain a name the user did write. Say it
+     * here, where the family is still known. */
+    if (!matched_base && !gn_registration_binds(L, info->family)) {
+        CCSlice fam = info->family;
+        if (matched_ext) {
+            CCString me = @string(`type: generic '${fam}' is extended but never defined (needs CC_GENERIC_FACTORY(${fam}) or cc_generic_register)`, L->arena);
+            lw_error(L, sp, me);
+        } else {
+            CCString mn = @string(`type: no generic factory for '${fam}': include the header that declares CC_GENERIC_FACTORY(${fam}), or register one with cc_generic_register`, L->arena);
+            lw_error(L, sp, mn);
+        }
+        *ok = false;
+        return text;
+    }
+    /* A slot the factory's own arity cannot fill, caught before the filled
+     * text is kept: the run path reports its own. */
+    if (!needs_run && oob.len) {
+        CCSlice fam2 = info->family;
+        int nargs = (int)nt;
+        CCString mo = @string(`factory '${fam2}': ${oob} is out of range: this instance has ${nargs} type arguments`, L->arena);
+        lw_error(L, sp, mo);
+        *ok = false;
+        return text;
+    }
+    if (needs_run) {
+        /* a fragment that computes is not a template this step can fill:
+         * what the instance is, is whatever the factory writes. It writes
+         * the base and every extension together, so the run replaces all
+         * of them and none of the templated text is kept. */
+        bool ran = false;
+        CCString def;
+        CCString whole = cc_string_new();
+        cc_string_push_slice(&whole, head.as_slice(), L->arena);
+        if (!gn_factories_ready(L, sp)) {
+            CCSlice fam = info->family;
+            CCString m = @string(`instance '${info->name}' of generic family '${fam}' needs its factory run, and the factories of this unit could not be bound to their handlers`, L->arena);
+            lw_error(L, sp, m);
+            *ok = false;
+            return whole;
+        }
+        def = gn_run_factory(L, info, sp, &ran);
+        if (!ran) { *ok = false; return whole; }
+        cc_string_push_slice(&whole, def.as_slice(), L->arena);
+        cc_string_push_cstr(&whole, "\n#endif\n", L->arena);
+        return whole;
+    }
+    cc_string_push_cstr(&text, "#endif\n", L->arena);
+    return text;
+}
+
+/* How deep an expansion may nest before the step calls it a cycle: an
+ * expansion whose own text names the family that produced it would
+ * otherwise expand forever. */
+enum { GN_MAX_DEPTH = 8 };
+
+/* The steps a spliced expansion goes through: the pipeline without the
+ * include rewrite (an expansion records no local headers of its own) and
+ * without the banner (the unit it is spliced into carries one). */
+static void gn_lower_steps(CcLowerer* L) {
+    CcLowerer_async(L);
+    CcLowerer_parallel(L);
+    CcLowerer_chan(L);
+    CcLowerer_closures(L);
+    CcLowerer_create(L);
+    CcLowerer_forin(L);
+    CcLowerer_slices(L);
+    CcLowerer_generics(L);
+    CcLowerer_variants(L);
+    CcLowerer_ufcs(L);
+    CcLowerer_slice_args(L);
+    CcLowerer_strings(L);
+    CcLowerer_results(L);
+    CcLowerer_cleanup(L);
+    lw_drop_cc_only(L);
+}
+
+/* What went wrong inside an expansion, said at the site that asked for it:
+ * the expansion has no position in the file the user can open. */
+/* Where the user named this instance.
+ *
+ * Every diagnostic this step raises used to carry a zero span, which resolves
+ * to the first token of the unit being lowered -- and for a unit that went
+ * through the compile-time stage that is a copy under the cache, so the whole
+ * step reported `<hash>.ccs:1:1` about a file the reader never wrote. The
+ * instance is named in the source; the span of the type that names it is what
+ * the reader can act on. */
+typedef struct GnSite {
+    CcLowerer* L;
+    CCSlice want;
+    CcSpan at;
+    bool found;
+} GnSite;
+
+static bool gn_site_type(CcType* t, void* env) {
+    GnSite* g = (GnSite*)env;
+    CCSlice nm = cc_slice_empty();
+    bool named = false;
+    bool generic = false;
+    if (g->found) return false;
+    /* By the time the instances are emitted the spellings have already been
+     * rewritten to their mangled names, so the site is usually a plain name
+     * by now; a `Vec::[T]` still standing is matched through its canon. */
+    @switch (t->k) {
+        case .named(n): nm = n.name; named = true; break;
+        case .generic: generic = true; break;
+        default: break;
+    }
+    if (named) {
+        if (!slice_eq(nm, g->want)) return true;
+        g->at = t->span;
+        g->found = true;
+        return false;
+    }
+    if (!generic) return true;
+    {
+        CCSlice canon = g->L->ix->canon(t);
+        if (!slice_eq(canon, g->want)) return true;
+        g->at = t->span;
+        g->found = true;
+    }
+    return false;
+}
+
+static CcSpan gn_use_site(CcLowerer* L, CCSlice name) {
+    CcVisitor v;
+    GnSite g;
+    g.L = L;
+    g.want = name;
+    g.at.first = 0;
+    g.at.last = 0;
+    g.found = false;
+    memset(&v, 0, sizeof(v));
+    v.type = gn_site_type;
+    v.env = &g;
+    CcUnit_walk(L->unit, v);
+    return g.at;
+}
+
+/* The nth line of a text, 1-based; empty past the end. */
+static CCSlice gn_nth_line(CCSlice text, uint32_t line) {
+    const char* p = (const char*)text.ptr;
+    size_t start = 0;
+    size_t i = 0;
+    uint32_t n = 1;
+    if (!line) return cc_slice_empty();
+    while (n < line) {
+        while (i < text.len && p[i] != '\n') i++;
+        if (i >= text.len) return cc_slice_empty();
+        i++;
+        start = i;
+        n++;
+    }
+    while (i < text.len && p[i] != '\n') i++;
+    return cc_slice_sub(text, start, i);
+}
+
+/* Where the definition starts in an expansion: the guard the expansion opens
+ * with is bookkeeping, and counting it makes the reported line disagree with
+ * the definition the reader is shown. */
+static uint32_t gn_definition_start(CCSlice text) {
+    uint32_t line = 1;
+    for (;;) {
+        CCSlice t = gn_nth_line(text, line);
+        size_t k = 0;
+        bool skip = false;
+        if (!t.len && line > 64) return 1;
+        while (k < t.len && (t.ptr[k] == ' ' || t.ptr[k] == '\t')) k++;
+        if (k >= t.len) skip = true;                       /* blank */
+        else if (t.ptr[k] == '#') skip = true;             /* the guard */
+        else if (k + 1 < t.len && t.ptr[k] == '/' &&
+                 (t.ptr[k + 1] == '*' || t.ptr[k + 1] == '/')) skip = true;  /* the banner */
+        if (!skip) return line;
+        line++;
+    }
+}
+
+/* `>    7 | <text>`: the generated line, numbered the way a compiler quotes
+ * one. The reader cannot open this file, so the line has to come to them. */
+static CCString gn_quote_line(CcLowerer* L, uint32_t line, CCSlice text) {
+    CCString sb = cc_string_new();
+    CCString num = @string(`${line}`, L->arena);
+    size_t w = num.as_slice().len;
+    cc_string_push_cstr(&sb, ">", L->arena);
+    while (w < 5) { cc_string_push_cstr(&sb, " ", L->arena); w++; }
+    cc_string_push_slice(&sb, num.as_slice(), L->arena);
+    cc_string_push_cstr(&sb, " | ", L->arena);
+    cc_string_push_slice(&sb, text, L->arena);
+    return sb;
+}
+
+static void gn_fragment_error(CcLowerer* L, CcSpan sp, CcDiags* ds, CCSlice stage,
+                              CCSlice inst, CCSlice text) {
+    Vec::[CcDiag]* items = &ds->items;
+    size_t n = items->len();
+    size_t i;
+    CCSlice first = cc_slice_empty();
+    CCSlice fam = cc_slice_empty();
+    uint32_t line = 0;
+    uint32_t rel = 0;
+    CCSlice quoted = cc_slice_empty();
+    for (i = 0; i < n; i++) {
+        CcDiag* d = items->get_ptr(i);
+        if (d->sev != CC_SEV_ERROR) continue;
+        first = d->msg;
+        line = d->at.line;
+        break;
+    }
+    if (inst.len) {
+        CcTypeInfo* info = L->ix->type_get(inst);
+        if (info) fam = info->family;
+    }
+    {
+        uint32_t start = gn_definition_start(text);
+        rel = line >= start ? line - start + 1 : line;
+        quoted = gn_nth_line(text, line);
+    }
+    /* Name the factory and the instance: the text that failed has no file of
+     * its own, so "what did this" is the only handle the reader has on it.
+     * Then show the line, since the reader cannot open the file to look, and
+     * say where the factory that wrote it lives. */
+    if (fam.len) {
+        CcUnit* u = L->unit;
+        CcLoc loc = u->loc(sp);
+        CCString m = @string(`type: compiled generic factory '${fam}' produced invalid C for '${inst}': ${first}`, L->arena);
+        CCString gen = @string(`in generated definition, line ${rel}
+`, L->arena);
+        {
+            CCString q = gn_quote_line(L, rel, quoted);
+            cc_string_push_slice(&gen, q.as_slice(), L->arena);
+        }
+        CCSlice hint = CC_SLICE_LIT("re-run with --emit-c-inspect to dump the full translation unit");
+        CCSlice fnote = gn_factory_note(L, fam);
+        CcDiag d = CcDiag_error(loc, cc_string_persist_slice(L->arena, &m));
+        CcLoc none;
+        CcDiags* sink = L->ds;
+        none.path = cc_slice_empty();
+        none.line = 0;
+        none.col = 0;
+        d = CcDiag_with_note_at(d, none, cc_string_persist_slice(L->arena, &gen), L->arena);
+        d = CcDiag_with_note_at(d, none, hint, L->arena);
+        if (fnote.len) d = CcDiag_with_note_at(d, none, fnote, L->arena);
+        sink->push(d);
+        return;
+    }
+    {
+        CCString m = @string(`the expansion of this unit's generic instances does not ${stage}: line ${line}: ${first}`, L->arena);
+        lw_error(L, sp, m);
+    }
+}
+
+/* The C an expansion lowers to. The expansion is a unit in its own right:
+ * parsed against the same index, put through the same steps, printed. It
+ * carries the language it was written in — Result returns, methods, string
+ * templates — so splicing its text unlowered would hand the host compiler
+ * Concurrent-C to compile. */
+/* Is this line the preprocessor directive `#<word>`? */
+static bool gn_line_is(CCSlice line, const char* word) {
+    size_t i = 0;
+    size_t n = strlen(word);
+    while (i < line.len && (line.ptr[i] == ' ' || line.ptr[i] == '\t')) i++;
+    if (i >= line.len || line.ptr[i] != '#') return false;
+    i++;
+    while (i < line.len && (line.ptr[i] == ' ' || line.ptr[i] == '\t')) i++;
+    if (line.len - i < n) return false;
+    if (memcmp(line.ptr + i, word, n) != 0) return false;
+    i += n;
+    return i == line.len || line.ptr[i] == ' ' || line.ptr[i] == '\t';
+}
+
+static bool gn_line_opens_validate(CCSlice line) {
+    size_t i = 0;
+    if (!gn_line_is(line, "ifdef")) return false;
+    while (i < line.len && line.ptr[i] != 'C') i++;
+    return line.len - i >= 20 && memcmp(line.ptr + i, "CC_FRAGMENT_VALIDATE", 20) == 0;
+}
+
+static bool gn_line_opens_cond(CCSlice line) {
+    return gn_line_is(line, "if") || gn_line_is(line, "ifdef") || gn_line_is(line, "ifndef");
+}
+
+/* The `#ifdef CC_FRAGMENT_VALIDATE` arm of a factory template is the stub the
+ * comptime engine compiles a fragment against on its own; a translation unit
+ * never defines that macro, so the arm is dead here. This step reads the
+ * expansion as Concurrent-C and runs no preprocessor, so the dead arm would
+ * be read as code -- and `typedef struct int { char _; } int;`, which is what
+ * `CCBox::[int]` puts there, is not code. Take the arm the program takes. */
+static CCString gn_take_product_arm(CcLowerer* L, CCString text) {
+    CCSlice src = text.as_slice();
+    CCString out = cc_string_new();
+    size_t at = 0;
+    int depth = 0;      /* nesting inside the validate arm, 0 when not in one */
+    int keep = 0;       /* nesting inside its `#else` arm, whose text is kept */
+    while (at < src.len) {
+        size_t end = at;
+        CCSlice line;
+        size_t next;
+        bool copy = false;
+        while (end < src.len && src.ptr[end] != '\n') end++;
+        line = cc_slice_from_buffer((char*)src.ptr + at, end - at);
+        next = end < src.len ? end + 1 : end;
+        if (depth) {
+            /* dropping the stub arm */
+            if (gn_line_opens_cond(line)) depth++;
+            else if (gn_line_is(line, "endif")) depth--;
+            else if (depth == 1 && gn_line_is(line, "else")) { depth = 0; keep = 1; }
+        } else if (keep) {
+            /* keeping the arm the program takes -- but its `#endif` closes an
+             * `#ifdef` that is no longer here, so it goes with it */
+            if (gn_line_opens_cond(line)) { keep++; copy = true; }
+            else if (gn_line_is(line, "endif")) { keep--; copy = keep != 0; }
+            else copy = true;
+        } else if (gn_line_opens_validate(line)) {
+            depth = 1;
+        } else {
+            copy = true;
+        }
+        if (copy) cc_string_push_slice(&out, cc_slice_from_buffer((char*)src.ptr + at, next - at), L->arena);
+        at = next;
+    }
+    return out;
+}
+
+static bool gn_lower_fragment(CcLowerer* L, CCString text, CcSpan sp, CCString* out, CCSlice inst) {
+    CCArena a = L->arena;
+    CcIndex* ix = L->ix;
+    CcDiags ds = CcDiags_new(a);
+    CcParseOpts opts;
+    CcPrintOpts po;
+    CcUnit* u;
+    CcLowerer sub;
+    CCSlice path = cstr_slice("<generic expansion>");
+    text = gn_take_product_arm(L, text);
+    /* the expansion is spliced into whatever the unit is, so it is read and
+     * printed as source: bodies kept, no include guard of its own */
+    opts.mode = CC_UNIT_SOURCE;
+    opts.known_types = ix->known_types();
+    u = cc_parse_unit(path, text.as_slice(), opts, &ds, a);
+    if (!u || ds.has_errors()) { gn_fragment_error(L, sp, &ds, cstr_slice("parse"), inst, text.as_slice()); return false; }
+    sub = cc_lowerer_new(u, ix, L->opts, &ds);
+    sub.depth = L->depth + 1;
+    sub.fragment = true;
+    gn_lower_steps(&sub);
+    if (ds.has_errors()) { gn_fragment_error(L, sp, &ds, cstr_slice("lower"), inst, text.as_slice()); return false; }
+    /* the Results the expansion names are the unit's to declare: it is
+     * spliced into the unit, and the expansion declares none itself */
+    {
+        Vec::[CcTypeInfoRef]* got = &sub.specs;
+        Vec::[CcTypeInfoRef]* mine = &L->specs;
+        size_t ng = got->len();
+        size_t g;
+        for (g = 0; g < ng; g++) {
+            CcTypeInfo* ti = *got->get_ptr(g);
+            size_t nm = mine->len();
+            size_t m;
+            bool listed = false;
+            for (m = 0; m < nm; m++) if (*mine->get_ptr(m) == ti) listed = true;
+            if (!listed) mine->push(ti);
+        }
+    }
+    po.identity = false;
+    po.line_directives = false;
+    po.header_mode = false;
+    po.header_owned = false;
+    po.path = path;
+    CcProduct prod = cc_print_unit(u, NULL, po, &ds, a) !>(e) {
+        CCSlice why = e.msg;
+        CCString m = @string(`the expansion of this unit's generic instances does not print: ${why}`, L->arena);
+        lw_error(L, sp, m);
+        return false;
+    };
+    if (ds.has_errors()) { gn_fragment_error(L, sp, &ds, cstr_slice("print"), inst, text.as_slice()); return false; }
+    *out = prod.text;
+    return true;
+}
+
+/* Whether a declaration is what makes `name` a type in this unit. */
+static bool gn_decl_defines(CcDecl* d, CCSlice name) {
+    CCSlice got = cc_slice_empty();
+    if (!name.len) return false;
+    @switch (d->k) {
+        case .typedef_(td): got = td.name; break;
+        case .tagged(tg): { if (tg.type) (void)type_named_name(tg.type, &got); break; }
+        case .variant(vd): got = vd.name; break;
+        default: break;
+    }
+    return got.len != 0 && slice_eq(got, name);
+}
+
+/* Where an expansion may land: after the leading includes, and after the
+ * last declaration this unit makes of any type the expansion names. An
+ * `ArrayMap::[int, Entr]` spells `Entr` in its fields, so it cannot be
+ * spliced above the `typedef struct Entr` that says what one is. */
+/* The name a type argument's declaration is written under: `Entry*` and
+ * `const Entry *` are both declared by `Entry`. An instance mentioning a
+ * pointer still cannot stand above the declaration of what it points at --
+ * the macro that builds it names the pointee -- so the decoration comes off
+ * before the search for the declaration that defines it. */
+static CCSlice gn_undecorate(CCSlice t) {
+    size_t n = t.len;
+    while (n && (t.ptr[n - 1] == '*' || t.ptr[n - 1] == ' ')) n--;
+    t = cc_slice_from_buffer((char*)t.ptr, n);
+    if (cc__has_prefix(t, "const ")) t = cc__skip(t, 6);
+    if (cc__has_prefix(t, "volatile ")) t = cc__skip(t, 9);
+    return cc__strip_tag(t);
+}
+
+static size_t gn_anchor(CcLowerer* L, CCSlice name, size_t base) {
+    CcIndex* ix = L->ix;
+    CcDeclList* decls = &L->unit->decls;
+    size_t nd = decls->len();
+    size_t at = base;
+    CcTypeInfo* info = ix->type_get(name);
+    CcTypeList* tv;
+    size_t k;
+    size_t nt;
+    if (!info) return at;
+    tv = &info->targs;
+    nt = tv->len();
+    for (k = 0; k < nt; k++) {
+        CcType* at_k = *tv->get_ptr(k);
+        CCSlice tn = gn_undecorate(ix->canon(at_k));
+        size_t j;
+        for (j = 0; j < nd; j++) {
+            CcDecl* d = *decls->get_ptr(j);
+            if (gn_decl_defines(d, tn) && j + 1 > at) at = j + 1;
+        }
+    }
+    return at;
+}
+
+/* ---- `py.expose::[T](...)`: the member spelling of a family factory ----
+ *
+ * `py_expose::[Counter](&py, "counter", &seed)` is the free-name spelling
+ * of a registered generic factory, and `py.expose::[Counter]("counter",
+ * &seed)` is the same call written the way every other method on `py` is
+ * written -- the receiver goes first, so the member spelling is the free
+ * one with the receiver put back at the head of the arguments. Nothing
+ * else on the receiver can answer `::[...]`: the type formal is the
+ * factory's, and a dynamic sink -- which is what an unresolved method on
+ * `CCPy` reaches -- has no formal to bind and would drop what the site
+ * wrote.
+ *
+ * This runs with the rest of the generics because the instance it names
+ * has to be written out with the others; by the UFCS step the expansions
+ * are already placed. */
+
+/* Does a registered, non-extend factory family carry this name? */
+static bool gn_family_named(CcLowerer* L, CCSlice name) {
+    CcDeclList* factv = &L->ix->factories;
+    size_t n = factv->len();
+    size_t i;
+    if (!name.len) return false;
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *factv->get_ptr(i);
+        CCSlice fam = cc__factory_name(d);
+        if (!fam.len || cc__factory_is_extend(d)) continue;
+        if (slice_eq(fam, name)) return true;
+    }
+    return false;
+}
+
+/* The one family whose name ends `_<method>`, for a receiver nothing can
+ * type -- the value a previous hop of the same chain answered with.  Two
+ * such families is not a choice this step has grounds to make, and it says
+ * nothing rather than guessing. */
+static CCSlice gn_family_by_member(CcLowerer* L, CCSlice method) {
+    CcDeclList* factv = &L->ix->factories;
+    size_t n = factv->len();
+    size_t i;
+    size_t hits = 0;
+    CCSlice hit = cc_slice_empty();
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *factv->get_ptr(i);
+        CCSlice fam = cc__factory_name(d);
+        if (!fam.len || cc__factory_is_extend(d)) continue;
+        if (fam.len <= method.len + 1) continue;
+        if (fam.ptr[fam.len - method.len - 1] != '_') continue;
+        if (memcmp(fam.ptr + fam.len - method.len, method.ptr, method.len) != 0) continue;
+        hits++;
+        hit = fam;
+    }
+    return hits == 1 ? hit : cc_slice_empty();
+}
+
+/* `CCPy` -> `py`: the family stem a receiver type spells. */
+static CCSlice gn_recv_stem(CcLowerer* L, CCSlice tn) {
+    size_t n = tn.len;
+    CCSlice base;
+    while (n && (tn.ptr[n - 1] == '*' || tn.ptr[n - 1] == ' ')) n--;
+    base = cc_slice_from_buffer((char*)tn.ptr, n);
+    if (base.len > 2 && base.ptr[0] == 'C' && base.ptr[1] == 'C' &&
+        base.ptr[2] >= 'A' && base.ptr[2] <= 'Z')
+        base = cc__skip(base, 2);
+    if (!base.len) return cc_slice_empty();
+    return L->ix->snake(base);
+}
+
+/* A receiver written as an unwrap: the hop before this one already
+ * answered with the value this one takes, so it goes as written. */
+static bool gn_recv_is_unwrap(CcExpr* e) {
+    if (!e) return false;
+    @switch (e->k) {
+        case .paren(pa): return gn_recv_is_unwrap(pa.a);
+        case .unwrap: return true;
+        case .unwrap_body: return true;
+        case .unwrap_or: return true;
+        case .unwrap_destroy: return true;
+        default: return false;
+    }
+}
+
+static bool gn_recv_type_is_pointer(CcType* t) {
+    if (!t) return false;
+    return t->k.kind == CcTypeK_pointer || t->k.kind == CcTypeK_array;
+}
+
+static void gn_member_generic(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m,
+                              CCSlice tn, CCSlice reason) {
+    CcLowerer* L = (CcLowerer*)w->env;
+    CCSlice recv_name = cc_slice_empty();
+    CCSlice fam = cc_slice_empty();
+    bool hop = gn_recv_is_unwrap(uf.recv);
+    (void)m;
+    (void)reason;
+    if (uf.arrow || !uf.targs.len() || !uf.recv) return;
+    if (expr_ident(strip_parens_expr(uf.recv), &recv_name) && recv_name.len) {
+        CCString cand = @string(`${recv_name}_${uf.method}`, L->arena);
+        CCSlice cs = lw_keep(L, &cand);
+        if (gn_family_named(L, cs)) fam = cs;
+    }
+    if (!fam.len && tn.len) {
+        CCSlice stem = gn_recv_stem(L, tn);
+        if (stem.len) {
+            CCString cand = @string(`${stem}_${uf.method}`, L->arena);
+            CCSlice cs = lw_keep(L, &cand);
+            if (gn_family_named(L, cs)) fam = cs;
+        }
+    }
+    if (!fam.len && hop) fam = gn_family_by_member(L, uf.method);
+    if (!fam.len) return;
+    {
+        CcGenericFn gf;
+        CcExpr* recv_arg = uf.recv;
+        CcExprList* av = &uf.args;
+        size_t n = av->len();
+        size_t i;
+        if (!hop && !gn_recv_type_is_pointer(rt)) {
+            if (!expr_ident(strip_parens_expr(uf.recv), &recv_name)) return;
+            recv_arg = cc_expr_unary(CC_OP_ADDR, uf.recv, e->span, L->arena);
+        }
+        gf.name = fam;
+        gf.targs = uf.targs;
+        gf.args = vec_new::[CcExprRef](L->arena);
+        gf.args.push(recv_arg);
+        for (i = 0; i < n; i++) {
+            CcExpr* a = *av->get_ptr(i);
+            gf.args.push(a);
+        }
+        e->k = { .generic_fn = gf };
+    }
+}
+
+static void gn_member_generic_pass(CcLowerer* L) {
+    Walker w;
+    memset(&w, 0, sizeof(w));
+    w.arena = L->arena;
+    w.ix = L->ix;
+    w.unit = L->unit;
+    w.on_ufcs = gn_member_generic;
+    w.env = L;
+    tw_unit(&w);
+}
+
+void CcLowerer_generics(CcLowerer* L) {
+    GStep st;
+    CcVisitor v;
+    CcIndex* ix = L->ix;
+    memset(&st, 0, sizeof(st));
+    st.L = L;
+    st.order = vec_new::[CCSlice](L->arena);
+    st.bad_keys = vec_new::[CCSlice](L->arena);
+    memset(&v, 0, sizeof(v));
+    v.type = gn_type_visit;
+    v.expr = gn_expr_visit;
+    v.env = &st;
+    gn_collect_requests(&st);
+    gn_member_generic_pass(L);   /* before the walk: the member spelling becomes the free one */
+    CcUnit_walk(L->unit, v);
+    {
+        CcNameList* o = &st.order;
+        size_t n = o->len();
+        size_t i;
+        Vec::[CCString] texts = vec_new::[CCString](L->arena);
+        CcNameList names = vec_new::[CCSlice](L->arena);
+        bool any = false;
+        for (i = 0; i < n; i++) {
+            CCSlice name = *o->get_ptr(i);
+            CcTypeInfo* info = ix->type_get(name);
+            CCString one;
+            bool ok;
+            CcSpan sp0 = gn_use_site(L, name);
+            if (gn_hand_declared(L, name)) continue;
+            if (L->depth >= (uint32_t)GN_MAX_DEPTH) {
+                int deep = GN_MAX_DEPTH;
+                CCString m = @string(`generic instance '${name}' expands into itself: the expansion nests ${deep} deep and still asks for another`, L->arena);
+                lw_error(L, sp0, m);
+                continue;
+            }
+            one = gn_instance_text(L, info, sp0, &ok);
+            if (!ok) continue;
+            texts.push(one);
+            names.push(name);
+            any = true;
+        }
+        if (!any) return;
+        /* Each expansion lands after the leading includes and after the
+         * last declaration this unit makes of a type it names — its own,
+         * not the latest of them all: one instance whose argument is
+         * declared at the end of the file would otherwise carry every
+         * other expansion down there with it, past their uses. They keep
+         * their order among themselves, since an instance may name
+         * another. */
+        {
+            CcDeclList* decls = &L->unit->decls;
+            size_t nd = decls->len();
+            size_t base = 0;
+            size_t run;
+            size_t k;
+            CcNameList* nv = &names;
+            size_t nt2 = nv->len();
+            CcDeclList with = vec_new::[CcDeclRef](L->arena);
+            Vec::[size_t] at = vec_new::[size_t](L->arena);
+            for (k = 0; k < nd; k++) {
+                CcDecl* dd = *decls->get_ptr(k);
+                bool is_pp = false;
+                @switch (dd->k) {
+                    case .pp: is_pp = true; break;
+                    case .empty: is_pp = true; break;
+                    case .pragma_cc: is_pp = true; break;
+                    case .raw: is_pp = true; break;
+                    default: break;
+                }
+                if (!is_pp) break;
+                base = k + 1;
+            }
+            run = base;
+            for (k = 0; k < nt2; k++) {
+                CCSlice nm = *nv->get_ptr(k);
+                size_t a = gn_anchor(L, nm, base);
+                if (a < run) a = run;
+                run = a;
+                at.push(a);
+            }
+            for (k = 0; k <= nd; k++) {
+                CCString group = cc_string_new();
+                bool grouped = false;
+                size_t j;
+                CcSpan sp;
+                sp.first = 0;
+                sp.last = 0;
+                if (k < nd) { CcDecl* dk2 = *decls->get_ptr(k); sp = dk2->span; }
+                else if (nd) { CcDecl* dl = *decls->get_ptr(nd - 1); sp = dl->span; }
+                CCSlice lead = cc_slice_empty();
+                for (j = 0; j < nt2; j++) {
+                    size_t aj = *at.get_ptr(j);
+                    CCString tj;
+                    if (aj != k) continue;
+                    tj = *texts.get_ptr(j);
+                    cc_string_push_slice(&group, tj.as_slice(), L->arena);
+                    if (!lead.len) lead = *nv->get_ptr(j);
+                    grouped = true;
+                }
+                if (grouped) {
+                    CCString lowered = cc_string_new();
+                    /* the expansion has no source of its own, so a failure in
+                     * it is reported where the reader asked for the instance */
+                    CcSpan site = lead.len ? gn_use_site(L, lead) : sp;
+                    if (!site.first && !site.last) site = sp;
+                    if (!gn_lower_fragment(L, group, site, &lowered, lead)) return;
+                    with.push(lw_raw_decl(L, lowered, sp));
+                }
+                if (k < nd) { CcDecl* dk3 = *decls->get_ptr(k); with.push(dk3); }
+            }
+            *decls = with;
+        }
+    }
+}
+
+#endif

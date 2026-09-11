@@ -23,7 +23,6 @@
 #include "comptime/const_eval.h"
 #include "comptime/executor.h"
 #include "comptime/symbols.h"
-#include "parser/symsig.h"
 #include "preprocess/cpp_expand.h"
 #include "preprocess/emit_plan.h"
 #include "preprocess/script_entry.h"
@@ -47,6 +46,7 @@
 #include "visitor/pass_result_unwrap.h"
 #include "visitor/pass_unwrap_destroy.h"
 #include "cccportable.h"
+#include "preprocess/unit_header.h"
 
 extern long g_cc_pass_error_count;
 
@@ -5914,6 +5914,19 @@ static _Thread_local int g_ufcs_typeformal_err = 0;
  * comment between the type name and its `::[` hide the whole site, so the
  * instantiation never happened and the raw spelling reached the C compiler.
  * Returns 1 and sets `*out_lb` to the `[`. */
+/* The generic forms the compiler itself lowers at a `::[` site. Any other
+ * name before `::[` is a generic factory family, produced by running the
+ * family's `CC_GENERIC_FACTORY` at compile time. */
+static int cc__generic_form_is_builtin(const char* gname) {
+    return strcmp(gname, "Vec") == 0 || strcmp(gname, "CCVec") == 0 ||
+           strcmp(gname, "Map") == 0 || strcmp(gname, "ArrayMap") == 0 ||
+           strcmp(gname, "vec_new") == 0 || strcmp(gname, "cc_vec_new") == 0 ||
+           strcmp(gname, "vec_from") == 0 || strcmp(gname, "cc_vec_from") == 0 ||
+           strcmp(gname, "map_new") == 0 || strcmp(gname, "cc_map_new") == 0 ||
+           strcmp(gname, "array_map_new") == 0 ||
+           strcmp(gname, "array_map_new_count") == 0;
+}
+
 static int cc__ident_generic_bracket(const char* src, size_t n, size_t id_e,
                                      size_t* out_lb) {
     size_t p = cc_skip_ws_and_comments(src, n, id_e);
@@ -8705,14 +8718,7 @@ static int cc__try_rewrite_pascal_generic(const char* src, size_t n,
     if (!fl || fl >= sizeof(gname)) return 0;
     memcpy(gname, src + i, fl);
     gname[fl] = 0;
-    if (strcmp(gname, "Vec") == 0 || strcmp(gname, "CCVec") == 0 ||
-        strcmp(gname, "Map") == 0 || strcmp(gname, "ArrayMap") == 0 ||
-        strcmp(gname, "vec_new") == 0 || strcmp(gname, "cc_vec_new") == 0 ||
-        strcmp(gname, "vec_from") == 0 || strcmp(gname, "cc_vec_from") == 0 ||
-        strcmp(gname, "map_new") == 0 || strcmp(gname, "cc_map_new") == 0 ||
-        strcmp(gname, "array_map_new") == 0 ||
-        strcmp(gname, "array_map_new_count") == 0)
-        return 0;
+    if (cc__generic_form_is_builtin(gname)) return 0;
     if (fl > 5 && strcmp(gname + fl - 5, "_make") == 0) {
         size_t k, po = 0;
         int up = 1;
@@ -12555,7 +12561,7 @@ static char* cc_preprocess_pipeline_ex(const char* input, size_t input_len, cons
                  * "'{' expected (got ';')" with nothing pointing here.
                  * Forward tags suffice: parser-mode TCC never evaluates an
                  * unselected arm's body, and the real compile emits its own
-                 * roster from complete types (shadow_lower / host cc). */
+                 * roster from complete types (the lowerer / host cc). */
                 for (size_t ri = 0; ri < cc_result_fn_registry_count(); ri++) {
                     const char* t = cc_result_fn_registry_result_type_at(ri);
                     if (!t || strncmp(t, "CCResult_", 9) != 0) continue;
@@ -14279,13 +14285,11 @@ static int cc__decl_fn_return_type_text(const char* text, size_t n,
     return 0;
 }
 
-/* Declared-function return type: the tcc-fed signature table first
- * (authoritative, sees system headers; populated once the parser-mode
- * parse has run), then the textual TU + included cch readers. */
+/* Declared-function return type: the textual TU, then the included cch
+ * readers. */
 static int cc__fn_return_type(const char* src, size_t n, const char* name,
                               char* out, size_t out_sz) {
     size_t h;
-    if (cc_symsig_fn_return(name, out, out_sz)) return 1;
     if (src && cc__decl_fn_return_type_text(src, n, name, out, out_sz)) return 1;
     for (h = 0; h < g_included_cch_source_count; h++) {
         size_t fn = 0;
@@ -15129,6 +15133,88 @@ static void cc__register_included_cch_imports(const char* source_path) {
     free(src);
 }
 
+/* ---- Cache keying ------------------------------------------------------ */
+
+uint64_t cc_fnv1a64_bytes(uint64_t h, const void* data, size_t n) {
+    const unsigned char* p = (const unsigned char*)data;
+    size_t i;
+    for (i = 0; i < n; i++) {
+        h ^= p[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static uint64_t cc__key_str(uint64_t h, const char* s) {
+    if (!s) s = "";
+    return cc_fnv1a64_bytes(h, s, strlen(s) + 1);
+}
+
+/* Missing files fold a sentinel with the path, so a file that appears
+ * later changes the key. */
+uint64_t cc_fold_file_content_u64(uint64_t h, const char* path) {
+    FILE* f = path && path[0] ? fopen(path, "rb") : NULL;
+    unsigned char buf[64 * 1024];
+    size_t n;
+    h = cc__key_str(h, path);
+    if (!f) return cc__key_str(h, "\x01<absent>");
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) h = cc_fnv1a64_bytes(h, buf, n);
+    fclose(f);
+    return h;
+}
+
+static int cc__key_self_exe_path(char* out, size_t cap) {
+#if defined(__APPLE__)
+    uint32_t sz = (uint32_t)cap;
+    return _NSGetExecutablePath(out, &sz) == 0 ? 0 : -1;
+#elif defined(__linux__)
+    ssize_t n = readlink("/proc/self/exe", out, cap - 1);
+    if (n <= 0) return -1;
+    out[n] = '\0';
+    return 0;
+#else
+    (void)out; (void)cap;
+    return -1;
+#endif
+}
+
+uint64_t cc_toolchain_content_fp(void) {
+    static uint64_t cached;
+    static int computed;
+    uint64_t h = 1469598103934665603ULL;
+    char self_path[PATH_MAX];
+    char cwd[PATH_MAX];
+    char root[PATH_MAX];
+    char bin[PATH_MAX];
+    const char* ver;
+    if (computed) return cached;
+    h = cc__key_str(h, "\x03toolchain-fp:v1");
+    if (cc__key_self_exe_path(self_path, sizeof(self_path)) == 0)
+        h = cc_fold_file_content_u64(h, self_path);
+    else
+        h = cc__key_str(h, "\x01<self-absent>");
+    root[0] = 0;
+    if (getcwd(cwd, sizeof(cwd)) && cc_path_find_repo_root(cwd, root, sizeof(root)) && root[0]) {
+        snprintf(bin, sizeof(bin), "%s/cc/bin/.ccc-bin", root);
+        if (!cc__key_self_exe_path(self_path, sizeof(self_path)) || strcmp(self_path, bin) != 0)
+            h = cc_fold_file_content_u64(h, bin);
+        snprintf(bin, sizeof(bin), "%s/out/cc/bin/shadow_lower", root);
+        if (strcmp(self_path, bin) != 0)
+            h = cc_fold_file_content_u64(h, bin);
+        snprintf(bin, sizeof(bin), "%s/out/cc/bin/lower_headers", root);
+        if (strcmp(self_path, bin) != 0)
+            h = cc_fold_file_content_u64(h, bin);
+    } else {
+        h = cc__key_str(h, "\x01<no-repo-root>");
+    }
+    ver = getenv("CCC_VERSION");
+    h = cc__key_str(h, "\x03" "ccc_version:");
+    h = cc__key_str(h, ver && ver[0] ? ver : "<unknown>");
+    cached = h;
+    computed = 1;
+    return h;
+}
+
 static int cc__write_file_text(const char* path, const char* buf, size_t len) {
     char tmp[PATH_MAX];
     FILE* f = NULL;
@@ -15244,15 +15330,15 @@ static int cc__match_local_include_line(const char* line,
  * `@typehooks`, file-scope `@variant` decls, `@comptime` blocks/fns,
  * `CC_GENERIC_FACTORY` bodies. Those are stripped or rewritten in the `.h`.
  *
- * Owner-bound (impl) constructs: non-`static` file-scope function
+ * Implementation constructs: non-`static` file-scope function
  * definitions, and TU-only `@` forms that remain on the extract surface
  * (`@errhandler` / `@defer` / `@string` in a `static inline`, etc.).
- * Extract strips non-`static` bodies to prototypes; the owner `.ccs`
- * splices those definitions back (`owner_defs_only`). Unowned faces that
- * still need the TU pipeline full-splice (per-TU static copies).
- *
- * Owner discovery: same-stem `foo.cch` → `foo.ccs`, or chapter
- * `foo_bar.cch` → `foo.ccs` in the same directory.
+ * A face with any of them is a module (spec 1.7): the extract keeps
+ * prototypes and `static inline` bodies, omits `static` functions,
+ * declares data `extern`, and carries a link marker; the bodies lower in
+ * the module unit, `<face>_cch.c`, which the driver compiles once. A unit
+ * that declares `#pragma(@module) "name"` is a member: its text splices
+ * into the module unit where the root includes it.
  */
 
 #define CC_IMPL_CCH_BEGIN_MARK "/*cc:impl_cch_begin:"
@@ -15313,15 +15399,50 @@ static size_t cc__skip_variant_decl_at(const char* src, size_t n, size_t i) {
     return p;
 }
 
-static int cc__cch_first_nonstatic_fn(const char* src, size_t n, char* name,
-                                      size_t cap);
-static int cc__cch_first_nonstatic_fn_at(const char* src, size_t n, char* name,
-                                         size_t cap, size_t* off);
 static int cc__file_scope_fn_def_end(const char* src, size_t n, size_t at,
                                      size_t* end);
 static int cc__fn_decl_has_static(const char* src, size_t n, size_t at,
                                   size_t fn_end);
 static size_t cc__skip_file_scope_item(const char* src, size_t n, size_t i);
+
+/* A file-scope item that exists only at compile time: a `@comptime`
+ * block, function, `if` or `for`, or a generic factory. The header
+ * lowering harvests these into every including unit; they are not C of
+ * the module, so they neither grade a face nor lose their body in the
+ * module `.h`. `end` is one past the closing brace. */
+static int cc__cch_comptime_only_item_end(const char* src, size_t n, size_t at,
+                                          size_t* end) {
+    static const char kw_ct[] = "@comptime";
+    static const char kw_fac[] = "CC_GENERIC_FACTORY";
+    const size_t ct_len = sizeof(kw_ct) - 1;
+    const size_t fac_len = sizeof(kw_fac) - 1;
+    size_t p, r;
+    if (!src || at >= n) return 0;
+    if (at + ct_len <= n && memcmp(src + at, kw_ct, ct_len) == 0 &&
+        (at + ct_len >= n || !cc_is_ident_char(src[at + ct_len]))) {
+        p = cc_skip_ws_and_comments(src, n, at + ct_len);
+        if (p >= n || src[p] == '(') return 0; /* `@comptime(expr)` is a value */
+        if (src[p] == '{') {
+            if (!cc_find_matching_brace(src, n, p, &r)) return 0;
+            if (end) *end = r + 1;
+            return 1;
+        }
+        return cc__file_scope_fn_def_end(src, n, p, end);
+    }
+    if (at + fac_len <= n && memcmp(src + at, kw_fac, fac_len) == 0 &&
+        (at == 0 || !cc_is_ident_char(src[at - 1]))) {
+        p = at + fac_len;
+        if (p + 7 <= n && memcmp(src + p, "_EXTEND", 7) == 0) p += 7;
+        if (p < n && cc_is_ident_char(src[p])) return 0;
+        p = cc_skip_ws_and_comments(src, n, p);
+        if (p >= n || src[p] != '(' || !cc_find_matching_paren(src, n, p, &r)) return 0;
+        p = cc_skip_ws_and_comments(src, n, r + 1);
+        if (p >= n || src[p] != '{' || !cc_find_matching_brace(src, n, p, &r)) return 0;
+        if (end) *end = r + 1;
+        return 1;
+    }
+    return 0;
+}
 
 /* Extract-surface TU-only `@` in [lo, hi). Skips interface forms
  * (`@comptime` block/fn, `@typeview`/`@typehooks`, `@variant` decl,
@@ -15341,6 +15462,28 @@ static int cc__cch_range_has_extract_at(const char* src, size_t lo, size_t hi) {
         if (i >= hi) break;
         c = src[i];
         c2 = (i + 1 < hi) ? src[i + 1] : 0;
+        /* `Name::[...]` of a generic factory family: the instance is
+         * produced by running the family at compile time, which is the
+         * unit pipeline's; the header subset lowers only the built-in
+         * forms. Member position (`recv.m::[T]`) is a call, not a type. */
+        if (cc_is_ident_start(c) && (i == lo || !cc_is_ident_char(src[i - 1]))) {
+            size_t id_e = i;
+            while (id_e < hi && cc_is_ident_char(src[id_e])) id_e++;
+            if (cc__ident_generic_bracket(src, hi, id_e, NULL)) {
+                size_t b = cc_rskip_ws_and_comments(src, i);
+                int member_pos = (b > 0 && (src[b - 1] == '.' ||
+                                            (b > 1 && src[b - 1] == '>' &&
+                                             src[b - 2] == '-')));
+                char gname[128];
+                size_t fl = id_e - i;
+                if (fl >= sizeof(gname)) fl = sizeof(gname) - 1;
+                memcpy(gname, src + i, fl);
+                gname[fl] = 0;
+                if (!member_pos && !cc__generic_form_is_builtin(gname)) return 1;
+            }
+            i = id_e;
+            continue;
+        }
         if (c == 'C') {
             size_t mlen = 0;
             if (i + fac_len_ext <= hi && memcmp(src + i, fac_kw_ext, fac_len_ext) == 0 &&
@@ -15422,42 +15565,99 @@ static int cc__cch_range_has_extract_at(const char* src, size_t lo, size_t hi) {
     return 0;
 }
 
-/* True when the face needs the owner/splice path. Grade is per construct:
- * non-`static` file-scope defs are owner-bound (bodies skipped here — extract
- * strips them); TU-only `@` on the extract surface (`static inline`, file
- * scope) flips impl. `T !>(E)` / `T ?>(E)` and statement `!>` / `?>` are
- * interface-grade. */
-static int cc__cch_text_is_impl_grade(const char* src, size_t n) {
+/* The grade of a face's text (spec 1.7). Grade is per construct: a
+ * non-`static` file-scope definition, a function body or initialized data,
+ * makes a module (CC_GRADE_MODULE: one unit, one object, a `.h` of
+ * prototypes). With no such definition, TU-only `@` forms in a `static`
+ * body or a file-scope item (`@string`, `@errhandler`, `@defer`, ...) make
+ * a library (CC_GRADE_LIBRARY): every definition static, so every includer
+ * compiles its own copy, and the header subset cannot lower the forms, so
+ * the face splices into each includer as a member does. Otherwise the face
+ * is interface grade (CC_GRADE_INTERFACE) and extracts to a lowered `.h`.
+ * `T !>(E)` / `T ?>(E)` and statement `!>` / `?>` are interface-grade. */
+enum { CC_GRADE_INTERFACE = 0, CC_GRADE_LIBRARY = 1, CC_GRADE_MODULE = 2 };
+
+static size_t cc__file_scope_data_eq(const char* src, size_t n, size_t start);
+static int cc__kw_at(const char* src, size_t n, size_t i, const char* kw);
+
+/* A file-scope item that defines data the module owns: `int xs[] = {1};`
+ * with no `static`, `extern` or `typedef` ahead of it. The lowered `.h`
+ * declares it `extern`; the module unit is its one definition. */
+static int cc__file_scope_item_is_data_def(const char* src, size_t n, size_t i) {
+    size_t p = i;
+    /* The item may open with directive lines the scanner left in front of
+     * it; the definition itself opens with a type name. A piece cut from
+     * a larger construct (`.destroy = f,` inside `@typehooks`, an `@`
+     * form, a stray `}`) does not. */
+    for (;;) {
+        p = cc_skip_ws_and_comments(src, n, p);
+        if (p < n && src[p] == '#') {
+            while (p < n && src[p] != '\n') p++;
+            continue;
+        }
+        break;
+    }
+    if (p >= n || !(cc_is_ident_char(src[p]) && !(src[p] >= '0' && src[p] <= '9'))) return 0;
+    i = p;
+    while (p < n) {
+        p = cc_skip_ws_and_comments(src, n, p);
+        if (p >= n) return 0;
+        if (cc__kw_at(src, n, p, "static") || cc__kw_at(src, n, p, "extern") ||
+            cc__kw_at(src, n, p, "typedef"))
+            return 0;
+        if (cc__kw_at(src, n, p, "const") || cc__kw_at(src, n, p, "volatile")) {
+            while (p < n && cc_is_ident_char(src[p])) p++;
+            continue;
+        }
+        break;
+    }
+    return cc__file_scope_data_eq(src, n, i) != 0;
+}
+
+static int cc__cch_text_grade(const char* src, size_t n) {
     size_t i = 0;
     int needs_owner = 0;
+    int has_at = 0;
     CCScannerState scan;
-    if (!src || n == 0) return 0;
+    if (!src || n == 0) return CC_GRADE_INTERFACE;
     cc_scanner_init(&scan);
     while (i < n) {
         size_t before = i;
         size_t fn_end = 0;
         if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
         if (i >= n) break;
+        /* An item starts at its first token: a directive line ahead of a
+         * function is not part of its declaration, and `static` is read
+         * off the declaration. */
+        if (src[i] == '\n' || src[i] == '\r' || src[i] == ' ' || src[i] == '\t') { i++; continue; }
         if (src[i] == '#') {
             while (i < n && src[i] != '\n') i++;
             if (i < n) i++;
             continue;
         }
+        if (cc__cch_comptime_only_item_end(src, n, i, &fn_end)) {
+            i = fn_end;
+            continue;
+        }
         if (cc__file_scope_fn_def_end(src, n, i, &fn_end)) {
+            if (getenv("CC_GRADE_DEBUG")) { size_t k; fprintf(stderr, "cc: grade fn static=%d [", cc__fn_decl_has_static(src, n, i, fn_end)); for (k = i; k < fn_end && k < i + 70; k++) fputc(src[k] == '\n' ? '|' : src[k], stderr); fprintf(stderr, "]\n"); }
             if (!cc__fn_decl_has_static(src, n, i, fn_end)) {
-                /* Owner-bound body: `@errhandler` here is not extract-surface. */
+                /* A body the module owns. */
                 needs_owner = 1;
                 i = fn_end;
                 continue;
             }
-            if (cc__cch_range_has_extract_at(src, i, fn_end)) return 1;
+            if (cc__cch_range_has_extract_at(src, i, fn_end)) has_at = 1;
             i = fn_end;
             continue;
         }
         {
             size_t e = cc__skip_file_scope_item(src, n, i);
             if (e > i) {
-                if (cc__cch_range_has_extract_at(src, i, e)) return 1;
+                if (cc__cch_range_has_extract_at(src, i, e)) has_at = 1;
+                /* Data the module owns: one definition, `extern` in the `.h`. */
+                if (cc__file_scope_item_is_data_def(src, n, i)) needs_owner = 1;
+                if (getenv("CC_GRADE_DEBUG")) { size_t k; fprintf(stderr, "cc: grade item data=%d [", cc__file_scope_item_is_data_def(src, n, i)); for (k = i; k < e && k < i + 70; k++) fputc(src[k] == '\n' ? '|' : src[k], stderr); fprintf(stderr, "]\n"); }
                 i = e;
             }
         }
@@ -15470,11 +15670,12 @@ static int cc__cch_text_is_impl_grade(const char* src, size_t n) {
             i++;
         }
     }
-    return needs_owner;
+    if (needs_owner) return CC_GRADE_MODULE;
+    return has_at ? CC_GRADE_LIBRARY : CC_GRADE_INTERFACE;
 }
 
-/* Per-process memo of .cch grade, keyed by realpath.  grade: 1 impl-grade,
- * 0 interface, -1 classification in progress (include cycle break). */
+/* Per-process memo of .cch grade, keyed by realpath.  grade: a CC_GRADE_*
+ * value, -1 classification in progress (include cycle break). */
 typedef struct {
     char* path;
     int grade;
@@ -15507,371 +15708,414 @@ static void cc__cch_grade_memo_set(const char* abs_src, int grade) {
     g_cch_grade_memo_count++;
 }
 
-/* Comments, `#` lines, and whitespace only — no file-scope code.
- * `c_pp_spike.cch` is this; `quote_cch_nested_impl_via_umbrella.cch`
- * is not (it has a function). */
-static int cc__cch_text_is_include_only(const char* src, size_t n) {
-    size_t i = 0;
-    CCScannerState scan;
-    if (!src) return 0;
-    cc_scanner_init(&scan);
-    while (i < n) {
-        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
-        if (src[i] == ' ' || src[i] == '\t' || src[i] == '\r') {
-            i++;
-            continue;
-        }
-        if (src[i] == '\n') {
-            scan.at_line_start = 1;
-            i++;
-            continue;
-        }
-        return 0;
-    }
-    return 1;
-}
+static char* cc__module_unit_text(const char* abs_face, const char* src, size_t n);
+static int cc__face_is_own_root(const char* abs_face);
 
-static int cc__cch_is_include_only(const char* abs_src) {
+/* The grade of a face is the grade of its module unit: the face with its
+ * members and the library faces it includes spliced in (spec 1.7). A
+ * nested `#include "leaf.cch"` of an interface or module face does not
+ * count; that leaf stands on its own, and this face includes its lowered
+ * `.h`. */
+static int cc__local_cch_grade(const char* abs_src) {
     char* src = NULL;
+    char* unit = NULL;
     size_t n = 0;
-    int only = 0;
-    if (!abs_src || cc__read_file_text(abs_src, &src, &n) != 0 || !src)
-        return 0;
-    only = cc__cch_text_is_include_only(src, n);
-    free(src);
-    return only;
-}
-
-/* Own-text only. A nested impl-grade `#include "leaf.cch"` does not make
- * this file impl-grade. The leaf splices only when an owner `.ccs` exists
- * (same-stem, a same-dir `.ccs` that includes it, or a face-includer);
- * otherwise that include fails. This file still extracts to a `.h`. */
-static int cc__local_cch_is_impl_grade(const char* abs_src) {
-    char* src = NULL;
-    size_t n = 0;
-    int grade = 0;
+    int grade = CC_GRADE_INTERFACE;
     CCCchGradeMemo* memo = cc__cch_grade_memo_find(abs_src);
-    if (memo) return memo->grade > 0;
+    if (memo) return memo->grade > 0 ? memo->grade : CC_GRADE_INTERFACE;
     cc__cch_grade_memo_set(abs_src, -1);
-    if (cc__read_file_text(abs_src, &src, &n) == 0 && src)
-        grade = cc__cch_text_is_impl_grade(src, n) ? 1 : 0;
+    if (cc__read_file_text(abs_src, &src, &n) == 0 && src) {
+        if (cc__face_is_own_root(abs_src)) unit = cc__module_unit_text(abs_src, src, n);
+        grade = cc__cch_text_grade(unit ? unit : src, unit ? strlen(unit) : n);
+    }
+    free(unit);
     free(src);
     cc__cch_grade_memo_set(abs_src, grade);
+    if (getenv("CC_GRADE_DEBUG"))
+        fprintf(stderr, "cc: grade %s: %s\n", abs_src,
+                grade == CC_GRADE_MODULE ? "module" : grade == CC_GRADE_LIBRARY ? "library" : "interface");
     return grade;
 }
 
-/* Headers already spliced into the current rewrite (one top-level call of
- * cc_rewrite_local_cch_includes_to_lowered_headers), by realpath.  A repeat
- * include of a spliced header is inert (its include guard would have made it
- * a no-op) and is replaced with a blank line. */
+static int cc__local_cch_is_impl_grade(const char* abs_src) {
+    return cc__local_cch_grade(abs_src) == CC_GRADE_MODULE;
+}
+
+/* A library face splices into each includer, as a member does. */
+static int cc__local_cch_is_library(const char* abs_src) {
+    return cc__local_cch_grade(abs_src) == CC_GRADE_LIBRARY;
+}
+
+
+/* Members already spliced into the module unit being rewritten (one
+ * top-level call of cc_rewrite_local_cch_includes_to_lowered_headers or
+ * cc_splice_module_members), by realpath. A repeat include of a spliced
+ * member is inert (its include guard would have made it a no-op) and is
+ * replaced with a blank line. */
 static char** g_spliced_impl_cch = NULL;
 static size_t g_spliced_impl_cch_count = 0;
 static size_t g_spliced_impl_cch_cap = 0;
-/* Faces extracted to `.h` in this rewrite. A later full splice of the
- * same face would redefine types the include guard cannot see. */
-static char** g_extracted_this_rewrite = NULL;
-static size_t g_extracted_this_rewrite_count = 0;
-static size_t g_extracted_this_rewrite_cap = 0;
-/* 1 when rewriting a .ccs / spliced impl body: impl children splice.
- * 0 when lowering an interface `.cch` → `.h`: omit impl includes that
- * have no owner `.ccs` (the including unit already spliced those
- * leaves). Owner-backed leaves extract to `.h` even in this mode. */
+/* 1 when rewriting a unit: an interface face whose UFCS the header
+ * lowerer cannot resolve splices into the unit. 0 when lowering a face to
+ * its `.h`: every face it includes becomes a `.h` include, spelled
+ * relative to this one. Members splice in both modes. */
 static int g_rewrite_allow_impl_splice = 1;
-/* Top-level `.ccs` of the current include rewrite. Used to distinguish
- * the defining owner TU (`find.ccs` including `find.cch` or
- * `piece_tree.ccs` including `piece_tree_rb.cch`) from every other
- * consumer. */
+/* Top-level unit of the current include rewrite: where a type a face
+ * names but does not define may be declared. */
 static const char* g_rewrite_root_path = NULL;
 static int cc__lowered_header_needs_ufcs_splice(const char* body, size_t body_len);
 static char* cc__rewrite_header_atomic_ufcs(const char* body, size_t body_len);
-static int cc__cch_face_per_tu(const char* abs_cch);
 
-/* Same-stem `foo.cch` → `foo.ccs`, else chapter `foo_bar.cch` → `foo.ccs`. */
-static int cc__cch_stem_owner_ccs_path(const char* abs_cch, char* out, size_t cap) {
+static int cc__try_quoted_cch_path(const char* dir, const char* rel,
+                                   char* child_path, size_t child_cap,
+                                   char* child_abs);
+
+/* ---- modules (spec 1.7, 1.8) ---------------------------------------------
+ *
+ * A unit joins a module by `#pragma(@module) "name"` at file start. The
+ * module root is `name.cch` beside the unit when that file exists, else
+ * the program that declares the name. The root includes its members, and
+ * the module unit is the root with each member include replaced by the
+ * member text. Membership is read off the pragma alone: nothing here
+ * scans a directory or infers an owner from a file name. */
+
+enum {
+    CC_MODULE_NONE = 0,    /* the unit names no module */
+    CC_MODULE_FACE = 1,    /* the root is `name.cch` */
+    CC_MODULE_PROGRAM = 2, /* the root is the `.ccs` that names the module */
+    CC_MODULE_MEMBER = 3   /* a `.ccs` naming a module whose face exists */
+};
+#define CC_MODULE_NAME_CAP 128
+
+typedef struct {
+    char* path;
+    char name[CC_MODULE_NAME_CAP];
+    int failed; /* ill-formed pragma, reported at its line */
+} CCUnitModuleMemo;
+
+static CCUnitModuleMemo* g_unit_module_memo;
+static size_t g_unit_module_memo_count;
+static size_t g_unit_module_memo_cap;
+
+static const char* cc__face_shown(const char* path, char* buf, size_t cap) {
+    return cc_path_rel_to_repo(path ? path : "<input>", buf, cap);
+}
+
+/* Basename of `abs` without its extension. */
+static void cc__path_stem(const char* abs, char* out, size_t cap) {
+    const char* b = cc__pp_base(abs);
+    const char* dot = strrchr(b, '.');
+    size_t n = dot ? (size_t)(dot - b) : strlen(b);
+    if (!out || cap == 0) return;
+    if (n >= cap) n = cap - 1;
+    memcpy(out, b, n);
+    out[n] = 0;
+}
+
+/* The module a unit declares, "" when none. An ill-formed pragma fails
+ * the lowering at its line; the memo reports it once. Returns 0 on that
+ * failure. */
+static int cc__unit_module_name(const char* abs_path, char* name, size_t cap) {
+    size_t i;
+    char* text = NULL;
+    size_t n = 0;
+    char err[192];
+    int err_line = 0;
+    CCUnitModuleMemo* e = NULL;
+    if (name && cap) name[0] = 0;
+    if (!abs_path) return 1;
+    for (i = 0; i < g_unit_module_memo_count; i++) {
+        if (strcmp(g_unit_module_memo[i].path, abs_path) == 0) {
+            e = &g_unit_module_memo[i];
+            break;
+        }
+    }
+    if (!e) {
+        if (g_unit_module_memo_count == g_unit_module_memo_cap) {
+            size_t ncap = g_unit_module_memo_cap ? g_unit_module_memo_cap * 2 : 8;
+            CCUnitModuleMemo* nv = (CCUnitModuleMemo*)realloc(
+                g_unit_module_memo, ncap * sizeof(*nv));
+            if (!nv) return 0;
+            g_unit_module_memo = nv;
+            g_unit_module_memo_cap = ncap;
+        }
+        e = &g_unit_module_memo[g_unit_module_memo_count];
+        memset(e, 0, sizeof(*e));
+        e->path = strdup(abs_path);
+        if (!e->path) return 0;
+        g_unit_module_memo_count++;
+        if (cc__read_file_text(abs_path, &text, &n) == 0 && text) {
+            if (cc_file_start_pragmas(text, n, NULL, NULL, e->name, sizeof(e->name),
+                                      err, sizeof(err), &err_line) != 0) {
+                char rel[PATH_MAX];
+                cc_pp_error_cat(cc__face_shown(abs_path, rel, sizeof(rel)),
+                                err_line, 1, "module", "%s", err);
+                e->failed = 1;
+                e->name[0] = 0;
+            }
+        }
+        free(text);
+    }
+    if (e->failed) {
+        g_local_cch_lower_failed = 1;
+        return 0;
+    }
+    if (name && cap) snprintf(name, cap, "%s", e->name);
+    return 1;
+}
+
+/* The unit the rewrite is inside: the root of the current module, or
+ * nothing. Set at the top of a rewrite and around each header extract. */
+typedef struct {
+    int kind;
+    char name[CC_MODULE_NAME_CAP];
+    char root[PATH_MAX];
     char dir[PATH_MAX];
-    char stem[PATH_MAX];
-    const char* slash;
-    char* cut;
+} CCModuleCtx;
+
+static CCModuleCtx g_module;
+
+static int cc__module_face_beside(const char* dir, const char* name, char* out,
+                                  size_t cap) {
+    if (snprintf(out, cap, "%s/%s.cch", dir, name) >= (int)cap) return 0;
+    return access(out, F_OK) == 0;
+}
+
+/* The context a root establishes. A `.cch` root is the face of the module
+ * its stem names. A `.ccs` root naming a module is that program when no
+ * `name.cch` sits beside it, and a member of the face module otherwise.
+ * Returns 0 when the pragma was ill-formed (reported). */
+static int cc__module_ctx_of_root(const char* root_abs, CCModuleCtx* out) {
+    char face[PATH_MAX];
     size_t n;
-    if (!abs_cch || !out || cap < 5) return 0;
-    n = strlen(abs_cch);
-    if (n < 4 || memcmp(abs_cch + n - 4, ".cch", 4) != 0) return 0;
-    slash = strrchr(abs_cch, '/');
-    if (slash) {
-        size_t dlen = (size_t)(slash - abs_cch);
-        if (dlen + 1 >= sizeof(dir)) return 0;
-        memcpy(dir, abs_cch, dlen);
-        dir[dlen] = '\0';
-        snprintf(stem, sizeof(stem), "%s", slash + 1);
-    } else {
-        memcpy(dir, ".", 2);
-        snprintf(stem, sizeof(stem), "%s", abs_cch);
+    memset(out, 0, sizeof(*out));
+    if (!root_abs || !root_abs[0]) return 1;
+    n = strlen(root_abs);
+    snprintf(out->root, sizeof(out->root), "%s", root_abs);
+    if (cc__dirname_local(root_abs, out->dir, sizeof(out->dir)) != 0) out->dir[0] = 0;
+    if (!cc__unit_module_name(root_abs, out->name, sizeof(out->name))) return 0;
+    if (n >= 4 && strcmp(root_abs + n - 4, ".cch") == 0) {
+        char stem[CC_MODULE_NAME_CAP];
+        cc__path_stem(root_abs, stem, sizeof(stem));
+        if (out->name[0] && strcmp(out->name, stem) != 0 &&
+            cc__module_face_beside(out->dir, out->name, face, sizeof(face))) {
+            /* A member face lowered on its own: the context is its module,
+             * rooted at the face. */
+            out->kind = CC_MODULE_FACE;
+            snprintf(out->root, sizeof(out->root), "%s", face);
+            return 1;
+        }
+        snprintf(out->name, sizeof(out->name), "%s", stem);
+        out->kind = CC_MODULE_FACE;
+        return 1;
     }
-    n = strlen(stem);
-    if (n < 4) return 0;
-    stem[n - 4] = '\0';
-    for (;;) {
-        if (snprintf(out, cap, "%s/%s.ccs", dir, stem) >= (int)cap) return 0;
-        if (access(out, F_OK) == 0) return 1;
-        cut = strrchr(stem, '_');
-        if (!cut || cut == stem) break;
-        *cut = '\0';
+    if (!out->name[0]) {
+        out->kind = CC_MODULE_NONE;
+        return 1;
     }
-    return 0;
+    if (cc__module_face_beside(out->dir, out->name, face, sizeof(face))) {
+        out->kind = CC_MODULE_MEMBER;
+        snprintf(out->root, sizeof(out->root), "%s", face);
+        return 1;
+    }
+    out->kind = CC_MODULE_PROGRAM;
+    return 1;
 }
 
-static int cc__quoted_include_basename_eq(const char* rel, const char* want_base) {
-    const char* slash;
-    if (!rel || !want_base) return 0;
-    slash = strrchr(rel, '/');
-    return strcmp(slash ? slash + 1 : rel, want_base) == 0;
+/* A face is its own module root unless it declares another module. */
+static int cc__face_is_own_root(const char* abs_face) {
+    char name[CC_MODULE_NAME_CAP];
+    char stem[CC_MODULE_NAME_CAP];
+    if (!cc__unit_module_name(abs_face, name, sizeof(name))) return 0;
+    if (!name[0]) return 1;
+    cc__path_stem(abs_face, stem, sizeof(stem));
+    return strcmp(name, stem) == 0;
 }
 
-static int cc__cch_text_quotes_basename(const char* src, size_t n, const char* want_base) {
-    size_t i = 0;
-    if (!src || !want_base) return 0;
-    while (i < n) {
-        size_t line_end = i;
-        size_t path_s = 0, path_e = 0;
+static int cc__path_ends_with(const char* p, const char* suf);
+
+/* A member of a program module: it declares a module with no face
+ * beside it. What it defines, the program defines. */
+static int cc__face_is_program_member(const char* abs) {
+    char name[CC_MODULE_NAME_CAP];
+    char stem[CC_MODULE_NAME_CAP];
+    char dir[PATH_MAX];
+    char face[PATH_MAX];
+    if (!cc__path_ends_with(abs, ".cch")) return 0;
+    if (!cc__unit_module_name(abs, name, sizeof(name)) || !name[0]) return 0;
+    cc__path_stem(abs, stem, sizeof(stem));
+    if (strcmp(name, stem) == 0) return 0;
+    if (cc__dirname_local(abs, dir, sizeof(dir)) != 0) return 0;
+    return !cc__module_face_beside(dir, name, face, sizeof(face));
+}
+
+/* The face of the module `abs` belongs to: `name.cch` beside a member,
+ * else `abs` itself. */
+static void cc__face_module_root(const char* abs, char* out, size_t cap) {
+    char name[CC_MODULE_NAME_CAP];
+    char dir[PATH_MAX];
+    char face[PATH_MAX];
+    snprintf(out, cap, "%s", abs);
+    if (!cc__unit_module_name(abs, name, sizeof(name)) || !name[0]) return;
+    if (cc__dirname_local(abs, dir, sizeof(dir)) != 0) return;
+    if (cc__module_face_beside(dir, name, face, sizeof(face)))
+        snprintf(out, cap, "%s", face);
+}
+
+static int cc__paths_same_module(const char* a, const char* b) {
+    char ra[PATH_MAX], rb[PATH_MAX];
+    cc__face_module_root(a, ra, sizeof(ra));
+    cc__face_module_root(b, rb, sizeof(rb));
+    return strcmp(ra, rb) == 0;
+}
+
+/* Does the quoted include closure of `root` reach `member`? */
+static int cc__root_includes(const char* root, const char* member, int depth) {
+    char dir[PATH_MAX];
+    char* src = NULL;
+    size_t n = 0, i = 0;
+    int hit = 0;
+    if (depth > 32 || !root || !member) return 0;
+    if (cc__dirname_local(root, dir, sizeof(dir)) != 0) return 0;
+    if (cc__read_file_text(root, &src, &n) != 0 || !src) return 0;
+    while (i < n && !hit) {
+        size_t line_end = i, path_s = 0, path_e = 0;
         while (line_end < n && src[line_end] != '\n') line_end++;
         if (cc__match_local_include_line(src + i, line_end - i, &path_s, &path_e)) {
-            char rel[PATH_MAX];
+            char rel[PATH_MAX], child_path[PATH_MAX], child_abs[PATH_MAX];
             size_t rel_len = path_e - path_s;
-            if (rel_len >= sizeof(rel)) rel_len = sizeof(rel) - 1;
-            memcpy(rel, src + i + path_s, rel_len);
-            rel[rel_len] = '\0';
-            if (cc__quoted_include_basename_eq(rel, want_base)) return 1;
+            if (rel_len > 4 && rel_len < sizeof(rel)) {
+                memcpy(rel, src + i + path_s, rel_len);
+                rel[rel_len] = 0;
+                if ((strcmp(rel + rel_len - 4, ".cch") == 0 ||
+                     strcmp(rel + rel_len - 4, ".ccs") == 0) &&
+                    cc__try_quoted_cch_path(dir, rel, child_path, sizeof(child_path),
+                                            child_abs)) {
+                    if (strcmp(child_abs, member) == 0) hit = 1;
+                    else if (strcmp(child_abs, root) != 0)
+                        hit = cc__root_includes(child_abs, member, depth + 1);
+                }
+            }
         }
         i = (line_end < n) ? line_end + 1 : line_end;
     }
-    return 0;
+    free(src);
+    return hit;
 }
 
-/* Same-dir `.ccs` that `#include`s this chapter. Preferred over a
- * face-includer (`workspace.cch` → `workspace.ccs`) so a chapter
- * included from a public face is still owned by the `.ccs` that
- * includes it (`document.ccs` → `utf8.cch`). Several `.ccs` files
- * may include it; the lexicographically first name is the owner. */
-static int cc__cch_direct_ccs_owner_path(const char* abs_cch, char* out, size_t cap) {
+/* A quoted include of `child` from a file inside g_module. 1: a member of
+ * this module, splice it; 0: a face (or the root, `*is_root`), treat as any
+ * include; -1: refused, the error is at the include site and says what to
+ * write. */
+/* A library face that names no module: a member's own text may grade as
+ * a library, but a member is its module's, and the faces it includes are
+ * the module unit's `.h` includes. */
+static int cc__face_is_library_root(const char* abs_src) {
+    char name[CC_MODULE_NAME_CAP];
+    if (!cc__unit_module_name(abs_src, name, sizeof(name)) || name[0]) return 0;
+    return cc__local_cch_is_library(abs_src);
+}
+
+static int cc__member_include_class(const char* child_abs, const char* current_path,
+                                    size_t line_no, int* is_root) {
+    char name[CC_MODULE_NAME_CAP];
+    char stem[CC_MODULE_NAME_CAP];
     char dir[PATH_MAX];
-    char best_name[PATH_MAX];
-    const char* slash;
-    const char* want_base;
-    DIR* dp;
-    struct dirent* de;
-    int have = 0;
-    if (!abs_cch || !out || cap < 5) return 0;
-    slash = strrchr(abs_cch, '/');
-    want_base = slash ? slash + 1 : abs_cch;
-    if (slash) {
-        size_t dlen = (size_t)(slash - abs_cch);
-        if (dlen + 1 >= sizeof(dir)) return 0;
-        memcpy(dir, abs_cch, dlen);
-        dir[dlen] = '\0';
-    } else {
-        memcpy(dir, ".", 2);
+    char face[PATH_MAX];
+    char rel[PATH_MAX];
+    const char* shown = cc__face_shown(current_path, rel, sizeof(rel));
+    size_t n = strlen(child_abs);
+    int is_ccs = n >= 4 && strcmp(child_abs + n - 4, ".ccs") == 0;
+    if (is_root) *is_root = 0;
+    if (g_module.kind != CC_MODULE_NONE && strcmp(child_abs, g_module.root) == 0) {
+        if (is_root) *is_root = 1;
+        return 0;
     }
-    best_name[0] = '\0';
-    dp = opendir(dir);
-    if (!dp) return 0;
-    while ((de = readdir(dp)) != NULL) {
-        char peer[PATH_MAX];
-        char* text = NULL;
-        size_t tn = 0;
-        size_t nl;
-        if (!de->d_name[0] || de->d_name[0] == '.') continue;
-        nl = strlen(de->d_name);
-        if (nl < 5 || strcmp(de->d_name + nl - 4, ".ccs") != 0) continue;
-        if (snprintf(peer, sizeof(peer), "%s/%s", dir, de->d_name) >= (int)sizeof(peer))
-            continue;
-        if (cc__read_file_text(peer, &text, &tn) != 0 || !text) {
-            free(text);
-            continue;
+    if (!cc__unit_module_name(child_abs, name, sizeof(name))) return -1;
+    cc__path_stem(child_abs, stem, sizeof(stem));
+    if (cc__dirname_local(child_abs, dir, sizeof(dir)) != 0) dir[0] = 0;
+    if (!name[0]) {
+        if (!is_ccs) return 0;
+        cc_pp_error_cat(shown, (int)line_no, 1, "module",
+                        "'%s' is a source unit; a quoted include names a face "
+                        "(.cch), or a member of this module (#pragma(@module))",
+                        cc__pp_base(child_abs));
+        return -1;
+    }
+    if (!is_ccs && strcmp(name, stem) == 0) return 0; /* the face of its own module */
+    if (g_module.kind != CC_MODULE_NONE && strcmp(name, g_module.name) == 0) {
+        if (strcmp(dir, g_module.dir) != 0) {
+            cc_pp_error_cat(shown, (int)line_no, 1, "module",
+                            "'%s' names module %s, whose root %s is in another "
+                            "directory; members sit beside their root",
+                            cc__pp_base(child_abs), name, cc__pp_base(g_module.root));
+            return -1;
         }
-        if (cc__cch_text_quotes_basename(text, tn, want_base)) {
-            if (!have || strcmp(de->d_name, best_name) < 0) {
-                snprintf(best_name, sizeof(best_name), "%s", de->d_name);
-                have = 1;
-            }
-        }
-        free(text);
-    }
-    closedir(dp);
-    if (!have) return 0;
-    return snprintf(out, cap, "%s/%s", dir, best_name) < (int)cap;
-}
-
-/* `workspace.cch` includes `ui_types.cch` → `workspace.ccs` owns the guest. */
-static int cc__cch_includer_owner_ccs_path(const char* abs_cch, char* out, size_t cap,
-                                          int depth) {
-    char dir[PATH_MAX];
-    const char* slash;
-    const char* want_base;
-    DIR* dp;
-    struct dirent* de;
-    if (!abs_cch || !out || cap < 5 || depth > 8) return 0;
-    slash = strrchr(abs_cch, '/');
-    want_base = slash ? slash + 1 : abs_cch;
-    if (slash) {
-        size_t dlen = (size_t)(slash - abs_cch);
-        if (dlen + 1 >= sizeof(dir)) return 0;
-        memcpy(dir, abs_cch, dlen);
-        dir[dlen] = '\0';
-    } else {
-        memcpy(dir, ".", 2);
-    }
-    dp = opendir(dir);
-    if (!dp) return 0;
-    while ((de = readdir(dp)) != NULL) {
-        char peer[PATH_MAX];
-        char* text = NULL;
-        size_t tn = 0;
-        size_t nl;
-        if (!de->d_name[0] || de->d_name[0] == '.') continue;
-        nl = strlen(de->d_name);
-        if (nl < 5 || strcmp(de->d_name + nl - 4, ".cch") != 0) continue;
-        if (strcmp(de->d_name, want_base) == 0) continue;
-        if (snprintf(peer, sizeof(peer), "%s/%s", dir, de->d_name) >= (int)sizeof(peer))
-            continue;
-        if (cc__read_file_text(peer, &text, &tn) != 0 || !text) {
-            free(text);
-            continue;
-        }
-        if (cc__cch_text_quotes_basename(text, tn, want_base)) {
-            if (cc__cch_stem_owner_ccs_path(peer, out, cap)) {
-                free(text);
-                closedir(dp);
-                return 1;
-            }
-            if (cc__cch_includer_owner_ccs_path(peer, out, cap, depth + 1)) {
-                free(text);
-                closedir(dp);
-                return 1;
-            }
-        }
-        free(text);
-    }
-    closedir(dp);
-    return 0;
-}
-
-/* Per-process owner path. A miss still walks the directory once; without
- * this, every `#include` of an unowned face (ui.cch) re-reads every
- * same-dir `.ccs` and `.cch`. */
-typedef struct {
-    char* face;
-    char* owner; /* NULL = no owner */
-} CCCchOwnerMemo;
-
-static CCCchOwnerMemo* g_cch_owner_memo = NULL;
-static size_t g_cch_owner_memo_count = 0;
-static size_t g_cch_owner_memo_cap = 0;
-
-static CCCchOwnerMemo* cc__cch_owner_memo_find(const char* abs_cch) {
-    size_t i;
-    if (!abs_cch) return NULL;
-    for (i = 0; i < g_cch_owner_memo_count; i++) {
-        if (strcmp(g_cch_owner_memo[i].face, abs_cch) == 0)
-            return &g_cch_owner_memo[i];
-    }
-    return NULL;
-}
-
-static void cc__cch_owner_memo_set(const char* abs_cch, const char* owner) {
-    CCCchOwnerMemo* e = cc__cch_owner_memo_find(abs_cch);
-    char* copy = NULL;
-    if (e) {
-        free(e->owner);
-        e->owner = (owner && owner[0]) ? strdup(owner) : NULL;
-        return;
-    }
-    if (g_cch_owner_memo_count == g_cch_owner_memo_cap) {
-        size_t cap = g_cch_owner_memo_cap ? g_cch_owner_memo_cap * 2 : 8;
-        CCCchOwnerMemo* nv = (CCCchOwnerMemo*)realloc(g_cch_owner_memo,
-                                                      cap * sizeof(*nv));
-        if (!nv) return;
-        g_cch_owner_memo = nv;
-        g_cch_owner_memo_cap = cap;
-    }
-    copy = strdup(abs_cch);
-    if (!copy) return;
-    g_cch_owner_memo[g_cch_owner_memo_count].face = copy;
-    g_cch_owner_memo[g_cch_owner_memo_count].owner =
-        (owner && owner[0]) ? strdup(owner) : NULL;
-    g_cch_owner_memo_count++;
-}
-
-/* Owner `.ccs`: same-stem / chapter prefix, else a same-dir `.ccs`
- * that includes this chapter, else a same-dir face that includes this
- * one and already has an owner (`workspace.cch` → `ui_types.cch`). */
-static int cc__cch_owner_ccs_path(const char* abs_cch, char* out, size_t cap) {
-    CCCchOwnerMemo* hit;
-    char found[PATH_MAX];
-    int ok;
-    if (!abs_cch || !out || cap < 5) return 0;
-    /* #pragma(@per_tu): private static copy in every TU; no owner .ccs. */
-    if (cc__cch_face_per_tu(abs_cch)) return 0;
-    hit = cc__cch_owner_memo_find(abs_cch);
-    if (hit) {
-        if (!hit->owner || !hit->owner[0]) return 0;
-        return snprintf(out, cap, "%s", hit->owner) < (int)cap;
-    }
-    ok = cc__cch_stem_owner_ccs_path(abs_cch, found, sizeof(found)) ||
-         cc__cch_direct_ccs_owner_path(abs_cch, found, sizeof(found)) ||
-         cc__cch_includer_owner_ccs_path(abs_cch, found, sizeof(found), 0);
-    cc__cch_owner_memo_set(abs_cch, ok ? found : "");
-    if (!ok) return 0;
-    return snprintf(out, cap, "%s", found) < (int)cap;
-}
-
-static int cc__cch_has_owner_ccs(const char* abs_cch) {
-    char own[PATH_MAX];
-    return cc__cch_owner_ccs_path(abs_cch, own, sizeof(own));
-}
-
-static int cc__cch_root_is_defining_ccs(const char* abs_cch) {
-    char own[PATH_MAX];
-    char own_real[PATH_MAX];
-    if (!g_rewrite_root_path || !g_rewrite_root_path[0]) return 0;
-    if (!cc__cch_owner_ccs_path(abs_cch, own, sizeof(own))) return 0;
-    if (realpath(own, own_real) && strcmp(g_rewrite_root_path, own_real) == 0)
         return 1;
-    return strcmp(g_rewrite_root_path, own) == 0;
+    }
+    if (cc__module_face_beside(dir, name, face, sizeof(face))) {
+        if (!cc__root_includes(face, child_abs, 0))
+            cc_pp_error_cat(shown, (int)line_no, 1, "module",
+                            "'%s' declares #pragma(@module) \"%s\" but %s.cch does "
+                            "not include it; add #include \"%s\" to %s.cch",
+                            cc__pp_base(child_abs), name, name, cc__pp_base(child_abs),
+                            name);
+        else
+            cc_pp_error_cat(shown, (int)line_no, 1, "module",
+                            "'%s' is a member of module %s; include the face %s.cch",
+                            cc__pp_base(child_abs), name, name);
+        return -1;
+    }
+    if (is_ccs && strcmp(name, stem) == 0) {
+        cc_pp_error_cat(shown, (int)line_no, 1, "module",
+                        "'%s' is the program of module %s; a unit outside the "
+                        "module cannot include it",
+                        cc__pp_base(child_abs), name);
+        return -1;
+    }
+    if (g_module.kind == CC_MODULE_NONE) {
+        size_t rn = strlen(g_module.root);
+        if (rn >= 4 && strcmp(g_module.root + rn - 4, ".ccs") == 0) {
+            cc_pp_error_cat(shown, (int)line_no, 1, "module",
+                            "'%s' names module %s, but there is no %s.cch beside it "
+                            "and %s declares no #pragma(@module) \"%s\"; add the "
+                            "pragma to %s, or create %s.cch",
+                            cc__pp_base(child_abs), name, name, cc__pp_base(g_module.root),
+                            name, cc__pp_base(g_module.root), name);
+            return -1;
+        }
+    }
+    cc_pp_error_cat(shown, (int)line_no, 1, "module",
+                    "'%s' is a member of program module %s; a unit outside the "
+                    "module cannot include it",
+                    cc__pp_base(child_abs), name);
+    return -1;
 }
 
-/* Owner `.ccs` exists and this rewrite is not that file: extract decls. */
-static int cc__cch_extract_for_other_tus(const char* abs_cch) {
-    if (!cc__cch_has_owner_ccs(abs_cch)) return 0;
-    return !cc__cch_root_is_defining_ccs(abs_cch);
+/* Repo-relative `<face>_cch.c` for the link marker, absolute when the
+ * face sits outside the repository. */
+static void cc__face_module_c_name(const char* abs_face, char* out, size_t cap) {
+    char root[PATH_MAX];
+    const char* rel = abs_face;
+    size_t n;
+    root[0] = 0;
+    if (cc_path_find_repo_root(abs_face, root, sizeof(root)) && root[0] &&
+        strncmp(abs_face, root, strlen(root)) == 0 && abs_face[strlen(root)] == '/')
+        rel = abs_face + strlen(root) + 1;
+    n = strlen(rel);
+    if (n >= 4 && strcmp(rel + n - 4, ".cch") == 0) n -= 4;
+    snprintf(out, cap, "%.*s_cch.c", (int)n, rel);
 }
 
-/* File-scope `foo(...) { ... }` → `foo(...);` so a sibling-backed `.cch`
- * can extract to a host `.h`. Bodies lower in the defining `.ccs`.
- * `static inline` bodies stay — guests need the definition in the `.h`.
- * Bodies under `#if` / `#ifdef` stay — host cpp of this TU selects them
- * (`#define FLAG` before the include). Inner `#if` in a body keeps it. */
+#define CC_MODULE_LINK_MARK "/*cc:link "
+
+/* File-scope `foo(...) { ... }` → `foo(...);` so a module face extracts
+ * to a host `.h`. Bodies lower in the module unit, `<face>_cch.c`, once,
+ * under the defines of that unit; a body under `#if` becomes a prototype
+ * under the same `#if`. `static inline` bodies stay — includers need the
+ * definition in the `.h`. */
 static int cc__fn_decl_is_static_inline(const char* src, size_t n, size_t at,
                                         size_t fn_end);
-static int cc__span_has_bol_if(const char* src, size_t lo, size_t hi) {
-    size_t i = lo;
-    int bol = 1;
-    if (!src || lo >= hi) return 0;
-    while (i < hi) {
-        if (bol) {
-            while (i < hi && (src[i] == ' ' || src[i] == '\t')) i++;
-            if (i < hi && src[i] == '#') {
-                size_t p = i + 1;
-                while (p < hi && (src[p] == ' ' || src[p] == '\t')) p++;
-                if (p + 2 <= hi && src[p] == 'i' && src[p + 1] == 'f')
-                    return 1;
-            }
-        }
-        bol = (src[i] == '\n');
-        i++;
-    }
-    return 0;
-}
-
 static int cc__bol_hash_if_delta(const char* src, size_t n, size_t hash_at) {
     size_t p;
     if (!src || hash_at >= n || src[hash_at] != '#') return 0;
@@ -15897,7 +16141,6 @@ static char* cc__strip_cch_function_bodies(const char* src, size_t n) {
     size_t i = 0;
     int brace = 0;
     int paren = 0;
-    int pp_depth = 0;
     int at_bol = 1;
     char last_sig = 0;
     int changed = 0;
@@ -15910,15 +16153,10 @@ static char* cc__strip_cch_function_bodies(const char* src, size_t n) {
         if (cc_scanner_skip_non_code(&scan, src, n, &i)) {
             size_t k;
             for (k = before; k < i; k++) {
-                if (src[k] == '\n') {
+                if (src[k] == '\n')
                     at_bol = 1;
-                } else if (at_bol && src[k] == '#') {
-                    pp_depth += cc__bol_hash_if_delta(src, n, k);
-                    if (pp_depth < 0) pp_depth = 0;
+                else if (src[k] != ' ' && src[k] != '\t')
                     at_bol = 0;
-                } else if (src[k] != ' ' && src[k] != '\t') {
-                    at_bol = 0;
-                }
             }
             cc_sb_append(&out, &out_len, &out_cap, src + before, i - before);
             continue;
@@ -15930,20 +16168,25 @@ static char* cc__strip_cch_function_bodies(const char* src, size_t n) {
             continue;
         }
         if (at_bol && c == '#') {
-            pp_depth += cc__bol_hash_if_delta(src, n, i);
-            if (pp_depth < 0) pp_depth = 0;
             at_bol = 0;
             cc_sb_append(&out, &out_len, &out_cap, src + i, 1);
             i++;
             continue;
         }
+        if (brace == 0 && paren == 0 && (c == '@' || c == 'C')) {
+            size_t item_end = 0;
+            if (cc__cch_comptime_only_item_end(src, n, i, &item_end)) {
+                cc_sb_append(&out, &out_len, &out_cap, src + i, item_end - i);
+                i = item_end;
+                last_sig = '}';
+                at_bol = 0;
+                continue;
+            }
+        }
         if (c == '{' && brace == 0 && paren == 0 && last_sig == ')') {
             size_t body_r = 0;
             if (cc_find_matching_brace(src, n, i, &body_r)) {
-                int keep = (pp_depth > 0) ||
-                           cc__span_has_bol_if(src, i, body_r + 1) ||
-                           cc__fn_decl_is_static_inline(src, n, i, body_r + 1);
-                if (!keep) {
+                if (!cc__fn_decl_is_static_inline(src, n, i, body_r + 1)) {
                     cc_sb_append_cstr(&out, &out_len, &out_cap, ";");
                     i = body_r + 1;
                     last_sig = ';';
@@ -16054,93 +16297,6 @@ static int cc__file_scope_fn_def_end(const char* src, size_t n, size_t at,
         i++;
     }
     return 0;
-}
-
-/* Definitions the extract stripped: file-scope function bodies and data
- * with initializers. `static inline` stays in the extract — do not paste
- * a second definition into the owner TU. Not a second header — no
- * include guard, typedefs, or prototypes. `#include` stays; a second
- * include is inert. */
-static char* cc__cch_keep_owner_defs(const char* src, size_t n) {
-    char* out = NULL;
-    size_t out_len = 0, out_cap = 0;
-    size_t i = 0;
-    int found = 0;
-    int skipped_inline = 0;
-    CCScannerState scan;
-    if (!src || n == 0) return NULL;
-    cc_scanner_init(&scan);
-    while (i < n) {
-        size_t before = i;
-        size_t fn_end = 0;
-        size_t eq;
-        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
-        if (i >= n) break;
-        if (src[i] == '#') {
-            size_t e = i;
-            int is_inc = 0;
-            size_t p;
-            while (e < n && src[e] != '\n') e++;
-            p = i + 1;
-            while (p < e && (src[p] == ' ' || src[p] == '\t')) p++;
-            if (p + 7 <= e && memcmp(src + p, "include", 7) == 0) is_inc = 1;
-            if (is_inc)
-                cc_sb_append(&out, &out_len, &out_cap, src + i,
-                             ((e < n) ? e + 1 : e) - i);
-            i = (e < n) ? e + 1 : e;
-            continue;
-        }
-        if (cc__file_scope_fn_def_end(src, n, i, &fn_end)) {
-            if (cc__fn_decl_is_static_inline(src, n, i, fn_end)) {
-                skipped_inline = 1;
-                i = fn_end;
-                continue;
-            }
-            cc_sb_append(&out, &out_len, &out_cap, src + i, fn_end - i);
-            if (fn_end > i && src[fn_end - 1] != '\n')
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
-            found = 1;
-            i = fn_end;
-            continue;
-        }
-        eq = cc__file_scope_data_eq(src, n, i);
-        if (eq) {
-            size_t p = i;
-            int is_static = 0;
-            /* `static` data stays in the extracted `.h`. Pasting it
-             * again here is a second definition: the include guard
-             * was stripped with the rest of the header. */
-            while (p < eq) {
-                if (p + 6 <= n && memcmp(src + p, "static", 6) == 0 &&
-                    (p == 0 || !cc_is_ident_char(src[p - 1])) &&
-                    (p + 6 >= n || !cc_is_ident_char(src[p + 6]))) {
-                    is_static = 1;
-                    break;
-                }
-                p++;
-            }
-            if (is_static) {
-                i = cc__skip_file_scope_item(src, n, i);
-                continue;
-            }
-            {
-                size_t e = cc__skip_file_scope_item(src, n, i);
-                cc_sb_append(&out, &out_len, &out_cap, src + i, e - i);
-                found = 1;
-                i = e;
-                continue;
-            }
-        }
-        i = cc__skip_file_scope_item(src, n, i);
-        if (i == before) i++;
-    }
-    if (!found) {
-        free(out);
-        /* Extract kept every `static inline`; owner `.h` already has them. */
-        if (skipped_inline) return strdup("\n");
-        return NULL;
-    }
-    return out;
 }
 
 static int cc__kw_at(const char* src, size_t n, size_t i, const char* kw) {
@@ -16264,64 +16420,53 @@ static char* cc__omit_static_file_scope_fns(const char* src, size_t n) {
     return out;
 }
 
-static int cc__file_scope_fn_name_off(const char* src, size_t n, size_t at,
-                                      char* name, size_t cap, size_t* name_off) {
-    size_t i = at;
-    int paren = 0;
-    CCScannerState scan;
-    if (name && cap) name[0] = 0;
-    if (name_off) *name_off = at;
-    if (!src || at >= n) return 0;
-    cc_scanner_init(&scan);
-    while (i < n) {
-        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
-        if (src[i] == '(' && paren == 0) {
-            size_t b = i;
-            while (b > at && (src[b - 1] == ' ' || src[b - 1] == '\t' ||
-                              src[b - 1] == '\n' || src[b - 1] == '\r'))
-                b--;
-            if (b >= 2 && src[b - 2] == '!' && src[b - 1] == '>') {
-                /* `T !>(E)` — keep scanning for the function name. */
-            } else if (b > at && cc_is_ident_char(src[b - 1])) {
-                size_t s = b;
-                while (s > at && cc_is_ident_char(src[s - 1])) s--;
-                if (name && cap) {
-                    size_t L = b - s;
-                    if (L >= cap) L = cap - 1;
-                    memcpy(name, src + s, L);
-                    name[L] = 0;
-                }
-                if (name_off) *name_off = s;
-                return 1;
-            }
-        }
-        if (src[i] == '(') paren++;
-        else if (src[i] == ')' && paren > 0) paren--;
-        else if ((src[i] == '{' || src[i] == ';') && paren == 0) return 0;
-        i++;
-    }
-    return 0;
-}
-
 /* `static` may sit before `T !>(E)` or other specifiers; `at` may land
  * on `int` of `static int !>(E) f`. Walk back to the declaration start. */
+/* Where the declaration that ends at `at` begins: just after the last
+ * `;`, `}`, directive line or blank line that precedes `at` in code. Read
+ * forward from the start of the text with the scanner, never backward:
+ * a walk back can land inside a comment, and a scan that starts there
+ * takes an apostrophe in prose for a character literal. */
+static size_t cc__decl_start_before(const char* src, size_t n, size_t at) {
+    size_t q = 0;
+    size_t last = 0;
+    int at_bol = 1;
+    CCScannerState scan;
+    cc_scanner_init(&scan);
+    while (q < at && q < n) {
+        size_t before = q;
+        if (cc_scanner_skip_non_code(&scan, src, n, &q)) {
+            size_t k;
+            for (k = before; k < q; k++) at_bol = src[k] == '\n' ? 1 : (src[k] == ' ' || src[k] == '\t') ? at_bol : 0;
+            continue;
+        }
+        if (src[q] == ';' || src[q] == '}') { last = q + 1; at_bol = 0; q++; continue; }
+        if (src[q] == '#' && at_bol) {
+            while (q < n && src[q] != '\n') q++;
+            if (q < n) q++;
+            last = q;
+            at_bol = 1;
+            continue;
+        }
+        if (src[q] == '\n') {
+            if (at_bol) last = q + 1; /* a blank line */
+            at_bol = 1;
+            q++;
+            continue;
+        }
+        if (src[q] != ' ' && src[q] != '\t') at_bol = 0;
+        q++;
+    }
+    return last > at ? at : last;
+}
+
 static int cc__fn_decl_has_static(const char* src, size_t n, size_t at,
                                   size_t fn_end) {
-    size_t lo = at;
+    size_t lo;
     size_t q;
     CCScannerState scan;
     if (!src || at >= n) return 0;
-    while (lo > 0) {
-        char c = src[lo - 1];
-        if (c == ';' || c == '}') break;
-        if (c == '\n') {
-            size_t j = lo - 1;
-            while (j > 0 && (src[j - 1] == ' ' || src[j - 1] == '\t')) j--;
-            if (j > 0 && src[j - 1] == '#') break;
-            if (j == 0 || src[j - 1] == '\n') break;
-        }
-        lo--;
-    }
+    lo = cc__decl_start_before(src, n, at);
     cc_scanner_init(&scan);
     q = lo;
     while (q < fn_end && q < n) {
@@ -16335,21 +16480,11 @@ static int cc__fn_decl_has_static(const char* src, size_t n, size_t at,
 
 static int cc__fn_decl_has_inline(const char* src, size_t n, size_t at,
                                   size_t fn_end) {
-    size_t lo = at;
+    size_t lo;
     size_t q;
     CCScannerState scan;
     if (!src || at >= n) return 0;
-    while (lo > 0) {
-        char c = src[lo - 1];
-        if (c == ';' || c == '}') break;
-        if (c == '\n') {
-            size_t j = lo - 1;
-            while (j > 0 && (src[j - 1] == ' ' || src[j - 1] == '\t')) j--;
-            if (j > 0 && src[j - 1] == '#') break;
-            if (j == 0 || src[j - 1] == '\n') break;
-        }
-        lo--;
-    }
+    lo = cc__decl_start_before(src, n, at);
     cc_scanner_init(&scan);
     q = lo;
     while (q < fn_end && q < n) {
@@ -16368,292 +16503,6 @@ static int cc__fn_decl_is_static_inline(const char* src, size_t n, size_t at,
                                         size_t fn_end) {
     return cc__fn_decl_has_static(src, n, at, fn_end) &&
            cc__fn_decl_has_inline(src, n, at, fn_end);
-}
-
-static void cc__off_line_col(const char* src, size_t n, size_t off, int* line,
-                             int* col) {
-    size_t i;
-    int l = 1, c = 1;
-    if (line) *line = 1;
-    if (col) *col = 1;
-    if (!src) return;
-    if (off > n) off = n;
-    for (i = 0; i < off; i++) {
-        if (src[i] == '\n') {
-            l++;
-            c = 1;
-        } else
-            c++;
-    }
-    if (line) *line = l;
-    if (col) *col = c;
-}
-
-/* 1 if a file-scope function is not `static` (fills name and byte offset). */
-static int cc__cch_first_nonstatic_fn_at(const char* src, size_t n, char* name,
-                                         size_t cap, size_t* off) {
-    size_t i = 0;
-    CCScannerState scan;
-    if (name && cap) name[0] = 0;
-    if (off) *off = 0;
-    if (!src || n == 0) return 0;
-    cc_scanner_init(&scan);
-    while (i < n) {
-        size_t before = i;
-        size_t fn_end = 0;
-        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
-        if (i >= n) break;
-        if (src[i] == '#') {
-            while (i < n && src[i] != '\n') i++;
-            if (i < n) i++;
-            continue;
-        }
-        if (cc__file_scope_fn_def_end(src, n, i, &fn_end)) {
-            if (!cc__fn_decl_has_static(src, n, i, fn_end)) {
-                size_t name_off = i;
-                cc__file_scope_fn_name_off(src, n, i, name, cap, &name_off);
-                if (off) *off = name_off;
-                return 1;
-            }
-            i = fn_end;
-            continue;
-        }
-        i = cc__skip_file_scope_item(src, n, i);
-        if (i == before) i++;
-    }
-    return 0;
-}
-
-static int cc__cch_first_nonstatic_fn(const char* src, size_t n, char* name,
-                                      size_t cap) {
-    return cc__cch_first_nonstatic_fn_at(src, n, name, cap, NULL);
-}
-
-/* First construct that binds the face to an owner: a non-`static` body,
- * else a `static` body with extract-surface `@`. */
-static int cc__cch_first_owner_bound_at(const char* src, size_t n, char* name,
-                                        size_t cap, size_t* off) {
-    size_t i = 0;
-    CCScannerState scan;
-    if (name && cap) name[0] = 0;
-    if (off) *off = 0;
-    if (!src || n == 0) return 0;
-    if (cc__cch_first_nonstatic_fn_at(src, n, name, cap, off)) return 1;
-    cc_scanner_init(&scan);
-    while (i < n) {
-        size_t before = i;
-        size_t fn_end = 0;
-        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
-        if (i >= n) break;
-        if (src[i] == '#') {
-            while (i < n && src[i] != '\n') i++;
-            if (i < n) i++;
-            continue;
-        }
-        if (cc__file_scope_fn_def_end(src, n, i, &fn_end)) {
-            if (cc__cch_range_has_extract_at(src, i, fn_end)) {
-                size_t name_off = i;
-                cc__file_scope_fn_name_off(src, n, i, name, cap, &name_off);
-                if (off) *off = name_off;
-                return 1;
-            }
-            i = fn_end;
-            continue;
-        }
-        {
-            size_t e = cc__skip_file_scope_item(src, n, i);
-            if (e > i && cc__cch_range_has_extract_at(src, i, e)) {
-                if (off) *off = i;
-                return 1;
-            }
-            i = e;
-        }
-        if (i == before) i++;
-    }
-    return 0;
-}
-
-static const char* cc__face_shown(const char* path, char* buf, size_t cap) {
-    return cc_path_rel_to_repo(path ? path : "<input>", buf, cap);
-}
-
-static void cc__face_stem_ccs(const char* face_abs, char* out, size_t cap) {
-    const char* b = cc__pp_base(face_abs);
-    size_t n = strlen(b);
-    if (!out || cap < 5) return;
-    if (n >= 4 && strcmp(b + n - 4, ".cch") == 0 && n - 4 + 4 < cap) {
-        memcpy(out, b, n - 4);
-        memcpy(out + (n - 4), ".ccs", 5);
-    } else
-        snprintf(out, cap, "%s", b);
-}
-
-/* Locus of the owner-bound construct in `face_abs`. 1 if a real offset. */
-static int cc__face_owner_locus(const char* face_abs, char* name, size_t ncap,
-                                int* line, int* col, int* is_nonstatic) {
-    char* src = NULL;
-    size_t n = 0, off = 0;
-    int hit;
-    if (name && ncap) name[0] = 0;
-    if (line) *line = 1;
-    if (col) *col = 1;
-    if (is_nonstatic) *is_nonstatic = 0;
-    if (!face_abs || cc__read_file_text(face_abs, &src, &n) != 0 || !src)
-        return 0;
-    hit = cc__cch_first_nonstatic_fn_at(src, n, name, ncap, &off);
-    if (hit && is_nonstatic) *is_nonstatic = 1;
-    if (!hit) hit = cc__cch_first_owner_bound_at(src, n, name, ncap, &off);
-    if (hit) cc__off_line_col(src, n, off, line, col);
-    free(src);
-    return hit;
-}
-
-static int cc__cch_first_type_name(const char* src, size_t n, char* name,
-                                   size_t cap) {
-    size_t i = 0;
-    CCScannerState scan;
-    if (name && cap) name[0] = 0;
-    if (!src || n == 0) return 0;
-    cc_scanner_init(&scan);
-    while (i < n) {
-        size_t kw = 0;
-        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
-        if (i >= n) break;
-        if (cc__kw_at(src, n, i, "typedef")) kw = 7;
-        else if (cc__kw_at(src, n, i, "struct")) kw = 6;
-        else if (cc__kw_at(src, n, i, "enum")) kw = 4;
-        else if (cc__kw_at(src, n, i, "union")) kw = 5;
-        if (kw) {
-            size_t p = cc_skip_ws_and_comments(src, n, i + kw);
-            if (p < n && cc_is_ident_start(src[p])) {
-                size_t e = p;
-                while (e < n && cc_is_ident_char(src[e])) e++;
-                if (name && cap) {
-                    size_t L = e - p;
-                    if (L >= cap) L = cap - 1;
-                    memcpy(name, src + p, L);
-                    name[L] = 0;
-                }
-                return 1;
-            }
-        }
-        i++;
-    }
-    return 0;
-}
-
-static void cc__face_error_no_owner(const char* face_abs) {
-    char rel[PATH_MAX];
-    char stem[256];
-    char nm[96];
-    int line = 1, col = 1, ns = 0;
-    const char* shown = cc__face_shown(face_abs, rel, sizeof(rel));
-    cc__face_stem_ccs(face_abs, stem, sizeof(stem));
-    (void)cc__face_owner_locus(face_abs, nm, sizeof(nm), &line, &col, &ns);
-    if (ns && nm[0])
-        cc_pp_error_cat(shown, line, col, "face",
-                        "'%s' is a non-static body with no owner .ccs "
-                        "(same-stem %s, or a same-directory .ccs that includes "
-                        "this face)",
-                        nm, stem);
-    else if (nm[0])
-        cc_pp_error_cat(shown, line, col, "face",
-                        "'%s' needs an owner .ccs (same-stem %s, or a "
-                        "same-directory .ccs that includes this face)",
-                        nm, stem);
-    else
-        cc_pp_error_cat(shown, line, col, "face",
-                        "this face has no owner .ccs (same-stem %s, or a "
-                        "same-directory .ccs that includes this face)",
-                        stem);
-}
-
-static void cc__face_error_needs_owner_link(const char* face_abs,
-                                           const char* owner_path) {
-    char rel[PATH_MAX];
-    char nm[96];
-    int line = 1, col = 1, ns = 0;
-    const char* shown = cc__face_shown(face_abs, rel, sizeof(rel));
-    const char* own = cc__pp_base(owner_path);
-    (void)cc__face_owner_locus(face_abs, nm, sizeof(nm), &line, &col, &ns);
-    if (nm[0])
-        cc_pp_error_cat(shown, line, col, "face",
-                        "'%s' is a non-static body; owner is %s (this unit "
-                        "extracted decls; link that unit)",
-                        nm, own);
-    else
-        cc_pp_error_cat(shown, line, col, "face",
-                        "extract of this face needs owner %s in the link set",
-                        own);
-}
-
-static void cc__face_error_multi_splice(const char* face_abs, int ntu,
-                                        const char* tu0, const char* tu1) {
-    char rel[PATH_MAX];
-    char nm[96];
-    int line = 1, col = 1, ns = 0;
-    const char* shown = cc__face_shown(face_abs, rel, sizeof(rel));
-    (void)cc__face_owner_locus(face_abs, nm, sizeof(nm), &line, &col, &ns);
-    if (nm[0])
-        cc_pp_error_cat(shown, line, col, "face",
-                        "'%s' is a non-static body spliced into %d translation "
-                        "units (%s, %s); make it static or give it an owner .ccs",
-                        nm, ntu, cc__pp_base(tu0), cc__pp_base(tu1));
-    else
-        cc_pp_error_cat(shown, line, col, "face",
-                        "unowned face spliced into %d translation units (%s, %s); "
-                        "make its file-scope functions static or give it an "
-                        "owner .ccs",
-                        ntu, cc__pp_base(tu0), cc__pp_base(tu1));
-}
-
-static int cc__cch_per_tu_nonstatic(const char* abs, const char* src, size_t n) {
-    char nm[96];
-    char rel[PATH_MAX];
-    size_t off = 0;
-    int line = 1, col = 1;
-    const char* shown;
-    if (!cc__cch_first_nonstatic_fn_at(src, n, nm, sizeof(nm), &off)) return 0;
-    cc__off_line_col(src, n, off, &line, &col);
-    shown = cc__face_shown(abs, rel, sizeof(rel));
-    cc_pp_error_cat(shown, line, col, "face",
-                    "'%s' is a non-static body; #pragma(@per_tu) requires "
-                    "all file-scope functions static",
-                    nm[0] ? nm : "?");
-    return -1;
-}
-
-static int cc__cch_face_all_static(const char* abs_cch) {
-    char* text = NULL;
-    size_t n = 0;
-    int all;
-    if (!abs_cch || !abs_cch[0]) return 1;
-    if (cc__read_file_text(abs_cch, &text, &n) != 0 || !text) return 1;
-    all = !cc__cch_first_nonstatic_fn(text, n, NULL, 0);
-    free(text);
-    return all;
-}
-
-static int cc__cch_face_per_tu(const char* abs_cch) {
-    char* text = NULL;
-    size_t n = 0;
-    int pt = 0;
-    if (!abs_cch || !abs_cch[0]) return 0;
-    if (cc__read_file_text(abs_cch, &text, &n) != 0 || !text) return 0;
-    (void)cc_file_start_pragmas(text, n, NULL, NULL, &pt, NULL, 0);
-    free(text);
-    return pt;
-}
-
-static int cc__cch_check_per_tu_face(const char* abs_cch) {
-    char* text = NULL;
-    size_t n = 0;
-    int rc;
-    if (!cc__cch_face_per_tu(abs_cch)) return 0;
-    if (cc__read_file_text(abs_cch, &text, &n) != 0 || !text) return 0;
-    rc = cc__cch_per_tu_nonstatic(abs_cch, text, n);
-    free(text);
-    return rc;
 }
 
 /* `=` of a file-scope data definition, or 0. Skips function bodies and
@@ -16709,8 +16558,10 @@ static size_t cc__skip_initializer_eq(const char* src, size_t n, size_t eq) {
     return n;
 }
 
-/* Owned extract: `int xs[] = {1,2};` → `extern int xs[];` so the owner
- * splice is the one definition. `static` data stays. Tentative `int x;`
+/* Module extract: `int xs[] = {1,2};` → `extern int xs[];` so the module
+ * unit is the one definition. `static` data is module-private and is
+ * omitted, its lines left blank; so is a file-scope `_Static_assert`,
+ * which the unit checks and which may name that data. Tentative `int x;`
  * is left (C merges those). */
 static char* cc__extern_file_scope_data_defs(const char* src, size_t n) {
     char* out = NULL;
@@ -16750,7 +16601,7 @@ static char* cc__extern_file_scope_data_defs(const char* src, size_t n) {
         }
         if (at_stmt) {
             size_t p = i;
-            int has_static = 0, has_extern = 0, has_typedef = 0;
+            int has_static = 0, has_extern = 0, has_typedef = 0, has_const = 0;
             int dummy = 0;
             size_t eq;
             size_t lead = cc_skip_ws_and_comments(src, n, i);
@@ -16777,12 +16628,30 @@ static char* cc__extern_file_scope_data_defs(const char* src, size_t n) {
                 if (cc__kw_at(src, n, p, "static")) { has_static = 1; p += 6; continue; }
                 if (cc__kw_at(src, n, p, "extern")) { has_extern = 1; p += 6; continue; }
                 if (cc__kw_at(src, n, p, "typedef")) { has_typedef = 1; p += 7; continue; }
-                if (cc__kw_at(src, n, p, "const") || cc__kw_at(src, n, p, "volatile") ||
-                    cc__kw_at(src, n, p, "inline")) {
+                if (cc__kw_at(src, n, p, "const")) { has_const = 1; p += 5; continue; }
+                if (cc__kw_at(src, n, p, "volatile") || cc__kw_at(src, n, p, "inline")) {
                     while (p < n && cc_is_ident_char(src[p])) p++;
                     continue;
                 }
                 break;
+            }
+            /* `static const` data stays: an includer's copy of an immutable
+             * table is the same table, and the `static inline` bodies the
+             * `.h` keeps may read it. Mutable `static` data is omitted --
+             * an includer's own copy would silently diverge from the
+             * module's. */
+            if (cc__kw_at(src, n, i, "_Static_assert") ||
+                (has_static && !has_typedef && !has_const &&
+                 !cc__static_follows_file_scope_fn(src, n, i, &dummy))) {
+                size_t e = cc__skip_file_scope_item(src, n, i);
+                size_t k;
+                for (k = i; k < e; k++)
+                    if (src[k] == '\n') cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+                changed = 1;
+                i = e;
+                at_stmt = 1;
+                at_bol = (i > 0 && src[i - 1] == '\n');
+                continue;
             }
             if (has_typedef || has_static ||
                 cc__static_follows_file_scope_fn(src, n, i, &dummy)) {
@@ -16974,6 +16843,20 @@ static int cc__ident_at_is_type_def(const char* src, size_t n, size_t i,
                 q--;
                 continue;
             }
+            if (src[q - 1] == ']') {
+                /* `typedef Vec::[T] Name;`: over the generic arguments to
+                 * the family, then on to `typedef`. */
+                size_t depth = 0;
+                while (q > 0) {
+                    q--;
+                    if (src[q] == ']') depth++;
+                    else if (src[q] == '[' && --depth == 0) break;
+                }
+                if (src[q] != '[' || q < 2 || src[q - 1] != ':' || src[q - 2] != ':')
+                    break;
+                q -= 2;
+                continue;
+            }
             if (cc_is_ident_char(src[q - 1])) {
                 size_t e = q;
                 while (q > 0 && cc_is_ident_char(src[q - 1])) q--;
@@ -17043,7 +16926,7 @@ static size_t cc__skip_to_stmt_end(const char* src, size_t n, size_t i);
 
 /* One scan of a buffer → defined type names. Hoist used to call
  * cc__header_defines_type once per identifier (full-file memcmp each
- * time). Shadow self-emit spent ~5 minutes there. */
+ * time). Lowering the compiler's own sources spent ~5 minutes there. */
 typedef struct {
     const char* src;
     size_t n;
@@ -17512,6 +17395,83 @@ static size_t cc__hoist_insert_for_include(const char* this_src, size_t this_n,
  * uses and does not define. Insert after this face's definitions of
  * names the included face uses (`RtxBuf` before `ui_types.h`), not
  * blindly after the preamble. A consumer leaf stays in source order. */
+static char* cc__hoist_quoted_includes(const char* src, size_t n);
+
+/* A module `.h` is the root followed by its members. The faces a member
+ * includes are placed once, ahead of the first member, and the root is
+ * hoisted on its own: a member typedef that spells a name a face also
+ * uses would otherwise pull that face below the member text that needs
+ * it. The include line a member loses stays a blank line, so the
+ * `#line` accounting inside the member holds. */
+static char* cc__module_h_place_member_includes(const char* src, size_t n) {
+    const char* first = NULL;
+    size_t root_n;
+    char* root_h = NULL;
+    char* incs = NULL;
+    size_t incs_len = 0, incs_cap = 0;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i;
+    if (!src || n == 0) return NULL;
+    {
+        size_t k = 0;
+        size_t ml = strlen(CC_IMPL_CCH_BEGIN_MARK);
+        while (k + ml <= n) {
+            if (memcmp(src + k, CC_IMPL_CCH_BEGIN_MARK, ml) == 0) {
+                first = src + k;
+                break;
+            }
+            k++;
+        }
+    }
+    if (!first) return cc__hoist_quoted_includes(src, n);
+    root_n = (size_t)(first - src);
+    root_h = cc__hoist_quoted_includes(src, root_n);
+    if (root_h)
+        cc_sb_append_cstr(&out, &out_len, &out_cap, root_h);
+    else
+        cc_sb_append(&out, &out_len, &out_cap, src, root_n);
+    free(root_h);
+    i = root_n;
+    {
+        char* members = NULL;
+        size_t m_len = 0, m_cap = 0;
+        while (i < n) {
+            size_t line_start = i;
+            size_t line_end;
+            while (i < n && src[i] != '\n') i++;
+            line_end = i;
+            if (i < n && src[i] == '\n') i++;
+            if (cc__line_is_quoted_include(src + line_start, line_end - line_start)) {
+                size_t ln = line_end - line_start;
+                int seen = 0;
+                size_t q = 0;
+                while (q < incs_len) {
+                    size_t e = q;
+                    while (e < incs_len && incs[e] != '\n') e++;
+                    if (e - q == ln && memcmp(incs + q, src + line_start, ln) == 0) {
+                        seen = 1;
+                        break;
+                    }
+                    q = e + 1;
+                }
+                if (!seen) {
+                    cc_sb_append(&incs, &incs_len, &incs_cap, src + line_start, ln);
+                    cc_sb_append_cstr(&incs, &incs_len, &incs_cap, "\n");
+                }
+                if (i > line_end) cc_sb_append_cstr(&members, &m_len, &m_cap, "\n");
+                continue;
+            }
+            cc_sb_append(&members, &m_len, &m_cap, src + line_start, i - line_start);
+        }
+        if (incs) cc_sb_append(&out, &out_len, &out_cap, incs, incs_len);
+        if (members) cc_sb_append(&out, &out_len, &out_cap, members, m_len);
+        free(members);
+    }
+    free(incs);
+    return out;
+}
+
 static char* cc__hoist_quoted_includes(const char* src, size_t n) {
     enum { HOIST_CAP = 16 };
     size_t hoist_lo[HOIST_CAP];
@@ -17635,19 +17595,12 @@ static int cc__cch_base_is_priv(const char* path) {
     return n > 9 && memcmp(b + n - 9, "_priv.cch", 9) == 0;
 }
 
-static int cc__paths_same_owner(const char* a, const char* b) {
-    char oa[PATH_MAX], ob[PATH_MAX], ra[PATH_MAX], rb[PATH_MAX];
-    if (!cc__cch_owner_ccs_path(a, oa, sizeof(oa))) return 0;
-    if (!cc__cch_owner_ccs_path(b, ob, sizeof(ob))) return 0;
-    if (realpath(oa, ra) && realpath(ob, rb)) return strcmp(ra, rb) == 0;
-    return strcmp(oa, ob) == 0;
-}
-
-static int cc__defining_peers_one_owner(char found[][PATH_MAX], int nc) {
+/* Members of one module that define a name are that module (spec 1.7). */
+static int cc__defining_peers_one_module(char found[][PATH_MAX], int nc) {
     int i;
     if (nc < 2) return 1;
     for (i = 1; i < nc; i++) {
-        if (!cc__paths_same_owner(found[0], found[i])) return 0;
+        if (!cc__paths_same_module(found[0], found[i])) return 0;
     }
     return 1;
 }
@@ -18122,7 +18075,7 @@ static int cc__collect_defining_peer_faces(const char* src, size_t n,
                                          names[k], strlen(names[k]), found, 8);
         if (g_local_cch_lower_failed) return -1;
         if (nc >= 2) {
-            if (cc__defining_peers_one_owner(found, nc)) {
+            if (cc__defining_peers_one_module(found, nc)) {
                 int pick = cc__pick_defining_peer(found, nc);
                 if (pick != 0)
                     memcpy(found[0], found[pick], strlen(found[pick]) + 1);
@@ -18151,11 +18104,15 @@ static int cc__collect_defining_peer_faces(const char* src, size_t n,
             g_local_cch_lower_failed = 1;
             return -1;
         }
-        /* Impl-grade with no owner splices into the including .ccs
-         * (`document.cch` from find.ccs). Extracting it from the leaf
-         * is the error; leave the name unresolved in this .h. */
-        if (cc__local_cch_is_impl_grade(found[0]) && !cc__cch_has_owner_ccs(found[0]))
-            continue;
+        /* A member defines the name: the extract includes its face. A
+         * member of a program module has none; the program that splices
+         * it defines the name ahead of this include. */
+        if (cc__face_is_program_member(found[0])) continue;
+        {
+            char root[PATH_MAX];
+            cc__face_module_root(found[0], root, sizeof(root));
+            memcpy(found[0], root, strlen(root) + 1);
+        }
         for (d = 0; d < np; d++) {
             if (strcmp(peers[d], found[0]) == 0) break;
         }
@@ -18226,48 +18183,32 @@ static void cc__reset_spliced_impl_cch(void) {
     size_t i;
     for (i = 0; i < g_spliced_impl_cch_count; i++) free(g_spliced_impl_cch[i]);
     g_spliced_impl_cch_count = 0;
-    for (i = 0; i < g_extracted_this_rewrite_count; i++)
-        free(g_extracted_this_rewrite[i]);
-    g_extracted_this_rewrite_count = 0;
 }
 
-static int cc__face_extracted_this_rewrite(const char* abs_src) {
-    size_t i;
-    if (!abs_src) return 0;
-    for (i = 0; i < g_extracted_this_rewrite_count; i++) {
-        if (strcmp(g_extracted_this_rewrite[i], abs_src) == 0) return 1;
-    }
-    return 0;
+/* The member ledger of the unit being rewritten, set aside so a nested
+ * splice for another purpose (grading a face by its module unit) starts
+ * from an empty one and hands this one back untouched. */
+typedef struct {
+    char** items;
+    size_t count;
+    size_t cap;
+} CCSplicedLedger;
+
+static void cc__spliced_ledger_swap(CCSplicedLedger* saved) {
+    saved->items = g_spliced_impl_cch;
+    saved->count = g_spliced_impl_cch_count;
+    saved->cap = g_spliced_impl_cch_cap;
+    g_spliced_impl_cch = NULL;
+    g_spliced_impl_cch_count = 0;
+    g_spliced_impl_cch_cap = 0;
 }
 
-static void cc__face_unmark_extracted_this_rewrite(const char* abs_src) {
-    size_t i, j;
-    if (!abs_src) return;
-    for (i = 0; i < g_extracted_this_rewrite_count; i++) {
-        if (strcmp(g_extracted_this_rewrite[i], abs_src) != 0) continue;
-        free(g_extracted_this_rewrite[i]);
-        for (j = i + 1; j < g_extracted_this_rewrite_count; j++)
-            g_extracted_this_rewrite[j - 1] = g_extracted_this_rewrite[j];
-        g_extracted_this_rewrite_count--;
-        return;
-    }
-}
-
-static void cc__face_mark_extracted_this_rewrite(const char* abs_src) {
-    if (!abs_src || !abs_src[0] || cc__face_extracted_this_rewrite(abs_src))
-        return;
-    if (g_extracted_this_rewrite_count == g_extracted_this_rewrite_cap) {
-        size_t cap = g_extracted_this_rewrite_cap
-                         ? g_extracted_this_rewrite_cap * 2
-                         : 8;
-        char** nv = (char**)realloc(g_extracted_this_rewrite, cap * sizeof(*nv));
-        if (!nv) return;
-        g_extracted_this_rewrite = nv;
-        g_extracted_this_rewrite_cap = cap;
-    }
-    g_extracted_this_rewrite[g_extracted_this_rewrite_count] = strdup(abs_src);
-    if (!g_extracted_this_rewrite[g_extracted_this_rewrite_count]) return;
-    g_extracted_this_rewrite_count++;
+static void cc__spliced_ledger_restore(const CCSplicedLedger* saved) {
+    cc__reset_spliced_impl_cch();
+    free(g_spliced_impl_cch);
+    g_spliced_impl_cch = saved->items;
+    g_spliced_impl_cch_count = saved->count;
+    g_spliced_impl_cch_cap = saved->cap;
 }
 
 static int cc__impl_cch_was_spliced(const char* abs_src) {
@@ -18369,7 +18310,7 @@ static int cc__resolve_rewrite_root_ccs(const char* input_path,
 }
 
 /* Extra quoted-include root when dirname(current_path) is a cache wrap.
- * Same sources as shadow_fill_quote_dir: SHADOW_QUOTE_DIR, else #line. */
+ * Same sources the lowerer resolves from: SHADOW_QUOTE_DIR, else #line. */
 static void cc__fill_quoted_cch_search_dir(const char* src, size_t n,
                                            char* dst, size_t cap) {
     const char* env;
@@ -18394,77 +18335,6 @@ static int cc__try_quoted_cch_path(const char* dir, const char* rel,
     return realpath(child_path, child_abs) != NULL;
 }
 
-/* Adopting a cached umbrella `.h` does not re-lower nested faces. Mark
- * those quoted `.cch` includes extracted so a later full splice in this
- * TU still fails (include guards do not apply to a splice). Do not mark
- * `abs_src` itself — the owner TU may still splice that face. */
-static void cc__face_mark_extracted_nested_includes(const char* abs_src) {
-    char dir[PATH_MAX];
-    char* src = NULL;
-    size_t n = 0, i = 0;
-    if (!abs_src || cc__dirname_local(abs_src, dir, sizeof(dir)) != 0) return;
-    if (cc__read_file_text(abs_src, &src, &n) != 0 || !src) {
-        free(src);
-        return;
-    }
-    while (i < n) {
-        size_t line_end = i, path_s = 0, path_e = 0;
-        while (line_end < n && src[line_end] != '\n') line_end++;
-        if (cc__match_local_include_line(src + i, line_end - i, &path_s, &path_e)) {
-            char rel[PATH_MAX], child_path[PATH_MAX], child_abs[PATH_MAX];
-            size_t rel_len = path_e - path_s;
-            if (rel_len >= 4 && rel_len < sizeof(rel) &&
-                strncmp(src + i + path_e - 4, ".cch", 4) == 0) {
-                memcpy(rel, src + i + path_s, rel_len);
-                rel[rel_len] = '\0';
-                if (cc__try_quoted_cch_path(dir, rel, child_path,
-                                           sizeof(child_path), child_abs) &&
-                    !cc__face_extracted_this_rewrite(child_abs)) {
-                    cc__face_mark_extracted_this_rewrite(child_abs);
-                    cc__face_mark_extracted_nested_includes(child_abs);
-                }
-            }
-        }
-        i = (line_end < n) ? line_end + 1 : line_end;
-    }
-    free(src);
-}
-
-/* Probe extract of a leftover-UFCS helper is not the product: the owner
- * TU splices instead. Drop this face and its nested quoted includes so
- * that splice is not a redefine. */
-static void cc__face_unmark_extracted_tree(const char* abs_src) {
-    char dir[PATH_MAX];
-    char* src = NULL;
-    size_t n = 0, i = 0;
-    if (!abs_src) return;
-    cc__face_unmark_extracted_this_rewrite(abs_src);
-    if (cc__dirname_local(abs_src, dir, sizeof(dir)) != 0) return;
-    if (cc__read_file_text(abs_src, &src, &n) != 0 || !src) {
-        free(src);
-        return;
-    }
-    while (i < n) {
-        size_t line_end = i, path_s = 0, path_e = 0;
-        while (line_end < n && src[line_end] != '\n') line_end++;
-        if (cc__match_local_include_line(src + i, line_end - i, &path_s,
-                                        &path_e)) {
-            char rel[PATH_MAX], child_path[PATH_MAX], child_abs[PATH_MAX];
-            size_t rel_len = path_e - path_s;
-            if (rel_len >= 4 && rel_len < sizeof(rel) &&
-                strncmp(src + i + path_e - 4, ".cch", 4) == 0) {
-                memcpy(rel, src + i + path_s, rel_len);
-                rel[rel_len] = '\0';
-                if (cc__try_quoted_cch_path(dir, rel, child_path,
-                                           sizeof(child_path), child_abs))
-                    cc__face_unmark_extracted_tree(child_abs);
-            }
-        }
-        i = (line_end < n) ? line_end + 1 : line_end;
-    }
-    free(src);
-}
-
 static int cc__path_ends_with(const char* p, const char* suf) {
     size_t n, s;
     if (!p || !suf) return 0;
@@ -18473,18 +18343,152 @@ static int cc__path_ends_with(const char* p, const char* suf) {
     return n >= s && memcmp(p + n - s, suf, s) == 0;
 }
 
-/* Splice an implementation-grade header into `out`. Direct includes dump
- * the raw face (nested includes rewrite first). Owner include-graph
- * leaves (`owner_defs_only`) splice only the definitions extract
- * stripped — after the parent `.h`, not a second copy of the header.
- * `include_line_no` restores `#line` after the splice.
- * Returns 0 on success, -1 when the header could not be read (caller
- * falls back) or when a defs-only splice finds no definitions. */
+/* Comments of a spliced member become spaces, newline for newline. A
+ * scanner that matches braces over the bytes of an opaque body, knowing
+ * only string and character literals, reads a brace or an apostrophe in
+ * a comment as code. The member text is what those bytes come from; its
+ * comments carry nothing the lowering reads. */
+static void cc__blank_comments_keep_lines(char* buf, size_t n) {
+    size_t i = 0;
+    while (i < n) {
+        char c = buf[i];
+        if (c == '/' && i + 1 < n && buf[i + 1] == '/') {
+            while (i < n && buf[i] != '\n') buf[i++] = ' ';
+            continue;
+        }
+        if (c == '/' && i + 1 < n && buf[i + 1] == '*') {
+            buf[i++] = ' ';
+            buf[i++] = ' ';
+            while (i < n && !(buf[i] == '*' && i + 1 < n && buf[i + 1] == '/')) {
+                if (buf[i] != '\n') buf[i] = ' ';
+                i++;
+            }
+            if (i < n) { buf[i++] = ' '; }
+            if (i < n) { buf[i++] = ' '; }
+            continue;
+        }
+        if (c == '"' || c == '\'' || c == '`') {
+            char q = c;
+            i++;
+            while (i < n && buf[i] != q) {
+                if (buf[i] == '\\' && i + 1 < n) i++;
+                if (q != '`' && buf[i] == '\n') break;
+                i++;
+            }
+            if (i < n) i++;
+            continue;
+        }
+        i++;
+    }
+}
+
+/* Splice a member of the current module into `out` where its include
+ * stood: the raw member text, its own includes rewritten first.
+ * `include_line_no` restores `#line` after the splice. Returns 0 on
+ * success, -1 when the member could not be read or a nested rewrite
+ * refused. */
+/* Blank a face's outer include guard (`#ifndef X` / `#define X` first,
+ * `#endif` last) in text about to be spliced into a unit. A repeat
+ * include of a spliced face is already replaced by the driver, so the
+ * guard decides nothing; left in place it wraps the face's angle
+ * includes in a conditional on the root tape, which keeps them at the
+ * splice instead of with the unit's leading includes, and a generic
+ * instance the face names then goes out ahead of the header that
+ * declares it. Newlines are kept so line numbers hold. */
+static void cc__blank_splice_include_guard(char* body, size_t n) {
+    size_t i = 0, ls, le, p, name_at = 0, name_len = 0;
+    size_t if_ls = 0, if_le = 0, def_ls = 0, def_le = 0, end_ls = 0, end_le = 0;
+    int stage = 0;
+    if (!body || n == 0) return;
+    /* First two directives, past blanks and comments only: `#ifndef NAME`
+     * then `#define NAME`. */
+    while (i < n && stage < 2) {
+        char c = body[i];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') { i++; continue; }
+        if (c == '/' && i + 1 < n && body[i + 1] == '*') {
+            size_t e = i + 2;
+            while (e + 1 < n && !(body[e] == '*' && body[e + 1] == '/')) e++;
+            i = (e + 1 < n) ? e + 2 : n;
+            continue;
+        }
+        if (c == '/' && i + 1 < n && body[i + 1] == '/') {
+            while (i < n && body[i] != '\n') i++;
+            continue;
+        }
+        if (c != '#') return;
+        ls = i;
+        le = ls;
+        while (le < n && body[le] != '\n') le++;
+        p = ls + 1;
+        while (p < le && (body[p] == ' ' || body[p] == '\t')) p++;
+        if (stage == 0) {
+            if (!(p + 6 <= le && memcmp(body + p, "ifndef", 6) == 0 &&
+                  (p + 6 == le || !cc_is_ident_char(body[p + 6]))))
+                return;
+            p += 6;
+            while (p < le && (body[p] == ' ' || body[p] == '\t')) p++;
+            name_at = p;
+            while (p < le && cc_is_ident_char(body[p])) p++;
+            name_len = p - name_at;
+            if (!name_len) return;
+            if_ls = ls; if_le = le;
+        } else {
+            if (!(p + 6 <= le && memcmp(body + p, "define", 6) == 0 &&
+                  (p + 6 == le || !cc_is_ident_char(body[p + 6]))))
+                return;
+            p += 6;
+            while (p < le && (body[p] == ' ' || body[p] == '\t')) p++;
+            if (p + name_len > le || memcmp(body + p, body + name_at, name_len) != 0 ||
+                (p + name_len < le && cc_is_ident_char(body[p + name_len])))
+                return;
+            def_ls = ls; def_le = le;
+        }
+        stage++;
+        i = le;
+    }
+    if (stage < 2) return;
+    /* Last directive: `#endif`, with only blanks and comments after it. */
+    {
+        size_t k = n;
+        while (k > def_le) {
+            size_t e = k;
+            size_t s2;
+            while (e > def_le && (body[e - 1] == '\n' || body[e - 1] == '\r' ||
+                                  body[e - 1] == ' ' || body[e - 1] == '\t'))
+                e--;
+            if (e == def_le) return;
+            s2 = e;
+            while (s2 > def_le && body[s2 - 1] != '\n') s2--;
+            p = s2;
+            while (p < e && (body[p] == ' ' || body[p] == '\t')) p++;
+            if (p + 2 <= e && body[p] == '/' && body[p + 1] == '/') { k = s2; continue; }
+            if (e >= 2 && body[e - 1] == '/' && body[e - 2] == '*') {
+                size_t c = e - 2;
+                while (c > def_le && !(body[c - 1] == '/' && body[c] == '*')) c--;
+                if (c == def_le) return;
+                k = c - 1;
+                continue;
+            }
+            if (body[p] != '#') return;
+            p++;
+            while (p < e && (body[p] == ' ' || body[p] == '\t')) p++;
+            if (!(p + 5 <= e && memcmp(body + p, "endif", 5) == 0 &&
+                  (p + 5 == e || !cc_is_ident_char(body[p + 5]))))
+                return;
+            end_ls = s2; end_le = e;
+            break;
+        }
+        if (!end_le) return;
+    }
+    for (i = if_ls; i < if_le; i++) if (body[i] != '\n') body[i] = ' ';
+    for (i = def_ls; i < def_le; i++) if (body[i] != '\n') body[i] = ' ';
+    for (i = end_ls; i < end_le; i++) if (body[i] != '\n') body[i] = ' ';
+}
+
 static int cc__splice_impl_cch_into(char** out, size_t* out_len, size_t* out_cap,
                                     const char* child_abs,
                                     const char* current_path,
-                                    size_t include_line_no,
-                                    int owner_defs_only) {
+                                    size_t include_line_no) {
     char* body = NULL;
     size_t body_len = 0;
     char* rew = NULL;
@@ -18496,32 +18500,21 @@ static int cc__splice_impl_cch_into(char** out, size_t* out_len, size_t* out_cap
         free(body);
         return -1;
     }
-    if (!owner_defs_only && cc__face_extracted_this_rewrite(child_abs)) {
-        char rel[PATH_MAX];
-        char ty[96];
-        const char* shown = cc__face_shown(child_abs, rel, sizeof(rel));
-        const char* what = cc__pp_base(child_abs);
-        ty[0] = 0;
-        if (cc__cch_first_type_name(body, body_len, ty, sizeof(ty)) && ty[0])
-            what = ty;
-        else {
-            char nm[96];
-            if (cc__cch_first_nonstatic_fn(body, body_len, nm, sizeof(nm)) &&
-                nm[0])
-                what = nm;
-        }
-        cc_pp_error_cat(shown, 1, 1, "face",
-                        "'%s' already extracted in this TU; a splice would "
-                        "redefine '%s'",
-                        cc__pp_base(child_abs), what);
-        g_local_cch_lower_failed = 1;
-        free(body);
-        return -1;
-    }
     if (cc__impl_cch_mark_spliced(child_abs) != 0) {
         free(body);
         return -1;
     }
+    /* A member `.ccs` opens with a unit header; that line is not program
+     * text. Blanked, newline kept, so its lines keep their numbers. */
+    {
+        size_t skip = cc_unit_header_skip(body, body_len);
+        size_t k;
+        for (k = 0; k < skip; k++)
+            if (body[k] != '\n') body[k] = ' ';
+    }
+    if (g_rewrite_allow_impl_splice)
+        cc__blank_comments_keep_lines(body, body_len);
+    cc__blank_splice_include_guard(body, body_len);
     rew = cc__rewrite_local_cch_includes_impl(body, body_len, child_abs);
     if (g_local_cch_lower_failed) {
         free(rew);
@@ -18543,23 +18536,6 @@ static int cc__splice_impl_cch_into(char** out, size_t* out_len, size_t* out_cap
             use = rew;
             use_len = strlen(rew);
         }
-    }
-    if (owner_defs_only) {
-        char* defs = cc__cch_keep_owner_defs(use, use_len);
-        if (!defs) {
-            fprintf(stderr,
-                    "cc: error: owner splice of %s: no function "
-                    "definitions\n",
-                    child_abs);
-            g_local_cch_lower_failed = 1;
-            free(rew);
-            free(body);
-            return -1;
-        }
-        if (rew) free(rew);
-        rew = defs;
-        use = rew;
-        use_len = strlen(rew);
     }
     cc_sb_append_cstr(out, out_len, out_cap, CC_IMPL_CCH_BEGIN_MARK);
     cc_sb_append_cstr(out, out_len, out_cap, child_abs);
@@ -18620,37 +18596,135 @@ static int cc__lowered_h_is_raw_cch(const char* abs_cch, const char* lowered_h,
     return raw;
 }
 
-/* Strictly-before mtime compare (nsec when available). Second-granular
- * st_mtime treats same-second header edits as fresh and reuses stale `.h`. */
-static int cc__stat_mtime_before(const struct stat* a, const struct stat* b) {
-#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || \
-    defined(__NetBSD__)
-    if (a->st_mtimespec.tv_sec != b->st_mtimespec.tv_sec)
-        return a->st_mtimespec.tv_sec < b->st_mtimespec.tv_sec;
-    return a->st_mtimespec.tv_nsec < b->st_mtimespec.tv_nsec;
-#elif defined(__linux__)
-    if (a->st_mtim.tv_sec != b->st_mtim.tv_sec)
-        return a->st_mtim.tv_sec < b->st_mtim.tv_sec;
-    return a->st_mtim.tv_nsec < b->st_mtim.tv_nsec;
-#else
-    return a->st_mtime < b->st_mtime;
-#endif
+
+/* Fold the quoted `.cch` includes of `abs_cch`, recursively, resolved
+ * beside the including file. Each is folded once per key computation. */
+static uint64_t cc__lowered_h_fold_includes(uint64_t h, const char* abs_cch,
+                                            char seen[][PATH_MAX], int* nseen,
+                                            int depth) {
+    char* text = NULL;
+    size_t n = 0;
+    size_t i = 0;
+    char dir[PATH_MAX];
+    int k;
+    if (depth > 32 || !abs_cch) return h;
+    for (k = 0; k < *nseen; k++)
+        if (strcmp(seen[k], abs_cch) == 0) return h;
+    if (*nseen < 256) snprintf(seen[(*nseen)++], PATH_MAX, "%s", abs_cch);
+    if (cc__read_file_text_uncached(abs_cch, &text, &n) != 0 || !text) return h;
+    if (cc__dirname_local(abs_cch, dir, sizeof(dir)) != 0) dir[0] = 0;
+    while (i < n) {
+        size_t ls = i;
+        size_t p;
+        while (i < n && text[i] != '\n') i++;
+        p = ls;
+        while (p < i && (text[p] == ' ' || text[p] == '\t')) p++;
+        if (p < i && text[p] == '#') {
+            p++;
+            while (p < i && (text[p] == ' ' || text[p] == '\t')) p++;
+            if (p + 7 <= i && memcmp(text + p, "include", 7) == 0) {
+                p += 7;
+                while (p < i && (text[p] == ' ' || text[p] == '\t')) p++;
+                if (p < i && text[p] == '"') {
+                    size_t q = p + 1;
+                    while (q < i && text[q] != '"') q++;
+                    if (q < i && q > p + 1) {
+                        char rel[PATH_MAX];
+                        char child[PATH_MAX];
+                        size_t rl = q - (p + 1);
+                        if (rl >= sizeof(rel)) rl = sizeof(rel) - 1;
+                        memcpy(rel, text + p + 1, rl);
+                        rel[rl] = 0;
+                        /* A member `.ccs` is part of the unit as much as a
+                         * `.cch` is: its bytes are in the key. */
+                        if (rl > 4 && (strcmp(rel + rl - 4, ".cch") == 0 ||
+                                       strcmp(rel + rl - 4, ".ccs") == 0)) {
+                            if (rel[0] == '/')
+                                snprintf(child, sizeof(child), "%s", rel);
+                            else
+                                snprintf(child, sizeof(child), "%s/%s", dir[0] ? dir : ".", rel);
+                            h = cc_fold_file_content_u64(h, child);
+                            h = cc__lowered_h_fold_includes(h, child, seen, nseen, depth + 1);
+                        }
+                    }
+                }
+            }
+        }
+        if (i < n) i++;
+    }
+    free(text);
+    return h;
+}
+
+/* The key a lowered `.h` was produced under: the header's bytes, every
+ * quoted `.cch` it includes transitively (its members among them), and
+ * the toolchain that lowered it. Stored beside the `.h` as `<h>.key`; a
+ * mismatch re-lowers. */
+static uint64_t cc__lowered_h_key(const char* abs_cch) {
+    static char seen[256][PATH_MAX];
+    int nseen = 0;
+    uint64_t h = 1469598103934665603ULL;
+    h = cc__key_str(h, "\x03lowered-h:v2");
+    h = cc_fold_file_content_u64(h, abs_cch);
+    h = cc__lowered_h_fold_includes(h, abs_cch, seen, &nseen, 0);
+    h ^= cc_toolchain_content_fp();
+    return h;
+}
+
+/* The key of a module unit `<face>_cch.c`: the `.h` key and the lowerer
+ * that produced the C, since the two lowerers do not agree byte for byte. */
+uint64_t cc_face_module_key(const char* abs_face) {
+    const char* lw = getenv("CC_LOWERER");
+    uint64_t h = cc__lowered_h_key(abs_face);
+    h = cc__key_str(h, "\x03module-c:v1");
+    h = cc__key_str(h, (lw && lw[0]) ? lw : "shadow");
+    if (lw && strcmp(lw, "clean") == 0) {
+        /* The clean lowerer is not in the toolchain fingerprint; its bytes
+         * are part of what produced the C. */
+        const char* tool = getenv("CC_CLEAN_TOOL");
+        char cwd[PATH_MAX], root[PATH_MAX], bin[PATH_MAX];
+        if (!tool || !tool[0]) {
+            root[0] = 0;
+            if (getcwd(cwd, sizeof(cwd)) && cc_path_find_repo_root(cwd, root, sizeof(root)) && root[0]) {
+                snprintf(bin, sizeof(bin), "%s/out/cc/bin/cclower_cc", root);
+                tool = bin;
+            }
+        }
+        if (tool && tool[0]) h = cc_fold_file_content_u64(h, tool);
+        else h = cc__key_str(h, "\x01<no-clean-tool>");
+    }
+    return h;
+}
+
+static void cc__lowered_h_key_path(const char* lowered_h, char* out, size_t cap) {
+    snprintf(out, cap, "%s.key", lowered_h);
+}
+
+static int cc__lowered_h_key_write(const char* lowered_h, uint64_t key) {
+    char kp[PATH_MAX];
+    char text[40];
+    cc__lowered_h_key_path(lowered_h, kp, sizeof(kp));
+    snprintf(text, sizeof(text), "%016llx\n", (unsigned long long)key);
+    return cc__write_file_text(kp, text, strlen(text));
 }
 
 static int cc__lowered_h_fresh(const char* abs_cch, const char* lowered_h) {
-    struct stat hs, cs, os;
-    char own[PATH_MAX];
+    struct stat hs, cs;
+    char kp[PATH_MAX];
+    char text[64];
+    FILE* f;
+    unsigned long long stored = 0;
     if (!abs_cch || !lowered_h || stat(lowered_h, &hs) != 0 || hs.st_size == 0)
         return 0;
     if (stat(abs_cch, &cs) != 0) return 0;
-    /* Reuse only when the lowered file is strictly newer than its source. */
-    if (cc__stat_mtime_before(&hs, &cs)) return 0;
-    if (!cc__stat_mtime_before(&cs, &hs)) return 0;
-    if (cc__cch_owner_ccs_path(abs_cch, own, sizeof(own)) &&
-        stat(own, &os) == 0) {
-        if (cc__stat_mtime_before(&hs, &os)) return 0;
-        if (!cc__stat_mtime_before(&os, &hs)) return 0;
-    }
+    cc__lowered_h_key_path(lowered_h, kp, sizeof(kp));
+    f = fopen(kp, "r");
+    if (!f) return 0;
+    text[0] = 0;
+    if (!fgets(text, sizeof(text), f)) { fclose(f); return 0; }
+    fclose(f);
+    if (sscanf(text, "%llx", &stored) != 1) return 0;
+    if ((uint64_t)stored != cc__lowered_h_key(abs_cch)) return 0;
     if (cc__lowered_h_is_raw_cch(abs_cch, lowered_h, hs.st_size, cs.st_size))
         return 0;
     return 1;
@@ -18680,22 +18754,29 @@ static const char* cc__adopt_lowered_h(const char* abs_src, const char* lowered_
     return g_lowered_local_headers[i].lowered_path;
 }
 
-/* Extracting `c_pp_spike.cch` (include-only) nests `pp_ast_core.cch`.
- * Those leaves have no sibling `.ccs`; the in-progress umbrella is the
- * owner-TU context. A coded umbrella (nested-impl-via-umbrella fail)
- * is not include-only, so this stays 0. */
-static int cc__in_progress_include_only_umbrella(void) {
-    size_t i;
-    for (i = 0; i < g_lowered_local_header_count; i++) {
-        const char* path = g_lowered_local_headers[i].source_path;
-        if (!g_lowered_local_headers[i].in_progress || !path) continue;
-        if (cc__cch_is_include_only(path)) return 1;
-    }
-    return 0;
-}
+static const char* cc__lower_local_cch_header_in(const char* abs_src);
 
+/* A face lowered to its `.h`, with the module context set to that face:
+ * the members it includes splice into the text the extract reads, and
+ * every other face it includes becomes a `.h` include. */
 static const char* cc__lower_local_cch_header(const char* source_path) {
     char abs_src[PATH_MAX];
+    CCModuleCtx saved;
+    const char* r;
+    if (!source_path || !source_path[0]) return NULL;
+    if (!realpath(source_path, abs_src)) return NULL;
+    saved = g_module;
+    if (!cc__module_ctx_of_root(abs_src, &g_module)) {
+        g_module = saved;
+        g_local_cch_lower_failed = 1;
+        return NULL;
+    }
+    r = cc__lower_local_cch_header_in(abs_src);
+    g_module = saved;
+    return r;
+}
+
+static const char* cc__lower_local_cch_header_in(const char* abs_src) {
     char lowered_path[PATH_MAX];
     char lowered_dir[PATH_MAX];
     char lock_path[PATH_MAX];
@@ -18705,8 +18786,9 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
     size_t input_len = 0;
     size_t lowered_idx = (size_t)-1;
     int lock_fd = -1;
-    if (!source_path || !source_path[0]) return NULL;
-    if (!realpath(source_path, abs_src)) return NULL;
+    int is_module;
+    CCSymbolTable* module_syms = NULL;
+    CCSymbolTable* saved_syms = NULL;
     cc__register_included_cch_tree(abs_src);
     for (size_t i = 0; i < g_lowered_local_header_count; ++i) {
         if (strcmp(g_lowered_local_headers[i].source_path, abs_src) == 0) {
@@ -18715,10 +18797,8 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
             /* A failed extract used to leave this slot + a leftover `.h`
              * from an older source. The next rewrite (stage1 after type
              * pass) then reused that file and the compile succeeded. */
-            if (g_lowered_local_headers[i].ready) {
-                cc__face_mark_extracted_nested_includes(abs_src);
+            if (g_lowered_local_headers[i].ready)
                 return g_lowered_local_headers[i].lowered_path;
-            }
         }
     }
     long long t_lower = cc__pp_now_ms();
@@ -18756,18 +18836,19 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
         const char* hit = cc__adopt_lowered_h(abs_src, lowered_path);
         if (hit) {
             if (lock_fd >= 0) { flock(lock_fd, LOCK_UN); close(lock_fd); }
-            cc__face_mark_extracted_nested_includes(abs_src);
             cc__pp_prof("lower_reuse", abs_src, t_lower);
             return hit;
         }
     }
     if (cc__read_file_text(abs_src, &input, &input_len) != 0)
         CC__LOWER_GIVE_UP("read");
-    if (cc__local_cch_is_impl_grade(abs_src) && !cc__cch_has_owner_ccs(abs_src) &&
-        !cc__in_progress_include_only_umbrella()) {
-        cc__face_error_no_owner(abs_src);
-        g_local_cch_lower_failed = 1;
+    /* The grade of the module unit decides the shape of the `.h`: a
+     * module presents prototypes and links its object; an interface face
+     * is the `.h` itself. */
+    is_module = cc__local_cch_is_impl_grade(abs_src);
+    if (g_local_cch_lower_failed) {
         free(input);
+        if (lock_fd >= 0) { flock(lock_fd, LOCK_UN); close(lock_fd); }
         return NULL;
     }
     if (cc__ensure_lowered_local_header_capacity(g_lowered_local_header_count + 1) != 0)
@@ -18790,6 +18871,7 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
         free(input);
         free(rewritten);
         CC__LOWER_ABANDON_SLOT();
+        if (lock_fd >= 0) { flock(lock_fd, LOCK_UN); close(lock_fd); }
         return NULL;
     }
     {
@@ -18810,13 +18892,14 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
             free(input);
             free(rewritten);
             CC__LOWER_ABANDON_SLOT();
+            if (lock_fd >= 0) { flock(lock_fd, LOCK_UN); close(lock_fd); }
             return NULL;
         }
     }
-    /* Owner impl bodies carry `@errhandler` / `@defer` / `?>` the
-     * header subset cannot parse. Guests only need prototypes — strip
+    /* Module bodies carry `@errhandler` / `@defer` / `?>` the header
+     * subset cannot parse. Includers only need prototypes — strip
      * before lower. */
-    if (cc__local_cch_is_impl_grade(abs_src) && cc__cch_has_owner_ccs(abs_src)) {
+    if (is_module) {
         const char* face = rewritten ? rewritten : input;
         size_t face_n = rewritten ? strlen(rewritten) : input_len;
         char* pre;
@@ -18825,6 +18908,33 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
             free(rewritten);
             rewritten = pre;
         }
+    }
+    /* A module `.h` declares the module's types, a packed variant among
+     * them, and that needs the size and niche of every arm. The
+     * registrations that carry them (`@typehooks on CCString` in the
+     * prelude) are in the faces this face includes: the lowering reads
+     * them from its include-expanded text, as the unit does. */
+    if (is_module) {
+        char* expanded = cc_preprocess_include_expanded(abs_src);
+        char* reg = NULL;
+        const char* text;
+        if (!expanded) CC__LOWER_GIVE_UP("include expansion");
+        reg = cc_rewrite_typehooks_to_register(expanded, strlen(expanded));
+        text = reg ? reg : expanded;
+        module_syms = cc_symbols_new();
+        if (!module_syms ||
+            cc_symbols_collect_type_registrations_ex(module_syms, abs_src, text,
+                                                     strlen(text), NULL, NULL,
+                                                     NULL, NULL) != 0) {
+            free(reg);
+            free(expanded);
+            cc_symbols_free(module_syms);
+            CC__LOWER_GIVE_UP("type registrations");
+        }
+        free(reg);
+        free(expanded);
+        saved_syms = cc_unwrap_destroy_get_symbols();
+        cc_unwrap_destroy_set_symbols(module_syms);
     }
     g_header_lower_preserve_tu_state++;
     {
@@ -18835,9 +18945,14 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
         cc__pp_prof("header_string", abs_src, t_hs);
     }
     g_header_lower_preserve_tu_state--;
+    if (is_module) {
+        cc_unwrap_destroy_set_symbols(saved_syms);
+        cc_symbols_free(module_syms);
+        module_syms = NULL;
+    }
     /* Never write raw `.cch` into the `.h` — that looks like a successful lower. */
     if (!lowered) CC__LOWER_GIVE_UP("lower");
-    /* Header lower is text, not shadow UFCS. `flag.store(1)` in a face
+    /* Header lower is text, not the lowerer's UFCS. `flag.store(1)` in a face
      * (pigz_cc cut_short) must become `cc_atomic_store` before the
      * leftover-member-call check. */
     {
@@ -18849,14 +18964,14 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
     }
     /* Bodies already stripped above; this pass is idempotent if lower
      * reintroduced a brace. UFCS in an interface `.cch` stays. */
-    if (cc__local_cch_is_impl_grade(abs_src) && cc__cch_has_owner_ccs(abs_src)) {
+    if (is_module) {
         char* stripped = cc__strip_cch_function_bodies(lowered, strlen(lowered));
         if (stripped) {
             free(lowered);
             lowered = stripped;
         }
-        /* Strip leaves `static int foo();`. Omit that function — guests
-         * do not see a proto. Exported methods are written without static. */
+        /* Strip leaves `static int foo();`. Omit that function — it is
+         * module-private. Exported functions are written without static. */
         {
             char* om = cc__omit_static_file_scope_fns(lowered, strlen(lowered));
             if (om) {
@@ -18873,7 +18988,9 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
         }
     }
     {
-        char* hoisted = cc__hoist_quoted_includes(lowered, strlen(lowered));
+        char* hoisted = is_module
+            ? cc__module_h_place_member_includes(lowered, strlen(lowered))
+            : cc__hoist_quoted_includes(lowered, strlen(lowered));
         if (hoisted) {
             free(lowered);
             lowered = hoisted;
@@ -18887,6 +19004,7 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
             free(input);
             free(rewritten);
             CC__LOWER_ABANDON_SLOT();
+            if (lock_fd >= 0) { flock(lock_fd, LOCK_UN); close(lock_fd); }
             return NULL;
         }
         if (pulled) {
@@ -18894,12 +19012,29 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
             lowered = pulled;
         }
     }
-    /* Leftover `->len()` is not a failed extract. Sibling-less helpers
-     * (map UFCS registered only in the parent TU) splice into the owner
-     * so phase3 can rewrite them. An error here made those includes
-     * uncompilable. */
+    /* A module presents one link marker at the top: the driver compiles
+     * `<face>_cch.c` once and links it into every program whose include
+     * closure reaches this `.h`. */
+    if (is_module) {
+        char cname[PATH_MAX];
+        char* marked = NULL;
+        size_t marked_len = 0, marked_cap = 0;
+        cc__face_module_c_name(abs_src, cname, sizeof(cname));
+        cc_sb_append_cstr(&marked, &marked_len, &marked_cap, CC_MODULE_LINK_MARK);
+        cc_sb_append_cstr(&marked, &marked_len, &marked_cap, cname);
+        cc_sb_append_cstr(&marked, &marked_len, &marked_cap, "*/\n");
+        cc_sb_append_cstr(&marked, &marked_len, &marked_cap, lowered);
+        free(lowered);
+        lowered = marked;
+    }
     if (cc__write_file_text(lowered_path, lowered, strlen(lowered)) != 0)
         CC__LOWER_GIVE_UP("write");
+    /* The key is computed after the write so the include tree reflects
+     * what this lowering read. A key that cannot be written leaves no key,
+     * which re-lowers next time: never a stale hit. */
+    if (cc__lowered_h_key_write(lowered_path, cc__lowered_h_key(abs_src)) != 0)
+        fprintf(stderr, "cc: warning: cannot write %s.key; the header will be re-lowered on every build\n",
+                lowered_path);
 #undef CC__LOWER_GIVE_UP
 #undef CC__LOWER_ABANDON_SLOT
     g_lowered_local_headers[lowered_idx].in_progress = 0;
@@ -18908,65 +19043,8 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
     free(rewritten);
     free(lowered);
     if (lock_fd >= 0) { flock(lock_fd, LOCK_UN); close(lock_fd); }
-    cc__face_mark_extracted_this_rewrite(abs_src);
     cc__pp_prof("lower_cch", abs_src, t_lower);
     return g_lowered_local_headers[lowered_idx].lowered_path;
-}
-
-/* Owner TU extracted an interface face: splice include-graph impl leaves
- * (`ui_types.cch` included from `workspace.cch`) into this unit after
- * the parent `.h`. Guests with their own stem owner (`safe.cch` →
- * `safe.ccs`) stay extracted. */
-static void cc__splice_include_graph_impl_leaves(char** out, size_t* out_len,
-                                                size_t* out_cap,
-                                                const char* parent_abs,
-                                                const char* current_path) {
-    char parent_dir[PATH_MAX];
-    char* src = NULL;
-    size_t n = 0;
-    size_t i = 0;
-    if (!out || !parent_abs || !current_path) return;
-    if (cc__dirname_local(parent_abs, parent_dir, sizeof(parent_dir)) != 0) return;
-    if (cc__read_file_text(parent_abs, &src, &n) != 0 || !src) {
-        free(src);
-        return;
-    }
-    while (i < n) {
-        size_t line_end = i;
-        size_t path_s = 0, path_e = 0;
-        while (line_end < n && src[line_end] != '\n') line_end++;
-        if (cc__match_local_include_line(src + i, line_end - i, &path_s, &path_e)) {
-            char rel[PATH_MAX];
-            char child_path[PATH_MAX];
-            char child_abs[PATH_MAX];
-            size_t rel_len = path_e - path_s;
-            if (rel_len >= 4 && strncmp(src + i + path_e - 4, ".cch", 4) == 0 &&
-                rel_len < sizeof(rel)) {
-                memcpy(rel, src + i + path_s, rel_len);
-                rel[rel_len] = '\0';
-                if (cc__try_quoted_cch_path(parent_dir, rel, child_path,
-                                           sizeof(child_path), child_abs) &&
-                    cc__local_cch_is_impl_grade(child_abs)) {
-                    char stem_own[PATH_MAX];
-                    if (!cc__cch_stem_owner_ccs_path(child_abs, stem_own,
-                                                     sizeof(stem_own)) &&
-                        cc__cch_root_is_defining_ccs(child_abs) &&
-                        !cc__impl_cch_was_spliced(child_abs)) {
-                        size_t line_no = 1;
-                        size_t k;
-                        for (k = 0; k < i; k++)
-                            if (src[k] == '\n') line_no++;
-                        if (cc__splice_impl_cch_into(out, out_len, out_cap,
-                                                     child_abs, current_path,
-                                                     line_no, 1) != 0)
-                            g_local_cch_lower_failed = 1;
-                    }
-                }
-            }
-        }
-        i = (line_end < n) ? line_end + 1 : line_end;
-    }
-    free(src);
 }
 
 static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, const char* current_path) {
@@ -18980,7 +19058,7 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
     if (cc__dirname_local(current_path, current_dir, sizeof(current_dir)) != 0) return NULL;
     /* Unit-header wraps live under unit_native/; quoted `.cch` sits next to
      * the original source.  Try dirname(current) first (C include rules),
-     * then SHADOW_QUOTE_DIR / #line — same roots the tape uses later. */
+     * then SHADOW_QUOTE_DIR / #line — same roots the lowerer uses later. */
     cc__fill_quoted_cch_search_dir(src, n, search_dir, sizeof(search_dir));
     while (i < n) {
         size_t line_end = i;
@@ -18988,12 +19066,15 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
         while (line_end < n && src[line_end] != '\n') line_end++;
         if (cc__match_local_include_line(src + i, line_end - i, &path_s, &path_e)) {
             size_t rel_len = path_e - path_s;
-            if (rel_len >= 4 && strncmp(src + i + path_e - 4, ".cch", 4) == 0) {
+            int is_cch = rel_len >= 4 && strncmp(src + i + path_e - 4, ".cch", 4) == 0;
+            int is_ccs = rel_len >= 4 && strncmp(src + i + path_e - 4, ".ccs", 4) == 0;
+            if (is_cch || is_ccs) {
                 char rel_path[PATH_MAX];
                 char child_path[PATH_MAX];
                 char child_abs[PATH_MAX];
                 const char* lowered_path;
                 int found;
+                size_t line_no = 1;
                 if (rel_len >= sizeof(rel_path)) rel_len = sizeof(rel_path) - 1;
                 memcpy(rel_path, src + i + path_s, rel_len);
                 rel_path[rel_len] = '\0';
@@ -19008,25 +19089,35 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                 if (!found)
                     snprintf(child_path, sizeof(child_path), "%s/%s",
                              current_dir, rel_path);
-                /* Owned faces extract to `.h` and splice owner-bound defs;
-                 * unowned impl faces full-splice (per-TU). Grade is
-                 * per-construct on the extract surface — see
-                 * cc__cch_text_is_impl_grade.
+                for (size_t k = 0; k < i; k++)
+                    if (src[k] == '\n') line_no++;
+                /* A member of this module splices where its include stood
+                 * (spec 1.7); its root is inert here. Every other quoted
+                 * `.cch` is a face and becomes its lowered `.h`, whose
+                 * link marker, when it is a module, the driver honours.
                  *
-                 * Nested UFCS inside an already-spliced impl face still
-                 * splices (redis_db → redis_mem). A `.ccs` that includes
-                 * a UFCS-only header extracts it — one `.foo(` must not
-                 * dump the file into the host TU.
-                 *
-                 * Do not splice every quoted `.cch` included from a `.ccs`.
-                 * That inlines ordinary helpers: autoblock can no longer
-                 * refuse an untyped string pack, and a syntax error in the
-                 * header is blamed on the include site.  Chapter parent
-                 * types stay in scope because the extracted `#include`
-                 * is not hoisted above the TU declarations. */
+                 * An interface face whose UFCS the header lowerer could
+                 * not resolve still splices into the unit: the method may
+                 * bind a registration that lives only in this unit
+                 * (CC_MAP_DECL_UFCS in the .ccs), and an extracted `.h`
+                 * with raw calls fails host compile blaming the header. */
                 if (found) {
-                    int splice_child = cc__local_cch_is_impl_grade(child_abs);
-                    if (!splice_child && g_rewrite_allow_impl_splice) {
+                    int is_root = 0;
+                    int cls = cc__member_include_class(child_abs, current_path,
+                                                       line_no, &is_root);
+                    int splice_child = 0;
+                    if (cls < 0) {
+                        g_local_cch_lower_failed = 1;
+                        free(out);
+                        return NULL;
+                    }
+                    if (cls == 1 || is_root) splice_child = 1;
+                    /* A library face (every definition static, forms the
+                     * header subset cannot lower) is this unit's own copy. */
+                    if (!splice_child && cls == 0 && cc__local_cch_is_library(child_abs))
+                        splice_child = 1;
+                    if (!splice_child && g_rewrite_allow_impl_splice &&
+                        !cc__local_cch_is_impl_grade(child_abs)) {
                         char* child_src = NULL;
                         size_t child_len = 0;
                         int ufcs = 0;
@@ -19035,24 +19126,21 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                             ufcs = cc__lowered_header_needs_ufcs_splice(child_src,
                                                                         child_len);
                         free(child_src);
-                        /* Nested inside a spliced impl face (redis_mem), or
-                         * the defining owner `.ccs` — not every `.ccs`
-                         * that includes an umbrella with one `.foo(`. */
-                        if (ufcs && cc__path_ends_with(current_path, ".cch")) {
-                            /* Nested in a face (redis_mem / impl_cch inner):
-                             * Type_meth lives on the parent. Do not extract. */
+                        if (cc__path_ends_with(current_path, ".cch") &&
+                            (ufcs || cc__face_is_library_root(current_path))) {
+                            /* Nested in spliced text: a member whose leaf
+                             * still has raw UFCS (Type_meth lives on the
+                             * parent), or any leaf of a library face, whose
+                             * types may live on the parent -- a name
+                             * resolved without them can land on a declared
+                             * decoy with the same spelling. It is this
+                             * unit's copy: splice it, do not extract. */
                             splice_child = 1;
-                        } else if (ufcs &&
-                                   cc__cch_root_is_defining_ccs(child_abs)) {
-                            /* Owner TU including its face. Extract when
-                             * `.store(` rewrote to host-C (pigz_cc
-                             * cut_short). Unresolved UFCS splices. */
+                        } else if (ufcs) {
                             const char* lp = cc__lower_local_cch_header(child_abs);
                             char* hb = NULL;
                             size_t hn = 0;
                             if (g_local_cch_lower_failed) {
-                                /* Nested unowned impl (or other loud
-                                 * extract fail): do not splice instead. */
                                 free(out);
                                 return NULL;
                             }
@@ -19060,90 +19148,52 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                                 splice_child = 1;
                             else if (cc__read_file_text(lp, &hb, &hn) == 0 &&
                                      hb &&
-                                     cc__lowered_header_needs_ufcs_splice(hb, hn)) {
-                                cc__face_unmark_extracted_tree(child_abs);
+                                     cc__lowered_header_needs_ufcs_splice(hb, hn))
                                 splice_child = 1;
-                            }
                             free(hb);
                         }
-                        else if (ufcs && !cc__cch_has_owner_ccs(child_abs)) {
-                            /* Sibling-less leaf: its UFCS may bind
-                             * registrations that live only in the parent TU
-                             * (CC_MAP_DECL_UFCS in the .ccs, a TU-local
-                             * generic instance). Lower it standalone and
-                             * splice when method-call UFCS survives — an
-                             * extracted `.h` with raw calls fails host
-                             * compile blaming the header. Resolvable
-                             * headers keep extracting. */
-                            const char* lp = cc__lower_local_cch_header(child_abs);
-                            if (lp) {
-                                char* hb = NULL;
-                                size_t hn = 0;
-                                if (cc__read_file_text(lp, &hb, &hn) == 0 && hb &&
-                                    cc__lowered_header_needs_ufcs_splice(hb, hn)) {
-                                    cc__face_unmark_extracted_tree(child_abs);
-                                    splice_child = 1;
-                                }
-                                free(hb);
-                            }
-                        }
                     }
-                    if (splice_child && cc__cch_extract_for_other_tus(child_abs)) {
-                        /* Other TUs extract decls. Leftover member-call
-                         * UFCS in that `.h` is a leftover-UFCS error, not
-                         * a reason to also splice: the include guard
-                         * cannot see an inline, and extract+splice in one
-                         * TU redefines file-scope `static` data. */
-                        splice_child = 0;
+                    if (g_local_cch_lower_failed) {
+                        free(out);
+                        return NULL;
                     }
-                    if (splice_child && !cc__cch_has_owner_ccs(child_abs) &&
-                        !g_rewrite_allow_impl_splice) {
-                        /* Unowned impl under an include-only umbrella
-                         * (`c_pp_spike.cch` → `pp_ast_core.cch`): extract
-                         * the leaf to `.h` so the owner TU includes
-                         * lowered C. An umbrella with its own decls still
-                         * fails (nested-impl-via-umbrella). */
-                        if (cc__cch_is_include_only(current_path) ||
-                            cc__in_progress_include_only_umbrella())
-                            splice_child = 0;
-                        else {
-                            cc__face_error_no_owner(child_abs);
-                            g_local_cch_lower_failed = 1;
-                            free(out);
-                            return NULL;
-                        }
-                    }
-                    if (splice_child && g_rewrite_allow_impl_splice) {
-                        if (cc__cch_check_per_tu_face(child_abs) != 0) {
-                            g_local_cch_lower_failed = 1;
-                            free(out);
-                            return NULL;
-                        }
-                        if (cc__impl_cch_was_spliced(child_abs)) {
-                            /* Repeat include: the header's guard would make this
-                             * inert; keep a blank line so following lines in this
-                             * file keep their physical numbers. */
+                    if (splice_child) {
+                        if (is_root || cc__impl_cch_was_spliced(child_abs)) {
+                            /* Repeat include: the guard would make this
+                             * inert; keep a blank line so following lines
+                             * in this file keep their physical numbers. */
                             cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
                             changed = 1;
                             i = (line_end < n) ? line_end + 1 : line_end;
                             continue;
                         }
-                        size_t line_no = 1;
-                        for (size_t k = 0; k < i; k++)
-                            if (src[k] == '\n') line_no++;
                         if (cc__splice_impl_cch_into(&out, &out_len, &out_cap,
                                                      child_abs, current_path,
-                                                     line_no, 0) == 0) {
+                                                     line_no) == 0) {
                             changed = 1;
                             i = (line_end < n) ? line_end + 1 : line_end;
                             continue;
                         }
-                        if (g_local_cch_lower_failed) {
-                            free(out);
-                            return NULL;
+                        if (!g_local_cch_lower_failed) {
+                            char rel[PATH_MAX];
+                            cc_pp_error_cat(cc__face_shown(current_path, rel, sizeof(rel)),
+                                            (int)line_no, 1, "module",
+                                            "cannot read '%s' to splice it", child_abs);
+                            g_local_cch_lower_failed = 1;
                         }
-                        /* Unreadable header: fall through to the interface path. */
+                        free(out);
+                        return NULL;
                     }
+                } else if (is_ccs) {
+                    /* Left as written it would reach the host compiler as
+                     * text; the include names nothing that resolves. */
+                    char rel[PATH_MAX];
+                    cc_pp_error_cat(cc__face_shown(current_path, rel, sizeof(rel)),
+                                    (int)line_no, 1, "module",
+                                    "cannot find '%s' beside this unit", rel_path);
+                    g_local_cch_lower_failed = 1;
+                    free(out);
+                    return NULL;
                 }
                 {
                     const char* parent_set = current_path;
@@ -19190,38 +19240,6 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                     }
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "\"");
                     if (line_end < n && src[line_end] == '\n') cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
-                    /* Owner defs after the extracted parent `.h` so names
-                     * that face defines are in scope. The splice is the
-                     * definitions extract stripped, not a second header.
-                     * Direct include of an impl-grade chapter (same stem
-                     * owner) uses the same owner-defs path as nested
-                     * include-graph leaves. */
-                    if (g_rewrite_allow_impl_splice &&
-                        cc__cch_root_is_defining_ccs(found ? child_abs
-                                                           : child_path)) {
-                        const char* face = found ? child_abs : child_path;
-                        if (cc__local_cch_is_impl_grade(face) &&
-                            !cc__impl_cch_was_spliced(face)) {
-                            size_t line_no = 1;
-                            size_t k;
-                            for (k = 0; k < i; k++)
-                                if (src[k] == '\n') line_no++;
-                            if (cc__splice_impl_cch_into(&out, &out_len,
-                                                         &out_cap, face,
-                                                         current_path,
-                                                         line_no, 1) != 0) {
-                                g_local_cch_lower_failed = 1;
-                                free(out);
-                                return NULL;
-                            }
-                        }
-                        cc__splice_include_graph_impl_leaves(
-                            &out, &out_len, &out_cap, face, current_path);
-                        if (g_local_cch_lower_failed) {
-                            free(out);
-                            return NULL;
-                        }
-                    }
                     changed = 1;
                     i = (line_end < n) ? line_end + 1 : line_end;
                     continue;
@@ -19253,178 +19271,633 @@ int cc_prefetch_lower_ccs_includes(const char* ccs_path) {
     return cc_local_header_lower_failed() ? -1 : 0;
 }
 
-typedef struct {
-    char face[PATH_MAX];
-    char tus[8][PATH_MAX];
-    int ntu;
-} CCUnownedSplice;
+/* ---- the member splice, for a lowerer that resolves `.cch` itself -------
+ *
+ * The rewrite above answers two questions in one pass: which members this
+ * module unit is made of, and which lowered `.h` every other quoted
+ * include stands for. Only the first is the clean lowerer's business — it
+ * resolves `.cch` includes and writes their `.h` itself, so an include
+ * rewritten here would hand it the C11 header lowerer's output instead of
+ * its own.
+ *
+ * So this walks the same include lines under the same membership rule and
+ * changes nothing else. A member of the unit's module is replaced by its
+ * text; every other include is left exactly as written, for the lowerer
+ * to resolve. The same walk, on a face, is the module unit a face is
+ * graded and staged by.
+ *
+ * A quoted `.cch` include inside spliced text is spelled relative to the
+ * member, and the file that carries it now is the unit — so it is made
+ * absolute. Left relative it would be looked for beside the unit and
+ * reported missing while it sits beside the member. */
 
-static void cc__path_dir(const char* path, char* dir, size_t cap) {
-    const char* slash;
-    if (!dir || cap == 0) return;
-    if (!path || !path[0]) {
-        snprintf(dir, cap, ".");
-        return;
+/* Members whose text is built but not yet placed: everything included from
+ * a file's opening block lands together at the end of it. */
+#define CC_CLEAN_SPLICE_MAX_PENDING 256
+
+static char* cc__splice_members_into(const char* src, size_t n,
+                                     const char* current_path, int depth);
+
+/* A line of a file's opening block: blank, comment, or a preprocessor
+ * line (the `#!` shebang included). `*in_comment` carries block-comment
+ * state from the previous line. */
+static int cc__line_is_header_shaped(const char* line, size_t len,
+                                     int* in_comment) {
+    size_t p = 0;
+    while (p < len) {
+        if (*in_comment) {
+            if (p + 1 < len && line[p] == '*' && line[p + 1] == '/') {
+                *in_comment = 0;
+                p += 2;
+                continue;
+            }
+            p++;
+            continue;
+        }
+        if (line[p] == ' ' || line[p] == '\t' || line[p] == '\r') {
+            p++;
+            continue;
+        }
+        if (p + 1 < len && line[p] == '/' && line[p + 1] == '*') {
+            *in_comment = 1;
+            p += 2;
+            continue;
+        }
+        if (p + 1 < len && line[p] == '/' && line[p + 1] == '/') return 1;
+        return line[p] == '#';
     }
-    slash = strrchr(path, '/');
-    if (!slash) {
-        snprintf(dir, cap, ".");
-        return;
-    }
-    {
-        size_t dlen = (size_t)(slash - path);
-        if (dlen + 1 >= cap) dlen = cap - 1;
-        memcpy(dir, path, dlen);
-        dir[dlen] = 0;
-    }
+    return 1;
 }
 
-/* Walk quoted `.cch` includes (nested) so an umbrella extract cannot hide
- * an unowned leaf. `parent_extracting` is an interface / guest-owned
- * extract (not a .ccs splice). `parent_include_only` is the include-only
- * umbrella exception used at extract time. */
-static int cc__check_quoted_cch_tree(const char* file_abs, const char* file_dir,
-                                     int parent_extracting,
-                                     int parent_include_only,
-                                     const char owners[][PATH_MAX], int nown,
-                                     const char* tu, CCUnownedSplice* splices,
-                                     int* ns, char visited[][PATH_MAX],
-                                     int* nvis) {
-    char* src = NULL;
-    size_t sn = 0, off = 0;
-    int i;
-    if (!file_abs || !file_abs[0] || !nvis) return 0;
-    for (i = 0; i < *nvis; i++) {
-        if (strcmp(visited[i], file_abs) == 0) return 0;
+/* The member's text under the markers and the `#line` the reference splice
+ * writes, with the member's own includes taken through the same pass. The
+ * caller re-pins `#line` after placing it. Returns a buffer to free, or
+ * NULL when the member cannot be read or a nested pass refused. */
+static char* cc__splice_member_text(const char* child_abs, int depth) {
+    char* body = NULL;
+    size_t body_len = 0;
+    char* rew = NULL;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    const char* use;
+    size_t use_len;
+    char ld[PATH_MAX + 64];
+    if (cc__read_file_text(child_abs, &body, &body_len) != 0 || !body) {
+        free(body);
+        return NULL;
     }
-    if (*nvis >= 128) return 0;
-    snprintf(visited[(*nvis)++], PATH_MAX, "%s", file_abs);
-    if (cc__read_file_text(file_abs, &src, &sn) != 0 || !src) return 0;
-    while (off < sn) {
-        size_t line_end = off;
-        char rel[PATH_MAX];
-        char child_path[PATH_MAX];
-        char face[PATH_MAX];
-        char child_dir[PATH_MAX];
-        char own[PATH_MAX];
-        char own_real[PATH_MAX];
-        int k, j;
-        while (line_end < sn && src[line_end] != '\n') line_end++;
-        if (cc__quoted_include_path(src + off, line_end - off, rel,
-                                    sizeof(rel)) &&
-            cc__try_quoted_cch_path(file_dir, rel, child_path, sizeof(child_path),
-                                    face)) {
-            int child_impl = cc__local_cch_is_impl_grade(face);
-            int child_owned = 0;
-            int child_is_owner_tu = 0;
-            if (child_impl) {
-                if (cc__cch_check_per_tu_face(face) != 0) {
-                    free(src);
-                    return -1;
-                }
-                if (cc__cch_has_owner_ccs(face) &&
-                    cc__cch_owner_ccs_path(face, own, sizeof(own))) {
-                    const char* own_key = realpath(own, own_real) ? own_real
-                                                                  : own;
-                    child_owned = 1;
-                    child_is_owner_tu = (strcmp(tu, own_key) == 0);
-                    if (!child_is_owner_tu) {
-                        int found = 0;
-                        for (k = 0; k < nown; k++) {
-                            if (strcmp(owners[k], own_key) == 0) {
-                                found = 1;
-                                break;
-                            }
-                        }
-                        if (!found) {
-                            cc__face_error_needs_owner_link(face, own);
-                            free(src);
-                            return -1;
-                        }
-                    }
-                } else if (parent_extracting && !parent_include_only) {
-                    cc__face_error_no_owner(face);
-                    free(src);
-                    return -1;
-                } else if (!cc__cch_face_all_static(face)) {
-                    int slot = -1;
-                    for (j = 0; j < *ns; j++) {
-                        if (strcmp(splices[j].face, face) == 0) {
-                            slot = j;
-                            break;
-                        }
-                    }
-                    if (slot < 0 && *ns < 64) {
-                        slot = (*ns)++;
-                        snprintf(splices[slot].face, sizeof(splices[slot].face),
-                                 "%s", face);
-                        splices[slot].ntu = 0;
-                    }
-                    if (slot >= 0 && splices[slot].ntu < 8) {
-                        int have = 0;
-                        for (k = 0; k < splices[slot].ntu; k++) {
-                            if (strcmp(splices[slot].tus[k], tu) == 0)
-                                have = 1;
-                        }
-                        if (!have)
-                            snprintf(splices[slot].tus[splices[slot].ntu++],
-                                     sizeof(splices[slot].tus[0]), "%s", tu);
-                    }
-                }
+    cc__blank_splice_include_guard(body, body_len);
+    rew = cc__splice_members_into(body, body_len, child_abs, depth + 1);
+    if (g_local_cch_lower_failed) {
+        free(rew);
+        free(body);
+        return NULL;
+    }
+    use = rew ? rew : body;
+    use_len = rew ? strlen(rew) : body_len;
+    cc_sb_append_cstr(&out, &out_len, &out_cap, CC_IMPL_CCH_BEGIN_MARK);
+    cc_sb_append_cstr(&out, &out_len, &out_cap, child_abs);
+    cc_sb_append_cstr(&out, &out_len, &out_cap, "*/\n");
+    snprintf(ld, sizeof(ld), "#line 1 \"%s\"\n", child_abs);
+    cc_sb_append_cstr(&out, &out_len, &out_cap, ld);
+    cc_sb_append(&out, &out_len, &out_cap, use, use_len);
+    if (use_len == 0 || use[use_len - 1] != '\n')
+        cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+    cc_sb_append_cstr(&out, &out_len, &out_cap, CC_IMPL_CCH_END_MARK);
+    cc_sb_append_cstr(&out, &out_len, &out_cap, child_abs);
+    cc_sb_append_cstr(&out, &out_len, &out_cap, "*/\n");
+    free(rew);
+    free(body);
+    return out;
+}
+
+static void cc__splice_pin_line(char** out, size_t* out_len, size_t* out_cap,
+                                size_t line_no, const char* path) {
+    char ld[PATH_MAX + 64];
+    snprintf(ld, sizeof(ld), "#line %zu \"%s\"\n", line_no, path);
+    cc_sb_append_cstr(out, out_len, out_cap, ld);
+}
+
+static char* cc__splice_members_into(const char* src, size_t n,
+                                     const char* current_path, int depth) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0;
+    size_t line_no = 1;
+    int changed = 0;
+    int in_header = 1;
+    int in_comment = 0;
+    char* pending[CC_CLEAN_SPLICE_MAX_PENDING];
+    int npend = 0;
+    int k;
+    char current_dir[PATH_MAX];
+    char search_dir[PATH_MAX];
+    if (!src || !current_path) return NULL;
+    /* A member is marked spliced before its own includes are walked, so a
+     * cycle ends at the repeat include and this bound is out of reach.
+     * It still says so rather than returning "nothing changed", which is
+     * what a unit with no includes at all looks like. */
+    if (depth > 128) {
+        fprintf(stderr,
+                "cc: error: member splice nested deeper than 128 at %s\n",
+                current_path);
+        g_local_cch_lower_failed = 1;
+        return NULL;
+    }
+    if (cc__dirname_local(current_path, current_dir, sizeof(current_dir)) != 0)
+        return NULL;
+    cc__fill_quoted_cch_search_dir(src, n, search_dir, sizeof(search_dir));
+    while (i < n) {
+        size_t line_end = i;
+        size_t path_s = 0, path_e = 0;
+        int hdr_line;
+        while (line_end < n && src[line_end] != '\n') line_end++;
+        hdr_line = in_header
+                       ? cc__line_is_header_shaped(src + i, line_end - i,
+                                                   &in_comment)
+                       : 0;
+        /* The opening block ends here: the members it included are placed
+         * now, ahead of the first declaration and behind every include
+         * the block wrote. A member's types are then in scope for the
+         * declarations that follow, and the `.h` of a face this unit
+         * includes is in scope for the spliced text. */
+        if (in_header && !hdr_line) {
+            for (k = 0; k < npend; k++) {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, pending[k]);
+                free(pending[k]);
             }
-            {
-                int child_inc_only = cc__cch_is_include_only(face);
-                int child_extracting = child_impl
-                    ? (child_owned && !child_is_owner_tu)
-                    : !child_inc_only;
-                cc__path_dir(face, child_dir, sizeof(child_dir));
-                if (cc__check_quoted_cch_tree(face, child_dir, child_extracting,
-                                              child_inc_only, owners, nown, tu,
-                                              splices, ns, visited,
-                                              nvis) != 0) {
-                    free(src);
-                    return -1;
+            if (npend) cc__splice_pin_line(&out, &out_len, &out_cap, line_no,
+                                           current_path);
+            npend = 0;
+            in_header = 0;
+        }
+        if (cc__match_local_include_line(src + i, line_end - i, &path_s, &path_e)) {
+            size_t rel_len = path_e - path_s;
+            int is_cch = rel_len >= 4 && strncmp(src + i + path_e - 4, ".cch", 4) == 0;
+            int is_ccs = rel_len >= 4 && strncmp(src + i + path_e - 4, ".ccs", 4) == 0;
+            if ((is_cch || is_ccs) && rel_len < PATH_MAX) {
+                char rel_path[PATH_MAX];
+                char child_path[PATH_MAX];
+                char child_abs[PATH_MAX];
+                int found;
+                memcpy(rel_path, src + i + path_s, rel_len);
+                rel_path[rel_len] = '\0';
+                found = cc__try_quoted_cch_path(current_dir, rel_path, child_path,
+                                                sizeof(child_path), child_abs);
+                if (!found && search_dir[0] &&
+                    strcmp(search_dir, current_dir) != 0)
+                    found = cc__try_quoted_cch_path(search_dir, rel_path,
+                                                    child_path,
+                                                    sizeof(child_path),
+                                                    child_abs);
+                if (found) {
+                    int is_root = 0;
+                    int cls = cc__member_include_class(child_abs, current_path,
+                                                       line_no, &is_root);
+                    if (cls < 0) {
+                        g_local_cch_lower_failed = 1;
+                        goto refuse;
+                    }
+                    /* A member, a library face, or an interface leaf nested
+                     * in a library face being spliced: the leaf's types may
+                     * live on the parent, and a name resolved without them
+                     * can land on a declared decoy with the same spelling.
+                     * Each is this unit's own copy. */
+                    if (cls == 1 || is_root ||
+                        (cls == 0 && (cc__local_cch_is_library(child_abs) ||
+                                      (depth > 0 && cc__face_is_library_root(current_path))))) {
+                        char* member = NULL;
+                        if (is_root || cc__impl_cch_was_spliced(child_abs)) {
+                            /* Repeat include: the guard would make this
+                             * inert; a blank line keeps the lines after it
+                             * at the numbers they were written at. */
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+                            changed = 1;
+                            goto next_line;
+                        }
+                        if (in_header && npend == CC_CLEAN_SPLICE_MAX_PENDING) {
+                            fprintf(stderr,
+                                    "cc: error: more than %d members spliced from "
+                                    "the opening block of %s\n",
+                                    CC_CLEAN_SPLICE_MAX_PENDING, current_path);
+                            g_local_cch_lower_failed = 1;
+                            goto refuse;
+                        }
+                        if (cc__impl_cch_mark_spliced(child_abs) != 0) {
+                            g_local_cch_lower_failed = 1;
+                            goto refuse;
+                        }
+                        member = cc__splice_member_text(child_abs, depth);
+                        if (g_local_cch_lower_failed) {
+                            free(member);
+                            goto refuse;
+                        }
+                        if (!member) {
+                            char rel[PATH_MAX];
+                            cc_pp_error_cat(cc__face_shown(current_path, rel, sizeof(rel)),
+                                            (int)line_no, 1, "module",
+                                            "cannot read '%s' to splice it", child_abs);
+                            g_local_cch_lower_failed = 1;
+                            goto refuse;
+                        }
+                        if (in_header) {
+                            /* The line it stood on becomes blank so the
+                             * lines after it keep their numbers. */
+                            pending[npend++] = member;
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+                        } else {
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, member);
+                            free(member);
+                            cc__splice_pin_line(&out, &out_len, &out_cap,
+                                                line_no + 1, current_path);
+                        }
+                        changed = 1;
+                        goto next_line;
+                    }
+                }
+                if (found && depth > 0) {
+                    cc_sb_append(&out, &out_len, &out_cap, src + i, path_s);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, child_abs);
+                    cc_sb_append(&out, &out_len, &out_cap, src + i + path_e,
+                                 line_end - i - path_e);
+                    if (line_end < n && src[line_end] == '\n')
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+                    changed = 1;
+                    goto next_line;
                 }
             }
         }
-        off = (line_end < sn) ? line_end + 1 : line_end;
+        cc_sb_append(&out, &out_len, &out_cap, src + i, line_end - i);
+        if (line_end < n && src[line_end] == '\n')
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+    next_line:
+        i = (line_end < n) ? line_end + 1 : line_end;
+        line_no++;
+    }
+    /* A file that is opening block all the way down. */
+    for (k = 0; k < npend; k++) {
+        cc_sb_append_cstr(&out, &out_len, &out_cap, pending[k]);
+        free(pending[k]);
+    }
+    npend = 0;
+    if (!changed) {
+        free(out);
+        return NULL;
+    }
+    return out;
+refuse:
+    for (k = 0; k < npend; k++) free(pending[k]);
+    free(out);
+    return NULL;
+}
+
+/* The module unit of a face: its text with its members spliced in, under
+ * a context of its own so the ledger and module of the rewrite in
+ * progress are untouched. NULL when the face has no members (the unit is
+ * the face) or a member refused. */
+static char* cc__module_unit_text(const char* abs_face, const char* src, size_t n) {
+    CCModuleCtx saved = g_module;
+    CCSplicedLedger ledger;
+    char* out;
+    if (!cc__module_ctx_of_root(abs_face, &g_module)) {
+        g_module = saved;
+        return NULL;
+    }
+    cc__spliced_ledger_swap(&ledger);
+    out = cc__splice_members_into(src, n, abs_face, 0);
+    cc__spliced_ledger_restore(&ledger);
+    g_module = saved;
+    return out;
+}
+
+/* The unit a rewrite starts from: its module, when it names one. A `.ccs`
+ * naming a module whose face exists is a member, not a unit of its own —
+ * said here, where the face is known, rather than as a duplicate symbol
+ * at link. Returns 0 on refusal. */
+static int cc__enter_module_root(const char* root_abs) {
+    if (!cc__module_ctx_of_root(root_abs, &g_module)) return 0;
+    if (g_module.kind == CC_MODULE_MEMBER) {
+        char rel[PATH_MAX];
+        cc_pp_error_cat(cc__face_shown(root_abs, rel, sizeof(rel)), 1, 1, "module",
+                        "'%s' declares #pragma(@module) \"%s\": %s is the unit and "
+                        "includes it; build a program that includes %s",
+                        cc__pp_base(root_abs), g_module.name, cc__pp_base(g_module.root),
+                        cc__pp_base(g_module.root));
+        g_local_cch_lower_failed = 1;
+        return 0;
+    }
+    return 1;
+}
+
+char* cc_splice_module_members(const char* src, size_t input_len,
+                               const char* input_path) {
+    if (!src || input_len == 0 || !input_path || !input_path[0]) return NULL;
+    /* One call = one module unit, as for the rewrite: a repeat include of
+     * a member already spliced into it is inert. */
+    g_local_cch_lower_failed = 0;
+    cc__reset_spliced_impl_cch();
+    {
+        const char* saved_root = g_rewrite_root_path;
+        CCModuleCtx saved_module = g_module;
+        char resolved[PATH_MAX];
+        char* spliced = NULL;
+        resolved[0] = 0;
+        if (cc__resolve_rewrite_root_ccs(input_path, src, input_len, resolved,
+                                        sizeof(resolved)))
+            g_rewrite_root_path = resolved;
+        else
+            g_rewrite_root_path = input_path;
+        if (cc__enter_module_root(g_rewrite_root_path))
+            spliced = cc__splice_members_into(src, input_len, input_path, 0);
+        g_module = saved_module;
+        g_rewrite_root_path = saved_root;
+        return spliced;
+    }
+}
+
+/* The includes of a module unit, in order, as its prologue: the angle
+ * includes, then, with `faces_first`, the quoted faces. A lowerer takes
+ * an include as prologue only ahead of the first declaration; under a
+ * face guard, or in a member spliced after the code of the root, the
+ * declarations it hoists would land ahead of the prelude and the host
+ * headers. The lowerer hoists its Result specs and generic instances
+ * ahead of every include, so with `faces_first` the faces that define
+ * their types go first as well. An include under a conditional other than a
+ * guard (`#ifndef NAME` then `#define NAME`) stays where it is. The
+ * members are already spliced into `src`, so a quoted `.cch` left in it
+ * is a face. Repeated where the unit wrote them, the includes are inert. */
+static void cc__unit_prologue_includes(const char* src, size_t n, int faces_first,
+                                       char** out, size_t* len, size_t* cap) {
+    char* copy;
+    char* faces = NULL;
+    size_t faces_len = 0, faces_cap = 0;
+    size_t i = 0;
+    int depth = 0;
+    if (!src || n == 0) return;
+    copy = (char*)malloc(n + 1);
+    if (!copy) return;
+    memcpy(copy, src, n);
+    copy[n] = 0;
+    cc__blank_comments_keep_lines(copy, n);
+    while (i < n) {
+        size_t line_end = i, p, w;
+        while (line_end < n && copy[line_end] != '\n') line_end++;
+        p = i;
+        while (p < line_end && (copy[p] == ' ' || copy[p] == '\t')) p++;
+        if (p < line_end && copy[p] == '#') {
+            p++;
+            while (p < line_end && (copy[p] == ' ' || copy[p] == '\t')) p++;
+            w = p;
+            while (w < line_end && cc_is_ident_char(copy[w])) w++;
+            if (w - p == 7 && memcmp(copy + p, "include", 7) == 0) {
+                size_t q = w;
+                while (q < line_end && (copy[q] == ' ' || copy[q] == '\t')) q++;
+                if (depth == 0 && q < line_end && copy[q] == '<') {
+                    cc_sb_append(out, len, cap, copy + i, line_end - i);
+                    cc_sb_append_cstr(out, len, cap, "\n");
+                } else if (faces_first && depth == 0 && q < line_end && copy[q] == '"' &&
+                           line_end - q > 6 && memcmp(copy + line_end - 5, ".cch\"", 5) == 0) {
+                    size_t ln = line_end - i;
+                    size_t f = 0;
+                    int seen = 0;
+                    while (f < faces_len) {
+                        size_t e = f;
+                        while (e < faces_len && faces[e] != '\n') e++;
+                        if (e - f == ln && memcmp(faces + f, copy + i, ln) == 0) {
+                            seen = 1;
+                            break;
+                        }
+                        f = e + 1;
+                    }
+                    if (!seen) {
+                        cc_sb_append(&faces, &faces_len, &faces_cap, copy + i, ln);
+                        cc_sb_append_cstr(&faces, &faces_len, &faces_cap, "\n");
+                    }
+                }
+            } else if (w - p == 6 && memcmp(copy + p, "ifndef", 6) == 0) {
+                /* A guard: `#ifndef NAME` with `#define NAME` on the next line. */
+                size_t ns = w, ne, q;
+                int guard = 0;
+                while (ns < line_end && (copy[ns] == ' ' || copy[ns] == '\t')) ns++;
+                ne = ns;
+                while (ne < line_end && cc_is_ident_char(copy[ne])) ne++;
+                q = (line_end < n) ? line_end + 1 : line_end;
+                while (q < n && (copy[q] == ' ' || copy[q] == '\t')) q++;
+                if (ne > ns && q < n && copy[q] == '#') {
+                    q++;
+                    while (q < n && (copy[q] == ' ' || copy[q] == '\t')) q++;
+                    if (q + 6 <= n && memcmp(copy + q, "define", 6) == 0) {
+                        q += 6;
+                        while (q < n && (copy[q] == ' ' || copy[q] == '\t')) q++;
+                        if (q + (ne - ns) <= n && memcmp(copy + q, copy + ns, ne - ns) == 0 &&
+                            (q + (ne - ns) >= n || !cc_is_ident_char(copy[q + (ne - ns)])))
+                            guard = 1;
+                    }
+                }
+                if (!guard) depth++;
+            } else if ((w - p == 2 && memcmp(copy + p, "if", 2) == 0) ||
+                       (w - p == 5 && memcmp(copy + p, "ifdef", 5) == 0)) {
+                depth++;
+            } else if (w - p == 5 && memcmp(copy + p, "endif", 5) == 0) {
+                if (depth > 0) depth--;
+            }
+        }
+        i = (line_end < n) ? line_end + 1 : line_end;
+    }
+    if (faces) cc_sb_append(out, len, cap, faces, faces_len);
+    free(faces);
+    free(copy);
+}
+
+char* cc_module_stage_text(const char* abs_face, int members, int faces_first,
+                           size_t* out_len) {
+    char* src = NULL;
+    char* unit = NULL;
+    char* staged = NULL;
+    size_t n = 0, sl = 0, sc = 0, skip;
+    const char* use;
+    size_t use_n;
+    char ld[PATH_MAX + 64];
+    if (out_len) *out_len = 0;
+    if (!abs_face || cc__read_file_text(abs_face, &src, &n) != 0 || !src) {
+        fprintf(stderr, "cc: cannot read module face %s\n", abs_face ? abs_face : "");
+        return NULL;
+    }
+    /* The prologue comes from the whole unit, members included, whether
+     * or not the copy carries them. */
+    unit = cc__module_unit_text(abs_face, src, n);
+    if (g_local_cch_lower_failed) {
+        free(unit);
+        free(src);
+        return NULL;
+    }
+    use = (members && unit) ? unit : src;
+    use_n = (members && unit) ? strlen(unit) : n;
+    /* The unit header is not program text; the copy starts where the
+     * face text does and names its line. */
+    skip = cc_unit_header_skip(use, use_n);
+    use += skip;
+    use_n -= skip;
+    /* The first line names the origin the quoted includes resolve from;
+     * the prologue sits under it, and the text is re-pinned after. */
+    snprintf(ld, sizeof(ld), "#line 1 \"%s\"\n", abs_face);
+    cc_sb_append_cstr(&staged, &sl, &sc, ld);
+    cc__unit_prologue_includes(unit ? unit : src, unit ? strlen(unit) : n, faces_first,
+                               &staged, &sl, &sc);
+    snprintf(ld, sizeof(ld), "#line %d \"%s\"\n", skip ? 2 : 1, abs_face);
+    cc_sb_append_cstr(&staged, &sl, &sc, ld);
+    cc_sb_append(&staged, &sl, &sc, use, use_n);
+    free(unit);
+    free(src);
+    if (out_len) *out_len = sl;
+    return staged;
+}
+
+/* Every module face in the quoted include closure of a unit, each with
+ * the text of its module unit (`#line 1` to the face, members spliced),
+ * for a lowerer that reads faces from disk and needs the unit instead.
+ * Faces that are members, or interface grade, are not modules and are
+ * not reported. 0, or -1 when a face refused or `fn` did. */
+static int cc__module_faces_walk(const char* abs, cc_module_face_fn fn, void* env,
+                                 char*** seen, size_t* nseen, size_t* cseen) {
+    char dir[PATH_MAX];
+    char* src = NULL;
+    size_t n = 0, i = 0;
+    int rc = 0;
+    for (i = 0; i < *nseen; i++)
+        if (strcmp((*seen)[i], abs) == 0) return 0;
+    if (*nseen == *cseen) {
+        size_t cap = *cseen ? *cseen * 2 : 16;
+        char** nv = (char**)realloc(*seen, cap * sizeof(*nv));
+        if (!nv) return -1;
+        *seen = nv;
+        *cseen = cap;
+    }
+    (*seen)[(*nseen)++] = strdup(abs);
+    if (cc__dirname_local(abs, dir, sizeof(dir)) != 0) return 0;
+    if (cc__read_file_text(abs, &src, &n) != 0 || !src) return 0;
+    if (cc__path_ends_with(abs, ".cch") && cc__face_is_own_root(abs) &&
+        cc__local_cch_is_impl_grade(abs)) {
+        size_t sl = 0;
+        char* staged = cc_module_stage_text(abs, 1, 1, &sl);
+        if (!staged) {
+            free(src);
+            return -1;
+        }
+        rc = fn(abs, staged, sl, env);
+        free(staged);
+        if (rc != 0) {
+            free(src);
+            return -1;
+        }
+    }
+    if (g_local_cch_lower_failed) {
+        free(src);
+        return -1;
+    }
+    i = 0;
+    while (i < n) {
+        size_t line_end = i, path_s = 0, path_e = 0;
+        while (line_end < n && src[line_end] != '\n') line_end++;
+        if (cc__match_local_include_line(src + i, line_end - i, &path_s, &path_e)) {
+            char rel[PATH_MAX], child_path[PATH_MAX], child_abs[PATH_MAX];
+            size_t rel_len = path_e - path_s;
+            if (rel_len > 4 && rel_len < sizeof(rel)) {
+                memcpy(rel, src + i + path_s, rel_len);
+                rel[rel_len] = 0;
+                if ((strcmp(rel + rel_len - 4, ".cch") == 0 ||
+                     strcmp(rel + rel_len - 4, ".ccs") == 0) &&
+                    cc__try_quoted_cch_path(dir, rel, child_path, sizeof(child_path),
+                                            child_abs)) {
+                    if (cc__module_faces_walk(child_abs, fn, env, seen, nseen, cseen) != 0) {
+                        free(src);
+                        return -1;
+                    }
+                }
+            }
+        }
+        i = (line_end < n) ? line_end + 1 : line_end;
     }
     free(src);
     return 0;
 }
 
-int cc_check_link_set_faces(const char* const* ccs_paths, int n) {
-    char owners[64][PATH_MAX];
-    int nown = 0;
-    CCUnownedSplice splices[64];
-    int ns = 0;
-    int i, j;
-    if (!ccs_paths || n <= 0) return 0;
-    for (i = 0; i < n && nown < 64; i++) {
-        if (!ccs_paths[i] || !ccs_paths[i][0]) continue;
-        if (realpath(ccs_paths[i], owners[nown]))
-            nown++;
+int cc_module_faces_of_unit(const char* unit_path, cc_module_face_fn fn, void* env) {
+    char abs[PATH_MAX];
+    char** seen = NULL;
+    size_t nseen = 0, cseen = 0, i;
+    int rc;
+    if (!unit_path || !fn) return -1;
+    if (!realpath(unit_path, abs)) snprintf(abs, sizeof(abs), "%s", unit_path);
+    /* A staged copy opens with a `#line` naming the unit it was made from;
+     * the walk starts there, where its quoted includes resolve. */
+    {
+        char* src = NULL;
+        size_t n = 0;
+        char from[PATH_MAX], real[PATH_MAX];
+        if (cc__read_file_text(abs, &src, &n) == 0 && src) {
+            if (cc__quote_file_from_line_bytes(src, n, from, sizeof(from)) &&
+                realpath(from, real))
+                snprintf(abs, sizeof(abs), "%s", real);
+            free(src);
+        }
     }
-    for (i = 0; i < n; i++) {
-        char tu[PATH_MAX];
-        char dir[PATH_MAX];
-        char visited[128][PATH_MAX];
-        int nvis = 0;
-        if (!ccs_paths[i] || !ccs_paths[i][0]) continue;
-        if (!realpath(ccs_paths[i], tu))
-            snprintf(tu, sizeof(tu), "%s", ccs_paths[i]);
-        cc__path_dir(tu, dir, sizeof(dir));
-        if (cc__check_quoted_cch_tree(tu, dir, 0, 0, owners, nown, tu, splices,
-                                      &ns, visited, &nvis) != 0)
-            return -1;
+    rc = cc__module_faces_walk(abs, fn, env, &seen, &nseen, &cseen);
+    for (i = 0; i < nseen; i++) free(seen[i]);
+    free(seen);
+    return rc;
+}
+
+/* Function-like `#define`s whose body carries `@destroy` / `@detach`,
+ * expanded at the use site. See `cc_expand_cc_attr_defines` in the header
+ * for why the clean path needs this and the built-in life macros are
+ * deliberately NOT seeded here: `cc_arena_stack` and its family are the
+ * host preprocessor's on this path, and seeding them would silently
+ * change the body every unit that calls one gets. */
+char* cc_expand_cc_attr_defines(const char* src, size_t n) {
+    CCLifeMacro ms[CC__LIFE_MACRO_MAX];
+    int nm = 0, harvested, changed = 0, round, i;
+    char* cur;
+    size_t cur_n;
+    if (!src || n == 0) return NULL;
+    memset(ms, 0, sizeof(ms));
+    do {
+        harvested = nm;
+        (void)cc__life_harvest(ms, &nm, src, n);
+    } while (nm > harvested);
+    if (nm == 0) return NULL;
+    /* A body is written across lines with `\` splices and the use site is
+     * one line: blanking the splices keeps the expansion on that line, so
+     * every line after it still names the line the user wrote. */
+    for (i = 0; i < nm; i++) {
+        char* b = (char*)ms[i].body;
+        size_t k;
+        if (!ms[i].owned || !b) continue;
+        for (k = 0; k + 1 < ms[i].body_n; k++) {
+            size_t j;
+            if (b[k] != '\\') continue;
+            j = k + 1;
+            if (b[j] == '\r' && j + 1 < ms[i].body_n) j++;
+            if (b[j] != '\n') continue;
+            while (k <= j) b[k++] = ' ';
+            k--;
+        }
     }
-    for (j = 0; j < ns; j++) {
-        if (splices[j].ntu < 2) continue;
-        cc__face_error_multi_splice(splices[j].face, splices[j].ntu,
-                                    splices[j].tus[0], splices[j].tus[1]);
-        return -1;
+    cur = cc__life_expand_once(src, n, ms, nm, &changed);
+    if (!cur) { cc__life_free(ms, nm); return NULL; }
+    cur_n = strlen(cur);
+    for (round = 0; changed && round < 7; round++) {
+        int again = 0;
+        char* nxt = cc__life_expand_once(cur, cur_n, ms, nm, &again);
+        if (!nxt) { free(cur); cc__life_free(ms, nm); return NULL; }
+        free(cur);
+        cur = nxt;
+        cur_n = strlen(cur);
+        changed = again;
     }
-    return 0;
+    cc__life_free(ms, nm);
+    if (cur_n == n && memcmp(cur, src, n) == 0) { free(cur); return NULL; }
+    return cur;
 }
 
 char* cc_rewrite_local_cch_includes_to_lowered_headers(const char* src,
@@ -19438,15 +19911,18 @@ char* cc_rewrite_local_cch_includes_to_lowered_headers(const char* src,
     cc__reset_spliced_impl_cch();
     {
         const char* saved_root = g_rewrite_root_path;
+        CCModuleCtx saved_module = g_module;
         char resolved[PATH_MAX];
-        char* rewritten;
+        char* rewritten = NULL;
         resolved[0] = 0;
         if (cc__resolve_rewrite_root_ccs(input_path, src, input_len, resolved,
                                         sizeof(resolved)))
             g_rewrite_root_path = resolved;
         else
             g_rewrite_root_path = input_path;
-        rewritten = cc__rewrite_local_cch_includes_impl(src, input_len, input_path);
+        if (cc__enter_module_root(g_rewrite_root_path))
+            rewritten = cc__rewrite_local_cch_includes_impl(src, input_len, input_path);
+        g_module = saved_module;
         g_rewrite_root_path = saved_root;
         return rewritten;
     }
@@ -19485,7 +19961,7 @@ static const CCLoweredLocalHeader* cc__find_lowered_header_by_include_path(const
     return NULL;
 }
 
-/* Shadow UFCS maps bare `.store` / `.load` / `.cas` / `.fetch_add` to
+/* The lowerer's UFCS maps bare `.store` / `.load` / `.cas` / `.fetch_add` to
  * `cc_atomic_*`. Header extract is text-only; rewrite those here so a
  * face can keep `g_pipeline_error.store(1)` (pigz_cc). */
 static int cc__atomic_ufcs_meth(const char* s, size_t n, size_t k,
@@ -20560,10 +21036,8 @@ static uint64_t cc__incexp_fold_file_sig(uint64_t h, const char* path) {
         h = cc__incexp_fnv64(path ? path : "", path ? strlen(path) : 0, h);
         return h;
     }
-    h = cc__incexp_fnv64(path, strlen(path), h);
-    h = cc__incexp_fnv64(&st.st_mtime, sizeof(st.st_mtime), h);
-    h = cc__incexp_fnv64(&st.st_size, sizeof(st.st_size), h);
-    return h;
+    /* Bytes, not mtime: two edits in one second must not share a key. */
+    return cc_fold_file_content_u64(h, path);
 }
 
 static uint64_t cc__incexp_disk_key(const char* input_path, const char* repo_root) {
@@ -20580,29 +21054,30 @@ static uint64_t cc__incexp_disk_key(const char* input_path, const char* repo_roo
         h = cc__incexp_fnv64(repo_root, strlen(repo_root), h);
     }
     /* Flag bits that change expand command / grammar splice behavior. */
-    h = cc__incexp_fnv64("|v=3|incexp", 12, h);
+    h = cc__incexp_fnv64("|v=4|incexp", 12, h);
+    {
+        uint64_t tc = cc_toolchain_content_fp();
+        h = cc__incexp_fnv64(&tc, sizeof(tc), h);
+    }
     return h;
 }
 
-/* Verify a deps sidecar: each line is "mtime_sec\tsize\tpath". */
+/* Verify a deps sidecar: each line is "content_hash\tpath". */
 static int cc__incexp_deps_fresh(const char* deps_path) {
     FILE* f = fopen(deps_path, "r");
     char line[2048];
     if (!f) return 0;
     while (fgets(line, sizeof(line), f)) {
-        long long mtime = 0, size = 0;
+        unsigned long long sum = 0;
         char path[1600];
-        struct stat st;
         size_t n = strlen(line);
         while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = '\0';
         if (n == 0) continue;
-        if (sscanf(line, "%lld\t%lld\t%1599[^\n]", &mtime, &size, path) != 3) {
+        if (sscanf(line, "%llx\t%1599[^\n]", &sum, path) != 2) {
             fclose(f);
             return 0;
         }
-        if (stat(path, &st) != 0 ||
-            (long long)st.st_mtime != mtime ||
-            (long long)st.st_size != size) {
+        if (cc_fold_file_content_u64(1469598103934665603ULL, path) != (uint64_t)sum) {
             fclose(f);
             return 0;
         }
@@ -20703,8 +21178,9 @@ static void cc__incexp_disk_store(const char* cache_dir, uint64_t key,
         for (size_t k = 0; k < path_n; ++k) {
             struct stat st;
             if (!paths[k] || stat(paths[k], &st) != 0) continue;
-            fprintf(df, "%lld\t%lld\t%s\n",
-                    (long long)st.st_mtime, (long long)st.st_size, paths[k]);
+            fprintf(df, "%016llx\t%s\n",
+                    (unsigned long long)cc_fold_file_content_u64(1469598103934665603ULL, paths[k]),
+                    paths[k]);
         }
         fclose(bf); bf = NULL;
         fclose(df); df = NULL;
@@ -20951,7 +21427,7 @@ char* cc_preprocess_include_expanded(const char* input_path) {
  * Structural members (`.kind`, `.nfields`, `.name`, `.fields[...]`) are a later
  * D1 increment that reads the type graph; only numeric layout lands here.
  * Runs in `cc__apply_phase1_canonical_passes` (parse path) AND on the
- * shadow_lower emit path (the product `.c` is produced there).
+ * emit path (the product `.c` is produced there).
  *
  * D1.1 adds the *structural* members the compiler can decide by name:
  *   - `.name`    -> `"T"` (constexpr string literal; the display spelling)
@@ -24354,9 +24830,9 @@ static int cc__try_expand_comptime_for(const char* src, size_t n, const char* in
     if (!(p + 3 <= n && memcmp(src + p, "for", 3) == 0 &&
           (p + 3 >= n || !cc_is_ident_char(src[p + 3])))) return 0;
 
-    /* Native shadow's whitelist cannot lower `@comptime for` that lives in a
-     * harvested/spliced `.cch`. Expanding it here looks like success while the
-     * subset still cannot represent the form — refuse loudly. */
+    /* A `@comptime for` that lives in a harvested or spliced `.cch` cannot be
+     * lowered where it lands. Expanding it here looks like success while the
+     * form still has no representation — refuse loudly. */
     {
         const char* bm = CC_IMPL_CCH_BEGIN_MARK;
         const char* em = CC_IMPL_CCH_END_MARK;
@@ -25328,7 +25804,7 @@ static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
              * because its statement has no `!>` / `?>` operator.
              *
              * Visitor unwrap-destroy also runs this rewrite on header /
-             * factory text that never goes through shadow_lower parse. */
+             * factory text the lowerer never parses. */
             if (cc_contains_token_top_level(chain->src, chain->len, "@destroy")) {
                 char* ud_out = NULL;
                 size_t ud_out_len = 0;

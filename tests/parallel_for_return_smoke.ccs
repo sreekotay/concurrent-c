@@ -11,6 +11,7 @@
 static int g_xs[N];
 
 static int go(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     int i;
     @parallel for (i in 0..N) {
         g_xs[i] = 1;

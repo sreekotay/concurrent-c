@@ -1,0 +1,19 @@
+/* A two-slot template as the direct argument of `return cc_ok(...)`.
+ * Binding it to a local first works; the direct form must work too. */
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+
+typedef struct Pair { int l; int r; } Pair;
+
+static CCString !>(CCError) show(Pair p, CCArena a) {
+    return cc_ok(@string(`(${p.l} ${p.r})`, a));
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    Pair p = { .l = 1, .r = 2 };
+    CCString s = show(p, a) !>;
+    println(@string(`${s}`, @scratch));
+    return 0;
+}

@@ -1,0 +1,52 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+#include <stdio.h>
+/* Forty call-local @scratch templates in one function: each is reclaimed after
+ * its call and the shared 1 KiB scratch never spills. */
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    cc_arena_stack(a, kilobytes(4));
+    int v = 100;
+    println(@string(`site 0 value ${v + 0}`, @scratch));
+    println(@string(`site 1 value ${v + 1}`, @scratch));
+    println(@string(`site 2 value ${v + 2}`, @scratch));
+    println(@string(`site 3 value ${v + 3}`, @scratch));
+    println(@string(`site 4 value ${v + 4}`, @scratch));
+    println(@string(`site 5 value ${v + 5}`, @scratch));
+    println(@string(`site 6 value ${v + 6}`, @scratch));
+    println(@string(`site 7 value ${v + 7}`, @scratch));
+    println(@string(`site 8 value ${v + 8}`, @scratch));
+    println(@string(`site 9 value ${v + 9}`, @scratch));
+    println(@string(`site 10 value ${v + 10}`, @scratch));
+    println(@string(`site 11 value ${v + 11}`, @scratch));
+    println(@string(`site 12 value ${v + 12}`, @scratch));
+    println(@string(`site 13 value ${v + 13}`, @scratch));
+    println(@string(`site 14 value ${v + 14}`, @scratch));
+    println(@string(`site 15 value ${v + 15}`, @scratch));
+    println(@string(`site 16 value ${v + 16}`, @scratch));
+    println(@string(`site 17 value ${v + 17}`, @scratch));
+    println(@string(`site 18 value ${v + 18}`, @scratch));
+    println(@string(`site 19 value ${v + 19}`, @scratch));
+    println(@string(`site 20 value ${v + 20}`, @scratch));
+    println(@string(`site 21 value ${v + 21}`, @scratch));
+    println(@string(`site 22 value ${v + 22}`, @scratch));
+    println(@string(`site 23 value ${v + 23}`, @scratch));
+    println(@string(`site 24 value ${v + 24}`, @scratch));
+    println(@string(`site 25 value ${v + 25}`, @scratch));
+    println(@string(`site 26 value ${v + 26}`, @scratch));
+    println(@string(`site 27 value ${v + 27}`, @scratch));
+    println(@string(`site 28 value ${v + 28}`, @scratch));
+    println(@string(`site 29 value ${v + 29}`, @scratch));
+    println(@string(`site 30 value ${v + 30}`, @scratch));
+    println(@string(`site 31 value ${v + 31}`, @scratch));
+    println(@string(`site 32 value ${v + 32}`, @scratch));
+    println(@string(`site 33 value ${v + 33}`, @scratch));
+    println(@string(`site 34 value ${v + 34}`, @scratch));
+    println(@string(`site 35 value ${v + 35}`, @scratch));
+    println(@string(`site 36 value ${v + 36}`, @scratch));
+    println(@string(`site 37 value ${v + 37}`, @scratch));
+    println(@string(`site 38 value ${v + 38}`, @scratch));
+    println(@string(`site 39 value ${v + 39}`, @scratch));
+    printf("scratch remaining ok=%d\n", cc_arena_remaining(__cc_str_scratch) > 900 ? 1 : 0);
+    return 0;
+}

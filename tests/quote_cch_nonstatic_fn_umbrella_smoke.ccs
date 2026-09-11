@@ -1,0 +1,9 @@
+/* A leaf with a non-static body, reached through an interface umbrella
+ * (spec 1.7): the leaf is a module of one, its `quote_nonstatic_fn_add`
+ * is exported and declared in the lowered `.h`, and the program links the
+ * module object through the umbrella's include. No owner unit is needed
+ * and none is looked for. */
+#include "quote_cch_nonstatic_fn_umbrella.cch"
+int main(void) {
+    return quote_nonstatic_fn_umbrella_decl() + quote_nonstatic_fn_add(1, 2) == 4 ? 0 : 1;
+}

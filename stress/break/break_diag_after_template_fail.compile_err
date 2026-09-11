@@ -1,0 +1,2 @@
+# a multi-line template does not shift the lines after it
+break_diag_after_template_fail.ccs:16:5

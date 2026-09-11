@@ -1,0 +1,149 @@
+/* An AST the CC way, in the shapes the compiler accepts today. Each
+ * workaround comment names a sibling break_* test for the shape it avoids.
+ *   - @variant nodes with pointer arms (recursive)
+ *   - Vec::[NodeRef] child lists, Map::[CCSlice, int] symbol table
+ *   - arena-owned nodes; @string templates for emitted text
+ *   - T!>(CCError) for fallible lookups; UFCS methods on the node type
+ *   - @typeview face on the printer context
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/vec.cch>
+#include <ccc/stdio.cch>
+#include <stdio.h>
+
+typedef struct Node Node;
+typedef Node* NodeRef;      /* Vec::[NodeRef] is not a spellable instance today */
+
+typedef struct BinOp { char op; Node* lhs; Node* rhs; } BinOp;
+typedef struct Call Call;
+
+@variant Node {
+    num:   int64_t;
+    name:  CCSlice;
+    bin:   BinOp;
+    call:  Call*;
+};
+
+/* after the variant: the Vec::[NodeRef] instance is spliced after Node's definition */
+struct Call { CCSlice name; Vec::[NodeRef] args; };
+
+typedef struct Printer {
+    CCArena arena;              /* owns every emitted string */
+    Map::[CCSlice, int] syms;   /* names seen -> count */
+    int depth;
+} Printer;
+
+@typeview Depth on Printer {
+    r: depth;
+};
+
+static Node* node_num(int64_t v, CCArena a) {
+    Node* n = cc_arena_alloc(a, sizeof(Node), _Alignof(Node));
+    *n = { .num = v };
+    return n;
+}
+static Node* node_name(CCSlice s, CCArena a) {
+    Node* n = cc_arena_alloc(a, sizeof(Node), _Alignof(Node));
+    *n = { .name = s };
+    return n;
+}
+static Node* node_bin(char op, Node* l, Node* r, CCArena a) {
+    Node* n = cc_arena_alloc(a, sizeof(Node), _Alignof(Node));
+    *n = { .bin = { .op = op, .lhs = l, .rhs = r } };
+    return n;
+}
+static Node* node_call(CCSlice name, CCArena a) {
+    Node* n = cc_arena_alloc(a, sizeof(Node), _Alignof(Node));
+    Call* c = cc_arena_alloc(a, sizeof(Call), _Alignof(Call));
+    c->name = name;
+    c->args = vec_new::[NodeRef](a);
+    *n = { .call = c };
+    return n;
+}
+
+/* UFCS: Node_add_arg installs n->add_arg(child); only a call node accepts. */
+static void !>(CCError) Node_add_arg(Node* n, Node* child) {
+    if (n->kind == Node_call) {
+        Call* c = n->call;
+        c->args.push(child);
+        return cc_ok();
+    }
+    return cc_err(CC_ERR_INVALID_ARG, "not a call node");
+}
+
+/* UFCS: Node_print installs n.print(p) */
+static CCString !>(CCError) Node_print(Node* n, Printer* p) {
+    @errhandler(CCError e) { return cc_err(e); }
+    @switch (n) {
+        case .num(v):
+            return cc_ok(@string(`${v}`, p->arena));
+        case .name(s): {
+            int* seen = p->syms->get_ptr(s);
+            if (seen) (*seen)++;
+            else p->syms->insert(s, 1);
+            return cc_ok(@string(`${s}`, p->arena));
+        }
+        case .bin(b): {
+            CCString l = b.lhs->print(p) !>;
+            CCString r = b.rhs->print(p) !>;
+            /* two-slot template directly inside return cc_ok(...) is clipped today */
+            CCString out = @string(`(${l} ${b.op} ${r})`, p->arena);
+            return cc_ok(out);
+        }
+        case .call(c): {
+            CCString acc = @string(`${c->name}`, p->arena);
+            acc.push_cstr("(", p->arena);   /* a lone '(' in template text unbalances the scanner today */
+            size_t i = 0;
+            @for (arg in c->args) {
+                Node* child = arg;
+                CCString s = child->print(p) !>;
+                const char* sep = i ? ", " : "";   /* a ", " literal inside ${} breaks the template splitter today */
+                acc = @string(`${acc}${sep}${s}`, p->arena);
+                i++;
+            }
+            acc.push_cstr(")", p->arena);
+            return cc_ok(acc);
+        }
+    }
+    return cc_err(CC_ERR_INVALID_ARG, "closed switch");
+}
+
+static int Node_count(Node* n) {
+    @switch (n) {
+        case .num:  return 1;
+        case .name: return 1;
+        case .bin(b): return 1 + b.lhs->count() + b.rhs->count();
+        case .call(c): {
+            int k = 1;
+            /* @for (arg in c->args) fails to lower here (case-bound c); index instead */
+            size_t n = c->args.len();
+            for (size_t i = 0; i < n; i++) {
+                Node* child = *c->args.get_ptr(i);
+                k += child->count();
+            }
+            return k;
+        }
+    }
+    return 0;
+}
+
+static int depth_of(@typeview(Depth) Printer* p) { return p->depth; }
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    CCArena a = cc_arena_heap(kilobytes(64)) @destroy;
+    Printer p = { .arena = a, .syms = map_new::[CCSlice, int](a), .depth = 3 };
+
+    Node* x = node_name(CC_SLICE_LIT("x"), a);
+    Node* y = node_name(CC_SLICE_LIT("y"), a);
+    Node* sum = node_bin('+', x, node_bin('*', node_num(2, a), y, a), a);
+    Node* call = node_call(CC_SLICE_LIT("f"), a);
+    call->add_arg(sum) !>;
+    call->add_arg(node_name(CC_SLICE_LIT("x"), a)) !>;
+
+    CCString out = call->print(&p) !>;
+    println(@string(`${out} nodes=${call->count()}`, @scratch));
+    int* xs = p.syms->get_ptr(CC_SLICE_LIT("x"));
+    println(@string(`x seen ${xs ? *xs : 0} times, syms=${p.syms->len()} depth=${depth_of(&p)}`, @scratch));
+    return 0;
+}

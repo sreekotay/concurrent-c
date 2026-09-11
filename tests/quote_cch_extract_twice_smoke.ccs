@@ -1,0 +1,9 @@
+/* One face reached twice in one unit -- through an umbrella and through
+ * a chapter that also includes it (spec 1.7). The face is a module of one;
+ * its lowered `.h` is guarded and its object is linked once. There is no
+ * splice for a second include to collide with. */
+#include "quote_cch_extract_then_splice_umbrella.cch"
+#include "quote_cch_extract_then_splice_chapter.cch"
+int main(void) {
+    return extract_then_splice_step() + extract_then_splice_chapter_add(0, 0) == 1 ? 0 : 1;
+}

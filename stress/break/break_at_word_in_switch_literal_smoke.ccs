@@ -1,0 +1,26 @@
+/* A string literal is text. One that spells an @-word inside a @switch
+ * case body must survive the switch lowering unchanged. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+@variant Kind {
+    handler: void;
+    deferred: void;
+};
+
+static CCSlice spelling(Kind* k) {
+    @switch (k) {
+        case .handler: return CC_SLICE_LIT("@errhandler");
+        case .deferred: return CC_SLICE_LIT("@defer");
+    }
+    return CC_SLICE_LIT("?");
+}
+
+int main(void) {
+    Kind a = { .handler = {} };
+    Kind b = { .deferred = {} };
+    CCSlice sa = spelling(&a);
+    CCSlice sb = spelling(&b);
+    printf("%.*s %.*s\n", (int)sa.len, sa.ptr, (int)sb.len, sb.ptr);
+    return 0;
+}

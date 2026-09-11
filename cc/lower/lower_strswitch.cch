@@ -1,0 +1,243 @@
+#pragma(@module) "lower"
+/* String case labels: `switch (slice) { case "GET": ... }`.
+ *
+ * C switches on integers. A `case "GET":` label names a byte string, so the
+ * switch subject becomes an ordinal computed from the slice's bytes and each
+ * label becomes that key's index. Fallthrough, `default:` and the arm bodies
+ * are left exactly as written — only the subject and the labels change:
+ *
+ *     switch (({ CCSlice k = (name); int i = -1;
+ *                if (k.len == 3 && cc__bytes_cmp(k.ptr, "GET", 3) == 0) i = 0;
+ *                i; })) { case 0: ... }
+ *
+ * The subject must be slice-shaped: an `int` subject with string labels is
+ * a mistake C would report as a type error pages away from its cause, so it
+ * is named here instead. Mixing string and integer labels in one switch has
+ * no ordinal that means both, and is likewise refused.
+ *
+ * The step runs late: by then a UFCS call or an `@string` in the subject is
+ * already the C it will be, and spelling it is spelling the final text. */
+#ifndef CC_LOWER_STRSWITCH_CCH
+#define CC_LOWER_STRSWITCH_CCH
+
+#include "lower.cch"
+#include "typing.cch"
+
+/* The bytes between the quotes of each label, escapes as written and in
+ * label order; what they decode to is `sr_decoded_len` of one. */
+typedef Vec::[CCSlice] SwKeyList;
+
+typedef struct SwStep {
+    CcLowerer* L;
+    Walker* w;
+    int seq;
+} SwStep;
+
+/* The content of a string literal as written: the spelling minus its
+ * quotes, with adjacent literals (`"a" "b"`) joined. */
+static CCString sw_literal_text(CcLowerer* L, CcExpr* e) {
+    CCString spelled = lw_spell_expr(L, e);
+    CCSlice s = spelled.as_slice();
+    CCString out = cc_string_new();
+    size_t i = 0;
+    while (i < s.len) {
+        if (s.ptr[i] != '"') { i++; continue; }
+        i++;
+        while (i < s.len && s.ptr[i] != '"') {
+            if (s.ptr[i] == '\\' && i + 1 < s.len) {
+                out.push_slice(cc_slice_from_buffer((char*)s.ptr + i, 2), L->arena);
+                i += 2;
+                continue;
+            }
+            out.push_slice(cc_slice_from_buffer((char*)s.ptr + i, 1), L->arena);
+            i++;
+        }
+        if (i < s.len) i++;
+    }
+    return out;
+}
+
+static bool sw_is_string(const CcExpr* e) {
+    return e && e->k.kind == CcExprK_string;
+}
+
+/* The cases directly under a switch body, in order. */
+static CcStmtList* sw_cases(CcStmt* body) {
+    if (!body || body->k.kind != CcStmtK_block) return NULL;
+    return lw_block_stmts(body);
+}
+
+/* Slice-shaped: what a string case label can be compared against. */
+static bool sw_canon_is_slice(CCSlice cn) {
+    if (cc_slice_eq_cstr(&cn, "CCSlice")) return true;
+    if (cc_slice_eq_cstr(&cn, "CCSliceUnique")) return true;
+    if (cc_slice_eq_cstr(&cn, "CCSliceShared")) return true;
+    if (cc_slice_eq_cstr(&cn, "CCSlicePacked")) return true;
+    return false;
+}
+
+/* The ordinal test chain and the temporary it lands in, as one expression. */
+/* The ordinal test chain and the temporary it lands in, as one expression.
+ *
+ * One template, not a head and a tail: a template that opens a brace it
+ * does not close reads as an unbalanced block to whatever scans the page
+ * next, so the chain is built separately and dropped in as a slot. */
+static CcExpr* sw_subject(SwStep* st, CcExpr* subj, SwKeyList* keys, CcSpan sp) {
+    CcLowerer* L = st->L;
+    CCArena a = L->arena;
+    CCString spelled = lw_spell_expr(L, subj);
+    CCString chain = cc_string_new();
+    int id = ++st->seq;
+    size_t n = keys->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CCSlice kt = *keys->get_ptr(i);
+        int kl = (int)sr_decoded_len(kt, false);
+        int ord = (int)i;
+        CCString one = @string(`if (__cc_ss${id}_k.len == ${kl}u && cc__bytes_cmp(__cc_ss${id}_p, "${kt}", ${kl}u) == 0) __cc_ss${id}_i = ${ord}; `, a);
+        chain.push_slice(one.as_slice(), a);
+    }
+    {
+        CCString b = @string(`({ CCSlice __cc_ss${id}_k = (${spelled}); int __cc_ss${id}_i = -1; const unsigned char* __cc_ss${id}_p = (const unsigned char*)__cc_ss${id}_k.ptr; ${chain} __cc_ss${id}_i; })`, a);
+        return lw_text(L, b, sp);
+    }
+}
+
+/* Every case label of one switch, in order.
+ *
+ * `case "A": case "B":` parses as one case whose labelled statement is the
+ * next case, so the labels of a fallthrough run are a chain hanging off the
+ * first, not siblings in the block. Both are collected. */
+static void sw_collect(CcStmtList* out, CcStmtList* stmts) {
+    size_t n = stmts->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CcStmt* t = *stmts->get_ptr(i);
+        while (t && t->k.kind == CcStmtK_case_) {
+            CcStmt* inner = NULL;
+            out->push(t);
+            @switch (t->k) {
+                case .case_(c): inner = c.inner; break;
+                default: break;
+            }
+            t = inner;
+        }
+    }
+}
+
+/* One switch: its labels and its subject decide whether this is one. */
+static void sw_switch(SwStep* st, CcStmt* s, CcSwitch sw) {
+    CcLowerer* L = st->L;
+    Walker* w = st->w;
+    CCArena a = L->arena;
+    CcStmtList* block = sw_cases(sw.body);
+    CcStmtList cases = vec_new::[CcStmtRef](a);
+    size_t n;
+    size_t i;
+    size_t nstr = 0;
+    size_t nint = 0;
+    bool subj_slice = false;
+    bool subj_known = false;
+    CCSlice cn = cc_slice_empty();
+    SwKeyList keys = vec_new::[CCSlice](a);
+    if (!block || !sw.subject) return;
+    sw_collect(&cases, block);
+    n = cases.len();
+    for (i = 0; i < n; i++) {
+        CcStmt* t = *cases.get_ptr(i);
+        @switch (t->k) {
+            case .case_(c): {
+                if (c.is_default) break;
+                if (sw_is_string(c.lo)) nstr++;
+                else if (c.lo) nint++;
+                break;
+            }
+            default: break;
+        }
+    }
+    {
+        CcType* t = type_of_expr(w, sw.subject);
+        subj_known = t != NULL;
+        if (t) cn = L->ix->canon(t);
+        subj_slice = subj_known && sw_canon_is_slice(cn);
+    }
+    /* A slice subject has no integer to switch on even with no labels at
+     * all: `switch (k) { default: ... }` is C the host rejects. */
+    if (!nstr && !subj_slice) return;
+    if (nint) {
+        CCString m = @string(`string switch: cannot mix string and non-string case labels`, a);
+        lw_error(L, s->span, m);
+        return;
+    }
+    if (nstr && subj_known && !subj_slice) {
+        CCString subj = lw_spell_expr(L, sw.subject);
+        CCString m = @string(`string switch: subject '${subj}' has type '${cn}' (need CCSlice)`, a);
+        lw_error(L, s->span, m);
+        return;
+    }
+    /* one ordinal per label, in label order: `case "A": case "B":` keeps
+     * falling through, now as `case 0: case 1:` */
+    for (i = 0; i < n; i++) {
+        CcStmt* t = *cases.get_ptr(i);
+        bool dup = false;
+        @switch (t->k) {
+            case .case_(c): {
+                CCSlice kt;
+                CCString txt;
+                size_t j;
+                if (c.is_default || !sw_is_string(c.lo)) break;
+                txt = sw_literal_text(L, c.lo);
+                kt = lw_keep(L, &txt);
+                for (j = 0; j < keys.len(); j++) {
+                    CCSlice prev = *keys.get_ptr(j);
+                    if (slice_eq(prev, kt)) dup = true;
+                }
+                if (dup) {
+                    CCString m = @string(`string switch: duplicate case "${kt}"`, a);
+                    lw_error(L, t->span, m);
+                    break;
+                }
+                {
+                    int ord = (int)keys.len();
+                    CCString lab = @string(`${ord}`, a);
+                    c.lo = lw_text(L, lab, t->span);
+                }
+                c.hi = NULL;
+                t->k = { .case_ = c };
+                keys.push(kt);
+                break;
+            }
+            default: break;
+        }
+        if (dup) return;
+    }
+    sw.subject = sw_subject(st, sw.subject, &keys, s->span);
+    sw.is_variant = false;
+    s->k = { .switch_ = sw };
+}
+
+static void sw_on_stmt(Walker* w, CcStmt* s, bool enter) {
+    SwStep* st = (SwStep*)w->env;
+    if (!enter) return;
+    @switch (s->k) {
+        case .switch_(sw): sw_switch(st, s, sw); break;
+        default: break;
+    }
+}
+
+void CcLowerer_strswitch(CcLowerer* L) {
+    Walker w;
+    SwStep st;
+    memset(&st, 0, sizeof(st));
+    st.L = L;
+    st.w = &w;
+    memset(&w, 0, sizeof(w));
+    w.arena = L->arena;
+    w.ix = L->ix;
+    w.unit = L->unit;
+    w.on_stmt = sw_on_stmt;
+    w.env = &st;
+    tw_unit(&w);
+}
+
+#endif

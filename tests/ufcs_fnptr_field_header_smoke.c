@@ -161,7 +161,7 @@ int main(void) {
     char polluter_call[512];
     char victim[512];
     char outdir[512];
-    char victim_h[512];
+    char victim_h[1024];
     char cmd[2048];
     char captured[4096];
     char* lowered = NULL;

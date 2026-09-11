@@ -1,0 +1,13 @@
+/* A bare `!>;` on a UFCS call with no `@errhandler` in scope has nowhere
+ * to forward the error. Spec 3.1 invariant 4: no match is ill-formed.
+ * The plain-call form (`f() !>;`) is refused by both lowerers
+ * (`result_unwrap_bang_expr_bare_no_handler_fail`); the dotted form is
+ * the same statement and must be refused the same way, at the site. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+int main(void) {
+    CCFile out = CC_FILE_CLOSED @destroy;
+    out.create("tmp/ufcs_bare_no_handler.txt") !>;
+    printf("reached\n");
+    return 0;
+}

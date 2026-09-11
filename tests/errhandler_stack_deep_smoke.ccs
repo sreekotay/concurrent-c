@@ -1,0 +1,46 @@
+/* Nine stacked `@errhandler`s, one per nested block.
+ *
+ * The ninth is the one in scope where the unwrap happens, so it is the one
+ * that must run. The rule this pins is that none of them is dropped; the
+ * number is not the point, and a lowerer with a fixed table would fail here
+ * at whatever depth its table ends. */
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+
+static int !> (CCError) boom(void) {
+    return cc_err(CC_ERR_NOT_FOUND, "boom");
+}
+
+int main(void) {
+    @errhandler(CCError e0) { (void)e0; println("depth 0"); return 10; }
+    {
+        @errhandler(CCError e1) { (void)e1; println("depth 1"); return 11; }
+        {
+            @errhandler(CCError e2) { (void)e2; println("depth 2"); return 12; }
+            {
+                @errhandler(CCError e3) { (void)e3; println("depth 3"); return 13; }
+                {
+                    @errhandler(CCError e4) { (void)e4; println("depth 4"); return 14; }
+                    {
+                        @errhandler(CCError e5) { (void)e5; println("depth 5"); return 15; }
+                        {
+                            @errhandler(CCError e6) { (void)e6; println("depth 6"); return 16; }
+                            {
+                                @errhandler(CCError e7) { (void)e7; println("depth 7"); return 17; }
+                                {
+                                    @errhandler(CCError e8) {
+                                        (void)e8;
+                                        println("depth 8");
+                                        return 18;
+                                    }
+                                    boom() !>;
+                                    return 0;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

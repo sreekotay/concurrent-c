@@ -1,0 +1,611 @@
+/* ccindex: exercise the declaration index on real files, in Concurrent-C.
+ *
+ *   ccindex [-I dir]... --dump FILE            every symbol, type info, hook and Result spec
+ *   ccindex [-I dir]... --resolve FILE Type m  the callee for `x.m()` on a receiver of type Type
+ *   ccindex [-I dir]... --gaps FILE...         every UFCS call site in the files, classified by
+ *                                              how the index resolves it (markdown on stdout)
+ *   ccindex [-I dir]... --sites FILE           one line per UFCS site with its resolution
+ *
+ * The default include directory is cc/include (run from the repository
+ * root). Diagnostics from the index and the parser print to stderr.
+ * Output is byte-identical to out/cc/bin/ccindex (the C11 reference). */
+#include "lower.cch"
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define SL(s) (int)(s).len, (const char*)(s).ptr
+
+typedef struct Session {
+    CCArena arena;
+    CcDiags ds;
+    CcIndex* ix;
+    CcUnit* unit;
+    CCSlice src;
+} Session;
+
+static CcNameList g_include_dirs;
+
+static CCSlice read_whole_file(const char* path, CCArena a, bool* ok) {
+    FILE* fp = fopen(path, "rb");
+    long n;
+    char* buf;
+    *ok = false;
+    if (!fp) return CC_SLICE_LIT("");
+    fseek(fp, 0, SEEK_END);
+    n = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    if (n < 0) n = 0;
+    buf = cc_arena_alloc(a, (size_t)n + 1, 1);
+    if (n > 0 && fread(buf, 1, (size_t)n, fp) != (size_t)n) { fclose(fp); return CC_SLICE_LIT(""); }
+    buf[n] = 0;
+    fclose(fp);
+    *ok = true;
+    return cc_slice_from_buffer(buf, (size_t)n);
+}
+
+static CcUnitMode mode_for(const char* path) {
+    size_t n = strlen(path);
+    if (n > 4 && strcmp(path + n - 4, ".cch") == 0) return CC_UNIT_HEADER;
+    if (n > 5 && strcmp(path + n - 5, ".shcc") == 0) return CC_UNIT_SCRIPT;
+    return CC_UNIT_SOURCE;
+}
+
+/* Parse `text` as a unit with the index's typedef names, on a scratch sink. */
+static CcUnit* parse_probe(Session* s, const char* label, CCSlice text, CcUnitMode mode, CcDiags* scratch) {
+    CcParseOpts po;
+    po.mode = mode;
+    po.known_types = s->ix->known_types();
+    return cc_parse_unit(cstr_slice(label), text, po, scratch, s->arena);
+}
+
+static bool session_open(Session* s, const char* path, CCArena a) {
+    bool ok;
+    CCSlice pathsl = cstr_slice(path);
+    CcParseOpts po;
+    s->arena = a;
+    s->ds = CcDiags_new(a);
+    s->ix = cc_index_new(g_include_dirs, cc_slice_empty(), &s->ds, a);
+    s->src = read_whole_file(path, a, &ok);
+    if (!ok) {
+        fprintf(stderr, "ccindex: %s: %s\n", path, strerror(errno));
+        return false;
+    }
+    po.mode = mode_for(path);
+    po.known_types = vec_new::[CCSlice](a);
+    {
+        /* the include scan lexes on a scratch sink; the parse reports */
+        CcDiags scratch = CcDiags_new(a);
+        CcTape tape = cc_lex(pathsl, s->src, &scratch, a);
+        s->ix->preload_includes(&tape, po);
+    }
+    po.known_types = s->ix->known_types();
+    s->unit = cc_parse_unit(pathsl, s->src, po, &s->ds, a);
+    s->ix->add_unit(s->unit, po.mode == CC_UNIT_HEADER);
+    return true;
+}
+
+static CCSlice session_source(CCSlice path, void* ctx, bool* physical) {
+    (void)path;
+    (void)ctx;
+    *physical = true;
+    return cc_slice_empty();
+}
+
+static void session_close(Session* s) {
+    s->ds.print(stderr, session_source, NULL);
+}
+
+static const char* sym_kind_name(CcSymKind k) {
+    switch (k) {
+    case CC_SYM_FUNC: return "func";
+    case CC_SYM_VAR: return "var";
+    case CC_SYM_TYPE: return "type";
+    case CC_SYM_ENUMERATOR: return "enumerator";
+    case CC_SYM_MACRO: return "macro";
+    }
+    return "?";
+}
+
+static CCSlice unit_label(const CcUnit* u) {
+    return u && u->tape.path.len ? u->tape.path : CC_SLICE_LIT("?");
+}
+
+/* The symbol of any kind with this name, or NULL. */
+/* ---- --dump ------------------------------------------------------------ */
+
+/* "ret(p1, p2, ...)" for a function symbol. */
+static CCSlice func_canon(Session* s, CcSym* sym, CcFuncType fn) {
+    CCString sb = cc_string_new();
+    CcParamList params = fn.params;
+    size_t k;
+    size_t n = params.len();
+    (void)sym;
+    sb.push_slice(s->ix->canon(fn.ret), s->arena);
+    sb.push_char('(', s->arena);
+    for (k = 0; k < n; k++) {
+        CcParam* p = params.get_ptr(k);
+        if (k) sb.push_cstr(", ", s->arena);
+        if (!p->type) sb.push_cstr("...", s->arena);
+        else { CCSlice pc = s->ix->canon(p->type); sb.push_slice(pc, s->arena); }
+    }
+    if (fn.variadic) {
+        if (n) sb.push_cstr(", ", s->arena);
+        sb.push_cstr("...", s->arena);
+    }
+    sb.push_char(')', s->arena);
+    return cc_string_persist_slice(s->arena, &sb);
+}
+
+static CCSlice sym_canon(Session* s, CcSym* sym) {
+    if (sym->type) {
+        if (sym->kind == CC_SYM_FUNC) {
+            @switch (sym->type->k) {
+                case .func(fn): return func_canon(s, sym, fn);
+                default: break;
+            }
+        }
+        return s->ix->canon(sym->type);
+    }
+    if (sym->kind == CC_SYM_MACRO && sym->macro) return cstr_slice(sym->macro->function_like ? "function-like" : "object-like");
+    return CC_SLICE_LIT("-");
+}
+
+static void dump_symbols(Session* s) {
+    CcIndex* ix = s->ix;
+    CcSymList* symv = &ix->syms;
+    size_t i;
+    /* canon() on a symbol's type may register a Result spec whose expansion
+     * appends symbols: the bound is re-read, as the reference does */
+    printf("# symbols (%zu)\n", symv->len());
+    for (i = 0; i < symv->len(); i++) {
+        CcSym* sym = *symv->get_ptr(i);
+        CcLoc loc = sym->loc();
+        CCSlice canon = sym_canon(s, sym);
+        printf("%s %.*s : %.*s (%.*s:%u)%s%s\n", sym_kind_name(sym->kind), SL(sym->name), SL(canon),
+               loc.path.len ? (int)loc.path.len : 1, loc.path.len ? loc.path.ptr : "?", loc.line,
+               sym->kind == CC_SYM_FUNC && sym->noreturn() ? " [noreturn]" : "",
+               sym->is_definition && sym->kind == CC_SYM_FUNC ? " [definition]" : "");
+    }
+}
+
+static void dump_hook_regs(Session* s) {
+    CcHookRegList* hookv = &s->ix->hooks;
+    size_t i;
+    size_t n = hookv->len();
+    printf("# typehooks (%zu)\n", n);
+    for (i = 0; i < n; i++) {
+        CcHookReg* h = *hookv->get_ptr(i);
+        printf("@typehooks on %.*s", SL(h->subject));
+        if (h->create_fn.len) printf(" create=%.*s%s%.*s", SL(h->create_fn), h->create_fn2.len ? "," : "", SL(h->create_fn2));
+        if (h->pre_destroy_fn.len) printf(" pre_destroy=%.*s", SL(h->pre_destroy_fn));
+        if (h->destroy_fn.len) printf(" destroy=%.*s", SL(h->destroy_fn));
+        if (h->ufcs_fn.len) {
+            CcUfcsRuleList* rulev = &h->rules;
+            size_t r = rulev->len();
+            printf(" ufcs=%.*s", SL(h->ufcs_fn));
+            if (h->ufcs_prefix.len) printf(" [prefix %.*s%s]", SL(h->ufcs_prefix), h->ufcs_prefix_by_value ? " by-value" : "");
+            if (h->ufcs_rejects) printf(" [rejects]");
+            if (h->ufcs_opaque) printf(" [opaque]");
+            while (r--) {
+                CcUfcsRule* rule = rulev->get_ptr(r);
+                printf(" %.*s->%.*s%s", SL(rule->method), SL(rule->callee), rule->by_value ? "(v)" : "");
+            }
+        }
+        if (h->has_len) printf(" len");
+        if (h->has_access) printf(" access");
+        if (h->has_cast) printf(" cast");
+        if (h->has_niche) printf(" niche");
+        if (h->has_sink) printf(" ufcs_sink");
+        printf("\n");
+    }
+}
+
+static void dump_type_infos(Session* s) {
+    CcTypeInfoList* infov = &s->ix->types;
+    size_t i;
+    printf("# types (%zu)\n", infov->len());
+    for (i = 0; i < infov->len(); i++) {
+        CcTypeInfo* t = *infov->get_ptr(i);
+        CcMethodList ms = s->ix->methods_of(t);
+        size_t k;
+        size_t nm = ms.len();
+        printf("type %.*s", SL(t->name));
+        if (t->family.len) printf(" family=%.*s", SL(t->family));
+        if (t->hooks) printf(" hooks=%.*s", SL(t->hooks->subject));
+        if (t->create_fn.len) printf(" create=%.*s", SL(t->create_fn));
+        if (t->pre_destroy_fn.len) printf(" pre_destroy=%.*s", SL(t->pre_destroy_fn));
+        if (t->destroy_fn.len) printf(" destroy=%.*s", SL(t->destroy_fn));
+        if (t->ufcs_registered_by.len) printf(" registered=%.*s", SL(t->ufcs_registered_by));
+        if (t->is_result) printf(" result%s%s", t->result_optional ? " optional" : "", t->result_from_header ? " header-declared" : "");
+        printf("\n");
+        for (k = 0; k < nm; k++) {
+            CcMethod* m = *ms.get_ptr(k);
+            printf("    .%.*s -> %.*s%s [%.*s] %.*s\n", SL(m->method), SL(m->callee), m->recv_by_ptr ? "(&recv)" : "(recv)",
+                   SL(m->source), SL(m->origin));
+        }
+    }
+}
+
+static void dump_result_specs(Session* s) {
+    CcIndex* ix = s->ix;
+    CcTypeInfoList* specv = &ix->result_specs;
+    CcTypeInfoList* infov = &ix->types;
+    size_t i;
+    printf("# result specs used by the unit (%zu)\n", specv->len());
+    for (i = 0; i < specv->len(); i++) {
+        CcTypeInfo* t = *specv->get_ptr(i);
+        CCSlice v = t->result_value ? ix->canon(t->result_value) : CC_SLICE_LIT("void");
+        CCSlice e = t->result_err ? ix->canon(t->result_err) : CC_SLICE_LIT("?");
+        printf("%.*s : %.*s !> %.*s%s : ", SL(t->name), SL(v), SL(e), t->result_optional ? " (?> discardable)" : "");
+        if (t->result_from_header) {
+            CCSlice ul = unit_label(t->result_decl_unit);
+            printf("declared in header %.*s:%u\n", SL(ul), t->result_decl_line);
+        } else if (t->result_decl_unit) {
+            CCSlice ul = unit_label(t->result_decl_unit);
+            printf("declared in the unit %.*s:%u\n", SL(ul), t->result_decl_line);
+        } else {
+            printf("TU must emit the spec\n");
+        }
+    }
+    printf("# result specs declared by headers\n");
+    for (i = 0; i < infov->len(); i++) {
+        CcTypeInfo* t = *infov->get_ptr(i);
+        if (t->is_result && t->result_from_header) {
+            CCSlice ul = unit_label(t->result_decl_unit);
+            printf("%.*s (%.*s:%u)\n", SL(t->name), SL(ul), t->result_decl_line);
+        }
+    }
+}
+
+static void dump_index(Session* s) {
+    CcIndex* ix = s->ix;
+    CcUnitList* unitv = &ix->units;
+    CcIntList* hdrv = &ix->unit_is_header;
+    size_t i;
+    size_t n = unitv->len();
+    printf("# units (%zu)\n", n);
+    for (i = 0; i < n; i++) {
+        CCSlice ul = unit_label(*unitv->get_ptr(i));
+        printf("  %s %.*s\n", *hdrv->get_ptr(i) ? "header" : "unit  ", SL(ul));
+    }
+    printf("# expansions: %u (parse errors inside them: %u)\n", ix->n_expansions, ix->n_expansion_errors);
+    dump_symbols(s);
+    dump_hook_regs(s);
+    dump_type_infos(s);
+    dump_result_specs(s);
+}
+
+/* ---- receiver typing for UFCS sites: typing.cch ------------------------ */
+
+typedef struct Site {
+    CCSlice type;       /* canonical receiver type; empty when unknown */
+    CCSlice method;
+    CCSlice source;     /* resolution source; empty when unresolved */
+    CCSlice callee;
+    CCSlice reason;     /* diagnostic when unresolved */
+    CCSlice file;
+    uint32_t line;
+    CCSlice recv_kind;  /* expression kind of the receiver */
+} Site;
+typedef Site* SiteRef;
+typedef Vec::[SiteRef] SiteList;
+
+/* The walker's callback: one Site per UFCS node, into the list in `env`. */
+static void record_site(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m, CCSlice tn, CCSlice reason) {
+    SiteList* sitev = (SiteList*)w->env;
+    Site* site = cc_arena_alloc(w->arena, sizeof(Site), _Alignof(Site));
+    CcLoc loc;
+    memset(site, 0, sizeof(*site));
+    loc = w->unit->tape.loc(e->span.first);
+    site->method = uf.method;
+    site->file = loc.path;
+    site->line = loc.line;
+    site->recv_kind = uf.recv ? CcExpr_kind_name(uf.recv) : CC_SLICE_LIT("?expr");
+    if (rt) {
+        site->type = tn;
+        if (m) {
+            site->source = m->source;
+            site->callee = m->callee;
+        } else {
+            site->reason = reason;
+        }
+    }
+    sitev->push(site);
+}
+
+/* ---- --sites / --gaps -------------------------------------------------- */
+
+typedef struct Count {
+    CCSlice key;
+    CCSlice key2;
+    bool has_key2;
+    size_t n;
+    bool in_non_fail;       /* at least one site outside an expected-failure test */
+} Count;
+typedef Count* CountRef;
+typedef Vec::[CountRef] CountList;
+
+static CCSlice agg_copy(CCArena a, CCSlice s) {
+    char* out = cc_arena_alloc(a, s.len + 1, 1);
+    if (s.len) memcpy(out, s.ptr, s.len);
+    out[s.len] = 0;
+    return cc_slice_from_buffer(out, s.len);
+}
+
+static Count* count_add(CCArena a, CountList* list, CCSlice key, CCSlice key2, bool has_key2) {
+    size_t i;
+    size_t n = list->len();
+    Count* c;
+    for (i = 0; i < n; i++) {
+        c = *list->get_ptr(i);
+        if (slice_eq(c->key, key) && ((!has_key2 && !c->has_key2) || (has_key2 && c->has_key2 && slice_eq(c->key2, key2)))) {
+            c->n++;
+            return c;
+        }
+    }
+    c = cc_arena_alloc(a, sizeof(Count), _Alignof(Count));
+    memset(c, 0, sizeof(*c));
+    c->key = agg_copy(a, key);
+    c->key2 = has_key2 ? agg_copy(a, key2) : cc_slice_empty();
+    c->has_key2 = has_key2;
+    c->n = 1;
+    list->push(c);
+    return c;
+}
+
+static int slice_cmp(CCSlice a, CCSlice b) {
+    size_t n = a.len < b.len ? a.len : b.len;
+    int c = n ? memcmp(a.ptr, b.ptr, n) : 0;
+    if (c) return c;
+    if (a.len != b.len) return a.len < b.len ? -1 : 1;
+    return 0;
+}
+
+static int count_cmp(const void* pa, const void* pb) {
+    const Count* a = *(Count* const*)pa;
+    const Count* b = *(Count* const*)pb;
+    if (a->n != b->n) return a->n < b->n ? 1 : -1;
+    {
+        int c = slice_cmp(a->key, b->key);
+        if (c) return c;
+    }
+    if (!a->has_key2 || !b->has_key2) return 0;
+    return slice_cmp(a->key2, b->key2);
+}
+
+/* The counts sorted by (n desc, key, key2): a copy of the list. */
+static CountList count_sorted(CCArena a, CountList* list) {
+    CountList arr = vec_new::[CountRef](a);
+    size_t i;
+    size_t n = list->len();
+    for (i = 0; i < n; i++) { Count* c = *list->get_ptr(i); arr.push(c); }
+    if (n > 1) qsort(arr.data(), n, sizeof(CountRef), count_cmp);
+    return arr;
+}
+
+/* The `parse errors on its own lines` check: an error whose path is the file. */
+static bool has_own_errors(Session* s, const char* path) {
+    Vec::[CcDiag]* itemv = &s->ds.items;
+    size_t d;
+    size_t n = itemv->len();
+    CCSlice p = cstr_slice(path);
+    for (d = 0; d < n; d++) {
+        CcDiag* dg = itemv->get_ptr(d);
+        if (dg->sev == CC_SEV_ERROR && dg->at.path.len && slice_eq(dg->at.path, p)) return true;
+    }
+    return false;
+}
+
+static bool ends_with(const char* s, const char* suffix) {
+    size_t n = strlen(s);
+    size_t m = strlen(suffix);
+    return n > m && strcmp(s + n - m, suffix) == 0;
+}
+
+typedef struct Gaps {
+    CCArena agg;
+    CountList by_source;
+    CountList unresolved;
+    CountList unknown_methods;
+    CountList unknown_recv;
+    CountList reasons;
+    size_t total; size_t n_resolved; size_t n_unresolved; size_t n_unknown; size_t n_files; size_t n_parse_err_files;
+} Gaps;
+
+static void print_site(Site* site, const char* path) {
+    CCSlice file = site->file.len ? site->file : cstr_slice(path);
+    CCSlice type = site->type.len ? site->type : CC_SLICE_LIT("?");
+    printf("%.*s:%u %.*s.%.*s -> ", SL(file), site->line, SL(type), SL(site->method));
+    if (site->source.len) printf("%.*s [%.*s]\n", SL(site->callee), SL(site->source));
+    else if (site->reason.len) printf("UNRESOLVED %.*s\n", SL(site->reason));
+    else printf("UNRESOLVED receiver type unknown\n");
+}
+
+static void count_site(Gaps* g, Site* site, const char* path) {
+    g->total++;
+    if (site->source.len) {
+        g->n_resolved++;
+        count_add(g->agg, &g->by_source, site->source, cc_slice_empty(), false);
+    } else if (site->type.len) {
+        Count* c;
+        bool is_fail = ends_with(path, "_fail.ccs");
+        g->n_unresolved++;
+        c = count_add(g->agg, &g->unresolved, site->type, site->method, true);
+        if (!is_fail) c->in_non_fail = true;
+        if (site->reason.len) count_add(g->agg, &g->reasons, site->reason, cc_slice_empty(), false);
+    } else {
+        g->n_unknown++;
+        count_add(g->agg, &g->unknown_methods, site->method, cc_slice_empty(), false);
+        count_add(g->agg, &g->unknown_recv, site->recv_kind, cc_slice_empty(), false);
+    }
+}
+
+static void print_gaps(Gaps* g) {
+    CountList arr;
+    size_t k;
+    size_t n;
+    printf("Files: %zu (%zu with parse errors on their own lines). UFCS call sites: %zu.\n\n", g->n_files, g->n_parse_err_files, g->total);
+    printf("| Outcome | Sites |\n|---|---|\n");
+    arr = count_sorted(g->agg, &g->by_source);
+    n = arr.len();
+    for (k = 0; k < n; k++) { Count* c = *arr.get_ptr(k); printf("| resolved: %.*s | %zu |\n", SL(c->key), c->n); }
+    printf("| resolved (all sources) | %zu |\n", g->n_resolved);
+    printf("| unresolved, receiver type known | %zu |\n", g->n_unresolved);
+    printf("| receiver type unknown | %zu |\n\n", g->n_unknown);
+    printf("### Unresolved with a known receiver type\n\n");
+    printf("(Type, method) pairs no declaration, hook or registration names. A pair whose every site is in a `*_fail.ccs` test is a diagnostic the test expects.\n\n| Receiver type | Method | Sites | Only in `_fail` tests |\n|---|---|---|---|\n");
+    arr = count_sorted(g->agg, &g->unresolved);
+    n = arr.len();
+    for (k = 0; k < n; k++) {
+        Count* c = *arr.get_ptr(k);
+        printf("| `%.*s` | `%.*s` | %zu | %s |\n", SL(c->key), SL(c->key2), c->n, c->in_non_fail ? "" : "yes");
+    }
+    printf("\n### Receiver type unknown\n\nBy receiver expression kind:\n\n| Receiver kind | Sites |\n|---|---|\n");
+    arr = count_sorted(g->agg, &g->unknown_recv);
+    n = arr.len();
+    for (k = 0; k < n; k++) { Count* c = *arr.get_ptr(k); printf("| %.*s | %zu |\n", SL(c->key), c->n); }
+    printf("\nMost frequent methods on untyped receivers:\n\n| Method | Sites |\n|---|---|\n");
+    arr = count_sorted(g->agg, &g->unknown_methods);
+    n = arr.len();
+    for (k = 0; k < n && k < 40; k++) { Count* c = *arr.get_ptr(k); printf("| `%.*s` | %zu |\n", SL(c->key), c->n); }
+}
+
+static void usage(void) {
+    fprintf(stderr, "usage: ccindex [-I dir] --dump FILE | --resolve FILE Type method | --sites FILE | --gaps FILE...\n");
+}
+
+static int run_dump(const char* path) {
+    CCArena a = cc_arena_heap(megabytes(256)) @destroy;
+    Session s;
+    if (!session_open(&s, path, a)) return 1;
+    dump_index(&s);
+    session_close(&s);
+    return 0;
+}
+
+/* A type spelling (`Vec::[int]`, `char[:]`, `int!>(CCError)`): parsed as a declaration. */
+static CcTypeInfo* resolve_type_arg(Session* s, const char* spelling, bool* ok) {
+    CCString sb = cc_string_new();
+    CcDiags scratch = CcDiags_new(s->arena);
+    CcUnit* u;
+    CcDeclList* declv;
+    CcType* t = NULL;
+    *ok = false;
+    sb.push_cstr(spelling, s->arena);
+    sb.push_cstr(" __cc_probe;\n", s->arena);
+    u = parse_probe(s, "<type>", cc_string_persist_slice(s->arena, &sb), CC_UNIT_HEADER, &scratch);
+    declv = &u->decls;
+    if (declv->len() == 1) t = cc__decl_type_of(*declv->get_ptr(0));
+    if (scratch.n_errors || !t) {
+        scratch.print(stderr, session_source, NULL);
+        fprintf(stderr, "ccindex: cannot read the type '%s'\n", spelling);
+        return NULL;
+    }
+    *ok = true;
+    return s->ix->type_get(s->ix->canon(peel(t)));
+}
+
+static int run_resolve(const char* path, const char* type_arg, const char* method) {
+    CCArena a = cc_arena_heap(megabytes(256)) @destroy;
+    Session s;
+    CcTypeInfo* info;
+    int rc;
+    if (!session_open(&s, path, a)) return 1;
+    if (strpbrk(type_arg, ":[*!? ")) {
+        bool ok;
+        info = resolve_type_arg(&s, type_arg, &ok);
+        if (!ok) return 2;
+    } else {
+        info = s.ix->type_get(cstr_slice(type_arg));
+    }
+    {
+        CcMethod* !>(CcDiag) r = s.ix->method_recv(info, cstr_slice(method), 0u, a);
+        if (r.is_ok()) {
+            CcMethod* m = r.value();
+            printf("%s.%s -> %.*s(%srecv, ...) [%.*s] %.*s\n", type_arg, method, SL(m->callee), m->recv_by_ptr ? "&" : "",
+                   SL(m->source), SL(m->origin));
+            rc = 0;
+        } else {
+            CcDiag d = r.error();
+            printf("error: %.*s\n", SL(d.msg));
+            rc = 1;
+        }
+    }
+    session_close(&s);
+    return rc;
+}
+
+static int run_sites(int argc, char** argv, int i, bool gaps) {
+    CCArena agg = cc_arena_heap(megabytes(16)) @destroy;
+    Gaps g;
+    memset(&g, 0, sizeof g);
+    g.agg = agg;
+    g.by_source = vec_new::[CountRef](agg);
+    g.unresolved = vec_new::[CountRef](agg);
+    g.unknown_methods = vec_new::[CountRef](agg);
+    g.unknown_recv = vec_new::[CountRef](agg);
+    g.reasons = vec_new::[CountRef](agg);
+    for (; i < argc; i++) {
+        CCArena a = cc_arena_heap(megabytes(256)) @destroy;
+        Session s;
+        Walker w;
+        SiteList sites;
+        SiteList* sitev;
+        size_t k;
+        size_t ns;
+        if (!session_open(&s, argv[i], a)) continue;
+        g.n_files++;
+        memset(&w, 0, sizeof w);
+        w.arena = a;
+        w.ix = s.ix;
+        w.unit = s.unit;
+        sites = vec_new::[SiteRef](a);
+        w.on_ufcs = record_site;
+        w.env = &sites;
+        tw_unit(&w);
+        if (has_own_errors(&s, argv[i])) {
+            g.n_parse_err_files++;
+            fprintf(stderr, "parse errors on its own lines: %s\n", argv[i]);
+        }
+        sitev = &sites;
+        ns = sitev->len();
+        for (k = 0; k < ns; k++) {
+            Site* site = *sitev->get_ptr(k);
+            if (!gaps) print_site(site, argv[i]);
+            count_site(&g, site, argv[i]);
+        }
+        /* parse diagnostics are noise for the gap table */
+        if (!gaps) session_close(&s);
+    }
+    if (gaps) print_gaps(&g);
+    return 0;
+}
+
+int main(int argc, char** argv) {
+    CCArena tool = cc_arena_heap(megabytes(1)) @destroy;
+    int i = 1;
+    const char* mode = NULL;
+    bool custom_dirs = false;
+    g_include_dirs = vec_new::[CCSlice](tool);
+    g_include_dirs.push(CC_SLICE_LIT("cc/include"));
+    while (i < argc && argv[i][0] == '-' && strcmp(argv[i], "--dump") && strcmp(argv[i], "--resolve") &&
+           strcmp(argv[i], "--gaps") && strcmp(argv[i], "--sites")) {
+        if (strcmp(argv[i], "-I") == 0 && i + 1 < argc && g_include_dirs.len() < 15) {
+            if (!custom_dirs) { g_include_dirs.clear(); custom_dirs = true; }
+            g_include_dirs.push(cstr_slice(argv[i + 1]));
+            i += 2;
+        } else {
+            fprintf(stderr, "ccindex: unknown option %s\n", argv[i]);
+            return 2;
+        }
+    }
+    if (i < argc) mode = argv[i++];
+    if (!mode) { usage(); return 2; }
+    if (strcmp(mode, "--dump") == 0 && i < argc) return run_dump(argv[i]);
+    if (strcmp(mode, "--resolve") == 0 && i + 2 < argc) return run_resolve(argv[i], argv[i + 1], argv[i + 2]);
+    if ((strcmp(mode, "--sites") == 0 || strcmp(mode, "--gaps") == 0) && i < argc) return run_sites(argc, argv, i, strcmp(mode, "--gaps") == 0);
+    usage();
+    return 2;
+}

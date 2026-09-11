@@ -1,0 +1,8 @@
+/* An implementation leaf whose bodies are all static, reached through an
+ * interface umbrella (spec 1.7): the leaf is a module of one that exports
+ * nothing. Including it is fine; only its lowered `.h` reaches this unit,
+ * and nothing in it is callable from here. */
+#include "quote_cch_nested_impl_via_umbrella.cch"
+int main(void) {
+    return nested_impl_via_umbrella_decl() == 1 ? 0 : 1;
+}

@@ -1,0 +1,16 @@
+/* Nested inside impl_cch_nested_decoy_outer.cch. `m->len()` on the alias
+ * is the instance's `len`; `decoy_map_len` below, the alias's composed
+ * spelling, takes the db and is a different function. Resolved standalone,
+ * without the alias in sight, the composed name is the only declared one
+ * and the call would land on it. The leaf lowers with the unit. (The
+ * apostrophe in "alias's" above is deliberate: a static body after a
+ * comment holding one must still read as static.) */
+#ifndef IMPL_CCH_NESTED_DECOY_INNER_CCH
+#define IMPL_CCH_NESTED_DECOY_INNER_CCH
+static size_t decoy_alias_len(DecoyMap m) {
+    return m ? m->len() : 0;
+}
+static size_t decoy_map_len(const DecoyDb* db) {
+    return db && db->entries ? db->entries->len() + 100 : 100;
+}
+#endif /* IMPL_CCH_NESTED_DECOY_INNER_CCH */

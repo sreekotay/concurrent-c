@@ -1,0 +1,13 @@
+/* A bare-name UFCS call whose only declaration is a system header. The
+ * lowerer reads no `<...>` header; the receiver is a C double with no
+ * method set, so the call is emitted as `sqrt(d)` and `<math.h>` makes
+ * it legal. The host's declarations decide, at the call site. */
+#include <ccc/std/prelude.cch>
+#include <math.h>
+#include <stdio.h>
+int main(void) {
+    double d = 16.0;
+    double r = d.sqrt();
+    printf("%g\n", r);
+    return 0;
+}

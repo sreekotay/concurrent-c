@@ -25,12 +25,15 @@ int cc_take_cccportable_flag(int argc, char** argv, int* i,
                              const char** dir_out, int* cli_set);
 
 /* File-start `#pragma(@prelude) off` / `#pragma(@linenumbers) off` /
- * `#pragma(@per_tu)` after the unit header. Returns 0, or -1 and fills
- * err on ill-formed operands. `per_tu` is presence (no `off`). */
+ * `#pragma(@module) "name"` after the unit header (spec 1.8). Returns 0,
+ * or -1 with err filled and err_line the 1-based line of the pragma that
+ * is ill-formed: a bad operand, a second `@module`, or `#pragma(@per_tu)`,
+ * which is refused where it stands. `module` receives the module name, or
+ * an empty string when the unit names none. */
 int cc_file_start_pragmas(const char* src, size_t n,
                           int* prelude_off, int* linenumbers_off,
-                          int* per_tu,
-                          char* err, size_t err_cap);
+                          char* module, size_t module_cap,
+                          char* err, size_t err_cap, int* err_line);
 
 /* Rewrite emitted .c in place: version comment always; strip libc banner
  * includes if prelude_off; strip #line / CC_LN if no_line. */

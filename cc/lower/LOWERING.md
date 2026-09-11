@@ -1,0 +1,1105 @@
+# Lowering shapes
+
+The C each Concurrent-C construct lowers to. The runtime and stdlib do not
+change, so these are the shapes the current lowerer emits, written down so
+the clean lowerer reproduces the behaviour without reproducing the code.
+Every generated line is pinned to the user's line of the construct with a
+`#line`; the printer does that from the spans, so nothing here emits
+`#line` by hand.
+
+## Results
+
+**Result types.** `T!>(E)` is `CCResult_T_E`, `T?>(E)` the same type with
+the optional-discard property recorded in the index. Canonical spelling
+mangles the value type: `int`, `size_t`, `void`, `CCSlice`, `voidptr` for
+`void*`, `charptr` for `char*`, `unsigned_charptr`, `CCPyptr`, `intptr_t`.
+Each spec the TU uses and no included header declares is emitted once at
+the top of the product, after the includes:
+
+```c
+#line 1 "<cc:result-specs>"
+#ifndef CCResult_int_CCError_DEFINED
+#define CCResult_int_CCError_DEFINED 1
+#ifdef CC_DECL_RESULT_SPEC
+CC_DECL_RESULT_SPEC(CCResult_int_CCError, int, CCError)
+#else
+typedef struct { int ok; union { int value; CCError error; } u; } CCResult_int_CCError;
+static inline CCResult_int_CCError cc_ok_CCResult_int_CCError(int v) { CCResult_int_CCError r; r.ok = 1; r.u.value = v; return r; }
+static inline CCResult_int_CCError cc_err_CCResult_int_CCError(CCError e) { CCResult_int_CCError r; r.ok = 0; r.u.error = e; return r; }
+#endif
+#endif
+```
+
+`void` value uses `CC_DECL_RESULT_SPEC_VOID(name, E)` and a `cc_ok_...(void)`.
+
+**Constructors.** In a function declared `T!>(E)`: `cc_ok(v)` →
+`cc_ok_CCResult_T_E(v)`, `cc_ok(void)` → `cc_ok_CCResult_void_E()`,
+`cc_err(e)` → `cc_err_CCResult_T_E(e)`, `cc_err(CC_ERR_X, "msg")` →
+`cc_err_CCResult_T_E(CC_ERROR(CC_ERR_X, "msg"))`. Explicit forms
+`cc_ok(T, v)`, `cc_ok(T, E, v)`, `cc_err(T, e)`, `cc_err(T, E, e)` name
+the spec directly. When the error value's type is not `E`, it is projected
+through the `as:` face graph; the current shape is a `_Generic` ladder over
+the declared faces:
+
+```c
+cc_err_CCResult_int_CCError(({ __typeof__(e) __cc_ep = (e); _Generic(__cc_ep, CCError: __cc_ep, CCIoError: (*(CCError*)(void*)&__cc_ep), default: __cc_ep); }))
+```
+
+The clean lowerer emits the same projection but builds the ladder from the
+faces the index found on the declarations, not from a fixed list.
+
+**Statement `e !>;` with an `@errhandler(E h)` in scope** (initializer form
+`int total = e !>;` shown; the expression-statement form has no `total`):
+
+```c
+int total;
+{
+    __typeof__(get_total_wait_time()) __r = get_total_wait_time();
+    if (!__r.ok) {
+        cc_rt_diag_record_unwrap_site("recipe.ccs", "49");
+        __cc_eh_e_0 = (__r).u.error;
+        goto __cc_eh_0;
+    }
+    total = (__r).u.value;
+}
+```
+
+The plain read is right because the declaration said what `E` is, and the
+handler was picked for it (through its `as:` faces when the two differ —
+that walk is the `path` above, read as members).
+
+**When the callee named no `T !>(E)`.** A `#define` has no declaration to
+read a Result off, so which error a macro call carries is the host's to
+decide and not the lowerer's. Reading `__r.u.error` into a cell of type `F`
+is right only when the error is an `F`; where it is not, the host rejects
+the assignment and the lowerer will have emitted a mismatch it could have
+said something about — `rx.recv(&v) !>;` under an `@errhandler(CCError e)`
+returns `CCIoError`, which reaches `CCError` through its `as: base` face.
+
+So the choice is made where the types are known: one arm per error type the
+index knows that reaches `F`, each reading the error through its own `as:`
+path. Every arm casts the address before it projects, so an arm that is not
+selected still type-checks.
+
+```c
+__cc_eh_e_0 = _Generic((__r).u.error,
+    CCIoError: ((CCIoError*)(void*)&(__r).u.error)->base,
+    CCError:   (*(CCError*)(void*)&(__r).u.error));
+```
+
+There is deliberately no `default:` arm. A Result whose error reaches `F`
+by no face is then a compile error at that line, naming the types, rather
+than a conversion nobody chose. A unit whose errors are all one type gets
+no ladder at all: there is nothing for the host to decide.
+
+The handler is hoisted to the end of the function body as a label, with the
+error cell declared at the top of the function:
+
+```c
+    CCError __cc_eh_e_0;              /* at function top */
+    ...
+    return 0;
+__cc_eh_0:;
+    {
+        CCError e = __cc_eh_e_0;
+        cc_error_log(e);
+        return 1;
+    }
+```
+
+A handler whose statement does not diverge (no `return`, `goto`, `exit`,
+`abort`, `cc_error_exit`, `longjmp`; `_Noreturn` on the declaration decides,
+with the index) is emitted inline at the unwrap site instead of hoisted.
+One cell and label per handler; handlers are selected by the Result's error
+type `E`, innermost first; no handler for `E` in scope is an error at the
+`!>` naming `E` and the handlers that are in scope.
+
+**`e !> body` and `e !>(err) body`:**
+
+```c
+int timeout;
+{
+    __typeof__(read_config_value("timeout")) __r = read_config_value("timeout");
+    if (!__r.ok) {
+        __typeof__(__r.u.error) e = __r.u.error;   /* only with a binder */
+        <body>                                      /* must diverge at expression position */
+    }
+    timeout = __r.u.value;
+}
+```
+
+`@err(e);` inside the body is `__cc_eh_e_N = (e); goto __cc_eh_N;` for the
+handler matching `e`'s type.
+
+**`e ?> default` and `e ?>(err) default`:**
+
+```c
+int missing;
+{
+    __typeof__(read_config_value("k")) __r = read_config_value("k");
+    missing = !__cc_uw_is_err(__r) ? __cc_uw_value(__r) : (-1);
+}
+```
+
+```c
+int bad;
+{
+    __typeof__(read_config_value("")) __r = read_config_value("");
+    if (__r.ok) { bad = __r.u.value; }
+    else { __typeof__(__r.u.error) e = __r.u.error; bad = (<default>); }
+}
+```
+
+`__cc_uw_is_err`, `__cc_uw_value` and `__cc_uw_err_at` are `_Generic`
+ladders over every Result spec the TU uses, emitted after the specs; the
+clean lowerer uses `__r.ok` / `__r.u.value` directly and drops the ladders.
+
+**`?>` discard.** A call whose declared type is `T?>(E)` used as a bare
+expression statement is `(void)f(...)`; used with `!>` it is the ordinary
+unwrap.
+
+**`e !> @destroy;` and `@destroy { D }` on a declaration:** the unwrap as
+above; then the variable is registered for destruction at scope exit with
+the type's destroy hook from the index (`cc_arena_destroy`, a
+`@typehooks .destroy`, the block `D`). Destruction runs in reverse order at
+every exit of the scope: fallthrough, `return`, `break`, `continue`,
+`goto` out of the scope, and the handler `goto`. `@detach` suppresses it.
+
+**`@defer stmt`, `@defer(ok) stmt`, `@defer(err) stmt`:** same scope-exit
+machinery; `(ok)` runs only on a `return cc_ok(...)` or fallthrough of a
+Result function, `(err)` only on `return cc_err(...)` or a handler exit.
+`@cancel_defer name;` clears the named entry. The current lowerer keeps a
+per-function `__cc_defer_hw` high-water counter and a cleanup label
+(`goto_cleanup`); the clean lowerer emits the deferred statements inline
+at each exit, in reverse order, which is what the `#line` pinning needs.
+
+**Result methods.** `r.is_ok()` → `(r).ok`, `r.is_err()` → `!(r).ok`,
+`r.value()` → `((r).ok ? (r).u.value : (cc_error_exit_result(...), (r).u.value))`,
+`r.error()` symmetric, `r.unwrap_or(d)` → `((r).ok ? (r).u.value : (d))`.
+These come from the index as the method set of every `CCResult_*` type.
+
+## UFCS
+
+**The operator follows the receiver.** A pointer receiver takes `->`, a
+value receiver takes `.`; writing the other one is a diagnostic, never a
+silent coercion. A char pointer is the one receiver a `.` reaches
+through, so `"s".len()` keeps working. Whether the receiver is a pointer
+is asked of the type as written, through aliases and through the
+pointer-instance rule: a generic instance whose factory hands back a
+pointer is spelled as one in every unit that names it, including a
+header the current unit only includes.
+
+**The call.** `callee(<recv>, args)` with the receiver fitted to the
+callee's first parameter: by address when the callee takes a pointer and
+the receiver is a value, itself when the two agree. An rvalue receiver
+that the callee wants by address lives in a compound literal of its own
+type. `Type.fn(args)` is the declared `Type_fn(args)`.
+
+**The bare-name tier.** A plain `m(T, ...)` is callable as `x.m(...)`
+under one rule: the address of a receiver may be taken, but a pointer is
+never dereferenced and const is never dropped. So a `T*` receiver does
+not reach `m(T)`, a `const T*` receiver does not reach `m(T*)`, and
+`void*` is a dispatch key for a pointer receiver only. A near miss lands
+in the resolution ladder:
+
+```
+no UFCS method 'get_x' for receiver type 'Pair'; tried: Pair_get_x pair_get_x; candidate get_x (bare): declared, but first parameter 'Pair* p1' does not take 'Pair'
+```
+
+The named tiers (`T_m`, `cc_<snake>_m`, hooks, registrations) are
+conventions the declaration opted into, so they keep the ordinary
+address rule.
+
+**A `.ufcs` handler that decides from the call site.** The index reads a
+handler's body as a table of `method -> callee` rules, and a handler that
+is one is answered from that table. One that decides from what it was
+passed is not: `toy.pick(2)`, `toy.pick("abcd")` and `toy.pick(3, 5)` are
+three different callees, and no reading of the body names them without the
+site. The index marks such a handler opaque, and an opaque handler is run.
+
+It is compiled once, out of a unit built for it — the prelude it is
+written against, the type declarations of the file that declared it, and
+the handler itself. Not that whole file: handing the file over declares
+its types twice, once from the extraction and once from the file, and the
+compile fails on the second. A handler that does not compile is not tried
+again and the site falls back to what the index could read.
+
+`@typehooks on *` is never run. A wildcard handler is where every
+unresolved method ends up, so compiling one that cannot be compiled would
+report that failure at every such site, about a handler that was not going
+to be the answer.
+
+What comes back is the callee, or one of two answers that are not a name:
+`cc_ufcs_pass()` leaves the method to the ordinary tiers, and the empty
+slice is a refusal. A `cc_ufcs_emit_value` return says the receiver goes
+by value. A name nothing declares is a diagnostic at the site, naming the
+handler — never a call the host is left to explain.
+
+A string literal argument is spelled to the handler as `const char*`. That
+is the shape the argument has where a handler picks an overload by it, and
+the spelling every handler already written was written against; typing it
+`char *` would answer a question about the site with a fact about the type
+system, and the handler's `const char*` arm would never be taken.
+
+**`as:` faces.** A method resolved through a `@typeview on T { as: f; }`
+field belongs to the field, not to `T`: the resolution records the member
+chain it walked, dot-joined across hops, and the call site projects the
+receiver through it before the address rule applies. `w.create(p)`
+resolved through `as: file` is `cc_file_create(&w.file, p)`.
+
+**Declaration checks.** A `@typeview` is checked where it is written, not
+where it is used. Each `as:` field names a value member, never a pointer;
+the face graph is acyclic; and no type is reachable through two faces,
+which would make a projection ambiguous. In a restrict list (`r:`, `w:`,
+`rw:`) every name matches a field or a method of the type, with the
+nearest name offered as a note when it does not; a `*` anywhere in an
+item is a pattern, so `out_*` and `*_len` match the members they name;
+and `^*` is refused as ill-formed rather than read as denying nothing.
+
+The receiver goes in as `&recv` when the callee's first parameter is a
+pointer. A declared function says so and the index reads it; a
+function-like macro has no parameters to read, and where a macro and a
+function share a name the macro is what the host compiler sees. What the
+macro does with its first argument answers it: one that hands it straight
+to the call it expands to wants an address, one that converts it first
+(`CC__ARENA_HOST(a)`) wants the value.
+
+A pointer to a type the program never defines is a handle: there are no
+fields to reach through it, so `.` and `->` name the same thing and `.`
+is the one that reads. A pointer to a struct with fields is not — there
+the two differ, and writing the wrong one is a diagnostic.
+
+`println(x)` and `eprintln(x)` are language spellings, not declared
+functions — `cc_println` is a `_Generic` macro the prelude defines — so
+nothing in the index resolves the bare name. The step renames them; the
+arguments and the Result the macro yields are untouched.
+
+A receiver a method wants by address that has none of its own (`xs.sub(1,
+3).len()`, an `@string(...)` built in place) gets one from a compound
+literal of one element, `(T[1]){ e }`, which decays to the `T*` the callee
+wants. Not `&(T){ e }`: a brace-enclosed initializer for a struct
+initializes its FIRST MEMBER from `e`, which is a type error when that
+member is not a `T` and silently the wrong object when it is.
+
+## Closures
+
+`(params) => body` becomes three C functions and a struct, and the
+closure expression becomes the call that builds one, so a closure value
+is the runtime's handle and nothing else:
+
+```c
+/* --- CC closure declarations --- */
+static void* cc_closure__N1_entry(void*, intptr_t);
+static CCClosure1 cc_closure__N1_make(int* gp);
+/* --- end closure declarations --- */
+
+CCClosure1 c = cc_closure__N1_make(gp);
+```
+
+```c
+typedef struct cc_closure__N1_env { int* gp; } cc_closure__N1_env;
+static void cc_closure__N1_env_drop(void* p) { if (p) cc__heap_free(p); }
+static CCClosure1 cc_closure__N1_make(int* gp) {
+    cc_closure__N1_env* __env = (cc_closure__N1_env*)cc__heap_alloc(sizeof(*__env));
+    __env->gp = gp;
+    return cc_closure1_make(cc_closure__N1_entry, __env, cc_closure__N1_env_drop);
+}
+static void* cc_closure__N1_entry(void* __p, intptr_t __arg0) {
+    cc_closure__N1_env* __env = (cc_closure__N1_env*)__p;
+    int* gp = __env->gp;
+    intptr_t x = (intptr_t)__arg0;
+    ...
+    return NULL;
+}
+```
+
+**What it captures** is what it reads: an explicit `[a, b]` list when one
+is written, otherwise every name the body uses that the enclosing scope
+declares, once each, in the order the body first reads it. Names that
+resolve to a global, a function or an enumerator are not captures.
+
+Captures are by value. The environment outlives the statement that built
+it, so a by-reference capture has to say whose lifetime it is borrowing;
+`[&x]`, a moving capture and an init capture are diagnostics until that
+is lowered, rather than a dangling alias that still compiles.
+
+**The call.** `c(a)` on a closure handle is `cc_closureN_call(c,
+(intptr_t)(a))`, with the arity read off the handle's type. The runtime
+carries `CCClosure0` through `CCClosure2`; more parameters than that is a
+diagnostic at the closure.
+
+The entry's body is built as real declarations, not text, so every step
+after this one types a closure body exactly as it types any function.
+
+`[&x]` captures the address: the environment field and the `_make`
+parameter are `void*`, the call site passes `&x`, and the entry says what
+it points at. A scalar is bound as `T* __cc_ref_x` and the body's uses of
+`x` are rewritten to read through it; an array is bound as `E* x`
+directly, because the body indexes elements and a pointer to the array
+would index the wrong width. A capture the body then declares again is a
+diagnostic, not a silent rewrite of the wrong name.
+
+## Slices
+
+A walk reads its element type off the container's registration: the return
+of the `.access` hook, or the type argument of the instance. The BARE slice
+has neither — `CCSlice` is what `char[:]` spells, and only the typed
+instances (`CCSlice_int`, …) carry a type argument — so the char family
+names its element directly. Nothing else can read it off a registration
+that never mentions `char`.
+
+
+**The type.** `T[:]` is an instance of the slice family, named by the same
+canonical spelling the index computes: `CCSlice` for the char family,
+`CCSlice_T` otherwise, and `CCSliceUnique` for a unique char slice. A
+typed instance is `struct { CCSlice base; }`, and the header declares
+`@typeview on CCSlice_* { as: base; }`, so `xs.len` reaches `xs.base.len`
+by the ordinary rule that a field the type does not have may live in an
+`as:` embed. Nothing in the lowerer names a slice to make that work.
+
+**The value.** A string literal that initializes, is returned as, or is
+passed to a slice becomes `CC_SLICE_LIT(...)`, which carries the bytes
+and their length with no run of `strlen`. `@slice("...")` is the same
+literal in expression position. A braced list is the array it spells,
+hoisted to its own local, and a slice over that array, so the storage and
+the view share one extent:
+
+```c
+char __cc_sl_br[] = { 'a', 'b', 'c', 'd' };
+CCSlice br = cc_slice_from_buffer(__cc_sl_br, sizeof(__cc_sl_br)/sizeof(__cc_sl_br[0]));
+
+double __cc_sl_xs[] = { 1.0, 2.0 };
+CCSlice_double xs = CCSlice_double_from_buffer(__cc_sl_xs, sizeof(__cc_sl_xs)/sizeof(__cc_sl_xs[0]));
+```
+
+**Arguments.** A typed instance handed to a parameter declared as the
+erased `CCSlice` becomes `CCSlice_T_bytes(&arg)`, whose length is scaled
+by the element size. This happens only where the callee's declaration
+provably takes the erased slice: erasing by default would turn a typed
+borrow into a byte marshal that still compiles. The coercion runs after
+UFCS, when a method call is a plain call and its parameter types are the
+callee's.
+
+The conversions the stdlib declares on a `.cast` hook (a char pointer or
+a `CCString` to a byte slice) are computed by the hook body, so they wait
+on the comptime seam rather than being written into the lowerer.
+
+## Variants
+
+**Declaration.** `@variant V { a: A; b: B; c: void; }` is the tag enum and
+the tagged union; a void arm has no union member, and a variant whose arms
+are all void has no union:
+
+```c
+typedef enum { V_a, V_b, V_c } VKind;
+typedef struct V { VKind kind; union { A a; B b; } u; } V;
+```
+
+When an arm type is itself registered with a destructor (a `@typehooks`
+`.destroy`; the `Type_destroy` naming convention does not count here, and
+neither does a value member that has one — a plain record holding an arena
+`Vec` is owned by the arena, and a variant over it must not be dropped on
+scope exit), the drop helper follows the typedef and is the variant's own
+destroy hook, so `@destroy`, `x.destroy()` and the chains of enclosing
+structs run it:
+
+```c
+static inline void V__cc_drop(V* __v) {
+    switch (__v->kind) {
+    case V_a: { a_destroy(&__v->u.a); } break;
+    default: break;
+    }
+}
+```
+
+**Construction.** A designated initializer naming one arm gets its tag;
+the arm value moves under `.u`; a void arm keeps only the tag; `.kind =`
+passes through. The same shape serves a declaration, a compound literal,
+and an initializer nested in a struct or array initializer:
+
+```c
+V v = { .kind = V_a, .u.a = make_a() };
+V w = { .kind = V_c };
+h = (Hold){ .cell = { .kind = V_b, .u.b = 9 } };
+```
+
+A bare `.arm` resolves to `V_arm` from the type of what it is compared
+with or assigned to (`x.kind == .a`, `VKind k = .a`, `k = .b`).
+
+**Transition.** `x = { .b = e };` and `x = (V){ .b = e };` on a variant
+with a drop helper build the new value first, drop the old arm, then
+store; on a variant without one they are the plain assignment:
+
+```c
+{ V __cc_vt1 = (V){ .kind = V_b, .u.b = e }; V__cc_drop(&(x)); x = __cc_vt1; }
+```
+
+A local of a variant with a drop helper is a `@destroy` site for the
+cleanup step; one declared without a value starts with a tag past the
+arms, `V x = { .kind = (VKind)2 };`, so its first store and its scope
+exit drop nothing.
+
+**Projection.** `x.a` is `x.u.a` where a dominating check protects it: the
+case of a checked switch on `x`, or the then-branch of `if (x.kind ==
+.a)` / `if (x.kind == V_a)` (either operand order). With its own handler or
+fallback it needs none:
+
+```c
+int64_t n = ({ if ((x).kind != V_a) { return -1; } (x).u.a; });
+int64_t m = ({ __typeof__((x).u.a) __cc_pj1; if ((x).kind == V_a) { __cc_pj1 = (x).u.a; } else { __cc_pj1 = (fallback); } __cc_pj1; });
+```
+
+In the handler body and the fallback of a two-armed variant the other
+arm is protected. Anything else is a diagnostic at the `.`: an
+unprotected projection, a write to `.kind`, a reach into `.u`.
+
+**Checked switch.** `@switch (x)` on a value or pointer switches on the
+tag; `case .a:` is `case V_a:`; `case .a(bind):` opens a block that
+declares the binding from the subject and holds the statements up to the
+next label. Every arm must appear unless a `default:` forfeits the check;
+`switch (x.kind)` with `V_a` labels is checked the same way.
+
+```c
+switch ((r->del).kind) {
+    case Del_text: {
+        Buf buf = (r->del).u.text;
+        ...
+    }
+    case Del_pieces:
+        ...
+}
+```
+
+`@variant(packed)` is not lowered by the clean lowerer yet: the
+declaration is a diagnostic.
+
+### Schema unions
+
+A `one of` in a `@grammar(schema)` body is a tagged union with the same
+`kind`/`u` layout and the same projection rules, but nothing in the text
+this step reads says so: the engine emits the declaration, so the index
+has the type, its `NameKind` and every enumerator, and `v.kind == .object`
+reads as a stray `.` and `v.object` as a missing member. The engine queues
+each union it declares; the driver writes that queue to a file and passes
+it as `--schema-variants`, and the step registers the arms from it before
+it collects the `@variant` declarations. Only the arms are registered:
+the engine's declaration is the real one, with the anonymous struct each
+arm actually has, and synthesizing one over it would replace what the
+index knows with something less true.
+
+A schema union is a product as well as a sum — fields the schema binds
+beside its `one of` are members of the same struct — so a member that is
+not an arm passes to C, which has the declaration, instead of being a
+misspelled-arm diagnostic.
+
+The fill and write helpers the engine emits set `.kind`, project the arm
+they have just tagged, and reach through `.u` to lay out bytes. Those are
+the compiler's own output, not a user's reach-in, so a body whose function
+name ends in `__fill`, `__wput`, `__wchk` or `__wmeasure` is exempt from
+the `.u` ban, the domination rule and the read-only `.kind` rule. Every
+other body is checked, schema union or not; the `.u` message names the
+surface (`schema union 'Bulk'`).
+
+## String switches
+
+C switches on integers, so `case "GET":` on a slice subject becomes an
+ordinal: the subject is replaced by a statement expression that compares
+the slice's bytes against each key and yields the matching label's index,
+and each label becomes that index. `case "A": case "B":` parses as one
+case whose labelled statement is the next case, so the labels of a
+fallthrough run hang off the first rather than sitting beside it; both are
+collected, and both become integer labels, so the fallthrough survives.
+Arm bodies and `default:` are untouched.
+
+A slice subject has no integer to switch on even with no string label at
+all, so `switch (k) { default: ... }` on one is lowered too — that is the
+shape a schema grammar's empty `Type__fk` has. A string label on a
+subject of a type that is not slice-shaped, and a switch that mixes string
+and integer labels, are diagnostics: neither has an ordinal that means
+what was written.
+
+The step runs after Results and before cleanup. By then a UFCS call or an
+`@string` in the subject is already the C it will be, so spelling the
+subject is spelling the final text.
+
+## String templates
+
+`@string(`...`, arena)` builds a CCString by pushing each piece in order,
+so it is a run of statements and is written where statements go: the
+initializer of a declaration. Anywhere else it is a diagnostic naming the
+fix, never a partial build.
+
+```c
+CCString s = cc_string_new();
+cc_string_push_buffer(&s, "hi ", 3, a);
+cc__string_slot_push(&s, (who), a);
+```
+
+A literal run carries the bytes as the source wrote them and the count of
+characters they stand for, so an escape counts once. `@scratch` as the
+arena names one stack arena per function, declared at the top and sized
+to the largest request in the body:
+
+```c
+cc_arena_stack(__cc_str_scratch, 1024);
+```
+
+`@string(`...`)` with no arena is the same pieces over a buffer sized on
+the stack, which is one expression and goes anywhere:
+
+```c
+CCSlice t = cc__string_stack_slice(cc__string_stack_push(cc__string_stack_lit(
+    cc__string_stack_new((char[0u + 4u + cc__string_stack_bound((n))]){0},
+                         0u + 4u + cc__string_stack_bound((n))), "a\nb ", 4), (n)));
+```
+
+The step runs after UFCS and the slice arguments, so a slot expression is
+already the C it will be: the stack form spells each slot into its size
+expression, and spelling it earlier would freeze a call the later steps
+had not rewritten yet. A tagged slot (`$~tag{e}`) and the direct form
+`@string(e, arena)` are diagnostics for now rather than a dropped tag.
+
+An arena template anywhere but a declaration initializer becomes those
+statements and the string they built, as one expression
+(`({ CCString __cc_str_n = cc_string_new(); ...; __cc_str_n; })`), so it
+evaluates where it stands — inside a condition, an argument, a loop body
+— and not once, earlier, where the code did not ask for it.
+
+A literal run becomes a C string literal, and what is ordinary between
+backticks is not ordinary there: a newline and a `\"` are escaped on the
+way out. An escape the user wrote travels through untouched, since C
+decodes it to the one character the length count already assumed; a
+verbatim run has no escapes to preserve, so its backslashes are escaped
+too.
+
+## Scratch and templates
+
+`@string(\`text ${x} more\`, arena)`:
+
+```c
+({ CCArena __cc_tpl_arena = CC__ARENA_HANDLE(arena);
+   CCString __cc_tpl = cc_string_new();
+   cc_string_push_buffer(&__cc_tpl, "text ", 5, __cc_tpl_arena);
+   cc__string_slot_push(&__cc_tpl, (x), __cc_tpl_arena);
+   cc_string_push_buffer(&__cc_tpl, " more", 5, __cc_tpl_arena);
+   __cc_tpl; })
+```
+
+printed one push per line. `@scratch` as the arena is the function's
+`cc_arena_stack(__cc_str_scratch, N)` declared at the top of the function
+(N = max `@scratch(N)`, default 1024). A statement that consumes a
+`@scratch` template in a call and binds nothing is wrapped, so the
+temporary's bytes are back before the next one asks for room:
+
+```c
+{
+    int __cc_defer_on_N = 0;
+    CCArenaCheckpoint __cc_scratch_cpM = cc_arena_checkpoint_local(__cc_str_scratch);
+    __cc_defer_on_N = 1;
+    <statement>
+    { if (__cc_defer_on_N) { cc_arena_restore_local(__cc_scratch_cpM); } }
+}
+```
+
+The restore is a `@defer` on the wrapper block, which is where the reach
+flag comes from and why every exit from inside the statement runs it on
+the way out: a `break` or `continue` that leaves the block, and the soft
+return a `return` inside a `!>` body becomes.
+
+A template whose product is bound to a name keeps its bytes for the frame,
+so the bound form is not wrapped. Both spellings of it are the bound form:
+a declaration initializer (`CCString s = @string(..., @scratch);`) and an
+assignment whose stored value is the template (`s = @string(..., @scratch);`,
+through parentheses, a cast, and the arms of a ternary).
+
+## Header mode
+
+A `.cch` is lowered to a `.h` the host compiler includes, and two things
+follow from being included rather than compiled alone.
+
+`<ccc/std/prelude.cch>` names the lowered header, so an angle `.cch`
+include becomes `.h` here. The driver rewrites those on the way to the
+host for a `.c`; a `.h` this step writes is read as it stands, and the
+language is not C.
+
+The unit that declares a type declares its Result spec. The index's spec
+list is every Result every unit lowered in this process has named, so a
+header that emitted all of them would put `CCResult_CcProduct_CcDiag`
+above the include that says what a `CcProduct` is — in whichever header
+happened to be read first. A header emits the specs it spells and the
+specs of the types it defines; a user of one reaches it through the
+include. A translation unit the host compiles alone still carries every
+spec the index knows, since anything it reaches has to be there.
+
+The type that decides is the value. An error type is shared by every
+Result in a program, so the header declaring it would take them all back
+and be first again — `CcDiag` is the error arm of nearly every spec here,
+and `diag.h` is included before anything else. A `void` Result has no
+value to decide and belongs to the header that declares its error.
+
+Both questions — what this unit defines, and where — are answered from
+this unit's text. The index holds one declaration per type, from the
+parse that indexed the file; a header lowered on its own is parsed
+again, so that declaration is not in this unit's list and its spans index
+another tape. Asking the index would say "not defined here" of a type
+this very file defines, and put its spec above the definition. The same
+applies to a `@variant`: the declaration to lower is the one in this
+unit, not the index's.
+
+## Compile time
+
+Running compile-time code needs a C compiler, so there is an executor and
+it stays: `cc/src/comptime`, on libtcc, which the lowerer links. What is
+being taken apart is not the executor but the shape of the call — a
+whole-translation-unit text rewrite before the lowerer sees anything, with
+the lowerer reading back whatever came out.
+
+`@comptime if` / `@comptime for` decide what source there is to lower at
+all, and a `@grammar` body is raw bytes no parser may read. Those are
+still resolved before the lowerer sees the unit, by the same engine the
+shadow path runs, and the lowerer is handed the source that survived —
+written to a stage in the cache, with a `#line` back to the file the user
+wrote (the prepare passes blank rather than delete, so line N there is
+line N here) and `--quote-dir` naming the directory that unit's quoted
+`.cch` includes resolve against.
+
+`@comptime(expr)` in value position is the lowerer's own. It parses the
+expression, names it by the span it parsed, and asks the executor for the
+text of the C constant its value projects to — an integer, a floating
+point number, a bool or a string. So a value that is none of those is a
+diagnostic at the expression the user wrote, in a file that is still being
+lowered, rather than a message from a copy that is thrown away. The stage
+keeps `@comptime` function definitions for the same reason: what the
+expression calls has to be there to read, and the lowerer takes those
+definitions back out of the C itself (they ran at compile time; what they
+computed is already the literal standing in the caller's place).
+
+A diagnostic on a staged unit names the file the user wrote, so its caret
+snippet is cut from that file, not from the stage: the stage is one line
+longer, and a snippet cut from it by the user's line number points one
+line off — the closer the copy, the more convincingly wrong.
+
+What the lowerer is not handed is C. The type-scoped and template passes
+are left off, so `Tweet.parse(...)` and `@string(`...`)` still reach it as
+the language, for its own steps to lower from the index and the AST.
+
+`@comptime { }` blocks are run, on their own copy of the source: the
+executor compiles a block as C, so the copy it is handed has every `.cch`
+include rewritten to the lowered header it stands for — a rewrite the
+lowerer must not see, since it resolves those itself. What the blocks
+emit is collected there and spliced into the C after lowering, at the
+anchors the fragments name. What is left of a block in the stage is
+blanked: a block that has run has no code in it for the lowerer to
+lower, and the blanking keeps the line count so the map still holds.
+
+Rewriting those includes takes something away, so it is put back. A
+`@comptime` function, a factory and a `@comptime { }` block are compile
+time only, and the lowered `.h` does not carry them — `static_map` is one
+of those functions, declared in `<ccc/std/static_map.cch>`. The copy the
+executor runs has them appended (`cc_harvest_local_header_factories`,
+`cc_harvest_header_comptime_functions`,
+`cc_harvest_local_header_comptime_blocks`, in that order, as the shadow
+path appends them). Without it the block calling `static_map` compiles,
+runs, and emits nothing — a table that is silently not there, and a use of
+it that the host reports as an implicit declaration.
+
+**Where a fragment lands.** A blanked block leaves `enum{__ccs<n>=0};` on
+one of its blanked lines, and that marker is what a fragment anchored at
+its own site aims at. The marker is a declaration, so how it is laid out
+is the printer's business: this lowerer prints it over several lines with
+a `#line` between each, where the text engine wrote it tight. Matching one
+spelling made the marker read as absent, and a fragment with no marker
+lands at the end of the file — after every use of what it defines. The
+match skips line breaks and `#line` directives with the other blanks, and
+a fragment aimed at the standalone marker goes after that declaration's
+`};`, since with the layout on several lines the marker's own line begins
+inside the enum.
+
+## Parallel
+
+The arms of `@parallel { a = f(); b = g(); }` may run at the same time.
+The first stays on the caller; each of the others becomes a
+`__cc_par_<n>_<k>_thunk` the runtime may put on another fiber, and the
+block joins before it ends — a lexical fork and join, not a nursery that
+outlives the scope.
+
+An arm reaches the locals it names through a
+`__cc_par_<n>_<k>_env_t`, and how depends on whether it outlives the
+block. An unbound arm reads through their addresses: the block joins
+before it ends, so the arm is meant to see what the caller sees. A bound
+arm reads a copy taken when it started, because the caller goes on and
+changes things it is not entitled to see later. Either way the
+assignment target is an address — the caller's own binding is what the
+arm has to write — and so is the handle the site binds, since a copy of
+a handle is one nothing else can pause. The runtime may refuse the site
+(`cc_parallel_deny_fast`) and a spawn may fail; both run the same thunk
+inline at the join, so the arms happen either way and the only difference
+is whether they overlapped.
+
+An arm becomes a thunk that evaluates one expression and writes at most
+one outer name through an out pointer, so the parser refuses the shapes
+that have no such form: a bare `{ }` (which should be `@serial { }`), a
+loop (`@parallel for`, or `@serial`), any other statement, an empty
+`@serial` body, and a `@serial` body that assigns more than one name from
+the enclosing scope. A `@parallel` with no arms at all is refused by the
+step rather than lowered to an empty block, which would run and join
+nothing.
+
+The one outer name a block arm writes is its dest, found in the parser by
+the same walk that refuses two of them. A dest is written through the
+arm's out pointer: the thunk binds the name from `*__e->__cc_out` before
+the body and stores it back after, so the assignment reaches the caller. A
+bound arm's other captures are a copy taken when it started, and a copy of
+the written name would make the assignment look like it happened while the
+caller still read its old value.
+
+`@parallel(h) { body }` is one more arm on a handle that already exists.
+It is the same environment, thunk and admit as an arm of a bound block,
+minus everything that belongs to opening one: nothing creates the dest,
+nothing joins at the end, and nothing enters the deny scope, because the
+block that bound the handle still owns them.
+
+A captured name the arm reaches through a pointer is read as a deref node,
+not as an identifier whose spelling happens to be `(*p)` — such an
+identifier is one the typing walk cannot look up, so a UFCS call on the
+captured name would lose its receiver's type. A bare `return;` in an arm
+body returns the thunk's NULL: the thunk returns `void*`, and a return with
+no value from it is a return with no value from a function that has one.
+
+`@serial { ... }` is an arm whose body is a block rather than one
+expression; it reaches its names through the same addresses, and a name
+it declares for itself over one it captures is a diagnostic rather than a
+rewrite of the wrong name.
+
+`CCParallel h = @parallel { ... }`, with or without `spawn`, binds a
+handle the caller joins later — `spawn` there says what the handle
+already says, and without a handle there would be nothing to join by.
+The handle is declared before the block, filled with
+`cc_parallel_dest()`, and passed to every arm so `cc_parallel_honor` can
+pause and resume it. An arm that outlives the block needs an environment
+that does too, so a bound site heap-allocates one and hands it to
+`cc_parallel_spawn_admit` / `cc_parallel_admit`. There is no inline
+fallback there: the handle promised a live arm, so a refused or failed
+spawn stops the program rather than quietly running it here.
+
+Everything else the form can carry — `spawn`, a predicate, `seq`, `wait`,
+`worker`, `cache`, and the `for` and dest forms — is a diagnostic naming
+it. A concurrency construct that
+quietly ran as something else would be a program that behaves differently
+for reasons the page does not show.
+
+## Ownership markers
+
+`@detach` says the owner outlives this scope. Nothing is registered for it
+— scope-exit cleanup is registered by `@destroy` and by nothing else — but
+the marker still comes off the declaration, over the whole unit rather
+than inside the per-function cleanup rewrite: a function whose only marker
+is `@detach` has no cleanup site, so that rewrite never visits it. A
+declaration that keeps the marker is a Concurrent-C declaration to the
+printer, which replays such a declaration as its source span, and
+`@detach` would go into the C verbatim.
+
+## Constructors
+
+`T x = @create(args);` calls what the type registered as its `.create`
+hook. A type may register two overloads, and an overload the type spells
+`decl:<callee>` is a DECL form: the callee declares the variable itself
+(it is a macro expanding to one or more declarations), so the whole
+declaration becomes `<callee>(name, args)` and nothing prints `T name =`
+in front of it:
+
+```c
+CCArena a = @create(buf, sizeof buf) @destroy;
+        -> cc_arena_bind_buffer(a, buf, sizeof buf);
+```
+
+The declaration node stays a declaration, with its name, its type and its
+`@destroy` intact, so the cleanup step registers the scope exit exactly as
+it would for any other owner. A decl-form overload picked where there is
+no declaration to name is a diagnostic.
+
+The type spells the marker `CC_TYPE_CREATE_DECL("callee")`, which expands
+to the two adjacent string literals `"decl:" "callee"`. The index does not
+run the preprocessor, so it reads the marker off the call rather than off
+the expansion; the macro's name is part of the type-hook protocol,
+declared beside `cc_type_create_overloads`.
+
+## Deadlines
+
+`@with_deadline(d) { ... }` becomes a block that builds the scope from the
+deadline the site names, pushes it as the current one, runs the body, and
+puts the previous one back:
+
+```c
+{
+    CCDeadline __cc_dl0;
+    CCDeadline* __cc_use0 = cc_deadline_scope(&__cc_dl0, (seconds(1)));
+    CCDeadline* __cc_prev0 = cc_deadline_push(__cc_use0);
+    ...
+    cc_deadline_pop(__cc_prev0);
+}
+```
+
+`as name` binds the scope's handle under that name instead of the
+generated one, so the body — and anything it hands the handle to — names
+the same clock. The pop is the last statement of the block, not a
+`@defer`: a `return` out of the body leaves the pushed deadline in place,
+which is what the runtime expects of a scope the returning frame is done
+with.
+
+The step runs before every other statement step, so by the time those look
+at the body it is ordinary statements — a handle a `@parallel` binds inside
+a deadline body is a declaration they can see, not something buried in a
+construct they do not walk into.
+
+## Scheduling facts
+
+`@blocking` / `@nonblocking` / `@noblock` / `@latency_sensitive` on a
+declaration say what the scheduler needs to know about the function. The
+index reads them off the declaration; C carries no such word, so they do
+not survive into the output — and must not, or the printer keeps the
+declaration whole rather than lower one it still reads as the language.
+
+The same words at a call site are a different construct: the call becomes
+a closure over its arguments, run as a task. That is a diagnostic for now.
+
+## Async
+
+`@async Ret f(a)` hands the caller a `CCTaskIntptr` instead of a value.
+It becomes four things:
+
+- `__cc_async_<f>_<n>_frame` — `__st`, `__r`, one `__p_<name>` per
+  parameter, and a task slot. It is heap-allocated because it outlives
+  the call that made it: the caller returns, the task does not.
+- `__cc_async_<f>_<n>_body(frame*)` — the body the user wrote, over
+  locals named as they named their parameters and read from the frame.
+- `__cc_async_<f>_<n>_poll` — `0 -> 1 -> 999`: run the body once, keep
+  the result in `__r`, report `CC_FUTURE_READY`. A `void` async keeps 0.
+- `__cc_async_<f>_<n>_drop` — releases the task slot and the frame.
+
+and the function the caller still calls by name, which allocates the
+frame, copies the arguments into it, and returns
+`cc_task_intptr_make_poll_ex(poll, NULL, frame, drop)`. A declaration
+without a body just returns `CCTaskIntptr`.
+
+`@await e` is `cc_block_on(T, e)`, with `T` the declared return type of
+the function `e` calls. An await whose type cannot be read that way is a
+diagnostic: reading a task's payload at the wrong width is a wrong value
+that still compiles.
+
+An `@async` function returning a Result is not lowered yet — the task
+carries the value boxed, and the await unboxes it.
+
+### A closure and the handler in scope
+
+A closure body becomes a function of its own, and a `goto` cannot leave one
+— but the `@errhandler` the author had in scope where the closure is
+written is still the handler an unwrap inside the body means. The
+declaration travels into the generated entry, where Results registers it as
+a local handler and inlines it at each unwrap. Without it a `!>` inside a
+closure reads as an unwrap with nowhere to send its error, which is a
+diagnostic about a handler the author did write.
+
+Only a handler that diverges without returning a value travels.
+`cc_error_exit(e)` means the same thing wherever it runs; a handler whose
+body is `return 1;` names a value belonging to the function it was written
+in, and the entry returns `void*`.
+
+A handler covers the rest of the list it sits in, not its own extent, so
+the walk records it at the depth of the enclosing block — recording its own
+depth drops it the moment the walk leaves the handler statement, which is
+before any of the code it covers.
+
+## Channel endpoints
+
+`int[~4 >]` is the same handle whether it names a local, a struct field, a
+typedef or a parameter: the element type and the capacity belong to the
+pair that creates it, and what the declarator holds is a `CCChanTx` /
+`CCChanRx`. The type is rewritten in place wherever it appears, so every
+position is covered by one rule rather than by a list of the places a
+declarator can occur.
+
+Only a local declaration is a site — nothing pairs, sends or receives by
+being declared elsewhere — so the rewrite runs after the sites are read,
+when every endpoint the step needs is already recorded against its local.
+
+The step runs before `@async` and `@parallel`. Both spell a captured
+parameter's type into text they generate (an async frame's field, an arm's
+environment), and an endpoint type spelled there is one no later AST pass
+can reach.
+
+## Channels that carry tasks
+
+`tx.send_task(() => f(x))` does not send the closure. It spawns the closure
+as a task and sends the task handle, so what the receiver reads back is
+something it can block on:
+
+```c
+CCClosure0 __cc_st_c0 = cc_closure__N1_make(v);
+CCTask __cc_st_t0 = cc_fiber_spawn_closure0(__cc_st_c0);
+int __cc_st_e0 = cc_chan_send((tx).raw, &__cc_st_t0, sizeof(__cc_st_t0));
+if (__cc_st_e0 != 0) { (void)cc_block_on_intptr(__cc_st_t0); }
+```
+
+A failed send would strand the task, so the site blocks on it there rather
+than dropping a fiber nothing will ever join. `send_task_hybrid` is the
+same shape on the other scheduler (`cc_fiber_spawn_closure0_v2`).
+
+The entry of such a closure stores its value in the task's result slot and
+returns the slot, which is where `cc_block_on_*` looks; the value is the
+closure's expression, or the last expression of its block. Every other
+closure returns NULL: it has no value anyone can ask for.
+
+A channel a `send_task` names carries `CCTask`, whatever its element type
+says — the value the task computed is read out of the handle, not off the
+channel — so the uses are collected before the declarations are read: the
+pair call that sizes the channel is built from the declaration and may come
+first. The `ordered` modifier reaches that call too, and an endpoint name
+resolves to its most recent declaration: taking the first would hand a
+later function the modifiers of an endpoint another function happened to
+give the same name.
+
+## Ambient namespaces
+
+`cc_std_out.write(x)` is `cc_std_out_write_auto(x)`. The receiver names no
+value — it is the namespace the callee lives in — so there is nothing for
+the receiver typing to find and no receiver argument to pass. The pairs
+come from `cc_ufcs_families.h`, the table every lowerer reads, so neither
+invents a name the other does not know. The callee it names is a
+`_Generic` that picks the overload from the argument's type, which is why
+the argument is passed as written. A local of that name shadows the
+namespace: it is a value, and the receiver typing has something to find.
+
+## `as:` coercion at a call
+
+`@typeview on T { as: f; }` says a `T` is an `f` wherever one is wanted —
+which is what makes `w.write(msg)` resolve to `cc_file_write(&w.file, …)`.
+The same face applies to an ordinary argument: an argument whose type has
+an `as:` path to what the parameter wants is projected through the faces
+on the way in, so `cc_error_str(e)` with `e` a `CCIoError` is
+`cc_error_str(e.base)`. `&x` for a `T*` parameter projects inside the
+address-of, so the callee points at the face rather than at a pointer to
+the wrapper that happens to start with one.
+
+Only an unambiguous path is taken. Two faces reaching the same type is the
+type's own ambiguity, and picking one would silently choose which of them
+the caller meant.
+
+The step runs after Results, so an unwrap's error binder is a declaration
+with a named type by the time the arguments in its body are read. That
+name is why Results declares a binder as the error the callee declared
+whenever it could type the Result, rather than as
+`__typeof__(__r.u.error)`: the two are the same type to C, but only the
+first is one an earlier-running step can read off the declaration.
+
+## Views
+
+`@typeview(V) T*` on a parameter is a restricted binding: the index
+enforces what the view lets through, and the annotation does not survive
+into C. Passing such a binding where the whole `T*` is expected is an
+error at the call — the callee would get everything the view withheld,
+and no cast makes that safe.
+
+### A slice destination and the owner filling it
+
+`char[:] v = s;` with `s` a `CCString`, `int[:] xs = v;` with `v` a
+`Vec::[int]`: the destination says what the value has to become, and the
+owner's own `as_slice` is what makes it one. The conversion is written as
+that UFCS call, so the method the type registered decides the callee and
+this step names none of them — `CCString` reaches `cc_string_as_slice`,
+which no rule about the canonical name would find. A pointer to the owner
+is the owner already addressed, so the call is written with `->`.
+
+A char pointer has no owner to ask: its extent is the NUL, and
+`cc_slice_cstr` is what reads it.
+
+The conversion needs the value's type, so it runs on the typing walk rather
+than in the statement rewrite, which has no scope — `s` is a local, and only
+the walk knows what it holds.
+
+## Generic instances
+
+`family::[T](args)` names the family itself, not one of its members: what
+the factory writes for that instance IS the function, so the instance name
+is the callee — `js_module::[Counter](env, exports, seed)` is
+`js_module_Counter(env, exports, seed)`. `family_member::[T](args)` is the
+other form, and rewrites to `<instance>_<member>`. Reading only the second
+made the first read as a use of an unregistered family, which named the
+wrong thing: the family was registered, the shape was not recognized.
+
+### Running a compiled factory
+
+An instance is normally the family's `@emit` template filled from the
+index's rules. A fragment that COMPUTES a slot is not a template anything
+can fill, and the only honest way to know what it produces is to run the
+factory: `js_module::[Counter]` is whatever `__cc_gfac_js_module` returns
+when it is run with "Counter".
+
+`CC_GENERIC_FACTORY(Name, K) { ... }` is sugar for a registration and a
+`@comptime` function, so the four steps are the driver's own:
+
+1. Spell each factory declaration back out of the unit it was parsed from —
+   the sugar rewrite reads `CC_GENERIC_FACTORY`, not an AST.
+2. Put that text through the prepare passes. The sugar becomes the
+   registration and the function; the `@emit` templates in the body become
+   the calls that build text. A body that still spells ``@emit(`...`)`` is
+   not C, and the engine compiles C.
+3. Scan the result — with this unit's own source, because the scan clears
+   what was registered before and the unit's `@comptime` functions have to
+   survive it — then COLLECT the registrations. The sugar's
+   `cc_generic_register("Name", handler)` is read out of the call rather
+   than run, and that is what binds an extension too, whose handler symbol
+   carries a sequence number only the rewrite knows.
+4. Produce per instance.
+
+The engine compiles a translation unit out of the file it is given, so the
+path it gets is the file the user wrote — which the staged copy's `#line`
+names — and not the staged copy, whose includes were already rewritten
+once.
+
+The factory writes the base and every extension together, so a family with
+any computed part runs once for the whole instance and none of the
+templated text is kept.
+
+
+Every instance a unit mentions is expanded from its family's factory
+template and spliced in after the leading includes, once, under
+`#ifndef CC_HEADER_<FAMILY>_<Instance>`. The expansion is a unit in its
+own right: it is parsed against the same index, put through the same
+steps, and printed. It carries the language it was written in — Result
+returns, methods, string templates — so what is spliced is the C those
+lower to, not the template's own source. An expansion that does not
+parse, lower or print is an error at the unit that asked for it, naming
+the stage and the first message; the expansion nests at most eight deep,
+past which the family is expanding into itself.
+
+An expansion lands after the leading includes, and after the last
+declaration this unit makes of any type it names: an
+`ArrayMap::[int, Entr]` spells `Entr` in its fields, so it cannot be
+spliced above the `typedef struct Entr` that says what one is. Each
+instance is placed at its own such position, so one instance naming a
+type declared late in the file does not push the rest down with it.
+
+An expansion declares no Result specs of its own. It is spliced into a
+unit that declares them, and a second `#include <ccc/cc_result.h>` with a
+second copy of every spec in the middle of the file says nothing the unit
+has not said. The Results an expansion names join the unit's list
+instead, which the results step reads after this one.
+
+`_Generic` inside an expansion (and anywhere else) may carry preprocessor
+lines between its associations, or a macro standing for whole
+associations: which associations the host compiler sees is the
+preprocessor's answer, not the parser's. The control expression is
+lowered; the association list is replayed as the tokens the user wrote.
+
+## Print
+
+`println(x)` is `cc_println(x)`; the alias list is the set of functions
+declared with the print attribute in `stdio.cch`. A bare `println(...)`
+statement is a discarded optional Result.
+
+An attribute is printed by replaying the tokens it occupies, so only one
+the source spells is printed at all. `@tag:NAME` and `@task` are read out
+of a comment and carry the span of the declaration they describe — the
+span a diagnostic wants — so replaying one would print that declaration's
+first token a second time (`static static void f`).

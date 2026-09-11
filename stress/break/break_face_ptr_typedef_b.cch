@@ -1,0 +1,7 @@
+#ifndef BREAK_FACE_PTR_TYPEDEF_B
+#define BREAK_FACE_PTR_TYPEDEF_B
+#include "break_face_ptr_typedef_a.cch"
+/* A typedef of a pointer to a type defined elsewhere is not a definition of that type. */
+typedef FaceNode* FaceNodeRef;
+static FaceNodeRef face_pick(FaceNodeRef a, FaceNodeRef b);
+#endif

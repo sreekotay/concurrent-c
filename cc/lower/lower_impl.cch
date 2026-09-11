@@ -1,0 +1,1156 @@
+#pragma(@module) "lower"
+/* Lowering: the pipeline and the node builders the steps share. Every
+ * builder takes the span of the construct it stands in for. */
+#ifndef CC_LOWER_LOWER_IMPL_CCH
+#define CC_LOWER_LOWER_IMPL_CCH
+#include "lower.cch"
+#include "ast_impl.cch"
+#include "parse_walk.cch"
+#include "print_impl.cch"
+#include "index_impl.cch"
+#include <string.h>
+
+CcLowerer cc_lowerer_new(CcUnit* u, CcIndex* ix, CcLowerOpts opts, CcDiags* ds) {
+    CcLowerer L;
+    memset(&L, 0, sizeof(L));
+    L.arena = u->arena;
+    L.ds = ds;
+    L.ix = ix;
+    L.unit = u;
+    L.opts = opts;
+    L.next_temp = 0;
+    L.headers = vec_new::[CCSlice](u->arena);
+    L.specs = vec_new::[CcTypeInfoRef](u->arena);
+    L.sinks = vec_new::[CCSlice](u->arena);
+    L.res_dests = vec_new::[CcExprRef](u->arena);
+    L.ctor_sites = vec_new::[CcExprRef](u->arena);
+    L.ctor_specs = vec_new::[CcTypeInfoRef](u->arena);
+    L.dest_bodies = vec_new::[CcDeclRef](u->arena);
+    L.ufcs_sites = vec_new::[CcExprRef](u->arena);
+    L.ufcs_meths = vec_new::[CCSlice](u->arena);
+    return L;
+}
+
+uint32_t CcLowerer_temp_id(CcLowerer* L) { return L->next_temp++; }
+
+/* A TU-only construct so the extractor sees an implementation header
+ * (without one, a header of plain C bodies is taken for an interface and
+ * refuses the per-TU modules it includes). Never called. */
+static CCString cc__lower_impl_marker(CcLowerer* L) {
+    CCString s = @string(`lower`, L->arena);
+    return s;
+}
+
+/* ---- diagnostics ------------------------------------------------------ */
+
+static void lw_error(CcLowerer* L, CcSpan span, CCString msg) {
+    CcUnit* u = L->unit;
+    CcLoc loc = u->loc(span);
+    CcDiag d = CcDiag_error(loc, cc_string_persist_slice(L->arena, &msg));
+    CcDiags* ds = L->ds;
+    ds->push(d);
+}
+
+/* A warning: the C is what the source asked for, and the source asked for
+ * something it probably did not mean. It does not stop the lowering. */
+static void lw_warning(CcLowerer* L, CcSpan span, CCString msg) {
+    CcUnit* u = L->unit;
+    CcLoc loc = u->loc(span);
+    CcDiag d = CcDiag_warning(loc, cc_string_persist_slice(L->arena, &msg));
+    CcDiags* ds = L->ds;
+    ds->push(d);
+}
+
+/* An error about two positions: where it went wrong, and the place the
+ * reader has to see to understand why. */
+static void lw_error_at(CcLowerer* L, CcSpan span, CCString msg,
+                        CcSpan note_span, CCString note_msg) {
+    CcUnit* u = L->unit;
+    CcLoc loc = u->loc(span);
+    CcLoc nloc = u->loc(note_span);
+    CcDiag d = CcDiag_error(loc, cc_string_persist_slice(L->arena, &msg));
+    CcDiags* ds = L->ds;
+    d = CcDiag_with_note_at(d, nloc, cc_string_persist_slice(L->arena, &note_msg), L->arena);
+    ds->push(d);
+}
+
+/* ---- node builders ---------------------------------------------------- */
+
+/* A persisted copy of a built string, as a slice the nodes can keep. */
+static CCSlice lw_keep(CcLowerer* L, CCString* s) {
+    return cc_string_persist_slice(L->arena, s);
+}
+
+static CcExpr* lw_ident(CcLowerer* L, CCSlice name, CcSpan sp) {
+    return cc_expr_ident(name, sp, L->arena);
+}
+
+/* Any C text as an expression operand: printed verbatim. */
+static CcExpr* lw_text(CcLowerer* L, CCString text, CcSpan sp) {
+    return cc_expr_ident(lw_keep(L, &text), sp, L->arena);
+}
+
+/* The argument list of a call node, and the statement list of a block:
+ * projections are lowered only inside a @switch on the node, so each
+ * accessor is one. */
+static CcExprList* lw_call_args(CcExpr* c) {
+    CcExprList* args = NULL;
+    @switch (c->k) {
+        case .call: args = &c->k.call.args; break;
+        default: break;
+    }
+    return args;
+}
+
+static CcStmtList* lw_block_stmts(CcStmt* b) {
+    CcStmtList* list = NULL;
+    @switch (b->k) {
+        case .block: list = &b->k.block.stmts; break;
+        default: break;
+    }
+    return list;
+}
+
+static CcExpr* lw_call0(CcLowerer* L, CCSlice fn, CcSpan sp) {
+    return cc_expr_call(lw_ident(L, fn, sp), sp, L->arena);
+}
+
+static CcExpr* lw_call1(CcLowerer* L, CCSlice fn, CcExpr* a, CcSpan sp) {
+    CcExpr* c = lw_call0(L, fn, sp);
+    CcExprList* args = lw_call_args(c);
+    args->push(a);
+    return c;
+}
+
+static CcExpr* lw_call2(CcLowerer* L, CCSlice fn, CcExpr* a, CcExpr* b, CcSpan sp) {
+    CcExpr* c = lw_call1(L, fn, a, sp);
+    CcExprList* args = lw_call_args(c);
+    args->push(b);
+    return c;
+}
+
+static CcExpr* lw_member(CcLowerer* L, CcExpr* a, const char* name, CcSpan sp) {
+    return cc_expr_member(a, cc_slice_from_buffer((char*)name, strlen(name)), false, sp, L->arena);
+}
+
+static CcExpr* lw_member_s(CcLowerer* L, CcExpr* a, CCSlice name, CcSpan sp) {
+    return cc_expr_member(a, name, false, sp, L->arena);
+}
+
+static CcExpr* lw_not(CcLowerer* L, CcExpr* a, CcSpan sp) {
+    return cc_expr_unary(CC_OP_NOT, a, sp, L->arena);
+}
+
+static CcExpr* lw_assign(CcLowerer* L, CcExpr* lhs, CcExpr* rhs, CcSpan sp) {
+    CcExpr* e = cc__expr_blank(sp, L->arena);
+    CcBinary b;
+    b.op = CC_OP_ASSIGN;
+    b.a = lhs;
+    b.b = rhs;
+    e->k = { .assign = b };
+    return e;
+}
+
+static CcExpr* lw_paren(CcLowerer* L, CcExpr* a, CcSpan sp) {
+    CcExpr* e = cc__expr_blank(sp, L->arena);
+    CcUnary u;
+    u.op = CC_OP_NONE;
+    u.a = a;
+    e->k = { .paren = u };
+    return e;
+}
+
+static CcExpr* lw_ternary(CcLowerer* L, CcExpr* c, CcExpr* a, CcExpr* b, CcSpan sp) {
+    CcExpr* e = cc__expr_blank(sp, L->arena);
+    CcTernary t;
+    t.c = c;
+    t.a = a;
+    t.b = b;
+    e->k = { .ternary = t };
+    return e;
+}
+
+static CcType* lw_named_type(CcLowerer* L, CCSlice name, CcSpan sp) {
+    return cc_type_named(name, sp, L->arena);
+}
+
+static CcStmt* lw_expr_stmt(CcLowerer* L, CcExpr* e, CcSpan sp) {
+    return cc_stmt_expr(e, sp, L->arena);
+}
+
+static CcStmt* lw_block(CcLowerer* L, CcSpan sp) {
+    return cc_stmt_block(sp, L->arena);
+}
+
+static void lw_push(CcStmt* block, CcStmt* s) {
+    CcStmtList* list = lw_block_stmts(block);
+    list->push(s);
+}
+
+static CcStmt* lw_if(CcLowerer* L, CcExpr* cond, CcStmt* then, CcStmt* els, CcSpan sp) {
+    return cc_stmt_if(cond, then, els, sp, L->arena);
+}
+
+static CcStmt* lw_goto(CcLowerer* L, CCSlice label, CcSpan sp) {
+    return cc_stmt_goto(label, sp, L->arena);
+}
+
+static CcStmt* lw_label(CcLowerer* L, CCSlice name, CcStmt* inner, CcSpan sp) {
+    return cc_stmt_label(name, inner, sp, L->arena);
+}
+
+/* `T name = init;` (init may be NULL) as a statement. */
+static CcStmt* lw_decl_stmt(CcLowerer* L, CcType* type, CCSlice name, CcExpr* init, CcSpan sp) {
+    CcInit* in = NULL;
+    CcDecl* d;
+    CcStmt* s;
+    CcDeclStmt ds;
+    if (init) {
+        in = cc_arena_alloc(L->arena, sizeof(CcInit), _Alignof(CcInit));
+        memset(in, 0, sizeof(*in));
+        in->span = sp;
+        in->designators = vec_new::[CcDesignator](L->arena);
+        in->items = vec_new::[CcInitRef](L->arena);
+        in->expr = init;
+    }
+    d = cc_decl_var(type, name, in, sp, L->arena);
+    s = cc__stmt_blank(sp, L->arena);
+    ds.d = d;
+    s->k = { .decl = ds };
+    return s;
+}
+
+/* Verbatim C at file scope. */
+static CcDecl* lw_raw_decl(CcLowerer* L, CCString text, CcSpan sp) {
+    CcDecl* d = cc_arena_alloc(L->arena, sizeof(CcDecl), _Alignof(CcDecl));
+    CCSlice t = lw_keep(L, &text);
+    memset(d, 0, sizeof(*d));
+    d->span = sp;
+    d->attrs = vec_new::[CcAttr](L->arena);
+    d->k = { .raw = t };
+    return d;
+}
+
+/* The C spelling of an expression, for `__typeof__(...)` and messages. */
+static CCString lw_spell_expr(CcLowerer* L, const CcExpr* e) {
+    return CcExpr_spell(e, &L->unit->tape, L->arena);
+}
+
+/* ---- name suggestions -------------------------------------------------- */
+
+/* Levenshtein distance, for "did you mean". Names longer than the window
+ * are compared by their first 63 bytes: a suggestion, not a proof. */
+static int lw_edit_distance(CCSlice a, CCSlice b) {
+    int prev[64];
+    int cur[64];
+    size_t i;
+    size_t j;
+    size_t na = a.len < 63 ? a.len : 63;
+    size_t nb = b.len < 63 ? b.len : 63;
+    for (j = 0; j <= nb; j++) prev[j] = (int)j;
+    for (i = 1; i <= na; i++) {
+        cur[0] = (int)i;
+        for (j = 1; j <= nb; j++) {
+            int cost = a.ptr[i - 1] == b.ptr[j - 1] ? 0 : 1;
+            int d = prev[j - 1] + cost;
+            if (prev[j] + 1 < d) d = prev[j] + 1;
+            if (cur[j - 1] + 1 < d) d = cur[j - 1] + 1;
+            cur[j] = d;
+        }
+        for (j = 0; j <= nb; j++) prev[j] = cur[j];
+    }
+    return prev[nb];
+}
+
+/* The nearest of `names` to `name`, or empty when none is near enough. */
+static CCSlice lw_closest(CcNameList names, CCSlice name) {
+    size_t n = names.len();
+    size_t i;
+    int best = 1 << 30;
+    CCSlice pick = cc_slice_empty();
+    for (i = 0; i < n; i++) {
+        CCSlice cand = *names.get_ptr(i);
+        int d = lw_edit_distance(cand, name);
+        if (d < best) { best = d; pick = cand; }
+    }
+    if (best > 3) return cc_slice_empty();
+    return pick;
+}
+
+/* ---- the pipeline ----------------------------------------------------- */
+
+/* Declarations no longer part of the unit once the steps have read them:
+ * the generics step lowers a spliced expansion through the same steps and
+ * needs this one before it is defined. */
+static void lw_drop_cc_only(CcLowerer* L);
+
+#include "lower_comptime.cch"
+#include "lower_generics.cch"
+#include "lower_slices.cch"
+#include "lower_strings.cch"
+#include "lower_closures.cch"
+#include "lower_create.cch"
+#include "lower_forin.cch"
+#include "lower_deadline.cch"
+#include "lower_chan.cch"
+#include "lower_async.cch"
+#include "lower_parallel.cch"
+#include "lower_variants.cch"
+#include "lower_ufcs.cch"
+#include "lower_results.cch"
+#include "lower_asargs.cch"
+#include "lower_strswitch.cch"
+#include "lower_cleanup.cch"
+#include "lower_own.cch"
+
+/* The banner every lowered TU starts with: the generator, and the two
+ * headers whose names lowered code spells without asking. */
+static void lw_banner(CcLowerer* L) {
+    CcDeclList* decls = &L->unit->decls;
+    CcDeclList with = vec_new::[CcDeclRef](L->arena);
+    size_t n = decls->len();
+    size_t i;
+    CcSpan sp;
+    CcDecl* raw;
+    CCString text = @string(`/* generated by Concurrent-C (ccc / cclower) */
+#include <stddef.h>
+#include <stdint.h>
+`, L->arena);
+    sp.first = 0;
+    sp.last = 0;
+    if (n) {
+        CcDecl* d0 = *decls->get_ptr(0);
+        sp = d0->span;
+    }
+    raw = lw_raw_decl(L, text, sp);
+    with.push(raw);
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *decls->get_ptr(i);
+        with.push(d);
+    }
+    *decls = with;
+}
+
+/* `@typeview(Name)` on a parameter's type names the face the callee may
+ * reach through: the index enforces it, and C has nothing to say about
+ * it, so it does not survive into the output. */
+static void lw_strip_views(CcLowerer* L, CcAttrList* av) {
+    size_t n = av->len();
+    size_t i;
+    bool any = false;
+    for (i = 0; i < n; i++) {
+        CcAttr* a = av->get_ptr(i);
+        if (cc_slice_eq_cstr(&a->name, "typeview")) any = true;
+    }
+    if (!any) return;
+    {
+        CcAttrList keep = vec_new::[CcAttr](L->arena);
+        for (i = 0; i < n; i++) {
+            CcAttr a = *av->get_ptr(i);
+            if (cc_slice_eq_cstr(&a.name, "typeview")) continue;
+            keep.push(a);
+        }
+        *av = keep;
+    }
+}
+
+static void lw_strip_view_params(CcLowerer* L, CcType* t) {
+    CcParamList* ps = NULL;
+    size_t n;
+    size_t i;
+    @switch (t->k) {
+        case .func: ps = &t->k.func.params; break;
+        default: break;
+    }
+    if (!ps) return;
+    n = ps->len();
+    for (i = 0; i < n; i++) {
+        CcParam* pa = ps->get_ptr(i);
+        lw_strip_views(L, &pa->attrs);
+    }
+}
+
+static bool lw_strip_view_attrs(CcType* t, void* env) {
+    CcLowerer* L = (CcLowerer*)env;
+    lw_strip_views(L, &t->attrs);
+    lw_strip_view_params(L, t);
+    return true;
+}
+
+/* What `@blocking` / `@nonblocking` / `@noblock` / `@latency_sensitive`
+ * say about a function is a fact for the scheduler, read off the
+ * declaration by the index. C carries no such word, so once it has been
+ * read the declaration is an ordinary one — and has to be, or the printer
+ * keeps it whole rather than lower a declaration it thinks is still the
+ * language. */
+#define LW_SPEC_SCHEDULING (CC_SPEC_BLOCKING | CC_SPEC_NONBLOCKING | CC_SPEC_LATENCY_SENSITIVE)
+
+/* A named value view names an alias of its subject, T_Restrict_Mode
+ * (spec/draft_facets.md), and a source declares locals of that name. What
+ * the view allows is checked by the index and C has nothing to say about
+ * it, but the NAME has to exist in the C or every such declaration is an
+ * unknown type. */
+static bool lw_decl_typeview(CcDecl* d, CcTypeview* out) {
+    if (!d) return false;
+    @switch (d->k) {
+        case .typeview(tv): {
+            CcTypeview v = tv;
+            *out = v;
+            return true;
+        }
+        default: return false;
+    }
+}
+
+static CcDecl* lw_typeview_alias(CcLowerer* L, CcDecl* d, CcTypeview tv) {
+    CCSlice subject;
+    CCString text = cc_string_new();
+    if (!tv.view.len || !tv.target) return NULL;
+    subject = cc__strip_tag(L->ix->canon(tv.target));
+    if (!subject.len) return NULL;
+    /* a glob subject (`Fam_*`) names no one type to alias */
+    if (subject.ptr[subject.len - 1] == '*') return NULL;
+    cc_string_push_cstr(&text, "typedef ", L->arena);
+    cc_string_push_slice(&text, subject, L->arena);
+    cc_string_push_char(&text, ' ', L->arena);
+    cc_string_push_slice(&text, subject, L->arena);
+    cc_string_push_cstr(&text, "_Restrict_", L->arena);
+    cc_string_push_slice(&text, tv.view, L->arena);
+    cc_string_push_cstr(&text, ";\n", L->arena);
+    return lw_raw_decl(L, text, d->span);
+}
+
+/* Declarations the index consumed and C never sees: `@typeview`, and a
+ * `@comptime` definition — that one ran at compile time, and what it
+ * computed is already the literal standing in its caller's place. */
+static void lw_drop_cc_only(CcLowerer* L) {
+    CcDeclList* decls = &L->unit->decls;
+    CcDeclList with = vec_new::[CcDeclRef](L->arena);
+    size_t n = decls->len();
+    size_t i;
+    CcVisitor v;
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *decls->get_ptr(i);
+        CcDecl* alias = NULL;
+        CcTypeview tv_of;
+        bool is_typeview = lw_decl_typeview(d, &tv_of);
+        bool drop = false;
+        @switch (d->k) {
+            case .typeview: drop = true; break;
+            case .typehooks: drop = true; break;
+            case .factory: drop = true; break;
+            /* A unit reaches the lowerer with its compile-time blocks
+             * already run: blanked, or left in place for the hooks they
+             * register, which the index has read. A header is read as it
+             * was written. Either way nothing of the block is C; what it
+             * produced is spliced into the translation unit by the driver. */
+            case .comptime_block: drop = true; break;
+            case .comptime_fn: drop = L->header_mode; break;
+            case .comptime_if: drop = L->header_mode; break;
+            default: break;
+        }
+        if (is_typeview) alias = lw_typeview_alias(L, d, tv_of);
+        if ((d->specs & (uint32_t)CC_SPEC_COMPTIME) != 0) drop = true;
+        d->specs &= ~(uint32_t)LW_SPEC_SCHEDULING;
+        if (drop && alias) { with.push(alias); }
+        if (!drop) with.push(d);
+    }
+    *decls = with;
+    memset(&v, 0, sizeof(v));
+    v.type = lw_strip_view_attrs;
+    v.env = L;
+    CcUnit_walk(L->unit, v);
+}
+
+/* `#include "x.cch"` names a local header: the C includes its lowered
+ * `<rel/x.h>` (relative to the repository root, under the host's include
+ * path), and the header is recorded so the tool lowers it too. Angle
+ * includes are the driver's business. */
+/* ---- where a lowered header's own includes belong -------------------------
+ *
+ * A `.cch` may name a type that a header it includes further down provides,
+ * and that header may in turn name a type this one defines -- the two faces
+ * refer to each other, so neither include can simply go first. Left where it
+ * was written, though, the include lands after the use and the type is
+ * unknown there: a `.h` is read where it is included, and the language it
+ * was written in is not.
+ *
+ * So the include moves to just before the first declaration that names
+ * something it provides, and no earlier -- which is what keeps a header
+ * whose include is already early exactly where it is. */
+
+/* The header unit the index loaded for `path`, or NULL. */
+static CcUnit* lw_unit_for_path(CcIndex* ix, CCSlice path) {
+    CcUnitList* uv = &ix->units;
+    size_t n = uv->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CcUnit* u = *uv->get_ptr(i);
+        if (u && slice_eq(u->tape.path, path)) return u;
+    }
+    return NULL;
+}
+
+/* The type names a header declares: what including it is for. */
+static CcNameList lw_header_type_names(CcLowerer* L, CcUnit* u) {
+    CcNameList out = vec_new::[CCSlice](L->arena);
+    CcDeclList* dv;
+    size_t n;
+    size_t i;
+    if (!u) return out;
+    dv = &u->decls;
+    n = dv->len();
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *dv->get_ptr(i);
+        CCSlice nm = cc_slice_empty();
+        @switch (d->k) {
+            case .typedef_(td): nm = td.name; break;
+            case .variant(vd): nm = vd.name; break;
+            default: break;
+        }
+        if (nm.len) { out.push(nm); }
+    }
+    return out;
+}
+
+/* Does this declaration's own text name one of them? */
+static bool lw_decl_names_any(CcUnit* u, CcDecl* d, CcNameList* names) {
+    size_t nn = names->len();
+    uint32_t t;
+    if (!u || !d || !nn) return false;
+    for (t = d->span.first; t <= d->span.last; t++) {
+        const CcToken* k = cc__tok(u, t);
+        size_t i;
+        if (!k || k->kind != CC_TK_IDENT) continue;
+        for (i = 0; i < nn; i++) {
+            CCSlice nm = *names->get_ptr(i);
+            if (slice_eq(k->text, nm)) return true;
+        }
+    }
+    return false;
+}
+
+/* The first declaration that reads one of `names`; false when none does. */
+static bool lw_first_use_of(CcUnit* u, CcDeclList* decls, CcNameList* names, size_t* out) {
+    size_t n = decls->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *decls->get_ptr(i);
+        if (lw_decl_names_any(u, d, names)) { *out = i; return true; }
+    }
+    return false;
+}
+
+/* Move the declaration at `from` to `to`, keeping everything else in order. */
+static void lw_move_decl(CcLowerer* L, CcDeclList* decls, size_t from, size_t to) {
+    size_t nd = decls->len();
+    CcDeclList out = vec_new::[CcDeclRef](L->arena);
+    CcDecl* moved = *decls->get_ptr(from);
+    size_t k;
+    if (to >= from) return;
+    for (k = 0; k < nd; k++) {
+        CcDecl* dk = *decls->get_ptr(k);
+        if (k == to) { out.push(moved); }
+        if (k != from) { out.push(dk); }
+    }
+    *decls = out;
+}
+
+/* Move the declaration at `to`, and everything after it, one along, and
+ * put `d` in the gap. */
+static void lw_insert_decl(CcLowerer* L, CcDeclList* decls, size_t to, CcDecl* d) {
+    size_t nd = decls->len();
+    CcDeclList out = vec_new::[CcDeclRef](L->arena);
+    size_t k;
+    for (k = 0; k < nd; k++) {
+        CcDecl* dk = *decls->get_ptr(k);
+        if (k == to) { out.push(d); }
+        out.push(dk);
+    }
+    if (to >= nd) { out.push(d); }
+    *decls = out;
+}
+
+/* Whether `names` holds `nm`. */
+static bool lw_names_have(CcNameList* names, CCSlice nm) {
+    size_t n = names->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CCSlice k = *names->get_ptr(i);
+        if (slice_eq(k, nm)) return true;
+    }
+    return false;
+}
+
+/* ---- a face this header names but does not include ------------------------
+ *
+ * A `.cch` may spell `Peer*` for a type a sibling face declares without
+ * including that face: a pointer needs no definition where it is written,
+ * and the unit that includes both resolves it. A `.h` is read where it is
+ * included and by a host compiler, which needs the name to be a type, so
+ * the sibling that declares it is included ahead of the first declaration
+ * that spells it. */
+
+/* Names this header spells in a pointer position that neither it nor the
+ * index declares. */
+static CcNameList lw_undeclared_pointees(CcLowerer* L) {
+    CCArena a = L->arena;
+    CcUnit* u = L->unit;
+    CcNameList out = vec_new::[CCSlice](a);
+    CcNameList mine = lw_header_type_names(L, u);
+    CcNameList known = L->ix->known_types();
+    CcTape* tp = (CcTape*)&u->tape;
+    size_t n = tp->toks.len();
+    size_t i;
+    for (i = 0; i + 1 < n; i++) {
+        const CcToken* k = tp->toks.get_ptr(i);
+        const CcToken* nx = tp->toks.get_ptr(i + 1);
+        if (!k || !nx) continue;
+        if (k->kind != CC_TK_IDENT) continue;
+        if (nx->kind != CC_TK_PUNCT || nx->punct != CC_P_STAR) continue;
+        if (lw_names_have(&mine, k->text)) continue;
+        if (lw_names_have(&known, k->text)) continue;
+        if (lw_names_have(&out, k->text)) continue;
+        out.push(k->text);
+    }
+    return out;
+}
+
+/* The part of `path` after the last `/`. */
+static CCSlice lw_path_base(CCSlice path) {
+    size_t i = path.len;
+    while (i > 0 && path.ptr[i - 1] != '/') i--;
+    return cc_slice_from_buffer((char*)path.ptr + i, path.len - i);
+}
+
+/* Everything before the last `/`; empty when there is none. */
+static CCSlice lw_path_dir(CCSlice path) {
+    size_t i = path.len;
+    while (i > 0 && path.ptr[i - 1] != '/') i--;
+    if (i == 0) return cc_slice_empty();
+    return cc_slice_from_buffer((char*)path.ptr, i - 1);
+}
+
+static void lw_include_defining_faces(CcLowerer* L, CcDeclList* decls) {
+    CcIndex* ix = L->ix;
+    CCSlice dir = lw_path_dir(L->unit->tape.path);
+    CcNameList want = lw_undeclared_pointees(L);
+    size_t n = want.len();
+    size_t i;
+    if (!dir.len) return;
+    for (i = 0; i < n; i++) {
+        CCSlice nm = *want.get_ptr(i);
+        CCSlice face = ix->peer_face(dir, nm);
+        CCSlice base;
+        CCSlice stem;
+        CCString line;
+        CcNameList one = vec_new::[CCSlice](L->arena);
+        size_t use = 0;
+        if (!face.len) continue;
+        if (slice_eq(face, L->unit->tape.path)) continue;
+        base = lw_path_base(face);
+        if (base.len < 5) continue;
+        stem = cc_slice_from_buffer((char*)base.ptr, base.len - 4);
+        one.push(nm);
+        if (!lw_first_use_of(L->unit, decls, &one, &use)) continue;
+        line = @string(`#include "${stem}.h"
+`, L->arena);
+        {
+            CcDecl* at = *decls->get_ptr(use);
+            CcDecl* raw = lw_raw_decl(L, line, at->span);
+            lw_insert_decl(L, decls, use, raw);
+        }
+        {
+            Vec::[CCSlice]* hs = &L->headers;
+            hs->push(face);
+        }
+    }
+}
+
+/* `__spawn_into_call(fn, arg)` is the spawn-into surface written out: a
+ * task handle from a plain `void*(*)(void*)`, with the result buffer the
+ * ordered receive reads. It is declared in `ccc/cc_closure_helper.h`, which
+ * no other header pulls in -- so a unit that writes the call and nothing
+ * else from that header reaches the host compiler with the name
+ * undeclared. The include goes above the first declaration that names it,
+ * which is below every header the helper itself needs. */
+static void lw_include_spawn_helper(CcLowerer* L, CcDeclList* decls) {
+    CcNameList one = vec_new::[CCSlice](L->arena);
+    size_t use = 0;
+    one.push(cstr_slice("__spawn_into_call"));
+    if (!lw_first_use_of(L->unit, decls, &one, &use)) return;
+    {
+        CcDecl* at = *decls->get_ptr(use);
+        CCString line = @string(`#include <ccc/cc_closure_helper.h>
+`, L->arena);
+        CcDecl* raw = lw_raw_decl(L, line, at->span);
+        lw_insert_decl(L, decls, use, raw);
+    }
+}
+
+/* Does this path name the scheduler header? */
+static bool lw_is_sched_include(CCSlice p) {
+    size_t i;
+    if (p.len < 8) return false;
+    for (i = 0; i + 8 <= p.len; i++)
+        if (memcmp(p.ptr + i, "cc_sched", 8) == 0) return true;
+    return false;
+}
+
+void CcLowerer_includes(CcLowerer* L) {
+    CcIndex* ix = L->ix;
+    CcIncludeRefList refs;
+    size_t n;
+    size_t i;
+    CcDeclList* decls = &L->unit->decls;
+    size_t nd = decls->len();
+    if (!L->opts.repo_root.len) return;
+    refs = cc__scan_includes(ix, &L->unit->tape);
+    n = refs.len();
+    for (i = 0; i < n; i++) {
+        CcIncludeRef* r = refs.get_ptr(i);
+        CCString searched = cc_string_new();
+        CCSlice found;
+        CCSlice rel;
+        size_t k;
+        if (!(r->path.len > 4 && memcmp(r->path.ptr + r->path.len - 4, ".cch", 4) == 0)) continue;
+        if (!r->quoted) {
+            /* `<ccc/std/prelude.cch>` names the lowered header the host
+             * compiler reads. The driver rewrites these on its way to the
+             * host for a `.c`, but a `.h` this step writes is included as
+             * it stands — and the language is not C. */
+            CCSlice stem = cc_slice_from_buffer((char*)r->path.ptr, r->path.len - 4);
+            size_t k2;
+            for (k2 = 0; k2 < nd; k2++) {
+                CcDecl* d = *decls->get_ptr(k2);
+                bool hit = false;
+                @switch (d->k) {
+                    case .pp(pd): hit = pd.tok == r->tok; break;
+                    default: break;
+                }
+                if (hit) {
+                    CCString line = @string(`#include <${stem}.h>
+`, L->arena);
+                    if (!L->header_mode && lw_is_sched_include(stem)) {
+                        /* `cc_sched.cch` documents the task waits and
+                         * declares none of them: `cc_block_on_intptr` is
+                         * `std/task.cch`'s. A unit that includes the
+                         * scheduler and calls one would reach the host
+                         * compiler with no declaration at all. */
+                        cc_string_push_cstr(&line, "#include <ccc/std/task.h>\n", L->arena);
+                    }
+                    *decls->get_ptr(k2) = lw_raw_decl(L, line, d->span);
+                    break;
+                }
+            }
+            continue;
+        }
+        found = cc__resolve_include(ix, L->unit->tape.path, r, &searched);
+        if (!found.len) continue;   /* the index reported it */
+        found = cc__canonical_path(ix, found);
+        if (found.len > L->opts.repo_root.len && memcmp(found.ptr, L->opts.repo_root.ptr, L->opts.repo_root.len) == 0 &&
+            found.ptr[L->opts.repo_root.len] == '/')
+            rel = cc_slice_from_buffer((char*)found.ptr + L->opts.repo_root.len + 1, found.len - L->opts.repo_root.len - 1);
+        else {
+            CcSpan at;
+            CCString m = @string(`local header '${r->path}' resolves outside the repository root (${found}); the clean lowerer cannot place its lowered form`, L->arena);
+            at.first = r->tok;
+            at.last = r->tok;
+            lw_error(L, at, m);
+            continue;
+        }
+        for (k = 0; k < nd; k++) {
+            CcDecl* d = *decls->get_ptr(k);
+            bool hit = false;
+            @switch (d->k) {
+                case .pp(pd): hit = pd.tok == r->tok; break;
+                default: break;
+            }
+            if (hit) {
+                CCSlice stem = cc_slice_from_buffer((char*)rel.ptr, rel.len - 4);
+                CCString line = @string(`#include <${stem}.h>
+`, L->arena);
+                CcDecl* raw = lw_raw_decl(L, line, d->span);
+                *decls->get_ptr(k) = raw;
+                if (L->header_mode) {
+                    CcUnit* hu = lw_unit_for_path(ix, found);
+                    CcNameList names = lw_header_type_names(L, hu);
+                    size_t use = 0;
+                    if (lw_first_use_of(L->unit, decls, &names, &use)) {
+                        lw_move_decl(L, decls, k, use);
+                    }
+                }
+                break;
+            }
+        }
+        {
+            Vec::[CCSlice]* hs = &L->headers;
+            hs->push(found);
+        }
+    }
+    if (L->header_mode) lw_include_defining_faces(L, decls);
+    lw_include_spawn_helper(L, decls);
+}
+
+/* `type_of(T)` is `cc_type_of("T")`: a lookup in the runtime registry by
+ * the type's spelling. A type nothing registered is not an error there --
+ * the lookup answers NULL, the program reads a field off it, and what
+ * happens next is a null dereference in a build that compiled clean. So
+ * the spelling is checked here, where the name is still a name.
+ *
+ * The token run is read rather than the tree: `type_of` takes a type, and
+ * a type is not an expression, so the parser has nothing to hand this. A
+ * spelling of more than one token (`unsigned long`) is left alone; so is
+ * `cc_type_of("...")`, which is the runtime probe and is allowed to miss. */
+static bool lw_typeof_primitive(CCSlice n) {
+    static const char* prims[18] = {
+        "int", "char", "short", "long", "float", "double", "size_t",
+        "intptr_t", "bool", "void", "int32_t", "uint32_t", "int64_t",
+        "uint64_t", "CCSlice", "CCArena", "CCError", "CCChan"
+    };
+    size_t i;
+    for (i = 0; i < 18; i++)
+        if (cc_slice_eq_cstr(&n, prims[i])) return true;
+    return false;
+}
+
+/* A name the index or this unit declares as a type. Registration is a
+ * separate act, and a declared type may still be unregistered -- but a
+ * refusal is a claim about the program, and this one is only made where
+ * nothing in sight declares the name at all. */
+static bool lw_typeof_declared(CcLowerer* L, CCSlice name) {
+    CcNameList known = L->ix->known_types();
+    CcNameList* v = &known;
+    size_t n = v->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CCSlice s = *v->get_ptr(i);
+        if (slice_eq(s, name)) return true;
+    }
+    {
+        CcNameList* own = &L->unit->typedef_names;
+        n = own->len();
+        for (i = 0; i < n; i++) {
+            CCSlice s = *own->get_ptr(i);
+            if (slice_eq(s, name)) return true;
+        }
+    }
+    /* A mangled instance of a generic family (`CCVec_Point2`) is declared
+     * by its family's expansion, which registers a type_info for it. The
+     * name reads back as family + arguments, and that is the declaration. */
+    {
+        CcType* g = cc__unmangle_arg(L->ix, name, 0);
+        if (g) {
+            @switch (g->k) {
+                case .generic: return true;
+                default: break;
+            }
+        }
+    }
+    return false;
+}
+
+static void CcLowerer_typeof(CcLowerer* L) {
+    CcUnit* u = L->unit;
+    CcTape* tp = &u->tape;
+    Vec::[CcToken]* toks = &tp->toks;
+    CcIndex* ix = L->ix;
+    size_t n = toks->len();
+    size_t i;
+    if (n < 4) return;
+    for (i = 0; i + 3 < n; i++) {
+        const CcToken* t = toks->get_ptr(i);
+        const CcToken* lp = toks->get_ptr(i + 1);
+        const CcToken* nm = toks->get_ptr(i + 2);
+        const CcToken* rp = toks->get_ptr(i + 3);
+        CCSlice name;
+        CcTypeInfo* info;
+        if (t->kind != CC_TK_IDENT) continue;
+        {
+            CCSlice tx = t->text;
+            if (!cc_slice_eq_cstr(&tx, "type_of")) continue;
+        }
+        if (!CcToken_is(lp, CC_P_LPAREN)) continue;
+        if (nm->kind != CC_TK_IDENT) continue;
+        if (!CcToken_is(rp, CC_P_RPAREN)) continue;
+        if (i > 0) {
+            const CcToken* prev = toks->get_ptr(i - 1);
+            if (CcToken_is(prev, CC_P_DOT) || CcToken_is(prev, CC_P_ARROW)) continue;
+        }
+        name = nm->text;
+        if (lw_typeof_primitive(name)) continue;
+        if (lw_typeof_declared(L, name)) continue;
+        info = ix->type(name) ?> NULL;
+        if (info) continue;
+        {
+            CcSpan sp;
+            CCString m = @string(`type_of(${name}): type '${name}' has no registered cc_type_info
+  hint: register with CC_TYPE_INFO_BEGIN(${name}) / CC_TYPE_INFO_END, or use a known primitive/Vec`, L->arena);
+            sp.first = (uint32_t)i;
+            sp.last = (uint32_t)(i + 3);
+            lw_error(L, sp, m);
+        }
+    }
+}
+
+/* ---- type_of members --------------------------------------------------- */
+
+/* The type `type_of(T)` names, or NULL when the call is not one. */
+static CcType* lw_tof_type_arg(CcExpr* e) {
+    if (!e) return NULL;
+    @switch (e->k) {
+        case .type_arg(ta): return ta.type;
+        default: return NULL;
+    }
+}
+
+static CcType* lw_tof_subject(CcExpr* e) {
+    CcExpr* callee = NULL;
+    CcExprList args;
+    bool have = false;
+    CCSlice nm;
+    if (!e) return NULL;
+    @switch (e->k) {
+        case .call(c): callee = c.callee; args = c.args; have = true; break;
+        default: return NULL;
+    }
+    if (!have || !callee) return NULL;
+    if (!expr_ident(callee, &nm)) return NULL;
+    if (!cc_slice_eq_cstr(&nm, "type_of")) return NULL;
+    if (args.len() != 1) return NULL;
+    {
+        CcExpr* a0 = *args.get_ptr(0);
+        return lw_tof_type_arg(a0);
+    }
+}
+
+/* A C scalar: its kind and its field count are the compiler's to answer.
+ * Every other type's are a registration's, and the runtime registry is
+ * what holds those -- so those two forward rather than guess. */
+static bool lw_tof_scalar(CCSlice n) {
+    static const char* k[16] = {
+        "int", "char", "short", "long", "long long", "float",
+        "double", "long double", "bool", "size_t", "intptr_t",
+        "unsigned int", "unsigned char", "unsigned short",
+        "unsigned long", "unsigned long long"
+    };
+    size_t i;
+    for (i = 0; i < 16; i++) if (cc_slice_eq_cstr(&n, k[i])) return true;
+    return false;
+}
+
+/* `type_of(T).size` and its siblings fold to constant expressions, so a
+ * program may write them where C requires one -- an array dimension, a
+ * `_Static_assert`. Left as written they are a member of a call to
+ * `cc_type_of`, which returns a pointer: the host explains a `.` on a
+ * pointer, about a line that has no pointer in it. */
+static bool lw_tof_visit(CcExpr* e, void* env) {
+    CcLowerer* L = (CcLowerer*)env;
+    CcExpr* base = NULL;
+    CCSlice field = cc_slice_empty();
+    bool arrow = false;
+    CcType* t;
+    CCSlice tn;
+    bool scalar;
+    bool ok = true;
+    CCString out = cc_string_new();
+    @switch (e->k) {
+        case .member(mb): base = mb.a; field = mb.name; arrow = mb.arrow; break;
+        default: return true;
+    }
+    if (arrow || !field.len) return true;
+    t = lw_tof_subject(base);
+    if (!t) return true;
+    tn = L->ix->canon(t);
+    scalar = lw_tof_scalar(tn);
+    if (cc_slice_eq_cstr(&field, "size")) out = @string(`((size_t)sizeof(${tn}))`, L->arena);
+    else if (cc_slice_eq_cstr(&field, "align")) out = @string(`((size_t)_Alignof(${tn}))`, L->arena);
+    else if (cc_slice_eq_cstr(&field, "name")) out = @string(`"${tn}"`, L->arena);
+    else if (cc_slice_eq_cstr(&field, "kind"))
+        out = scalar ? @string(`(CC_TK_PRIMITIVE)`, L->arena)
+                     : @string(`(cc_type_of("${tn}")->kind)`, L->arena);
+    else if (cc_slice_eq_cstr(&field, "nfields"))
+        out = scalar ? @string(`((size_t)0)`, L->arena)
+                     : @string(`((size_t)cc_type_of("${tn}")->nfields)`, L->arena);
+    else ok = false;
+    if (!ok) return true;
+    {
+        CcExpr* rep = lw_text(L, out, e->span);
+        e->k = rep->k;
+    }
+    return false;
+}
+
+static void CcLowerer_typeof_members(CcLowerer* L) {
+    CcVisitor v;
+    memset(&v, 0, sizeof(v));
+    v.expr = lw_tof_visit;
+    v.env = L;
+    CcUnit_walk(L->unit, v);
+}
+
+/* ---- forward typedefs -------------------------------------------------- */
+
+/* The name a `Name*` field type spells; empty when the field is not a
+ * pointer to a named type. */
+static CCSlice lw_ptr_named(CcType* t) {
+    CcType* p = NULL;
+    if (!t) return cc_slice_empty();
+    @switch (t->k) {
+        case .pointer(pt): p = pt.pointee; break;
+        default: return cc_slice_empty();
+    }
+    if (!p) return cc_slice_empty();
+    @switch (p->k) {
+        case .named(nm): return nm.name;
+        default: return cc_slice_empty();
+    }
+}
+
+/* Every name a record body reaches through a pointer. */
+static void lw_fwd_scan(CcType* t, CcNameList* out, int depth) {
+    CcRecordType rc;
+    bool is_rec = false;
+    CcFieldList* fv;
+    size_t n;
+    size_t i;
+    if (!t || depth > 4) return;
+    @switch (t->k) {
+        case .record(x): rc = x; is_rec = true; break;
+        default: break;
+    }
+    if (!is_rec || !rc.is_definition) return;
+    fv = &rc.fields;
+    n = fv->len();
+    for (i = 0; i < n; i++) {
+        CcField* f = fv->get_ptr(i);
+        CCSlice nm = lw_ptr_named(f->type);
+        if (nm.len) { out->push(nm); continue; }
+        lw_fwd_scan(f->type, out, depth + 1);
+    }
+}
+
+/* The tag of a `struct Tag { ... }` / `union Tag { ... }` written as a
+ * definition; empty when the type is not one, or is anonymous. */
+static CCSlice lw_record_tag(CcType* t, bool* is_union) {
+    if (!t) return cc_slice_empty();
+    @switch (t->k) {
+        case .record(rc): {
+            CCSlice tag = rc.tag;
+            bool u = rc.is_union;
+            bool def = rc.is_definition;
+            if (!def) return cc_slice_empty();
+            *is_union = u;
+            return tag;
+        }
+        default: return cc_slice_empty();
+    }
+}
+
+static CcType* lw_decl_type(CcDecl* d) {
+    if (!d) return NULL;
+    @switch (d->k) {
+        case .var(v): return v.type;
+        case .typedef_(td): return td.type;
+        case .tagged(tg): return tg.type;
+        default: return NULL;
+    }
+}
+
+static bool lw_name_seen(CcNameList* v, CCSlice name) {
+    size_t n = v->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CCSlice s = *v->get_ptr(i);
+        if (slice_eq(s, name)) return true;
+    }
+    return false;
+}
+
+/* `typedef struct RtxNode { RtxNode* next; } RtxNode;`
+ *
+ * The typedef name is in scope inside its own body here, and inside the
+ * body of a record declared before it. C has no such rule -- the name is
+ * not a type until the typedef closes -- so a name a record body reaches
+ * through a pointer gets its `typedef struct Tag Name;` first, above the
+ * definitions. C11 allows the definition to repeat the typedef. A tagless
+ * `typedef struct { ... } Name;` has no forward to write, and no body can
+ * reach it before it closes either. */
+static void lw_fwd_typedefs(CcLowerer* L) {
+    CcDeclList* decls = &L->unit->decls;
+    size_t n = decls->len();
+    size_t i;
+    CcNameList pointed = vec_new::[CCSlice](L->arena);
+    CcDeclList with = vec_new::[CcDeclRef](L->arena);
+    CCString text = cc_string_new();
+    size_t at = n;
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *decls->get_ptr(i);
+        lw_fwd_scan(lw_decl_type(d), &pointed, 0);
+    }
+    if (!pointed.len()) return;
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *decls->get_ptr(i);
+        CcTypedefDecl td;
+        bool is_td = false;
+        bool is_union = false;
+        CCSlice tag;
+        @switch (d->k) {
+            case .typedef_(x): td = x; is_td = true; break;
+            default: break;
+        }
+        if (!is_td || !td.name.len) continue;
+        tag = lw_record_tag(td.type, &is_union);
+        if (!tag.len) continue;
+        if (!lw_name_seen(&pointed, td.name)) continue;
+        if (at == n) at = i;
+        cc_string_push_cstr(&text, "typedef ", L->arena);
+        cc_string_push_cstr(&text, is_union ? "union " : "struct ", L->arena);
+        cc_string_push_slice(&text, tag, L->arena);
+        cc_string_push_char(&text, ' ', L->arena);
+        cc_string_push_slice(&text, td.name, L->arena);
+        cc_string_push_cstr(&text, ";\n", L->arena);
+    }
+    if (at == n || !text.len()) return;
+    {
+        CcDecl* anchor = *decls->get_ptr(at);
+        CcDecl* raw = lw_raw_decl(L, text, anchor->span);
+        for (i = 0; i < n; i++) {
+            CcDecl* d = *decls->get_ptr(i);
+            if (i == at) with.push(raw);
+            with.push(d);
+        }
+        *decls = with;
+    }
+}
+
+void CcLowerer_lower_unit(CcLowerer* L) {
+    CcLowerer_comptime(L);  /* first: a value the user asked for at compile time is a constant to every step */
+    CcLowerer_own(L);       /* then, before any rewrite: the ownership checks read the program as written */
+    CcLowerer_typeof(L);    /* likewise: `type_of(T)` names a type by its spelling, as written */
+    CcLowerer_typeof_members(L);  /* then fold its members: a constant where C wants one */
+    CcLowerer_includes(L);
+    CcLowerer_deadline(L);  /* before the rest: a deadline body is ordinary statements to every one of them */
+    CcLowerer_chan(L);      /* before them: an endpoint is the runtime handle before anything
+                               captures it, spells it into a frame, or copies it into an arm */
+    CcLowerer_async(L);     /* then: an async body is an ordinary body to every step after it */
+    CcLowerer_parallel(L);  /* then: an arm becomes an ordinary function the later steps walk */
+    CcLowerer_closures(L);  /* then: the body becomes a function the later steps walk */
+    CcLowerer_create(L);    /* before UFCS: the constructor becomes an ordinary call */
+    CcLowerer_forin(L);     /* after create: the walk subject is an ordinary value */
+    CcLowerer_slices(L);    /* before generics: it reads `T[:]` as written */
+    CcLowerer_generics(L);  /* before UFCS: a local of `Vec::[T]` is typed by its instance name */
+    CcLowerer_variants(L);  /* before UFCS and Results: projections are plain members after it */
+    CcLowerer_ufcs(L);      /* before Results: an unwrap needs the plain call to type its Result */
+    CcLowerer_slice_args(L);/* after UFCS: a method call is a plain call by now */
+    CcLowerer_strings(L);   /* after them: a slot spells the C it will be */
+    CcLowerer_results(L);
+    CcLowerer_asargs(L);   /* after Results: an error binder is a named declaration by now */
+    CcLowerer_strswitch(L);/* last but cleanup: the subject it spells is the C it will be */
+    CcLowerer_cleanup(L);
+    lw_drop_cc_only(L);   /* after the steps: the index reads faces off the unit's declarations */
+    lw_fwd_typedefs(L);   /* after them: the records the steps spliced need forwards too */
+    lw_banner(L);
+}
+
+#endif

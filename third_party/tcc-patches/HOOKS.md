@@ -1,7 +1,7 @@
 # TCC Extension Points for Concurrent C
 
 Technical reference for the hooks left in TCC after the legacy multipass front
-was removed. Product lowering is native `shadow_lower`; libtcc is used for
+was removed. Product lowering is the lowerer, `cclower_cc`; libtcc is used for
 comptime / `cpp_expand` / `--exe` on already-lowered C.
 
 All extensions are guarded by `#ifdef CONFIG_CC_EXT`.
@@ -25,7 +25,7 @@ All extensions are guarded by `#ifdef CONFIG_CC_EXT`.
 | `cc_ast_record*` / `CCASTStub*` / `cc_ast_record.h` | Stub-AST side table for the deleted visitor front |
 | `cc_tcc_parse*_to_ast` / `cc_tcc_free_ast` | Parse-to-stub-AST API; zero product callers |
 | `TCCExtParser` / `tcc_set_ext_parser` | External parser hooks |
-| UFCS host-parse tolerance / `cc_ufcs_*` TCCState | Product UFCS is `shadow_lower`; lowered C is ordinary C |
+| UFCS host-parse tolerance / `cc_ufcs_*` TCCState | UFCS lowers in `cclower_cc`; lowered C is ordinary C |
 | `TOK_CC_ARROW` (`=>`) | Closures lower before libtcc |
 | `CC_REC_*` recording macros | Recording APIs retired |
 | Column / `cc_tok_off` tracking | Existed for stub-AST provenance |

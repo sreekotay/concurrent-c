@@ -1,0 +1,79 @@
+/*
+ * A construct nested in an arm that leaves for a thunk is lowered before
+ * the arm moves: a dest-attach inside a spawned arm of a dest-bound
+ * construct, and inside the one worker of a dest-live one-arm construct
+ * (that arm is spawned and attached; the dest is live on the caller).
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+
+static int consume(int[~ <] rx) {
+    int v = 0;
+    if (!cc_io_avail(rx.recv(&v)))
+        return 0;
+    return v;
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    {
+        cc_atomic_int sum = 0;
+        int base = 0;
+        CCParallel h = @parallel spawn {
+            @serial { base = 1; }
+            @serial {
+                int i;
+                for (i = 1; i <= 3; i++) {
+                    int x = i;
+                    @parallel(h) { sum.fetch_add(x); }
+                }
+            }
+        } !>;
+        h.wait() !>;
+        if (sum.load() != 6 || base != 1) {
+            eprintln(@string(`FAIL spawned-arm attach sum=${sum} base=${base}`, @scratch));
+            return 1;
+        }
+    }
+
+    {
+        cc_atomic_int sum = 0;
+        CCParallel h = @parallel spawn {
+            @serial {
+                int i;
+                for (i = 1; i <= 3; i++) {
+                    int x = i;
+                    @parallel(h) { sum.fetch_add(x); }
+                }
+            }
+        } !>;
+        h.wait() !>;
+        if (sum.load() != 6) {
+            eprintln(@string(`FAIL one-arm attach sum=${sum}`, @scratch));
+            return 1;
+        }
+    }
+
+    {
+        /* the one-arm worker is spawned: a rendezvous with the caller
+         * completes because the caller is not the one running it */
+        int[~ >] tx;
+        int[~ <] rx;
+        CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
+        int got = 0;
+        CCParallel h = @parallel spawn {
+            @serial { got = consume(rx); }
+        } !>;
+        tx.send(9) !>;
+        tx.close();
+        h.wait() !>;
+        if (got != 9) {
+            eprintln(@string(`FAIL one-arm worker got=${got}`, @scratch));
+            return 1;
+        }
+    }
+
+    println("parallel_dest_nested_attach_smoke: OK");
+    return 0;
+}

@@ -29,6 +29,7 @@ static Prep !>(CCError) prepare_side(int id, int boom) {
 }
 
 static void unprepare(Store* st, Prep* p) {
+    @errhandler(CCError e) cc_error_exit(e);
     if (!p || !p->ready)
         return;
     p->ready = 0;

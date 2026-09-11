@@ -435,6 +435,84 @@ static inline void ?>(CCPrintError) cc__eprintln_scstr(const signed char *s) {
     return cc__eprintln_cstr((const char *)s);
 }
 
+/* The UFCS family spelling of the same arms. `us.println()` composes
+ * `cc_unsigned_char_println` from the receiver type the way `s.println()`
+ * composes `cc_char_println`; the _Generic arms above are the free-call
+ * surface and no name resolves to them. Both spellings, so a byte string
+ * reads the same whichever it is written as. */
+static inline void ?>(CCPrintError) cc_const_unsigned_char_print(const unsigned char *s) {
+    return cc__print_ucstr(s);
+}
+static inline void ?>(CCPrintError) cc_const_unsigned_char_println(const unsigned char *s) {
+    return cc__println_ucstr(s);
+}
+static inline void ?>(CCPrintError) cc_const_unsigned_char_eprint(const unsigned char *s) {
+    return cc__eprint_ucstr(s);
+}
+static inline void ?>(CCPrintError) cc_const_unsigned_char_eprintln(const unsigned char *s) {
+    return cc__eprintln_ucstr(s);
+}
+static inline void ?>(CCPrintError) cc_const_unsigned_char_fprint(const unsigned char *s, int fd) {
+    return cc_const_char_fprint((const char *)s, fd);
+}
+static inline void ?>(CCPrintError) cc_const_unsigned_char_fprintln(const unsigned char *s, int fd) {
+    return cc_const_char_fprintln((const char *)s, fd);
+}
+static inline void ?>(CCPrintError) cc_unsigned_char_print(unsigned char *s) {
+    return cc_const_unsigned_char_print(s);
+}
+static inline void ?>(CCPrintError) cc_unsigned_char_println(unsigned char *s) {
+    return cc_const_unsigned_char_println(s);
+}
+static inline void ?>(CCPrintError) cc_unsigned_char_eprint(unsigned char *s) {
+    return cc_const_unsigned_char_eprint(s);
+}
+static inline void ?>(CCPrintError) cc_unsigned_char_eprintln(unsigned char *s) {
+    return cc_const_unsigned_char_eprintln(s);
+}
+static inline void ?>(CCPrintError) cc_unsigned_char_fprint(unsigned char *s, int fd) {
+    return cc_const_unsigned_char_fprint(s, fd);
+}
+static inline void ?>(CCPrintError) cc_unsigned_char_fprintln(unsigned char *s, int fd) {
+    return cc_const_unsigned_char_fprintln(s, fd);
+}
+static inline void ?>(CCPrintError) cc_const_signed_char_print(const signed char *s) {
+    return cc__print_scstr(s);
+}
+static inline void ?>(CCPrintError) cc_const_signed_char_println(const signed char *s) {
+    return cc__println_scstr(s);
+}
+static inline void ?>(CCPrintError) cc_const_signed_char_eprint(const signed char *s) {
+    return cc__eprint_scstr(s);
+}
+static inline void ?>(CCPrintError) cc_const_signed_char_eprintln(const signed char *s) {
+    return cc__eprintln_scstr(s);
+}
+static inline void ?>(CCPrintError) cc_const_signed_char_fprint(const signed char *s, int fd) {
+    return cc_const_char_fprint((const char *)s, fd);
+}
+static inline void ?>(CCPrintError) cc_const_signed_char_fprintln(const signed char *s, int fd) {
+    return cc_const_char_fprintln((const char *)s, fd);
+}
+static inline void ?>(CCPrintError) cc_signed_char_print(signed char *s) {
+    return cc_const_signed_char_print(s);
+}
+static inline void ?>(CCPrintError) cc_signed_char_println(signed char *s) {
+    return cc_const_signed_char_println(s);
+}
+static inline void ?>(CCPrintError) cc_signed_char_eprint(signed char *s) {
+    return cc_const_signed_char_eprint(s);
+}
+static inline void ?>(CCPrintError) cc_signed_char_eprintln(signed char *s) {
+    return cc_const_signed_char_eprintln(s);
+}
+static inline void ?>(CCPrintError) cc_signed_char_fprint(signed char *s, int fd) {
+    return cc_const_signed_char_fprint(s, fd);
+}
+static inline void ?>(CCPrintError) cc_signed_char_fprintln(signed char *s, int fd) {
+    return cc_const_signed_char_fprintln(s, fd);
+}
+
 #define cc_print(x) _Generic((x), \
     CCSlice: cc__print_slice_val, \
     char *: cc__print_cstr, \

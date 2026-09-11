@@ -1,0 +1,91 @@
+/* Diagnostics: one message type, one sink.
+ *
+ * `CcDiag` is one message and the error arm of every `T!>(CcDiag)` in the
+ * lowerer: a step that cannot continue returns the diagnostic that says
+ * why, at the position that caused it. `CcDiags` collects the messages a
+ * unit produces (errors that do not stop the step, warnings, notes) and
+ * prints them sorted by position with a caret snippet.
+ *
+ * Lifetimes: a `CcDiag` owns nothing; its strings live in the arena the
+ * producing step was given. The sink lives in the unit's arena. */
+#ifndef CC_LOWER_DIAG_CCH
+#define CC_LOWER_DIAG_CCH
+#include <ccc/std/prelude.cch>
+#include <ccc/std/vec.cch>
+#include <stdio.h>
+
+typedef enum CcSeverity { CC_SEV_NOTE, CC_SEV_WARNING, CC_SEV_ERROR } CcSeverity;
+
+/* A user-coordinate position. `path` is the spelling the user can open. */
+typedef struct CcLoc {
+    CCSlice path;
+    uint32_t line;      /* 1-based; 0 = unknown */
+    uint32_t col;       /* 1-based; 0 = unknown */
+} CcLoc;
+
+/* A second place the reader has to look.
+ *
+ * Some errors are about a relationship between two positions -- a value
+ * returned here that was built there -- and naming only one of them leaves
+ * the reader to find the other. A note carries its own location and prints
+ * like a diagnostic of its own; `at.line == 0` means it has no place and
+ * prints as a plain trailing line. They chain rather than sit in a fixed
+ * array: how many an error wants is a property of the error. */
+typedef struct CcDiagNote CcDiagNote;
+struct CcDiagNote {
+    CcLoc at;
+    CCSlice msg;
+    uint32_t len;
+    uint32_t phys_line;
+    CcDiagNote* next;
+};
+
+typedef struct CcDiag {
+    CcSeverity sev;
+    CcLoc at;
+    CCSlice msg;        /* one line, user vocabulary: "no UFCS method 'len' for receiver type 'Pair'" */
+    CCSlice note;       /* optional second line: what would fix it; empty when none */
+    uint32_t len;       /* bytes the caret underlines; 0 = one caret */
+    uint32_t phys_line; /* physical line for the snippet when `at` is #line-rebased; 0 = at.line */
+    CcDiagNote* notes;  /* located notes, in the order they were attached */
+} CcDiag;
+/* d.with_len(n): the same diagnostic underlining n bytes. */
+CcDiag CcDiag_with_len(CcDiag d, uint32_t len);
+
+/* Constructors. The message is a template into `a`. */
+CcDiag CcDiag_error(CcLoc at, CCSlice msg);
+CcDiag CcDiag_warning(CcLoc at, CCSlice msg);
+CcDiag CcDiag_note(CcLoc at, CCSlice msg);
+/* d.with_note(note): same diagnostic with a note attached. */
+CcDiag CcDiag_with_note(CcDiag d, CCSlice note);
+/* d.with_note_at(at, msg, a): a note the reader can go and look at. */
+CcDiag CcDiag_with_note_at(CcDiag d, CcLoc at, CCSlice msg, CCArena a);
+
+/* The sink. */
+typedef struct CcDiags {
+    Vec::[CcDiag] items;
+    uint32_t n_errors;
+    CCArena arena;      /* owns items and the strings pushed through push_fmt */
+} CcDiags;
+
+CcDiags CcDiags_new(CCArena a);
+/* ds.push(d): record; counts errors. */
+void CcDiags_push(CcDiags* ds, CcDiag d);
+/* ds.has_errors() */
+bool CcDiags_has_errors(const CcDiags* ds);
+/* ds.print(out, source): sorted by (path, line, col); `source` returns the
+ * text of a path for the caret snippet, or an empty slice when unknown.
+ *
+ * `*physical` says which file came back, and the snippet is cut by a
+ * different line number for each: `true` means this is the text the tool
+ * read, which a `#line` may have rebased away from, so the physical line
+ * indexes it; `false` means this is the file the diagnostic names, where the
+ * user's own line does. Getting that backwards quotes a real line of a real
+ * file that is not the one the error is on -- the closer the two files, the
+ * more convincing the wrong answer. */
+typedef CCSlice (*CcSourceFn)(CCSlice path, void* ctx, bool* physical);
+void CcDiags_print(const CcDiags* ds, FILE* out, CcSourceFn source, void* ctx);
+
+@typeview Read on CcDiags { r: *; };
+
+#endif

@@ -32,5 +32,5 @@ right-associative.
 - No GNU / Concurrent-C surface (`=>`, `!>`, `@`, backticks).
 - `cc_match` is all-or-nothing; there is no recovery and no AST typecheck.
 
-The native front stays a whitelist AST (`cc/shadow/pp_tok.rules` +
-`pp_stmt.rules`). This directory is a SERDES experiment, not a succession path.
+The compiler keeps its own lexer and recursive-descent parser (`cc/lower/`).
+This directory is a SERDES experiment, not a succession path.

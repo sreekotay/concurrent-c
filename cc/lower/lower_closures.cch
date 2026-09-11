@@ -1,0 +1,1717 @@
+#pragma(@module) "lower"
+/* Clean lowerer, step: closures. `(params) => body` becomes three C
+ * functions and a struct: an environment holding what the body reads from
+ * the enclosing scope, a `_make` that fills it, and an `_entry` the
+ * runtime calls. The closure expression itself becomes the call to
+ * `_make`, so a closure value is the runtime's handle and nothing else.
+ *
+ * What the body captures is what it reads: an explicit `[a, b]` list when
+ * one is written, otherwise every name the body uses that the enclosing
+ * scope declares. A name is captured once, in the order the body first
+ * reads it, and by value: the environment outlives the statement that
+ * built it, so a by-reference capture has to say whose lifetime it is
+ * borrowing, and until that is lowered it is a diagnostic rather than a
+ * dangling alias.
+ *
+ * An explicit list is a floor rather than the whole answer for one kind of
+ * name: a channel endpoint the body sends or receives on is captured even
+ * when the list does not mention it. An endpoint is a value the enclosing
+ * frame holds and the body cannot reach any other way, so leaving it out
+ * makes the entry function name an undeclared identifier; a general
+ * re-merge of every name the body reads is what the explicit list is
+ * written to prevent, so only endpoints are added.
+ *
+ * The entry's body is real declarations, not text, so the steps after
+ * this one type the closure body exactly as they type any function.
+ *
+ * Lifetime: the lowerer arena for the nodes; the environment is heap and
+ * the runtime drops it with the closure. */
+#ifndef CC_LOWER_CLOSURES_CCH
+#define CC_LOWER_CLOSURES_CCH
+#include "lower.cch"
+#include "typing.cch"
+
+typedef struct KCap {
+    CCSlice name;
+    CcType* type;
+    bool by_ref;                /* `[&x]`: the environment carries the address */
+    bool is_safe;               /* `[@safe &x]`: the author owns the synchronisation */
+    CcType* elem;               /* by-ref array: the element the name decays to */
+    CcExpr* init;               /* `[p = e]`: the value the environment is filled from */
+} KCap;
+typedef KCap* KCapRef;
+typedef Vec::[KCapRef] KCapList;
+
+/* What a declaration in the enclosing frame holds, for the capture rules:
+ * whose storage it is, and whether the name only borrows it. */
+typedef struct KLocal {
+    CCSlice name;
+    size_t depth;               /* the block it was declared in, as `entered` counts */
+    bool stack_array;           /* `int buf[N];`: storage that belongs to this frame */
+    bool stack_slice;           /* a view over one of those */
+    bool scratch_string;        /* built in the `@scratch` arena */
+    bool ptr_alias;             /* `T* p = &local;`: writes through it reach that local */
+    bool borrow;                /* `T* p = cc_arena_alloc*(...)`: the arena owns it */
+} KLocal;
+typedef KLocal* KLocalRef;
+typedef Vec::[KLocalRef] KLocalList;
+
+/* An `@errhandler` in scope where a closure is written, and how deep the
+ * walk was when it was declared. */
+typedef struct KHandler {
+    CcStmt* stmt;
+    size_t depth;
+} KHandler;
+typedef KHandler* KHandlerRef;
+typedef Vec::[KHandlerRef] KHandlerList;
+
+typedef struct KStep {
+    CcLowerer* L;
+    Walker* w;
+    uint32_t next_id;
+    CcDeclList made;            /* the generated declarations, in order */
+    CCString fwd;               /* their forward declarations */
+    bool any;
+    bool in_hooks;              /* inside a `@typehooks`: its values are the compiler's, not C's */
+    CcDecl* at_decl;            /* the unit declaration the walk is inside */
+    CcDecl* first_host;         /* the first one that made a closure: the forward
+                                 * declarations name that body's capture types */
+    CcStmtList entered;         /* the statement path from the function body */
+    KHandlerList ehs;           /* the `@errhandler`s in scope along it */
+    KLocalList locals;          /* the declarations of the function being walked */
+    CcNameList globals;         /* the unit's own file-scope variables */
+    CcNameList macro_clo;       /* macros of this unit whose body writes a closure literal */
+    CcExprList escaping;        /* closures that outlive the frame that made them */
+    CcExprList escaping_task;   /* and those whose body runs after the statement that made them */
+    /* what one captured name is used for in one closure body: the scan runs
+     * one name at a time and never nests */
+    CCSlice use_name;
+    bool use_mutated;           /* `n = ...`, `*n = ...`, `n++` */
+    CcSpan use_mut_at;
+    bool use_amp;               /* `f(..., &n, ...)` */
+    CCSlice use_callee;
+    size_t use_index;
+    CcSpan use_amp_at;
+    bool use_freed;             /* `free(n)` */
+    CcSpan use_free_at;
+    CcExprList in_task;         /* closures a `send_task` is sending: the value is the task's result */
+    Vec::[CCSlice] task_recv;   /* the endpoint each of them is sent on, in the same order */
+    CcNameList task_spawn;      /* and the spawn that starts it: hybrid picks the other scheduler */
+} KStep;
+
+/* ---- the names a body reads from outside itself ------------------------- */
+
+typedef struct KScan {
+    KStep* st;
+    Walker* w;
+    CcNameList bound;           /* the closure's own parameters and locals */
+    CcNameList seen;            /* captured already */
+    KCapList caps;
+    bool failed;
+    bool chan_only;             /* an explicit list ran: only endpoints are added */
+} KScan;
+
+/* A channel endpoint held by a name: `T[~n >]` / `T[~n <]` as written, the
+ * `CCChanTx` / `CCChanRx` a lowered declaration holds, or a typedef of
+ * either. The hop count is bounded because a typedef chain that does not
+ * end is not this step's to diagnose. */
+static bool kl_type_is_chan_1(CcType* t, CCSlice* name) {
+    if (!t) return false;
+    @switch (t->k) {
+        case .chan(ch): (void)ch.dir; return true;
+        case .named(n): *name = n.name; return false;
+        default: return false;
+    }
+}
+
+/* A struct, written out or behind a typedef. */
+static bool kl_is_record(CcType* t) {
+    if (!t) return false;
+    @switch (t->k) {
+        case .record: return true;
+        default: return false;
+    }
+}
+
+/* A parameter type the runtime cannot carry in an `intptr_t`.
+ *
+ * A closure's arguments travel as `intptr_t`, so a caller with a struct to
+ * hand over passes its address instead -- `cc_closure2_call(b,
+ * (intptr_t)slot, (intptr_t)&arena)` is what the channel's builder call
+ * looks like, and every other runtime call that hands a handle to a
+ * closure looks the same. An aggregate parameter is therefore reloaded
+ * through that address; everything that does fit in the word -- a pointer,
+ * an integer -- stays the cast it has always been. Casting to the struct
+ * itself is not a narrower version of the right answer: it is
+ * `conversion to non-scalar type requested`, and the unit does not
+ * compile.
+ *
+ * The hop count is bounded because a typedef chain that does not end is
+ * not this step's to diagnose. */
+static bool kl_type_is_aggregate(CcIndex* ix, CcType* t) {
+    int hops = 0;
+    while (t && hops < 8) {
+        CCSlice nm = cc_slice_empty();
+        CcSym* sym;
+        if (kl_is_record(t)) return true;
+        if (!type_named_name(t, &nm) || !nm.len) return false;
+        sym = ix->sym(nm) ?> NULL;
+        while (sym && sym->kind != CC_SYM_TYPE) sym = sym->same_name;
+        if (!sym || !sym->type || sym->type == t) return false;
+        t = sym->type;
+        hops++;
+    }
+    return false;
+}
+
+static bool kl_type_is_chan(CcIndex* ix, CcType* t) {
+    int hops = 0;
+    while (t && hops < 8) {
+        CCSlice nm = cc_slice_empty();
+        CcSym* sym;
+        if (kl_type_is_chan_1(t, &nm)) return true;
+        if (!nm.len) return false;
+        if (cc_slice_eq_cstr(&nm, "CCChanTx")) return true;
+        if (cc_slice_eq_cstr(&nm, "CCChanRx")) return true;
+        sym = ix->sym(nm) ?> NULL;
+        while (sym && sym->kind != CC_SYM_TYPE) sym = sym->same_name;
+        if (!sym || !sym->type || sym->type == t) return false;
+        t = sym->type;
+        hops++;
+    }
+    return false;
+}
+
+static bool kl_name_in(CcNameList* v, CCSlice name) {
+    size_t n = v->len();
+    size_t i;
+    for (i = 0; i < n; i++)
+        if (slice_eq(*v->get_ptr(i), name)) return true;
+    return false;
+}
+
+/* A name the body reads that the enclosing scope declares is a capture. */
+static void kl_note_use(KScan* sc, CCSlice name) {
+    CcLowerer* L = sc->st->L;
+    CcType* t;
+    KCap* cap;
+    if (!name.len) return;
+    if (kl_name_in(&sc->bound, name) || kl_name_in(&sc->seen, name)) return;
+    t = sc_lookup(sc->w, name);
+    if (!t) return;                 /* a global, a function, an enumerator: not a capture */
+    if (sc->chan_only && !kl_type_is_chan(L->ix, t)) return;
+    cap = cc_arena_alloc(L->arena, sizeof(KCap), _Alignof(KCap));
+    memset(cap, 0, sizeof(*cap));
+    cap->name = name;
+    cap->type = t;
+    sc->caps.push(cap);
+    sc->seen.push(name);
+}
+
+static bool kl_scan_expr(CcExpr* e, void* env) {
+    KScan* sc = (KScan*)env;
+    @switch (e->k) {
+        case .ident(nm): kl_note_use(sc, nm); return true;
+        /* a member name is not a variable; its receiver is walked anyway */
+        default: return true;
+    }
+}
+
+static void kl_bind_local(KScan* sc, CCSlice name) {
+    if (!name.len) return;
+    sc->bound.push(name);
+}
+
+static bool kl_scan_stmt(CcStmt* s, void* env) {
+    KScan* sc = (KScan*)env;
+    CcDecl* d = NULL;
+    if (!stmt_is_decl(s, &d) || !d) return true;
+    @switch (d->k) {
+        case .var(v): kl_bind_local(sc, v.name); break;
+        default: break;
+    }
+    return true;
+}
+
+/* ---- the generated C ---------------------------------------------------- */
+
+static CCSlice kl_name(CcLowerer* L, uint32_t id, const char* suffix) {
+    CCString s = @string(`cc_closure__N${id}${suffix}`, L->arena);
+    return lw_keep(L, &s);
+}
+
+/* The pointee of a pointer type, or NULL for anything else. */
+static CcType* kl_pointee(CcType* t) {
+    if (!t) return NULL;
+    @switch (t->k) {
+        case .pointer(pt): return pt.pointee;
+        default: return NULL;
+    }
+}
+
+/* A canonical name is an identity, and an identity has no qualifiers: a
+ * `const char*` capture spelled `char*` makes the host compiler discard the
+ * qualifier the author wrote at every `_make` call. Each pointer level is
+ * spelled with the qualifiers written on it. */
+static void kl_spell_type(CCString* sb, CcLowerer* L, CcType* t) {
+    CCArena a = L->arena;
+    CcType* pointee = kl_pointee(t);
+    if (pointee) {
+        kl_spell_type(sb, L, pointee);
+        sb->push_char('*', a);
+        if (t->quals & CC_QUAL_CONST) sb->push_cstr(" const", a);
+        if (t->quals & CC_QUAL_VOLATILE) sb->push_cstr(" volatile", a);
+        return;
+    }
+    if (t && (t->quals & CC_QUAL_CONST)) sb->push_cstr("const ", a);
+    if (t && (t->quals & CC_QUAL_VOLATILE)) sb->push_cstr("volatile ", a);
+    sb->push_slice(L->ix->canon(t), a);
+}
+
+/* The spelling of a type in the generated struct and signatures. */
+static CCSlice kl_type_text(CcLowerer* L, CcType* t) {
+    CCString sb = cc_string_new();
+    kl_spell_type(&sb, L, t);
+    return lw_keep(L, &sb);
+}
+
+/* `T name` as a declaration reads: the canonical spelling carries the
+ * pointer, so a declarator suffix is never needed here. */
+static void kl_push_decl(CCString* sb, CcLowerer* L, CcType* t, CCSlice name, const char* tail) {
+    sb->push_slice(kl_type_text(L, t), L->arena);
+    sb->push_char(' ', L->arena);
+    sb->push_slice(name, L->arena);
+    sb->push_cstr(tail, L->arena);
+}
+
+/* The element an array capture decays to, or NULL when the capture is
+ * not an array. `[&arr]` names the elements, not the array object: the
+ * body indexes it, and a pointer to the array would index the wrong
+ * width. */
+static CcType* kl_array_elem(CcType* t) {
+    if (!t) return NULL;
+    @switch (t->k) {
+        case .array(ar): return ar.elem;
+        default: return NULL;
+    }
+}
+
+/* The name the body reads a by-reference scalar through. */
+static CCSlice kl_ref_name(CcLowerer* L, CCSlice name) {
+    CCString s = @string(`__cc_ref_${name}`, L->arena);
+    return lw_keep(L, &s);
+}
+
+/* The `_make` parameter a by-reference capture arrives on. */
+static CCSlice kl_opaque_name(CcLowerer* L, CCSlice name) {
+    CCString s = @string(`__cc_opaque_${name}`, L->arena);
+    return lw_keep(L, &s);
+}
+
+/* The environment struct, its drop, and the `_make` that fills it. */
+static CCString kl_env_text(KStep* st, uint32_t id, KCapList* caps, size_t arity) {
+    CcLowerer* L = st->L;
+    CCArena a = L->arena;
+    CCString sb = cc_string_new();
+    CCSlice env = kl_name(L, id, "_env");
+    CCSlice make = kl_name(L, id, "_make");
+    CCSlice entry = kl_name(L, id, "_entry");
+    CCSlice drop = kl_name(L, id, "_env_drop");
+    size_t n = caps->len();
+    size_t i;
+    CCString ar = @string(`${(int)arity}`, a);
+    sb.push_cstr("\n/* CC closure ", a);
+    {
+        CCString idn = @string(`${id}`, a);
+        sb.push_slice(cc_string_as_slice(&idn), a);
+    }
+    sb.push_cstr(" */\ntypedef struct ", a);
+    sb.push_slice(env, a);
+    sb.push_cstr(" {\n", a);
+    if (!n) sb.push_cstr("    char __unused;\n", a);
+    for (i = 0; i < n; i++) {
+        KCap* c = *caps->get_ptr(i);
+        sb.push_cstr("    ", a);
+        if (c->by_ref) {
+            /* the address, opaque: what it points at is the entry's business */
+            sb.push_cstr("void* ", a);
+            sb.push_slice(c->name, a);
+            sb.push_cstr(";\n", a);
+        } else {
+            kl_push_decl(&sb, L, c->type, c->name, ";\n");
+        }
+    }
+    sb.push_cstr("} ", a);
+    sb.push_slice(env, a);
+    sb.push_cstr(";\nstatic void ", a);
+    sb.push_slice(drop, a);
+    sb.push_cstr("(void* p) { if (p) cc__heap_free(p); }\nstatic CCClosure", a);
+    sb.push_slice(cc_string_as_slice(&ar), a);
+    sb.push_char(' ', a);
+    sb.push_slice(make, a);
+    sb.push_char('(', a);
+    if (!n) sb.push_cstr("void", a);
+    for (i = 0; i < n; i++) {
+        KCap* c = *caps->get_ptr(i);
+        if (i) sb.push_cstr(", ", a);
+        if (c->by_ref) {
+            sb.push_cstr("void* ", a);
+            sb.push_slice(kl_opaque_name(L, c->name), a);
+        } else {
+            kl_push_decl(&sb, L, c->type, c->name, "");
+        }
+    }
+    sb.push_cstr(") {\n    ", a);
+    sb.push_slice(env, a);
+    sb.push_cstr("* __env = (", a);
+    sb.push_slice(env, a);
+    sb.push_cstr("*)cc__heap_alloc(sizeof(*__env));\n", a);
+    for (i = 0; i < n; i++) {
+        KCap* c = *caps->get_ptr(i);
+        sb.push_cstr("    __env->", a);
+        sb.push_slice(c->name, a);
+        sb.push_cstr(" = ", a);
+        sb.push_slice(c->by_ref ? kl_opaque_name(L, c->name) : c->name, a);
+        sb.push_cstr(";\n", a);
+    }
+    sb.push_cstr("    return cc_closure", a);
+    sb.push_slice(cc_string_as_slice(&ar), a);
+    sb.push_cstr("_make(", a);
+    sb.push_slice(entry, a);
+    sb.push_cstr(", __env, ", a);
+    sb.push_slice(drop, a);
+    sb.push_cstr(");\n}", a);
+    return sb;
+}
+
+/* `static void* <entry>(void*[, intptr_t ...]);` and the `_make` line. */
+static void kl_forward(KStep* st, uint32_t id, KCapList* caps, size_t arity) {
+    CcLowerer* L = st->L;
+    CCArena a = L->arena;
+    CCString* sb = &st->fwd;
+    size_t n = caps->len();
+    size_t i;
+    CCString ar = @string(`${(int)arity}`, a);
+    sb->push_cstr("static void* ", a);
+    sb->push_slice(kl_name(L, id, "_entry"), a);
+    sb->push_cstr("(void*", a);
+    for (i = 0; i < arity; i++) sb->push_cstr(", intptr_t", a);
+    sb->push_cstr(");\nstatic CCClosure", a);
+    sb->push_slice(cc_string_as_slice(&ar), a);
+    sb->push_char(' ', a);
+    sb->push_slice(kl_name(L, id, "_make"), a);
+    sb->push_char('(', a);
+    if (!n) sb->push_cstr("void", a);
+    for (i = 0; i < n; i++) {
+        KCap* c = *caps->get_ptr(i);
+        if (i) sb->push_cstr(", ", a);
+        if (c->by_ref) {
+            sb->push_cstr("void* ", a);
+            sb->push_slice(kl_opaque_name(L, c->name), a);
+        } else {
+            kl_push_decl(sb, L, c->type, c->name, "");
+        }
+    }
+    sb->push_cstr(");\n", a);
+}
+
+/* `(T)e` as a real node. */
+static CcExpr* kl_cast(CcLowerer* L, CcType* t, CcExpr* a, CcSpan sp) {
+    CcExpr* e = cc__expr_blank(sp, L->arena);
+    CcCast ca;
+    ca.type = t;
+    ca.a = a;
+    e->k = { .cast = ca };
+    return e;
+}
+
+/* `(T)__env->name` as a real expression, so the unpacked local is typed. */
+static CcExpr* kl_unpack(CcLowerer* L, KCap* c, CcSpan sp) {
+    CcExpr* env = lw_ident(L, cstr_slice("__env"), sp);
+    return cc_expr_member(env, c->name, true, sp, L->arena);
+}
+
+/* A by-reference scalar is reached through its address, so the body's
+ * uses of the name become reads through that pointer. An array is not:
+ * the name is bound to the decayed element pointer and indexes as
+ * written. */
+typedef struct KRef {
+    CcLowerer* L;
+    CCSlice name;
+    CCSlice ref;                /* the pointer the entry reads the capture through */
+    bool shadowed;
+} KRef;
+
+static bool kl_ref_expr(CcExpr* e, void* env) {
+    KRef* r = (KRef*)env;
+    CCSlice nm;
+    @switch (e->k) {
+        case .ident(x): nm = x; break;
+        default: return true;
+    }
+    if (!slice_eq(nm, r->name)) return true;
+    {
+        /* a real dereference rather than its spelling: what follows a capture
+         * may be a method call, and a receiver that is text says nothing
+         * about the type it has */
+        CcExpr* id = lw_ident(r->L, r->ref, e->span);
+        CcExpr* deref = cc_expr_unary(CC_OP_DEREF, id, e->span, r->L->arena);
+        CcExpr* par = lw_paren(r->L, deref, e->span);
+        e->k = par->k;
+    }
+    return true;
+}
+
+static bool kl_ref_stmt(CcStmt* s, void* env) {
+    KRef* r = (KRef*)env;
+    CcDecl* d = NULL;
+    if (!stmt_is_decl(s, &d) || !d) return true;
+    @switch (d->k) {
+        case .var(v): if (slice_eq(v.name, r->name)) r->shadowed = true; break;
+        default: break;
+    }
+    return true;
+}
+
+/* Every use of `name` in `body`, read through `through` instead. */
+static bool kl_rewrite_ref(CcLowerer* L, CcStmt* body, CCSlice name, CCSlice ref, CcSpan sp) {
+    CcVisitor v;
+    KRef r;
+    memset(&r, 0, sizeof(r));
+    r.L = L;
+    r.name = name;
+    r.ref = ref;
+    memset(&v, 0, sizeof(v));
+    v.stmt = kl_ref_stmt;
+    v.env = &r;
+    CcStmt_walk(body, v);
+    if (r.shadowed) {
+        CCString m = @string(`'[&${name}]' is captured by reference and then declared again inside the closure; the clean lowerer does not lower a capture its body shadows`, L->arena);
+        lw_error(L, sp, m);
+        return false;
+    }
+    memset(&v, 0, sizeof(v));
+    v.expr = kl_ref_expr;
+    v.env = &r;
+    CcStmt_walk(body, v);
+    return true;
+}
+
+/* The entry function: the environment, the unpacked captures, the
+ * parameters, then the body as written. */
+/* The `@errhandler` in scope where a closure is written.
+ *
+ * A closure body becomes a function of its own, and a `goto` cannot leave
+ * one — but the handler the author had in scope is still the handler an
+ * unwrap inside the body means. The declaration travels into the generated
+ * entry, where the Results step registers it as a local handler and inlines
+ * it at each unwrap. Without it a `!>` inside a closure reads as an unwrap
+ * with nowhere to send its error, which is a diagnostic about a handler the
+ * author did write. */
+static void kl_scope_enter(KStep* st, CcStmt* s) {
+    CcStmtList* ev = &st->entered;
+    KHandlerList* hv = &st->ehs;
+    ev->push(s);
+    @switch (s->k) {
+        case .errhandler: {
+            KHandler* h = cc_arena_alloc(st->L->arena, sizeof(KHandler), _Alignof(KHandler));
+            h->stmt = s;
+            /* the handler covers the rest of the list it sits in, not its
+             * own extent: its depth is the enclosing block's */
+            h->depth = ev->len() - 1;
+            hv->push(h);
+            break;
+        }
+        default: break;
+    }
+}
+
+static void kl_scope_leave(KStep* st) {
+    CcStmtList* ev = &st->entered;
+    KHandlerList* hv = &st->ehs;
+    KLocalList* lv = &st->locals;
+    CcStmt* dropped = NULL;
+    if (ev->len()) ev->pop(&dropped);
+    while (hv->len()) {
+        KHandler* h = *hv->get_ptr(hv->len() - 1);
+        KHandler* out = NULL;
+        if (h->depth <= ev->len()) break;
+        hv->pop(&out);
+    }
+    while (lv->len()) {
+        KLocal* lo = *lv->get_ptr(lv->len() - 1);
+        KLocal* out = NULL;
+        if (lo->depth <= ev->len()) break;
+        lv->pop(&out);
+    }
+}
+
+/* A handler that returns a value cannot travel into a closure: the entry
+ * returns `void*`, and the value the handler names belongs to the function
+ * it was written in. One that diverges instead — `cc_error_exit(e)`, a
+ * bare `return` — means the same thing wherever it runs.
+ *
+ * `return <value>` names a control transfer that does not exist inside a
+ * closure body, so such a handler is not the handler for code written
+ * there; the search continues outward to the innermost one that is. */
+static bool kl_returns_value(CcStmt* s, void* env) {
+    bool* hit = (bool*)env;
+    @switch (s->k) {
+        case .return_(r): if (r.value) *hit = true; break;
+        default: break;
+    }
+    return true;
+}
+
+static CcStmt* kl_handler_in_scope(KStep* st) {
+    KHandlerList* hv = &st->ehs;
+    size_t i = hv->len();
+    while (i) {
+        KHandler* h = *hv->get_ptr(--i);
+        CcVisitor v;
+        bool hit = false;
+        memset(&v, 0, sizeof(v));
+        v.stmt = kl_returns_value;
+        v.env = &hit;
+        CcStmt_walk(h->stmt, v);
+        if (!hit) return h->stmt;
+    }
+    return NULL;
+}
+
+/* The closures a `send_task` is sending.
+ *
+ * `tx.send_task(() => f(x))` hands the runtime a task whose VALUE the
+ * receiver reads back; the closure's expression is that value, not
+ * something to evaluate and drop. The entry stores it in the task's result
+ * slot and returns the slot, which is where `cc_block_on_*` looks. Every
+ * other closure returns NULL: it has no value anyone can ask for.
+ *
+ * The channel step has already turned `tx.send_task(f)` into the plain
+ * call by the time this runs, so the callee name is what is matched. */
+static bool kl_is_send_task(CCSlice fn) {
+    return cc_slice_eq_cstr(&fn, "cc_channel_send_task") ||
+           cc_slice_eq_cstr(&fn, "cc_channel_send_task_hybrid") ||
+           cc_slice_eq_cstr(&fn, "cc_chan_send_task");
+}
+
+static bool kl_is_send_task_method(CCSlice m) {
+    return cc_slice_eq_cstr(&m, "send_task") || cc_slice_eq_cstr(&m, "send_task_hybrid");
+}
+
+static bool kl_is_hybrid(CCSlice n) {
+    return n.len > 7 && memcmp(n.ptr + n.len - 7, "_hybrid", 7) == 0;
+}
+
+/* Record one send: the closure, the endpoint it goes to, and the spawn
+ * that starts it. `send_task_hybrid` runs the task on the other scheduler
+ * and is the same shape otherwise. */
+static void kl_mark_one(KStep* st, CcExpr* closure, CCSlice recv, bool hybrid) {
+    CcExprList* seen = &st->in_task;
+    Vec::[CCSlice]* rv = &st->task_recv;
+    CcNameList* sv = &st->task_spawn;
+    CcExpr* a = strip_parens_expr(closure);
+    if (!a || a->k.kind != CcExprK_closure) return;
+    seen->push(a);
+    rv->push(recv);
+    sv->push(hybrid ? cstr_slice("cc_fiber_spawn_closure0_v2") : cstr_slice("cc_fiber_spawn_closure0"));
+}
+
+static bool kl_mark_task_visit(CcExpr* e, void* env) {
+    KStep* st = (KStep*)env;
+    @switch (e->k) {
+        case .call(cl): {
+            CCSlice fn;
+            CCSlice recv;
+            CcExprList* av = &cl.args;
+            if (av->len() != 2) break;
+            if (!expr_ident(strip_parens_expr(cl.callee), &fn)) break;
+            if (!kl_is_send_task(fn)) break;
+            if (!expr_ident(strip_parens_expr(*av->get_ptr(0)), &recv)) break;
+            kl_mark_one(st, *av->get_ptr(1), recv, kl_is_hybrid(fn));
+            break;
+        }
+        case .ufcs(uf): {
+            CCSlice recv;
+            CcExprList* av = &uf.args;
+            if (av->len() != 1) break;
+            if (!kl_is_send_task_method(uf.method)) break;
+            if (!expr_ident(strip_parens_expr(uf.recv), &recv)) break;
+            kl_mark_one(st, *av->get_ptr(0), recv, kl_is_hybrid(uf.method));
+            break;
+        }
+        default: break;
+    }
+    return true;
+}
+
+static bool kl_in_task(KStep* st, CcExpr* e) {
+    CcExprList* v = &st->in_task;
+    size_t n = v->len();
+    size_t i;
+    for (i = 0; i < n; i++) { CcExpr* c = *v->get_ptr(i); if (c == e) return true; }
+    return false;
+}
+
+/* `__typeof__(<e>)`: the node itself, so later steps lower it once. */
+static CcType* kl_typeof(CcLowerer* L, CcExpr* inner, CcSpan sp) {
+    CcType* t = cc__type_blank(sp, L->arena);
+    CcTypeofType tf;
+    tf.expr = inner;
+    tf.type = NULL;
+    t->k = { .typeof_ = tf };
+    return t;
+}
+
+/* The value of a `send_task` closure, into the task's result slot. */
+static void kl_task_result(CcLowerer* L, CcStmt* body, CcExpr* value, CcSpan sp) {
+    CCString slot = @string(`__typeof__(__cc_st_v)* __cc_st_r = (__typeof__(__cc_st_v)*)cc_task_result_ptr(sizeof(*__cc_st_r))`, L->arena);
+    CCString guard = @string(`if (!__cc_st_r) return NULL`, L->arena);
+    CCString store = @string(`*__cc_st_r = __cc_st_v`, L->arena);
+    lw_push(body, lw_decl_stmt(L, kl_typeof(L, value, sp), cstr_slice("__cc_st_v"), value, sp));
+    lw_push(body, lw_expr_stmt(L, lw_text(L, slot, sp), sp));
+    lw_push(body, lw_expr_stmt(L, lw_text(L, guard, sp), sp));
+    lw_push(body, lw_expr_stmt(L, lw_text(L, store, sp), sp));
+    lw_push(body, cc_stmt_return(lw_ident(L, cstr_slice("__cc_st_r"), sp), sp, L->arena));
+}
+
+static CcDecl* kl_entry_decl(KStep* st, uint32_t id, KCapList* caps, CcClosure cl, bool task_result, CcSpan sp) {
+    CcLowerer* L = st->L;
+    CcStmt* eh = kl_handler_in_scope(st);
+    CCSlice env = kl_name(L, id, "_env");
+    CcStmt* body = lw_block(L, sp);
+    CcParamList params = vec_new::[CcParam](L->arena);
+    CcType* fn_type = cc__type_blank(sp, L->arena);
+    CcFuncType ft;
+    CcFuncDecl fd;
+    CcDecl* d;
+    size_t n = caps->len();
+    size_t i;
+    Vec::[CcParam]* clp = &cl.params;
+    size_t np = clp->len();
+    if (eh) lw_push(body, eh);   /* the handler the author had in scope here */
+    {
+        /* `<env>* __env = (<env>*)__p;` */
+        CcType* pt = cc_type_pointer(cc_type_named(env, sp, L->arena), sp, L->arena);
+        CcExpr* cast = kl_cast(L, pt, lw_ident(L, cstr_slice("__p"), sp), sp);
+        lw_push(body, lw_decl_stmt(L, pt, cstr_slice("__env"), cast, sp));
+    }
+    for (i = 0; i < n; i++) {
+        KCap* c = *caps->get_ptr(i);
+        if (c->by_ref) {
+            /* the address arrives opaque: the entry says what it points at */
+            CcType* pointee = c->elem ? c->elem : c->type;
+            CcType* pt = cc_type_pointer(pointee, sp, L->arena);
+            CCSlice bind = c->elem ? c->name : kl_ref_name(L, c->name);
+            CcExpr* cast = kl_cast(L, pt, kl_unpack(L, c, sp), sp);
+            lw_push(body, lw_decl_stmt(L, pt, bind, cast, sp));
+            if (!c->elem && cl.body) {
+                if (!kl_rewrite_ref(L, cl.body, c->name, bind, sp)) return NULL;
+            }
+            continue;
+        }
+        lw_push(body, lw_decl_stmt(L, c->type, c->name, kl_unpack(L, c, sp), sp));
+    }
+    for (i = 0; i < np; i++) {
+        CcParam* p = clp->get_ptr(i);
+        CCString an = @string(`__arg${(int)i}`, L->arena);
+        CCSlice arg = lw_keep(L, &an);
+        CcType* pt = p->type ? p->type : cc_type_named(cstr_slice("intptr_t"), sp, L->arena);
+        CcExpr* cast;
+        if (p->type && kl_type_is_aggregate(L->ix, pt)) {
+            CcType* ptr = cc_type_pointer(pt, sp, L->arena);
+            cast = cc_expr_unary(CC_OP_DEREF, kl_cast(L, ptr, lw_ident(L, arg, sp), sp), sp, L->arena);
+        } else {
+            cast = kl_cast(L, pt, lw_ident(L, arg, sp), sp);
+        }
+        if (p->name.len) lw_push(body, lw_decl_stmt(L, pt, p->name, cast, sp));
+    }
+    {
+        CcStmtList* inner = NULL;
+        CcExpr* value = NULL;
+        size_t nb = 0;
+        size_t keep;
+        size_t k;
+        if (cl.body && cl.body->k.kind == CcStmtK_block) inner = lw_block_stmts(cl.body);
+        nb = inner ? inner->len() : 0;
+        keep = nb;
+        /* the closure's value is its expression, or the last expression of
+         * its block: what a `send_task` receiver reads back */
+        if (task_result && cl.body) {
+            CcStmt* last = inner ? (nb ? *inner->get_ptr(nb - 1) : NULL) : cl.body;
+            if (last && last->k.kind == CcStmtK_expr) {
+                @switch (last->k) {
+                    case .expr(es): if (!es.body) value = es.e; break;
+                    default: break;
+                }
+                if (value && inner) keep = nb - 1;
+            }
+        }
+        if (inner) {
+            for (k = 0; k < keep; k++) {
+                CcStmt* bs = *inner->get_ptr(k);
+                lw_push(body, bs);
+            }
+        } else if (cl.body && !value) {
+            lw_push(body, cl.body);
+        }
+        if (value) {
+            kl_task_result(L, body, value, sp);
+        } else {
+            lw_push(body, cc_stmt_return(lw_text(L, @string(`NULL`, L->arena), sp), sp, L->arena));
+        }
+    }
+    {
+        CcParam p0;
+        memset(&p0, 0, sizeof(p0));
+        p0.span = sp;
+        p0.type = cc_type_pointer(cc_type_named(cstr_slice("void"), sp, L->arena), sp, L->arena);
+        p0.name = cstr_slice("__p");
+        p0.attrs = vec_new::[CcAttr](L->arena);
+        params.push(p0);
+    }
+    for (i = 0; i < np; i++) {
+        CcParam pn;
+        CCString an = @string(`__arg${(int)i}`, L->arena);
+        memset(&pn, 0, sizeof(pn));
+        pn.span = sp;
+        pn.type = cc_type_named(cstr_slice("intptr_t"), sp, L->arena);
+        pn.name = lw_keep(L, &an);
+        pn.attrs = vec_new::[CcAttr](L->arena);
+        params.push(pn);
+    }
+    memset(&ft, 0, sizeof(ft));
+    ft.ret = cc_type_pointer(cc_type_named(cstr_slice("void"), sp, L->arena), sp, L->arena);
+    ft.params = params;
+    { CcTypeK tk = { .func = ft }; fn_type->k = tk; }
+    memset(&fd, 0, sizeof(fd));
+    fd.type = fn_type;
+    fd.name = kl_name(L, id, "_entry");
+    fd.body = body;
+    d = cc_arena_alloc(L->arena, sizeof(CcDecl), _Alignof(CcDecl));
+    memset(d, 0, sizeof(*d));
+    d->span = sp;
+    d->specs = CC_SPEC_STATIC;
+    d->attrs = vec_new::[CcAttr](L->arena);
+    { CcDeclK dk = { .func = fd }; d->k = dk; }
+    return d;
+}
+
+/* ---- capture safety ----------------------------------------------------
+ *
+ * A closure body runs somewhere else, and often later. What it may do to a
+ * name it captured depends on what that name is in the frame that wrote it,
+ * and on where the closure goes from there. Four rules:
+ *
+ *   a shared reference is read-only        `[&x]` and then `x = ...`
+ *   the address of one is not handed out   `[&x]` and then `f(&x)`
+ *   a value-captured alias is read-only    `[p]`, `T* p = &local`, `*p = ...`
+ *   a borrow is not freed by the borrower  `[base]` from an arena, `free(base)`
+ *
+ * plus a lifetime rule: a view over this frame cannot go into a closure
+ * that outlives the frame.
+ *
+ * `@unsafe` on the closure turns off the first three: the author has said
+ * the synchronisation is theirs. `[@safe &x]` turns off the second only --
+ * sharing the address is the point -- and never the first.
+ */
+
+/* Where a closure is written says whether it outlives the frame that made
+ * it. A nursery spawn joins before the frame leaves, so this frame storage
+ * is still there for it; a return, a store into a global or a field, and an
+ * argument to any other call all hand the closure to someone who outlives
+ * the statement. The body of a spawned task still runs after the statement
+ * that spawned it, so a write through a captured pointer races either way:
+ * that is the second, wider sense. */
+static void kl_mark_escape(KStep* st, CcExpr* e, bool frame_esc, bool task_esc) {
+    CcExpr* a = strip_parens_expr(e);
+    if (!a || a->k.kind != CcExprK_closure) return;
+    if (frame_esc) st->escaping.push(a);
+    if (task_esc) st->escaping_task.push(a);
+}
+
+static bool kl_expr_in(CcExprList* v, CcExpr* e) {
+    size_t n = v->len();
+    size_t i;
+    for (i = 0; i < n; i++) if (*v->get_ptr(i) == e) return true;
+    return false;
+}
+
+static bool kl_is_scoped_spawn(CCSlice m) {
+    return cc_slice_eq_cstr(&m, "spawn") || cc_slice_eq_cstr(&m, "spawnhybrid") ||
+           cc_slice_eq_cstr(&m, "spawn_unsafe") || cc_slice_eq_cstr(&m, "spawnhybrid_unsafe");
+}
+
+/* `g = <closure>` where `g` is a field or one of the unit file-scope
+ * variables: the value is reachable after the statement. */
+static bool kl_lvalue_outlives(KStep* st, CcExpr* lhs) {
+    CcExpr* a = strip_parens_expr(lhs);
+    CCSlice nm;
+    if (!a) return false;
+    if (a->k.kind == CcExprK_member || a->k.kind == CcExprK_index) return true;
+    if (expr_ident(a, &nm)) return kl_name_in(&st->globals, nm);
+    return false;
+}
+
+static bool kl_escape_expr_visit(CcExpr* e, void* env) {
+    KStep* st = (KStep*)env;
+    size_t i;
+    size_t n;
+    @switch (e->k) {
+        case .assign(as): {
+            bool out = kl_lvalue_outlives(st, as.a);
+            kl_mark_escape(st, as.b, out, out);
+            break;
+        }
+        case .call(cl): {
+            CcExprList* av = &cl.args;
+            n = av->len();
+            for (i = 0; i < n; i++) kl_mark_escape(st, *av->get_ptr(i), true, true);
+            break;
+        }
+        case .ufcs(uf): {
+            CcExprList* av = &uf.args;
+            bool scoped = kl_is_scoped_spawn(uf.method);
+            n = av->len();
+            for (i = 0; i < n; i++) kl_mark_escape(st, *av->get_ptr(i), !scoped, true);
+            break;
+        }
+        default: break;
+    }
+    return true;
+}
+
+static bool kl_escape_stmt_visit(CcStmt* s, void* env) {
+    KStep* st = (KStep*)env;
+    @switch (s->k) {
+        case .return_(r): kl_mark_escape(st, r.value, true, true); break;
+        default: break;
+    }
+    return true;
+}
+
+/* ---- what a name is in the frame that captured it ----------------------- */
+
+static KLocal* kl_find_local(KStep* st, CCSlice name) {
+    KLocalList* v = &st->locals;
+    size_t i = v->len();
+    while (i) {
+        KLocal* lo = *v->get_ptr(--i);
+        if (slice_eq(lo->name, name)) return lo;
+    }
+    return NULL;
+}
+
+static bool kl_has_prefix(CCSlice s, const char* p) {
+    size_t n = strlen(p);
+    return s.len >= n && memcmp(s.ptr, p, n) == 0;
+}
+
+static bool kl_text_has(CCSlice hay, const char* needle) {
+    size_t n = strlen(needle);
+    size_t i;
+    if (!n || hay.len < n) return false;
+    for (i = 0; i + n <= hay.len; i++)
+        if (memcmp(hay.ptr + i, needle, n) == 0) return true;
+    return false;
+}
+
+/* `f(args)` written with `f` an identifier. */
+static bool kl_call_of(CcExpr* e, CCSlice* fn, CcExprList* args) {
+    CcExpr* x = strip_parens_expr(e);
+    if (!x) return false;
+    @switch (x->k) {
+        case .call(cl):
+            if (!expr_ident(strip_parens_expr(cl.callee), fn)) return false;
+            *args = cl.args;
+            return true;
+        default: return false;
+    }
+}
+
+/* `&name` / `*name` / `name++`, through parens. */
+static bool kl_unary_of(CcExpr* e, CcOp op, CCSlice* name) {
+    CcExpr* x = strip_parens_expr(e);
+    if (!x) return false;
+    @switch (x->k) {
+        case .unary(un):
+            if (un.op != op) return false;
+            return expr_ident(strip_parens_expr(un.a), name);
+        default: return false;
+    }
+}
+
+static bool kl_is_named(CcExpr* e, CCSlice name) {
+    CCSlice nm;
+    return expr_ident(strip_parens_expr(e), &nm) && slice_eq(nm, name);
+}
+
+static bool kl_is_deref_of(CcExpr* e, CCSlice name) {
+    CCSlice nm;
+    return kl_unary_of(e, CC_OP_DEREF, &nm) && slice_eq(nm, name);
+}
+
+static bool kl_is_addr_of(CcExpr* e, CCSlice name) {
+    CCSlice nm;
+    return kl_unary_of(e, CC_OP_ADDR, &nm) && slice_eq(nm, name);
+}
+
+static bool kl_op_writes(CcOp op) {
+    return op == CC_OP_PREINC || op == CC_OP_PREDEC ||
+           op == CC_OP_POSTINC || op == CC_OP_POSTDEC;
+}
+
+static bool kl_scratch_visit(CcExpr* e, void* env) {
+    bool* hit = (bool*)env;
+    if (e->k.kind == CcExprK_scratch) *hit = true;
+    return true;
+}
+
+static bool kl_expr_uses_scratch(CcExpr* e) {
+    CcVisitor v;
+    bool hit = false;
+    if (!e) return false;
+    memset(&v, 0, sizeof(v));
+    v.expr = kl_scratch_visit;
+    v.env = &hit;
+    CcExpr_walk(e, v);
+    return hit;
+}
+
+/* The initializer says what the name holds. `cc_slice_from_buffer(buf, n)`
+ * over a local array is a view of this frame; a `cc_arena_alloc*` result is
+ * the arena storage under another name; `&local` is a second way to reach a
+ * binding that is still live here. */
+static void kl_note_init(KStep* st, Walker* w, KLocal* lo, CcExpr* e) {
+    CCSlice fn;
+    CCSlice base;
+    CcExprList args;
+    CcExpr* x = strip_parens_expr(e);
+    if (!x) return;
+    if (kl_expr_uses_scratch(x)) lo->scratch_string = true;
+    if (kl_unary_of(x, CC_OP_ADDR, &base) && sc_lookup(w, base)) { lo->ptr_alias = true; return; }
+    if (!kl_call_of(x, &fn, &args)) return;
+    if (kl_has_prefix(fn, "cc_arena_alloc")) { lo->borrow = true; return; }
+    if (!cc_slice_eq_cstr(&fn, "cc_slice_from_buffer") && !cc_slice_eq_cstr(&fn, "cc_slice_from_parts")) return;
+    if (!args.len() || !expr_ident(strip_parens_expr(*args.get_ptr(0)), &base)) return;
+    {
+        KLocal* src = kl_find_local(st, base);
+        if (src && src->stack_array) lo->stack_slice = true;
+    }
+}
+
+static void kl_note_local(KStep* st, Walker* w, CcStmt* s) {
+    CcLowerer* L = st->L;
+    CcDecl* d = NULL;
+    KLocal* lo;
+    CcType* type = NULL;
+    CcInit* init = NULL;
+    CCSlice name = cc_slice_empty();
+    CcStmtList* ev = &st->entered;
+    if (!stmt_is_decl(s, &d) || !d) return;
+    @switch (d->k) {
+        case .var(v): name = v.name; type = v.type; init = v.init; break;
+        default: break;
+    }
+    if (!name.len) return;
+    lo = cc_arena_alloc(L->arena, sizeof(KLocal), _Alignof(KLocal));
+    memset(lo, 0, sizeof(*lo));
+    lo->name = name;
+    /* the declaration is visible to the rest of the block it sits in, not
+     * to its own extent: its depth is the depth of that block */
+    lo->depth = ev->len() ? ev->len() - 1 : 0;
+    lo->stack_array = kl_array_elem(type) != NULL;
+    kl_note_init(st, w, lo, init ? init->expr : NULL);
+    st->locals.push(lo);
+}
+
+/* ---- what a body does with a captured name ------------------------------ */
+
+static bool kl_is_free_fn(CCSlice fn) {
+    return cc_slice_eq_cstr(&fn, "free") || cc_slice_eq_cstr(&fn, "cfree") ||
+           cc_slice_eq_cstr(&fn, "cc_slice_destroy") || cc_slice_eq_cstr(&fn, "CCSlice_destroy");
+}
+
+static void kl_note_call_use(KStep* u, CcExpr* e, CcCall cl) {
+    CCSlice fn;
+    CcExprList* av = &cl.args;
+    size_t n = av->len();
+    size_t i;
+    if (!expr_ident(strip_parens_expr(cl.callee), &fn)) return;
+    if (kl_is_free_fn(fn) && n && kl_is_named(*av->get_ptr(0), u->use_name) && !u->use_freed) {
+        u->use_freed = true;
+        u->use_free_at = e->span;
+    }
+    if (u->use_amp) return;
+    for (i = 0; i < n; i++) {
+        if (!kl_is_addr_of(*av->get_ptr(i), u->use_name)) continue;
+        u->use_amp = true;
+        u->use_callee = fn;
+        u->use_index = i;
+        u->use_amp_at = e->span;
+        return;
+    }
+}
+
+static bool kl_use_visit(CcExpr* e, void* env) {
+    KStep* u = (KStep*)env;
+    @switch (e->k) {
+        case .assign(as):
+            if (!u->use_mutated && (kl_is_named(as.a, u->use_name) || kl_is_deref_of(as.a, u->use_name))) {
+                u->use_mutated = true;
+                u->use_mut_at = e->span;
+            }
+            break;
+        case .unary(un):
+            if (!u->use_mutated && kl_op_writes(un.op) && kl_is_named(un.a, u->use_name)) {
+                u->use_mutated = true;
+                u->use_mut_at = e->span;
+            }
+            break;
+        case .call(cl): kl_note_call_use(u, e, cl); break;
+        default: break;
+    }
+    return true;
+}
+
+static void kl_scan_uses(KStep* u, CcStmt* body, CCSlice name) {
+    CcVisitor v;
+    u->use_name = name;
+    u->use_mutated = false;
+    u->use_amp = false;
+    u->use_freed = false;
+    u->use_index = 0;
+    u->use_callee = cc_slice_empty();
+    memset(&v, 0, sizeof(v));
+    v.expr = kl_use_visit;
+    v.env = u;
+    CcStmt_walk(body, v);
+}
+
+/* The parameter a callee reads argument `i` through, or NULL. */
+static CcType* kl_param_type(CcSym* sym, size_t i) {
+    if (!sym || sym->kind != CC_SYM_FUNC || !sym->type) return NULL;
+    @switch (sym->type->k) {
+        case .func(fn): {
+            CcParamList ps = fn.params;
+            if (i >= ps.len()) return NULL;
+            return ps.get_ptr(i)->type;
+        }
+        default: return NULL;
+    }
+}
+
+/* Handing out `&x` is handing out a write the callee may make. A
+ * pointer-to-const parameter says it will not, and the atomics are the one
+ * shared mutator a program means to have. A callee this unit cannot see is
+ * not a promise, so it is refused rather than assumed harmless. */
+static bool kl_amp_call_ok(KStep* st) {
+    CcType* pt;
+    CcType* pointee;
+    if (kl_text_has(st->use_callee, "atomic")) return true;
+    pt = kl_param_type(sym_any(st->L->ix, st->use_callee), st->use_index);
+    pointee = kl_pointee(pt);
+    return pointee != NULL && (pointee->quals & CC_QUAL_CONST) != 0;
+}
+
+/* A name in the lowering's own namespace: it minted the capture and the
+ * use, so it is answerable for both. */
+static bool kl_generated_name(CCSlice n) {
+    return n.len > 5 && memcmp(n.ptr, "__cc_", 5) == 0;
+}
+
+/* The rules, at the closure that wrote the capture list. */
+static bool kl_check_captures(KStep* st, CcExpr* e, CcClosure cl, KCapList* caps) {
+    CcLowerer* L = st->L;
+    bool frame_esc = kl_expr_in(&st->escaping, e);
+    bool task_esc = kl_expr_in(&st->escaping_task, e);
+    size_t n = caps->len();
+    size_t i;
+    if (!cl.body) return true;
+    for (i = 0; i < n; i++) {
+        KCap* c = *caps->get_ptr(i);
+        KLocal* lo;
+        CCSlice nm = c->name;
+        if (c->init) continue;      /* a fresh name: no outer binding is shared */
+        /* These are rules about what the capture list says, and a name the
+         * lowering minted is not something anyone wrote: a call the blocking
+         * attributes wrapped captures a pointer to the destination and writes
+         * the result through it, which is the wrap, not an alias the user
+         * built. */
+        if (kl_generated_name(nm)) continue;
+        lo = kl_find_local(st, nm);
+        kl_scan_uses(st, cl.body, nm);
+        if (frame_esc && lo && (lo->stack_slice || lo->scratch_string)) {
+            CCString m = @string(`cannot capture stack slice or ${"@"}scratch string in escaping closure: '${nm}' is a view of the frame the closure outlives`, L->arena);
+            lw_error(L, e->span, m);
+            return false;
+        }
+        if (st->use_freed && lo && lo->borrow) {
+            CCString m = @string(`cannot free/destroy non-owning borrow '${nm}': the arena it was allocated from owns it`, L->arena);
+            lw_error(L, st->use_free_at, m);
+            return false;
+        }
+        if (cl.is_unsafe) continue;
+        if (c->by_ref) {
+            if (st->use_mutated) {
+                CCString m = @string(`mutation of shared reference '${nm}' in closure`, L->arena);
+                lw_error(L, st->use_mut_at, m);
+                return false;
+            }
+            if (!c->is_safe && st->use_amp && !kl_amp_call_ok(st)) {
+                CCSlice callee = st->use_callee;
+                CCString m = @string(`passing '&${nm}' to '${callee}' may mutate shared state`, L->arena);
+                lw_error(L, st->use_amp_at, m);
+                return false;
+            }
+            continue;
+        }
+        if (task_esc && lo && lo->ptr_alias && st->use_mutated) {
+            CCString m = @string(`mutation through value-captured pointer '${nm}' that aliases an outer local`, L->arena);
+            lw_error(L, st->use_mut_at, m);
+            return false;
+        }
+    }
+    return true;
+}
+
+/* An explicit capture list this step does not lower yet: a move has an
+ * owner to hand over, and until that transfer is written the closure and
+ * the frame would both believe they own the value.
+ *
+ * `[&p = e]` is refused for a different reason: an init capture names a
+ * value, and there is no outer binding for the environment to hold the
+ * address of. */
+static bool kl_reject_capture(CcLowerer* L, CcCapture* c, CcSpan sp) {
+    CCSlice nm = c->name;
+    if (c->is_move) {
+        CCString m = @string(`'[${"@"}move ${nm}]' (a moving capture) is not lowered by the clean lowerer yet`, L->arena);
+        lw_error(L, sp, m);
+        return true;
+    }
+    if (c->init && c->by_ref) {
+        CCString m = @string(`'[&${nm} = ...]' has no outer binding to borrow; drop the '&' or the initializer`, L->arena);
+        lw_error(L, sp, m);
+        return true;
+    }
+    return false;
+}
+
+/* The generated `_make` is an ordinary declaration, so the index learns it:
+ * a later step asking what the closure expression is typed as gets
+ * `CCClosureN` and not a shrug. */
+static void kl_declare_make(KStep* st, uint32_t id, KCapList* caps, size_t arity) {
+    CcLowerer* L = st->L;
+    CcIndex* ix = L->ix;
+    CcSpan sp;
+    CCString rn = @string(`CCClosure${(int)arity}`, L->arena);
+    CcType* fn_type = cc__type_blank(span0(), L->arena);
+    CcFuncType ft;
+    CcParamList ps = vec_new::[CcParam](L->arena);
+    size_t n = caps->len();
+    size_t i;
+    sp = span0();
+    for (i = 0; i < n; i++) {
+        KCap* c = *caps->get_ptr(i);
+        CcParam p;
+        memset(&p, 0, sizeof(p));
+        p.span = sp;
+        p.type = c->by_ref
+                     ? cc_type_pointer(cc_type_named(cstr_slice("void"), sp, L->arena), sp, L->arena)
+                     : c->type;
+        p.name = c->name;
+        p.attrs = vec_new::[CcAttr](L->arena);
+        ps.push(p);
+    }
+    memset(&ft, 0, sizeof(ft));
+    ft.ret = cc_type_named(lw_keep(L, &rn), sp, L->arena);
+    ft.params = ps;
+    { CcTypeK tk = { .func = ft }; fn_type->k = tk; }
+    cc__sym_add(ix, kl_name(L, id, "_make"), CC_SYM_FUNC, NULL, L->unit, fn_type, false, true);
+}
+
+/* One closure: its captures, its three functions, and the `_make` call
+ * that replaces it. */
+static void kl_lower(KStep* st, CcExpr* e, CcClosure cl) {
+    CcLowerer* L = st->L;
+    Walker* w = st->w;
+    CcSpan sp = e->span;
+    uint32_t id = ++st->next_id;
+    KScan sc;
+    KCapList caps;
+    Vec::[CcCapture]* capv = &cl.captures;
+    size_t ncap = capv->len();
+    size_t i;
+    Vec::[CcParam]* clp = &cl.params;
+    size_t arity = clp->len();
+    memset(&sc, 0, sizeof(sc));
+    sc.st = st;
+    sc.w = w;
+    sc.bound = vec_new::[CCSlice](L->arena);
+    sc.seen = vec_new::[CCSlice](L->arena);
+    sc.caps = vec_new::[KCapRef](L->arena);
+    if (arity > 2) {
+        CCString m = @string(`a closure of ${(int)arity} parameters has no runtime handle; the runtime carries CCClosure0 through CCClosure2`, L->arena);
+        lw_error(L, sp, m);
+        return;
+    }
+    for (i = 0; i < arity; i++) {
+        CcParam* p = clp->get_ptr(i);
+        if (p->name.len) sc.bound.push(p->name);
+    }
+    if (ncap) {
+        for (i = 0; i < ncap; i++) {
+            CcCapture* c = capv->get_ptr(i);
+            CcType* t;
+            KCap* cap;
+            if (kl_reject_capture(L, c, sp)) return;
+            /* `[p = e]` binds a fresh name to the value of `e`, read in
+             * the enclosing scope: the type of that expression is the type
+             * of the capture, and the environment is filled from the
+             * expression rather than from a name the body could also have
+             * read directly. */
+            t = c->init ? type_of_expr(w, c->init) : sc_lookup(w, c->name);
+            if (!t) {
+                CCSlice nm = c->name;
+                if (c->init) {
+                    CCString m = @string(`the initializer of '[${nm} = ...]' has no type the closure environment can hold`, L->arena);
+                    lw_error(L, sp, m);
+                } else {
+                    CCString m = @string(`captured name '${nm}' is not declared in the enclosing scope`, L->arena);
+                    lw_error(L, sp, m);
+                }
+                return;
+            }
+            cap = cc_arena_alloc(L->arena, sizeof(KCap), _Alignof(KCap));
+            memset(cap, 0, sizeof(*cap));
+            cap->name = c->name;
+            cap->type = t;
+            cap->by_ref = c->by_ref;
+            cap->is_safe = c->is_safe;
+            cap->init = c->init;
+            if (c->by_ref) cap->elem = kl_array_elem(t);
+            sc.caps.push(cap);
+            sc.seen.push(c->name);
+        }
+    }
+    if (cl.body) {
+        CcVisitor v;
+        memset(&v, 0, sizeof(v));
+        sc.chan_only = (ncap != 0);
+        v.expr = kl_scan_expr;
+        v.stmt = kl_scan_stmt;
+        v.env = &sc;
+        CcStmt_walk(cl.body, v);
+    }
+    caps = sc.caps;
+    /* before the body is rewritten: the rules read the names as written */
+    if (!kl_check_captures(st, e, cl, &caps)) return;
+    kl_forward(st, id, &caps, arity);
+    {
+        CCString envt = kl_env_text(st, id, &caps, arity);
+        st->made.push(lw_raw_decl(L, envt, sp));
+        st->made.push(kl_entry_decl(st, id, &caps, cl, kl_in_task(st, e), sp));
+        kl_declare_make(st, id, &caps, arity);
+    }
+    {
+        /* the closure value is the call that builds it */
+        CcCall call;
+        size_t n = caps.len();
+        call.callee = lw_ident(L, kl_name(L, id, "_make"), sp);
+        call.args = vec_new::[CcExprRef](L->arena);
+        for (i = 0; i < n; i++) {
+            KCap* c = *caps.get_ptr(i);
+            CcExpr* arg = c->init ? c->init : lw_ident(L, c->name, sp);
+            if (c->by_ref) arg = cc_expr_unary(CC_OP_ADDR, arg, sp, L->arena);
+            call.args.push(arg);
+        }
+        e->k = { .call = call };
+    }
+    st->any = true;
+    if (!st->first_host) st->first_host = st->at_decl;
+}
+
+static void kl_on_stmt(Walker* w, CcStmt* s, bool enter) {
+    KStep* st = (KStep*)w->env;
+    if (!enter) { kl_scope_leave(st); return; }
+    kl_scope_enter(st, s);
+    kl_note_local(st, w, s);
+}
+
+/* A `@typehooks` declaration is the index's, and C never sees it: the
+ * lowerer drops it once the index has read it. Its `.ufcs` value is a
+ * handler of the call site -- `(recv_type, method, mode, argv, arg_types,
+ * arena) => { ... }` -- that the compiler reads as rules, or compiles and
+ * runs itself. It is not a value the runtime ever holds, so this step does
+ * not enter one: lowering it would hang an environment and a `_make`
+ * nothing calls off a declaration that is about to be dropped, and would
+ * reject the hook protocol's own arity for having no `CCClosure6`. */
+static void kl_on_decl(Walker* w, CcDecl* d) {
+    KStep* st = (KStep*)w->env;
+    st->in_hooks = false;
+    st->at_decl = d;
+    st->locals = vec_new::[KLocalRef](st->L->arena);
+    @switch (d->k) {
+        case .typehooks: st->in_hooks = true; break;
+        /* a `@comptime { }` block reaches the lowerer for the registrations
+         * it makes (`cc_type_register(..., (CCTypeHooks){ .ufcs = ... })`):
+         * the same handlers under the older spelling, dropped the same way */
+        case .comptime_block: st->in_hooks = true; break;
+        default: break;
+    }
+}
+
+static void kl_on_closure(Walker* w, CcExpr* e, CcClosure cl) {
+    KStep* st = (KStep*)w->env;
+    if (st->in_hooks) return;
+    kl_lower(st, e, cl);
+}
+
+/* ---- calling one -------------------------------------------------------- */
+
+/* `CCClosure0` .. `CCClosure2` and nothing else: the arity of a closure
+ * handle spelled `t`, or -1 when `t` is not one. */
+static int kl_handle_arity(CcIndex* ix, CcType* t) {
+    CCSlice cn;
+    if (!t) return -1;
+    cn = ix->canon(t);
+    if (cn.len != 10 || memcmp(cn.ptr, "CCClosure", 9) != 0) return -1;
+    if (cn.ptr[9] < '0' || cn.ptr[9] > '2') return -1;
+    return cn.ptr[9] - '0';
+}
+
+/* `cc_closureN_call(handle, (intptr_t)(a), ...)`: the runtime reads the
+ * triple by value, so the call never re-reads the place the handle came
+ * from -- which matters when the body frees that place. */
+static void kl_call_handle(KStep* st, CcExpr* e, CcExpr* handle, CcExprList* args, int arity) {
+    CcLowerer* L = st->L;
+    CCString fn = @string(`cc_closure${arity}_call`, L->arena);
+    CcCall out;
+    size_t n = args->len();
+    size_t i;
+    out.callee = lw_ident(L, lw_keep(L, &fn), e->span);
+    out.args = vec_new::[CcExprRef](L->arena);
+    out.args.push(handle);
+    for (i = 0; i < n; i++) {
+        CcExpr* a = *args->get_ptr(i);
+        CcExpr* cast = kl_cast(L, cc_type_named(cstr_slice("intptr_t"), a->span, L->arena),
+                               lw_paren(L, a, a->span), a->span);
+        out.args.push(cast);
+    }
+    e->k = { .call = out };
+}
+
+/* `obj.f(args)` / `obj->f(args)` where `f` is a field of closure type is a
+ * call on the value stored there, not on a method named `f`: the field
+ * shadows the method, so a struct that carries its own teardown reads as
+ * `w->destroy()` and dispatches through the runtime.
+ *
+ * This step owns the rule because it owns closure handles; UFCS runs after
+ * it and would otherwise report a `Type_f` free function that was never
+ * meant to exist. */
+static void kl_on_ufcs(Walker* w, CcExpr* e, CcUfcs uf, CcType* rt, CcMethod* m, CCSlice type_name, CCSlice reason) {
+    KStep* st = (KStep*)w->env;
+    CcLowerer* L = st->L;
+    CcType* ft;
+    int arity;
+    CcExprList* args = &uf.args;
+    if (st->in_hooks || !rt || !uf.method.len || !uf.recv) return;
+    ft = field_type(w, rt, uf.method);
+    arity = kl_handle_arity(w->ix, ft);
+    if (arity < 0) return;
+    if (args->len() != (size_t)arity) {
+        CCSlice fname = uf.method;
+        CCString msg = @string(`the closure field '${fname}' takes ${arity} arguments`, L->arena);
+        lw_error(L, e->span, msg);
+        return;
+    }
+    kl_call_handle(st, e, cc_expr_member(uf.recv, uf.method, uf.arrow, e->span, L->arena), args, arity);
+}
+
+/* `c(args)` where `c` is a closure handle: the runtime's call. */
+static void kl_on_call(Walker* w, CcExpr* e, CcCall cl) {
+    KStep* st = (KStep*)w->env;
+    CcLowerer* L = st->L;
+    CCSlice nm;
+    CcType* t;
+    int arity;
+    if (st->in_hooks) return;
+    if (!expr_ident(strip_parens_expr(cl.callee), &nm) || !nm.len) return;
+    t = sc_lookup(w, nm);
+    arity = kl_handle_arity(w->ix, t);
+    if (arity < 0) return;
+    kl_call_handle(st, e, lw_ident(L, nm, e->span), &cl.args, arity);
+}
+
+/* The send itself: `tx.send_task(f)` spawns `f` as a task and sends the
+ * task handle, so what the receiver reads back is something it can block
+ * on. A failed send would strand the task, so the site blocks on it there
+ * rather than dropping a fiber nothing will ever join.
+ *
+ * This runs after the closure rewrite, so the argument is the make call by
+ * then; the marked closure node is the same object, which is how the send
+ * finds the one it recorded. */
+static bool kl_send_task_visit(CcExpr* e, void* env) {
+    KStep* st = (KStep*)env;
+    CcLowerer* L = st->L;
+    CcExprList* seen = &st->in_task;
+    Vec::[CCSlice]* rv = &st->task_recv;
+    CcNameList* sv = &st->task_spawn;
+    CcExpr* arg = NULL;
+    size_t n = seen->len();
+    size_t i;
+    @switch (e->k) {
+        case .call(cl): {
+            CcExprList* av = &cl.args;
+            if (av->len() == 2) arg = strip_parens_expr(*av->get_ptr(1));
+            break;
+        }
+        case .ufcs(uf): {
+            CcExprList* av = &uf.args;
+            if (av->len() == 1) arg = strip_parens_expr(*av->get_ptr(0));
+            break;
+        }
+        default: break;
+    }
+    if (!arg) return true;
+    for (i = 0; i < n; i++) {
+        CcExpr* c = *seen->get_ptr(i);
+        CCSlice recv;
+        CCSlice spawn;
+        uint32_t id;
+        if (c != arg) continue;
+        recv = *rv->get_ptr(i);
+        spawn = *sv->get_ptr(i);
+        id = st->next_id++;
+        {
+            CcStmt* blk = lw_block(L, e->span);
+            CcExpr* wrapped = cc__expr_blank(e->span, L->arena);
+            CcStmtExpr se;
+            CCString cn = @string(`__cc_st_c${id}`, L->arena);
+            CCString tn = @string(`__cc_st_t${id}`, L->arena);
+            CCString en = @string(`__cc_st_e${id}`, L->arena);
+            CCSlice c_n = lw_keep(L, &cn);
+            CCSlice t_n = lw_keep(L, &tn);
+            CCSlice e_n = lw_keep(L, &en);
+            CCString spawn_call = @string(`${spawn}(${c_n})`, L->arena);
+            CCString send_call = @string(`cc_chan_send((${recv}).raw, &${t_n}, sizeof(${t_n}))`, L->arena);
+            CCString rescue = @string(`if (${e_n} != 0) { (void)cc_block_on_intptr(${t_n}); }`, L->arena);
+            /* What the send answers with is what every other channel
+             * operation answers with -- `bool !>(CCIoError)` -- so the
+             * `!>` a caller writes on the line has a Result to read. The
+             * errno the raw send returned is what it is built from. */
+            CCString surface = @string(`cc_chan_result_with((${recv}).raw, ${e_n}, 0)`, L->arena);
+            lw_push(blk, lw_decl_stmt(L, cc_type_named(cstr_slice("CCClosure0"), e->span, L->arena), c_n, arg, e->span));
+            lw_push(blk, lw_decl_stmt(L, cc_type_named(cstr_slice("CCTask"), e->span, L->arena), t_n,
+                                      lw_text(L, spawn_call, e->span), e->span));
+            lw_push(blk, lw_decl_stmt(L, cc_type_named(cstr_slice("int"), e->span, L->arena), e_n,
+                                      lw_text(L, send_call, e->span), e->span));
+            lw_push(blk, lw_expr_stmt(L, lw_text(L, rescue, e->span), e->span));
+            lw_push(blk, lw_expr_stmt(L, lw_text(L, surface, e->span), e->span));
+            se.block = blk;
+            wrapped->k = { .stmt_expr = se };
+            *e = *wrapped;
+        }
+        return true;
+    }
+    return true;
+}
+
+/* ---- closure literals written inside a macro body ----------------------- */
+
+static const CcToken* kl_tok(CcLowerer* L, uint32_t i) {
+    CcTape* tp = &L->unit->tape;
+    size_t n = tp->toks.len();
+    if (!n || i >= n) return NULL;
+    return tp->toks.get_ptr(i);
+}
+
+static bool kl_ident_char(char c) {
+    return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+}
+
+/* `#define NAME` / `#define NAME(...)`: the name it defines, or empty. */
+static CCSlice kl_define_name(CCSlice text) {
+    size_t i = 0;
+    size_t at;
+    if (!text.len || text.ptr[0] != '#') return cc_slice_empty();
+    i = 1;
+    while (i < text.len && (text.ptr[i] == ' ' || text.ptr[i] == '\t')) i++;
+    if (i + 6 > text.len || memcmp(text.ptr + i, "define", 6) != 0) return cc_slice_empty();
+    i += 6;
+    while (i < text.len && (text.ptr[i] == ' ' || text.ptr[i] == '\t')) i++;
+    at = i;
+    while (i < text.len && kl_ident_char(text.ptr[i])) i++;
+    if (i == at) return cc_slice_empty();
+    return cc_slice_from_buffer((char*)text.ptr + at, i - at);
+}
+
+/* A `#define` body is never parsed: the C preprocessor replays its tokens,
+ * and a closure literal among them reaches this step as nothing at all --
+ * the `=>` travels to the host compiler verbatim, where it is a syntax
+ * error nobody can read. The definition is harmless while nobody writes it,
+ * so the refusal lands on the use. */
+static bool kl_macro_use_visit(CcExpr* e, void* env) {
+    KStep* st = (KStep*)env;
+    CcLowerer* L = st->L;
+    CCSlice nm;
+    if (!expr_ident(e, &nm)) return true;
+    if (!kl_name_in(&st->macro_clo, nm)) return true;
+    {
+        CCString m = @string(`closure literal(s) from macro expansion are not supported (hint: define at the use site, or pass the closure as a macro parameter)`, L->arena);
+        lw_error(L, e->span, m);
+    }
+    return true;
+}
+
+/* The file-scope names this step needs before the walk: the variables a
+ * store can make a closure outlive its frame through, and the macros whose
+ * body writes a closure literal. */
+static void kl_collect_unit(KStep* st) {
+    CcLowerer* L = st->L;
+    CcDeclList* declv = &L->unit->decls;
+    size_t n = declv->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *declv->get_ptr(i);
+        const CcToken* t;
+        CCSlice mname;
+        uint32_t tok = 0;
+        bool is_pp = false;
+        CCSlice vname = cc_slice_empty();
+        @switch (d->k) {
+            case .pp(pd): is_pp = true; tok = pd.tok; break;
+            case .var(v): vname = v.name; break;
+            default: break;
+        }
+        if (vname.len) st->globals.push(vname);
+        if (!is_pp) continue;
+        t = kl_tok(L, tok);
+        if (!t || t->kind != CC_TK_PP) continue;
+        if (!kl_text_has(t->text, "=>")) continue;
+        mname = kl_define_name(t->text);
+        if (mname.len) st->macro_clo.push(mname);
+    }
+    if (!st->macro_clo.len()) return;
+    {
+        CcVisitor v;
+        memset(&v, 0, sizeof(v));
+        v.expr = kl_macro_use_visit;
+        v.env = st;
+        CcUnit_walk(L->unit, v);
+    }
+}
+
+void CcLowerer_closures(CcLowerer* L) {
+    Walker w;
+    KStep st;
+    memset(&st, 0, sizeof(st));
+    st.L = L;
+    st.w = &w;
+    st.made = vec_new::[CcDeclRef](L->arena);
+    st.entered = vec_new::[CcStmtRef](L->arena);
+    st.ehs = vec_new::[KHandlerRef](L->arena);
+    st.locals = vec_new::[KLocalRef](L->arena);
+    st.globals = vec_new::[CCSlice](L->arena);
+    st.macro_clo = vec_new::[CCSlice](L->arena);
+    st.escaping = vec_new::[CcExprRef](L->arena);
+    st.escaping_task = vec_new::[CcExprRef](L->arena);
+    st.in_task = vec_new::[CcExprRef](L->arena);
+    st.task_recv = vec_new::[CCSlice](L->arena);
+    st.task_spawn = vec_new::[CCSlice](L->arena);
+    st.fwd = cc_string_new();
+    memset(&w, 0, sizeof(w));
+    w.arena = L->arena;
+    w.ix = L->ix;
+    w.unit = L->unit;
+    w.on_decl = kl_on_decl;
+    w.on_closure = kl_on_closure;
+    w.on_call = kl_on_call;
+    w.on_ufcs = kl_on_ufcs;
+    w.on_stmt = kl_on_stmt;
+    w.env = &st;
+    kl_collect_unit(&st);
+    {
+        CcVisitor tv;
+        memset(&tv, 0, sizeof(tv));
+        tv.expr = kl_mark_task_visit;
+        tv.env = &st;
+        CcUnit_walk(L->unit, tv);   /* before the rewrite: a closure is still a closure node */
+    }
+    {
+        CcVisitor ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.expr = kl_escape_expr_visit;
+        ev.stmt = kl_escape_stmt_visit;
+        ev.env = &st;
+        CcUnit_walk(L->unit, ev);
+    }
+    tw_unit(&w);
+    if (!st.any) return;
+    {
+        CcDeclList* decls = &L->unit->decls;
+        CcDeclList with = vec_new::[CcDeclRef](L->arena);
+        size_t nd = decls->len();
+        size_t at = 0;
+        size_t k;
+        CcSpan sp;
+        sp.first = 0;
+        sp.last = 0;
+        for (k = 0; k < nd; k++) {
+            CcDecl* dd = *decls->get_ptr(k);
+            bool is_pp = false;
+            @switch (dd->k) {
+                case .pp: is_pp = true; break;
+                case .empty: is_pp = true; break;
+                case .pragma_cc: is_pp = true; break;
+                case .raw: is_pp = true; break;
+                default: break;
+            }
+            if (!is_pp) break;
+            at = k + 1;
+        }
+        /* A capture's type is as often as not a typedef of this unit, and a
+         * declaration above that typedef names a type the host has not seen
+         * yet: the parameter becomes an implicit int, and the definition
+         * below it conflicts with the declaration above. So the block goes
+         * directly above the declaration that first made a closure -- every
+         * type that body reads is declared by then, and nothing before it
+         * calls a `_make`. */
+        for (k = at; st.first_host && k < nd; k++) {
+            if (*decls->get_ptr(k) == st.first_host) { at = k; break; }
+        }
+        {
+            CCString head = cc_string_new();
+            head.push_cstr("/* --- CC closure declarations --- */\n", L->arena);
+            head.push_slice(cc_string_as_slice(&st.fwd), L->arena);
+            head.push_cstr("/* --- end closure declarations --- */", L->arena);
+            for (k = 0; k < nd; k++) {
+                CcDecl* dk = *decls->get_ptr(k);
+                if (k == at) with.push(lw_raw_decl(L, head, sp));
+                with.push(dk);
+            }
+            if (at >= nd) with.push(lw_raw_decl(L, head, sp));
+        }
+        {
+            CcDeclList* madev = &st.made;
+            size_t nm2 = madev->len();
+            with.push(lw_raw_decl(L, @string(`/* --- CC generated closures --- */`, L->arena), sp));
+            for (k = 0; k < nm2; k++) {
+                CcDecl* md = *madev->get_ptr(k);
+                with.push(md);
+            }
+        }
+        *decls = with;
+    }
+    if (st.in_task.len()) {
+        CcVisitor sv;
+        memset(&sv, 0, sizeof(sv));
+        sv.expr = kl_send_task_visit;
+        sv.env = &st;
+        /* last: the entries this step generated are unit declarations by
+         * now, so a send written inside a closure body is reached too */
+        CcUnit_walk(L->unit, sv);
+    }
+}
+
+#endif

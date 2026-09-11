@@ -1,11 +1,12 @@
+#pragma(@module) "splice_doc"
 #ifndef TESTS_QUOTE_CCH_SPLICE_DOC_CCH
 #define TESTS_QUOTE_CCH_SPLICE_DOC_CCH
 
 #include <ccc/std/prelude.cch>
 
-/* document.cch: impl-grade (@errhandler), no owner .ccs. Listing
- * TUs splice this. The leaf names SpliceDoc*; extract must not try to
- * extract this file. */
+/* document.cch: impl-grade (@errhandler), a member of the program module
+ * `splice_doc`, so the program splices this. The leaf names SpliceDoc*;
+ * its extract must not try to extract a program member. */
 typedef struct {
     int n;
 } SpliceDoc;

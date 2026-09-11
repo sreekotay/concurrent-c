@@ -1,0 +1,15 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/std/vec.cch>
+#include <stdio.h>
+/* A 150-character type name through Vec::[T]: mangled names must not be
+ * clipped into a different, valid-looking name. */
+typedef struct { int v; } AVeryLongStructNameVeryLongStructNameVeryLongStructNameVeryLongStructNameVeryLongStructNameVeryLongStructNameVeryLongStructNameVeryLongStructName;
+int main(void) {
+    cc_arena_stack(a, kilobytes(8));
+    Vec::[AVeryLongStructNameVeryLongStructNameVeryLongStructNameVeryLongStructNameVeryLongStructNameVeryLongStructNameVeryLongStructNameVeryLongStructName] xs = vec_new::[AVeryLongStructNameVeryLongStructNameVeryLongStructNameVeryLongStructNameVeryLongStructNameVeryLongStructNameVeryLongStructNameVeryLongStructName](a);
+    for (int i = 0; i < 5; i++) { AVeryLongStructNameVeryLongStructNameVeryLongStructNameVeryLongStructNameVeryLongStructNameVeryLongStructNameVeryLongStructNameVeryLongStructName e = { i }; xs.push(e); }
+    int sum = 0;
+    for (size_t i = 0; i < xs.len(); i++) sum += xs.at(i)->v;
+    printf("sum=%d len=%zu\n", sum, xs.len());
+    return sum == 10 ? 0 : 1;
+}

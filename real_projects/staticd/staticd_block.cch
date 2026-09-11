@@ -1,3 +1,4 @@
+#pragma(@module) "staticd"
 /*
  * Named-block cache — mmap's hit without mapping the file.
  * Include before staticd_fs.cch (file_hold ticks and culls).
@@ -24,7 +25,6 @@
  * Slabs grow on demand up to `ring_n` live entries (`--block-ring`,
  * default 256); cull/free returns them to the freelist.
  */
-#pragma(@per_tu)
 #ifndef STATICD_BLOCK_CCH
 #define STATICD_BLOCK_CCH
 

@@ -1,7 +1,8 @@
 /* Implementation-grade .cch headers: a local header carrying @variant
- * (plain and packed), @errhandler, @defer, and !> unwraps is spliced raw
- * into the TU and lowered by the full pipeline.  Repeat inclusion is inert
- * (the header's own guard). */
+ * (plain and packed), @errhandler, @defer, and !> unwraps is a module of
+ * one, lowered by the full pipeline as its own unit and linked in; this
+ * program sees its .h.  Repeat inclusion is inert (the header's own
+ * guard). */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 #include "impl_cch_header_helper.cch"

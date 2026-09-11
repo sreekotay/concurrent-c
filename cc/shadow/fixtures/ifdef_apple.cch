@@ -1,5 +1,0 @@
-#ifdef __APPLE__
-int apple_arm;
-#else
-int other_arm;
-#endif

@@ -1,0 +1,70 @@
+/*
+ * cache (s) when a ticket raises: the pool drains, the extras are still
+ * destroyed at the join (the declaration's @destroy on each), and only
+ * then does the ticket error re-raise into the enclosing handler. With
+ * cap 1 there are no extras: the declared instance alone is destroyed.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+
+#define N   16
+#define CAP 4
+
+typedef struct {
+    int hits;
+} Slot;
+
+static cc_atomic_int g_destroyed;
+
+static int !>(CCError) step(int i) {
+    if (i == 5)
+        return cc_err(CC_ERR_NOT_FOUND, "five");
+    return cc_ok(i);
+}
+
+static int walk(int cap) {
+    @errhandler(CCError e) {
+        (void)e;
+        return 3;
+    }
+    CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+    CCTurnstile ts@(cap, 1, arena) !> @destroy;
+    int i;
+    Slot s = {0} @destroy {
+        cc_atomic_fetch_add(&g_destroyed, 1);
+    };
+    @parallel wait (ts) cache (s) for (i in 0..N) {
+        step(i) !>;
+        s.hits++;
+    } !>.wait()!>;
+    return 0;
+}
+
+int main(void) {
+    int r;
+    cc_atomic_store(&g_destroyed, 0);
+    r = walk(CAP);
+    if (r != 3) {
+        fprintf(stderr, "FAIL cap %d r=%d\n", CAP, r);
+        return 1;
+    }
+    if (cc_atomic_load(&g_destroyed) != CAP) {
+        fprintf(stderr, "FAIL cap %d destroyed=%d want=%d\n", CAP,
+                cc_atomic_load(&g_destroyed), CAP);
+        return 1;
+    }
+    cc_atomic_store(&g_destroyed, 0);
+    r = walk(1);
+    if (r != 3) {
+        fprintf(stderr, "FAIL cap 1 r=%d\n", r);
+        return 1;
+    }
+    if (cc_atomic_load(&g_destroyed) != 1) {
+        fprintf(stderr, "FAIL cap 1 destroyed=%d want=1\n",
+                cc_atomic_load(&g_destroyed));
+        return 1;
+    }
+    printf("parallel_cache_raise_smoke: OK\n");
+    return 0;
+}

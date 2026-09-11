@@ -1,4 +1,7 @@
 # Provenance: a diagnostic for content lowered from a .cch must name the .cch
 # the user wrote (not the generated out/include/.../*.h) AND the correct line.
 # The syntax error is on line 9 of tests/hdr_line_provenance.cch.
-tests/hdr_line_provenance.cch:9: error: expression expected before ';'
+# What is pinned is that location. The wording is not: the reference reaches
+# this through the host compiler and rewrites its message afterwards, while
+# the clean lowerer's own parser catches it, so the two word it differently.
+hdr_line_provenance.cch:9:

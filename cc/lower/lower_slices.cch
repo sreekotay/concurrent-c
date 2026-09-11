@@ -1,0 +1,601 @@
+#pragma(@module) "lower"
+/* Clean lowerer, step: slice values. The slice types themselves are an
+ * instance family, named by the generics step; this step lowers what is
+ * written into one. A string literal initializing or passed to a slice is
+ * `CC_SLICE_LIT(...)`, which keeps the bytes and their length together
+ * without a run of `strlen`. A braced list is the C array it spells,
+ * hoisted to its own local, and a slice over that array: the array owns
+ * the storage and the slice borrows it, so the two have the same extent.
+ * `@slice("...")` is the same literal in expression position. Nothing
+ * here invents a length: a coercion happens only where the declared type
+ * or the callee's parameter says the value is a slice. Lifetime: the
+ * lowerer arena; the hoisted array lives in the block that declared the
+ * slice. */
+#ifndef CC_LOWER_SLICES_CCH
+#define CC_LOWER_SLICES_CCH
+#include "lower.cch"
+#include "typing.cch"
+
+typedef struct SStep {
+    CcLowerer* L;
+    Walker* w;
+    CcStmtList* out;            /* the statement list being rebuilt, for hoists */
+} SStep;
+
+/* `CC_SLICE_LIT(<lit>)` around a string literal as written. */
+static CcExpr* sl_lit_call(CcLowerer* L, CcExpr* lit) {
+    return lw_call1(L, cstr_slice("CC_SLICE_LIT"), lit, lit->span);
+}
+
+static bool sl_is_string(const CcExpr* e) {
+    if (!e) return false;
+    return e->k.kind == CcExprK_string;
+}
+
+/* An identifier that names an object-like `#define` whose body is one string
+ * literal: `#define PORT "127.0.0.1:18765"`.
+ *
+ * The value at a slice parameter is that literal, and `CC_SLICE_LIT` is a
+ * macro too -- so the name goes on being written and the preprocessor puts
+ * the literal inside the wrapper. Spelling the literal here instead would
+ * take the name out of the C, and out of the diagnostics the host compiler
+ * writes about it. */
+static bool sl_is_string_macro(CcIndex* ix, CcExpr* e) {
+    CCSlice nm;
+    CcSym* s;
+    CcMacroDef* m;
+    CCSlice b;
+    size_t lo = 0;
+    size_t hi;
+    if (!expr_ident(e, &nm) || !nm.len) return false;
+    s = sym_any(ix, nm);
+    while (s && s->kind != CC_SYM_MACRO) s = s->same_name;
+    if (!s || !s->macro) return false;
+    m = s->macro;
+    if (m->function_like || m->alt) return false;
+    b = m->body;
+    hi = b.len;
+    while (lo < hi && (b.ptr[lo] == ' ' || b.ptr[lo] == '\t')) lo++;
+    while (hi > lo && (b.ptr[hi - 1] == ' ' || b.ptr[hi - 1] == '\t')) hi--;
+    return hi - lo >= 2 && b.ptr[lo] == '"' && b.ptr[hi - 1] == '"';
+}
+
+/* The element type of a slice type as written. */
+static CcType* sl_elem_of(CcType* t) {
+    if (!t) return NULL;
+    @switch (t->k) {
+        case .slice(sl): return sl.elem;
+        default: return NULL;
+    }
+}
+
+static bool sl_type_is_slice(CcType* t) {
+    return t && t->k.kind == CcTypeK_slice;
+}
+
+/* The element type of an array type as written. */
+static CcType* sl_array_elem(CcType* t) {
+    if (!t) return NULL;
+    @switch (t->k) {
+        case .array(ar): return ar.elem;
+        default: return NULL;
+    }
+}
+
+/* Does the braced list name fields (`{ .ptr = p, .len = n }`)? Then it
+ * spells the slice struct itself, and the array-and-view form below would
+ * be an array of the element type with the slice's own field names in it. */
+static bool sl_init_names_fields(CcInit* in) {
+    size_t n;
+    size_t i;
+    if (!in || !in->is_list) return false;
+    n = in->items.len();
+    for (i = 0; i < n; i++) {
+        CcInit* it = *in->items.get_ptr(i);
+        CcDesignator* dg;
+        if (!it || !it->designators.len()) continue;
+        dg = it->designators.get_ptr(0);
+        if (dg->field.len) return true;
+    }
+    return false;
+}
+
+/* `char[:] xs[] = { "GET", "POST" }`: every element of the list is a slice,
+ * so a string literal written there carries its own length. Without this
+ * the bytes land in `.ptr` and the pointer lands in `.len`. */
+static void sl_lit_items(CcLowerer* L, CcInit* in) {
+    size_t n;
+    size_t i;
+    if (!in || !in->is_list) return;
+    n = in->items.len();
+    for (i = 0; i < n; i++) {
+        CcInit* it = *in->items.get_ptr(i);
+        if (!it || it->is_list || !it->expr) continue;
+        if (sl_is_string(it->expr)) it->expr = sl_lit_call(L, it->expr);
+    }
+}
+
+/* Is this canonical name one of the slice family? */
+static bool sl_canon_is_slice(CCSlice cn) {
+    if (cc_slice_eq_cstr(&cn, "CCSlice")) return true;
+    if (cc_slice_eq_cstr(&cn, "CCSliceUnique")) return true;
+    if (cc_slice_eq_cstr(&cn, "CCSliceShared")) return true;
+    return cn.len > 8 && memcmp(cn.ptr, "CCSlice_", 8) == 0;
+}
+
+/* `<instance>_from_buffer(arr, sizeof(arr)/sizeof(arr[0]))`; the char
+ * family spells it `cc_slice_from_buffer`. */
+static CcExpr* sl_from_buffer(CcLowerer* L, CCSlice instance, CCSlice arr, CcSpan sp) {
+    CCString fn = cc_slice_eq_cstr(&instance, "CCSlice")
+                  ? @string(`cc_slice_from_buffer`, L->arena)
+                  : @string(`${instance}_from_buffer`, L->arena);
+    CCString count = @string(`sizeof(${arr})/sizeof(${arr}[0])`, L->arena);
+    return lw_call2(L, lw_keep(L, &fn), lw_ident(L, arr, sp), lw_text(L, count, sp), sp);
+}
+
+/* An owner used where a slice is wanted.
+ *
+ * `char[:] v = s;` with `s` a `CCString`, `int[:] xs = v;` with `v` a
+ * `Vec::[int]`: the destination says what the value has to become, and the
+ * owner's own `as_slice` is what makes it one. The conversion is written
+ * as the UFCS call, so the method the type registered decides the callee
+ * and this step names none of them — `CCString` reaches
+ * `cc_string_as_slice`, which no rule about the canonical name would find.
+ *
+ * A char pointer has no owner to ask: its extent is the NUL, and
+ * `cc_slice_cstr` is what reads it. */
+static CcExpr* sl_as_slice(CcLowerer* L, CcExpr* v, bool arrow, CcSpan sp) {
+    CcExpr* e = cc__expr_blank(sp, L->arena);
+    CcUfcs uf;
+    memset(&uf, 0, sizeof(uf));
+    uf.recv = v;
+    uf.method = cstr_slice("as_slice");
+    uf.arrow = arrow;
+    uf.targs = vec_new::[CcTypeRef](L->arena);
+    uf.args = vec_new::[CcExprRef](L->arena);
+    e->k = { .ufcs = uf };
+    return e;
+}
+
+/* The conversion a slice destination needs, or NULL when the value is
+ * already one (or is nothing this step can convert). */
+static bool sl_is_char_pointer(CcType* t) {
+    CCSlice nm;
+    CcType* p = NULL;
+    if (!t || t->k.kind != CcTypeK_pointer) return false;
+    @switch (t->k) {
+        case .pointer(pt): p = pt.pointee; break;
+        default: break;
+    }
+    if (!p || !type_named_name(p, &nm)) return false;
+    return slice_eq(nm, cstr_slice("char"));
+}
+
+static bool sl_has_as_slice(CcIndex* ix, CCSlice canon) {
+    CcTypeInfo* info = canon.len ? ix->type_get(canon) : NULL;
+    CcMethodList ms;
+    size_t n;
+    size_t i;
+    if (!info) return false;
+    ms = ix->methods_of(info);
+    n = ms.len();
+    for (i = 0; i < n; i++) {
+        CcMethod* m = *ms.get_ptr(i);
+        if (slice_eq(m->method, cstr_slice("as_slice"))) return true;
+    }
+    return false;
+}
+
+/* The conversion a slice destination needs, keyed by the destination's
+ * canonical name rather than its node -- so a parameter spelled `CCSlice`
+ * reaches the same rule a `char[:]` declaration does. NULL when the value
+ * is already a slice, or is nothing this step converts. */
+static CcExpr* sl_coerce_canon(SStep* st, CCSlice wc, CcExpr* v, CcSpan sp) {
+    CcLowerer* L = st->L;
+    Walker* w = st->w;
+    CcIndex* ix = L->ix;
+    CcType* have;
+    CCSlice hn;
+    if (!sl_canon_is_slice(wc) || !v) return NULL;
+    have = type_of_expr(w, v);
+    if (!have) return NULL;
+    if (sl_type_is_slice(have)) return NULL;
+    hn = ix->canon(have);
+    if (sl_canon_is_slice(hn)) return NULL;
+    if (sl_is_char_pointer(have)) return lw_call1(L, cstr_slice("cc_slice_cstr"), v, sp);
+    if (have->k.kind == CcTypeK_pointer) {
+        /* a pointer to the owner is the owner already addressed */
+        CcType* p = NULL;
+        CCSlice pn;
+        @switch (have->k) {
+            case .pointer(pt): p = pt.pointee; break;
+            default: break;
+        }
+        if (!p) return NULL;
+        pn = ix->canon(p);
+        if (!sl_has_as_slice(ix, pn)) return NULL;
+        return sl_as_slice(L, lw_paren(L, v, sp), true, sp);
+    }
+    if (!sl_has_as_slice(ix, hn)) return NULL;
+    return sl_as_slice(L, lw_paren(L, v, sp), false, sp);
+}
+
+static CcExpr* sl_coerce(SStep* st, CcType* want, CcExpr* v, CcSpan sp) {
+    if (!sl_type_is_slice(want)) return NULL;
+    return sl_coerce_canon(st, st->L->ix->canon(want), v, sp);
+}
+
+/* A declaration whose type is a slice: the initializer decides the form.
+ * Returns the statement to emit before the declaration, or NULL. */
+static CcStmt* sl_decl_init(SStep* st, CcDecl* d, CcVarDecl v) {
+    CcLowerer* L = st->L;
+    CcIndex* ix = L->ix;
+    CcInit* in = v.init;
+    CcSpan sp = d->span;
+    CCSlice instance;
+    if (!in) return NULL;
+    if (!sl_type_is_slice(v.type)) {
+        /* an array OF slices: the list's elements are the destinations */
+        if (sl_type_is_slice(sl_array_elem(v.type))) sl_lit_items(L, in);
+        return NULL;
+    }
+    instance = ix->canon(v.type);
+    if (in->expr && sl_is_string(in->expr)) {
+        in->expr = sl_lit_call(L, in->expr);
+        return NULL;
+    }
+    if (!in->is_list) return NULL;
+    /* `{ .ptr = ..., .len = ... }` is the slice as written, not an array
+     * to take a view of */
+    if (sl_init_names_fields(in)) return NULL;
+    {
+        /* the braced list is the array; the slice is a view of it */
+        CcType* elem = sl_elem_of(v.type);
+        CCSlice name = v.name;
+        CCString an = @string(`__cc_sl_${name}`, L->arena);
+        CCSlice arr = lw_keep(L, &an);
+        CcType* arr_type;
+        CcArrayType at;
+        CcStmt* hoist;
+        CcDecl* ad;
+        CcDeclStmt ds;
+        if (!elem) return NULL;
+        arr_type = cc__type_blank(sp, L->arena);
+        at.elem = elem;
+        at.size = NULL;
+        at.is_static = false;
+        at.is_star = false;
+        arr_type->k = { .array = at };
+        ad = cc_decl_var(arr_type, arr, in, sp, L->arena);
+        hoist = cc__stmt_blank(sp, L->arena);
+        ds.d = ad;
+        hoist->k = { .decl = ds };
+        {
+            CcInit* nin = cc_arena_alloc(L->arena, sizeof(CcInit), _Alignof(CcInit));
+            memset(nin, 0, sizeof(*nin));
+            nin->span = sp;
+            nin->designators = vec_new::[CcDesignator](L->arena);
+            nin->items = vec_new::[CcInitRef](L->arena);
+            nin->expr = sl_from_buffer(L, instance, arr, sp);
+            v.init = nin;
+            d->k = { .var = v };
+        }
+        return hoist;
+    }
+}
+
+/* The parameter types of a called function, when the callee is a name the
+ * index knows. */
+static bool sl_callee_params(SStep* st, CcExpr* callee, CcParamList* out) {
+    CcIndex* ix = st->w->ix;
+    CCSlice nm;
+    CcSym* sym;
+    if (!expr_ident(strip_parens_expr(callee), &nm) || !nm.len) return false;
+    sym = sym_any(ix, nm);
+    while (sym && sym->kind != CC_SYM_FUNC) sym = sym->same_name;
+    if (!sym || !sym->type) return false;
+    @switch (sym->type->k) {
+        case .func(ft): *out = ft.params; return true;
+        default: return false;
+    }
+}
+
+/* The erased byte slice, as opposed to a typed `CCSlice_T` instance. */
+static bool sl_canon_is_erased(CCSlice cn) {
+    return cc_slice_eq_cstr(&cn, "CCSlice");
+}
+
+static bool sl_canon_is_typed(CCSlice cn) {
+    return cn.len > 8 && memcmp(cn.ptr, "CCSlice_", 8) == 0;
+}
+
+/* `<instance>_bytes(&x)`: the honest byte view of a typed slice, its
+ * length scaled by the element size. */
+static bool sl_is_simple(const CcExpr* e) {
+    if (!e) return false;
+    @switch (e->k) {
+        case .ident: return true;
+        case .member: return true;
+        case .index: return true;
+        default: return false;
+    }
+}
+
+static CcExpr* sl_bytes_of(CcLowerer* L, CCSlice instance, CcExpr* a, CcSpan sp) {
+    CCString fn = @string(`${instance}_bytes`, L->arena);
+    CcExpr* target = sl_is_simple(a) ? a : lw_paren(L, a, sp);
+    CcExpr* addr = cc_expr_unary(CC_OP_ADDR, target, sp, L->arena);
+    return lw_call1(L, lw_keep(L, &fn), addr, sp);
+}
+
+/* Arguments a slice parameter accepts: a string literal carries its length
+ * with it, and a typed instance handed to an erased `CCSlice` parameter is
+ * converted where the callee's declaration provably takes the erased one.
+ * Erasing anything else would turn a typed borrow into a byte marshal that
+ * still compiles. */
+static void sl_call_args(SStep* st, CcCall cl) {
+    Walker* w = st->w;
+    CcIndex* ix = w->ix;
+    CcParamList params;
+    CcExprList* args = &cl.args;
+    size_t n = args->len();
+    size_t np;
+    size_t i;
+    if (!sl_callee_params(st, cl.callee, &params)) return;
+    np = params.len();
+    for (i = 0; i < n && i < np; i++) {
+        CcExpr* a = *args->get_ptr(i);
+        CcParam* p = params.get_ptr(i);
+        CCSlice pc;
+        if (!p->type) continue;
+        pc = ix->canon(p->type);
+        if (sl_is_string(a) || sl_is_string_macro(ix, a)) {
+            if (sl_canon_is_slice(pc)) *args->get_ptr(i) = sl_lit_call(st->L, a);
+            continue;
+        }
+        {
+            /* the conversion a slice destination gets, at the parameter that
+             * is the destination here: a char pointer reads to its NUL, an
+             * owner answers `as_slice` */
+            CcExpr* conv = sl_coerce_canon(st, pc, a, a->span);
+            if (conv) { *args->get_ptr(i) = conv; continue; }
+        }
+        if (!sl_canon_is_erased(pc)) continue;
+        {
+            CcType* at = type_of_expr(w, a);
+            CCSlice ac;
+            if (!at) continue;
+            ac = ix->canon(at);
+            if (!sl_canon_is_typed(ac)) continue;
+            *args->get_ptr(i) = sl_bytes_of(st->L, ac, a, a->span);
+        }
+    }
+}
+
+static void sl_on_call(Walker* w, CcExpr* e, CcCall cl) {
+    SStep* st = (SStep*)w->env;
+    (void)e;
+    sl_call_args(st, cl);
+}
+
+static bool sl_expr_visit(CcExpr* e, void* env) {
+    SStep* st = (SStep*)env;
+    CcLowerer* L = st->L;
+    @switch (e->k) {
+        case .slice_lit(sl): {
+            /* `@slice("...")`: the literal token as written */
+            CcLiteral lit;
+            CcExpr* s = cc__expr_blank(e->span, L->arena);
+            lit.tok = sl.tok;
+            lit.n_toks = sl.n_toks ? sl.n_toks : 1;
+            s->k = { .string = lit };
+            e->k = sl_lit_call(L, s)->k;
+            return true;
+        }
+        default: return true;
+    }
+}
+
+/* A `return "..."` from a function that returns a slice. */
+static void sl_return(SStep* st, CcStmt* s, CcReturn r) {
+    CcLowerer* L = st->L;
+    CcReturn out;
+    if (!r.value || !sl_is_string(r.value)) return;
+    if (!sl_type_is_slice(st->L->ret_slice)) return;
+    out.value = sl_lit_call(L, r.value);
+    s->k = { .return_ = out };
+}
+
+static void sl_stmts(SStep* st, CcStmtList* list);
+static void sl_dest_pass(CcLowerer* L);
+
+static void sl_stmt(SStep* st, CcStmt* s) {
+    StmtView v;
+    if (!s) return;
+    view_stmt(&v, s);
+    @switch (s->k) {
+        case .return_(r): sl_return(st, s, r); break;
+        default: break;
+    }
+    if (v.is_block || (v.has_stmts && v.stmts.len())) {
+        CcStmtList inner = v.stmts;
+        sl_stmts(st, &inner);
+        {
+            CcStmt* blk = s;
+            @switch (blk->k) {
+                case .block(b): b.stmts = inner; blk->k = { .block = b }; break;
+                default: break;
+            }
+        }
+    }
+    if (v.has_then) { CcStmtList t = v.then_stmts; sl_stmts(st, &t); }
+    if (v.has_else) { CcStmtList t = v.else_stmts; sl_stmts(st, &t); }
+    sl_stmt(st, v.body);
+    sl_stmt(st, v.else_body);
+}
+
+/* Declarations are rewritten in place; a braced slice grows the hoisted
+ * array before it. */
+static void sl_stmts(SStep* st, CcStmtList* list) {
+    CcLowerer* L = st->L;
+    CcStmtList out = vec_new::[CcStmtRef](L->arena);
+    size_t n = list->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        CcStmt* s = *list->get_ptr(i);
+        CcDecl* d = NULL;
+        if (stmt_is_decl(s, &d) && d) {
+            CcVarDecl v;
+            bool is_var = false;
+            @switch (d->k) {
+                case .var(x): v = x; is_var = true; break;
+                default: break;
+            }
+            if (is_var) {
+                CcStmt* hoist = sl_decl_init(st, d, v);
+                if (hoist) out.push(hoist);
+            }
+        }
+        sl_stmt(st, s);
+        out.push(s);
+    }
+    *list = out;
+}
+
+static void sl_function(SStep* st, CcFuncDecl f) {
+    CcLowerer* L = st->L;
+    CcType* ret = NULL;
+    if (!f.body) return;
+    if (f.type) {
+        @switch (f.type->k) {
+            case .func(ft): ret = ft.ret; break;
+            default: break;
+        }
+    }
+    L->ret_slice = ret;
+    {
+        CcStmtList* body = lw_block_stmts(f.body);
+        if (body) sl_stmts(st, body);
+    }
+    L->ret_slice = NULL;
+}
+
+void CcLowerer_slices(CcLowerer* L) {
+    Walker w;
+    SStep st;
+    CcVisitor v;
+    CcDeclList* declv;
+    size_t n;
+    size_t i;
+    memset(&st, 0, sizeof(st));
+    st.L = L;
+    st.w = &w;
+    memset(&w, 0, sizeof(w));
+    w.arena = L->arena;
+    w.ix = L->ix;
+    w.unit = L->unit;
+    w.env = &st;
+    declv = &L->unit->decls;
+    n = declv->len();
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *declv->get_ptr(i);
+        @switch (d->k) {
+            case .func(f): sl_function(&st, f); break;
+            case .var(vd): {
+                CcStmt* hoist = sl_decl_init(&st, d, vd);
+                (void)hoist;    /* a file-scope slice cannot hoist an array before itself */
+                break;
+            }
+            default: break;
+        }
+    }
+    memset(&v, 0, sizeof(v));
+    v.expr = sl_expr_visit;
+    v.env = &st;
+    CcUnit_walk(L->unit, v);
+    sl_dest_pass(L);   /* last: the typing walk knows what a local holds */
+}
+
+/* A slice destination and the owner filling it.
+ *
+ * The conversion needs the value's type, so it runs on the typing walk
+ * rather than in the statement rewrite above, which has no scope: `s` in
+ * `char[:] v = s;` is a local, and only the walk knows what it holds. */
+static void sl_dest_assign(SStep* st, Walker* w, CcExpr* e, CcSpan sp) {
+    if (!e) return;
+    @switch (e->k) {
+        case .assign(as): {
+            CcExpr* conv;
+            if (as.op != CC_OP_ASSIGN || !as.a || !as.b) return;
+            conv = sl_coerce(st, type_of_expr(w, as.a), as.b, sp);
+            if (conv) {
+                CcBinary nb = as;
+                nb.b = conv;
+                e->k = { .assign = nb };
+            }
+            return;
+        }
+        default: return;
+    }
+}
+
+static void sl_dest_stmt(Walker* w, CcStmt* s, bool enter) {
+    SStep* st = (SStep*)w->env;
+    CcDecl* d = NULL;
+    if (!enter) return;
+    if (stmt_is_decl(s, &d) && d) {
+        CcVarDecl v;
+        bool is_var = false;
+        @switch (d->k) {
+            case .var(x): v = x; is_var = true; break;
+            default: break;
+        }
+        if (is_var && v.init && !v.init->is_list && v.init->expr) {
+            CcExpr* conv = sl_coerce(st, v.type, v.init->expr, s->span);
+            if (conv) v.init->expr = conv;
+        }
+        return;
+    }
+    {
+        CcExpr* e = NULL;
+        @switch (s->k) {
+            case .expr(es): e = es.e; break;
+            default: break;
+        }
+        sl_dest_assign(st, w, e, s->span);
+    }
+}
+
+static void sl_dest_pass(CcLowerer* L) {
+    Walker w;
+    SStep st;
+    memset(&st, 0, sizeof(st));
+    st.L = L;
+    st.w = &w;
+    memset(&w, 0, sizeof(w));
+    w.arena = L->arena;
+    w.ix = L->ix;
+    w.unit = L->unit;
+    w.on_stmt = sl_dest_stmt;
+    w.env = &st;
+    tw_unit(&w);
+}
+
+/* Argument coercion runs after UFCS: a `x.m("lit")` call site is a plain
+ * call by then, and its parameter types are the callee's. */
+void CcLowerer_slice_args(CcLowerer* L) {
+    Walker w;
+    SStep st;
+    memset(&st, 0, sizeof(st));
+    st.L = L;
+    st.w = &w;
+    memset(&w, 0, sizeof(w));
+    w.arena = L->arena;
+    w.ix = L->ix;
+    w.unit = L->unit;
+    w.on_call = sl_on_call;
+    w.env = &st;
+    tw_unit(&w);
+}
+
+#endif

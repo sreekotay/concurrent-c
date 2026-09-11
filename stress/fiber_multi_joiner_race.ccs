@@ -45,7 +45,7 @@ int main(void) {
         for (int j = 0; j < NUM_WAITERS; j++) {
             cc_nursery_spawn(n, waiter_task, NULL);
         }
-        cc_nursery_wait(n);
+        (void)cc_nursery_wait(n);
         n.free();
         
         /* All waiters should have completed */

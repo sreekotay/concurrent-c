@@ -1,6 +1,9 @@
-/* `host_mod.cch` includes `guest_leaf.cch` (other stem). Owner is still
- * `host_mod.ccs`. Other TUs extract decls; peer_mod.h must resolve. */
+/* `host_mod.cch` includes `guest_leaf.cch` (other stem) and
+ * `peer_mod.cch`: three modules of one (spec 1.7). Every includer
+ * extracts decls; the extracted host `.h` reaches the peer by a relative
+ * include, and the three objects link into the program. */
 CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
+int rc = 0;
 
 CCCommand emit_other = cc_command(arena, @slice("./cc/bin/ccc"));
 emit_other.arg("--no-cache");
@@ -9,12 +12,11 @@ emit_other.arg("tests/quote_cch_host_guest_other_mod.ccs");
 emit_other.arg("-o");
 emit_other.arg("out/quote_cch_host_guest_other.c");
 emit_other.inherit_stdio();
-int rc = emit_other.status() !>;
+rc = emit_other.status() !>;
 if (rc != 0) {
     "emit other failed".println();
     return 1;
 }
-
 CCCommand grep_other = cc_command(arena, @slice("grep"));
 grep_other.arg("-q");
 grep_other.arg("GUEST_LEAF_BODY_MUST_NOT_SPLICE");
@@ -24,7 +26,6 @@ if (rc == 0) {
     "other TU spliced guest leaf".println();
     return 1;
 }
-
 CCCommand grep_rel = cc_command(arena, @slice("grep"));
 grep_rel.arg("-q");
 grep_rel.arg("#include \"quote_cch_peer_mod.h\"");
@@ -34,7 +35,6 @@ if (rc != 0) {
     "extracted host_mod.h missing relative peer include".println();
     return 1;
 }
-
 CCCommand grep_abs = cc_command(arena, @slice("grep"));
 grep_abs.arg("-q");
 grep_abs.arg("#include \"/");
@@ -44,7 +44,6 @@ if (rc == 0) {
     "extracted host_mod.h used an absolute include".println();
     return 1;
 }
-
 CCCommand emit_owner = cc_command(arena, @slice("./cc/bin/ccc"));
 emit_owner.arg("--no-cache");
 emit_owner.arg("--emit-c-only");
@@ -54,20 +53,18 @@ emit_owner.arg("out/quote_cch_host_mod.c");
 emit_owner.inherit_stdio();
 rc = emit_owner.status() !>;
 if (rc != 0) {
-    "emit owner failed".println();
+    "emit same-stem unit failed".println();
     return 1;
 }
-
 CCCommand grep_owner = cc_command(arena, @slice("grep"));
 grep_owner.arg("-q");
 grep_owner.arg("GUEST_LEAF_BODY_MUST_NOT_SPLICE");
 grep_owner.arg("out/quote_cch_host_mod.c");
 rc = grep_owner.status() !>;
-if (rc != 0) {
-    "owner TU did not splice guest leaf".println();
+if (rc == 0) {
+    "same-stem TU spliced guest leaf".println();
     return 1;
 }
-
 CCCommand build = cc_command(arena, @slice("./cc/bin/ccc"));
 build.arg("build");
 build.arg("--no-cache");

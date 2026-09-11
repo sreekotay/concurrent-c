@@ -1,1 +1,3 @@
-m0_5_diag_origin_line_fail.ccs:15: error:
+# The diagnostic carries the user's file and the line the construct is on.
+# The column is not pinned: the reference has none to give here.
+m0_5_diag_origin_line_fail.ccs:15:

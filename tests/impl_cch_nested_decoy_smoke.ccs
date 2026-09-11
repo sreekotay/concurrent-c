@@ -1,0 +1,20 @@
+/* A leaf nested in a library face resolves a method through the parent's
+ * alias, not through a same-spelled function declared beside it. */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/array_map.cch>
+#include <stdio.h>
+#include "impl_cch_nested_decoy_outer.cch"
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(64)) @destroy;
+    DecoyDb db;
+    db.entries = array_map_new::[int, int](a);
+    if (!db.entries) return 1;
+    db.entries->insert(1, 10);
+    db.entries->insert(2, 20);
+    if (decoy_alias_len(db.entries) != 2) return 2;
+    if (decoy_map_len(&db) != 102) return 3;
+    decoy_destroy(&db);
+    printf("ok\n");
+    return 0;
+}

@@ -12,7 +12,7 @@
 
 #include <ccc/cc_arena.h>
 /* Host tools (lower_headers_stage1) do not link runtime/string.c — that TU is
- * unity-included in concurrent_c.o for shadow_lower / ccc.  Take the same
+ * unity-included in concurrent_c.o for ccc and the lowerer.  Take the same
  * static-inline CCString bodies the comptime executor uses. */
 #define CC_COMPTIME 1
 #include <ccc/std/string.h>
@@ -658,6 +658,43 @@ const char* cc_emit_plan_lookup_generic_factory_handler(const char* name) {
     return r ? r->handler_name : NULL;
 }
 
+size_t cc_emit_plan_generic_factory_registration_count(void) {
+    size_t n = 0;
+    for (size_t i = 0; i < cc__generic_count; i++) {
+        if (cc__generics[i].kind != CC_GENERIC_COMPILED) continue;
+        if (cc__generics[i].handler_name) n++;
+        n += cc__generics[i].ext_count;
+    }
+    return n;
+}
+
+int cc_emit_plan_generic_factory_registration_at(size_t i, const char** name,
+                                                 const char** handler, int* is_extend) {
+    for (size_t g = 0; g < cc__generic_count; g++) {
+        CCGenericReg* r = &cc__generics[g];
+        if (r->kind != CC_GENERIC_COMPILED) continue;
+        if (r->handler_name) {
+            if (i == 0) {
+                if (name) *name = r->name;
+                if (handler) *handler = r->handler_name;
+                if (is_extend) *is_extend = 0;
+                return 1;
+            }
+            i--;
+        }
+        for (size_t e = 0; e < r->ext_count; e++) {
+            if (i == 0) {
+                if (name) *name = r->name;
+                if (handler) *handler = r->ext_handlers[e];
+                if (is_extend) *is_extend = 1;
+                return 1;
+            }
+            i--;
+        }
+    }
+    return 0;
+}
+
 /* The slice ABI mirror lives in factory_abi.h (shared with the loader,
  * which verifies it against the comptime side's sizeof(CCSlice) probe
  * before any factory runs).  It must stay layout-identical to CCSlice
@@ -952,6 +989,24 @@ void cc_emit_plan_clear_comptime_instantiations(void) {
 
 size_t cc_emit_plan_comptime_instantiation_count(void) {
     return cc__comptime_inst_count;
+}
+
+int cc_emit_plan_comptime_instantiation_at(size_t i, const char** family,
+                                           const char** a, const char** b) {
+    const CCEmitComptimeInst* inst;
+    const char* fam;
+    if (i >= cc__comptime_inst_count) return 0;
+    inst = &cc__comptime_insts[i];
+    switch (inst->kind) {
+    case CC_GRAPH_REQUEST_VEC:  fam = "vec";  break;
+    case CC_GRAPH_REQUEST_MAP:  fam = "map";  break;
+    case CC_GRAPH_REQUEST_CHAN: fam = "chan"; break;
+    default: return 0;
+    }
+    if (family) *family = fam;
+    if (a) *a = inst->a;
+    if (b) *b = inst->b;
+    return 1;
 }
 
 /* ---- Comptime intrinsic registry ----
@@ -2426,19 +2481,40 @@ static size_t cc__emit_complete_typedef_end(const char* src, size_t len,
 /* `__ccs<digits>` dummy: `=0` with optional spaces, then `};` (file-scope
  * `enum{__ccsN=0};`) or `,` (enumerator inside `enum { }`). Emit may insert
  * spaces around `=` when reprinting tokens. */
+/* Between the tokens of the marker: blanks, and the `#line` directives a
+ * producer pins its output with. How a declaration is laid out is the
+ * producer's choice — the clean lowerer prints
+ *
+ *     enum {
+ *     #line 25 "x.ccs"
+ *         __ccs490 = 0
+ *     #line 25 "x.ccs"
+ *     };
+ *
+ * where the legacy pass wrote `enum{__ccs490=0};`. Neither the breaks nor
+ * the directives are code, and stopping at one reads the marker as absent. */
+static const char* cc__emit_skip_marker_gap(const char* q) {
+    for (;;) {
+        while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') q++;
+        if (*q != '#') return q;
+        while (*q && *q != '\n') q++;
+        if (!*q) return q;
+    }
+}
+
 static int cc__emit_match_ccs_dummy(const char* p, const char** end, int* comma) {
     const char* q;
     if (!p || memcmp(p, "__ccs", 5) != 0) return 0;
     q = p + 5;
     if (*q < '0' || *q > '9') return 0;
     while (*q >= '0' && *q <= '9') q++;
-    while (*q == ' ' || *q == '\t') q++;
+    q = cc__emit_skip_marker_gap(q);
     if (*q != '=') return 0;
     q++;
-    while (*q == ' ' || *q == '\t') q++;
+    q = cc__emit_skip_marker_gap(q);
     if (*q != '0') return 0;
     q++;
-    while (*q == ' ' || *q == '\t') q++;
+    q = cc__emit_skip_marker_gap(q);
     if (q[0] == '}' && q[1] == ';') {
         if (comma) *comma = 0;
         if (end) *end = q + 2;
@@ -2466,6 +2542,7 @@ static size_t cc__emit_resolve_anchor_pos(CCEmitAnchor anchor, size_t site_pos,
         snprintf(marker, sizeof(marker), "enum{__ccs%zu=0};", site_pos);
         snprintf(emarker, sizeof(emarker), "__ccs%zu=0,", site_pos);
         const char* hit = src ? strstr(src, marker) : NULL;
+        size_t after_decl = 0;   /* the standalone marker's `};`, when matched */
         if (!hit && src && emarker[0])
             hit = strstr(src, emarker);
         if (!hit && src) {
@@ -2500,24 +2577,31 @@ static size_t cc__emit_resolve_anchor_pos(CCEmitAnchor anchor, size_t site_pos,
                     : 0;
             const char* p = src;
             const char* best = NULL;
-            while ((p = strstr(p, "enum{__ccs")) != NULL) {
-                const char* q = p + 10;
-                if (*q < '0' || *q > '9') {
-                    p++;
-                    continue;
-                }
-                while (*q >= '0' && *q <= '9') q++;
-                if (strncmp(q, "=0};", 4) != 0) {
-                    p++;
+            const char* best_end = NULL;
+            /* The standalone `enum{ __ccs<n> = 0 };` marker, however its
+             * producer laid it out. Matching the tight spelling alone made a
+             * marker the clean lowerer had printed over several lines read as
+             * absent, and the fragment then landed at EOF — after every use of
+             * what it defines, which the host reports as an implicit
+             * declaration rather than as the misplacement it is. */
+            while ((p = strstr(p, "__ccs")) != NULL) {
+                const char* endp = NULL;
+                int comma = 0;
+                if (!cc__emit_match_ccs_dummy(p, &endp, &comma) || comma) {
+                    p += 5;
                     continue;
                 }
                 if ((size_t)(p - src) >= logic_pos) {
                     best = p;
+                    best_end = endp;
                     break;
                 }
-                if (!best) best = p;
-                p = q;
+                if (!best) { best = p; best_end = endp; }
+                p = endp;
             }
+            /* the fragment goes after the marker's declaration: laid out over
+             * several lines, the marker's own line start is inside the enum */
+            if (best && best_end) after_decl = (size_t)(best_end - src);
             if (!best) {
                 p = src;
                 while ((p = strstr(p, "__ccs")) != NULL) {
@@ -2537,18 +2621,22 @@ static size_t cc__emit_resolve_anchor_pos(CCEmitAnchor anchor, size_t site_pos,
             }
             hit = best;
         }
-        if (hit) {
+        if (hit && after_decl) {
+            pos = after_decl;
+            while (pos < len && src[pos] != '\n') pos++;
+            if (pos < len) pos++;
+        } else if (hit) {
             pos = (size_t)(hit - src);
             while (pos > 0 && src[pos - 1] != '\n') pos--;
         } else {
-            /* No marker in this buffer. Legacy keeps harvested header
-             * `@comptime` markers via parse-input append; serdes emits from a
-             * stage1 buffer that never saw that append, so header sites
-             * (static_map in .cch) have nothing to aim at. Searching
-             * `site_line` against the TU path is wrong when the line came from
-             * a `#line` in a harvested header — e.g. pp_stage2.cch:41 colliding
-             * with shadow_lower.ccs:41 and landing *before* umbrella includes
-             * that declare PpDirSpec. Match legacy harvest-append: EOF. */
+            /* No marker in this buffer. Harvested header `@comptime` markers
+             * arrive through a parse-input append; a buffer that never saw
+             * that append has header sites (static_map in .cch) with nothing
+             * to aim at. Searching `site_line` against the TU path is wrong
+             * when the line came from a `#line` in a harvested header: a face
+             * line can collide with the same line of the unit and land
+             * *before* the umbrella includes that declare the type. Splice
+             * where harvest-append does: EOF. */
             (void)site_line;
             (void)site_pos;
             (void)input_path;

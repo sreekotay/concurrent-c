@@ -1,0 +1,28 @@
+/* `@defer CALL !>(e) { ... };` is a statement-position unwrap inside the
+ * deferred statement: the handler runs at scope exit when the call fails,
+ * and control continues after it. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int g_teardown_errors = 0;
+
+static int !>(CCError) flush_it(int n) {
+    if (n < 0) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "negative"));
+    return cc_ok(n);
+}
+
+static void scope(int n) {
+    @defer flush_it(n) !>(e) {
+        (void)e;
+        g_teardown_errors++;
+    };
+    (void)n;
+}
+
+int main(void) {
+    scope(3);
+    scope(-1);
+    if (g_teardown_errors != 1) return 1;
+    printf("ok\n");
+    return 0;
+}

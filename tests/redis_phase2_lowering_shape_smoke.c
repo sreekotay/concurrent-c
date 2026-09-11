@@ -101,7 +101,13 @@ static int check_owner(const char* lowered) {
         return 1;
     }
 
-    owner_hot = strstr(lowered, "cc_io_avail(cc_channel_recv(__f->__p_req_rx");
+    /* How the receiver is spelled is the lowerer's business: one rewrites a
+     * parameter to its frame field at every use, the other reads the frame
+     * into a local once; one calls the raw recv on the handle, the other the
+     * typed one on the endpoint. What is pinned is that the request/reply
+     * path is the non-blocking poll and never hands off to a blocking
+     * thread. */
+    owner_hot = strstr(lowered, "cc_io_avail(cc_channel_recv");
     if (!owner_hot ||
         span_has(owner_hot, "static void __cc_async_owner_loop_",
                  "cc_run_blocking_task")) {

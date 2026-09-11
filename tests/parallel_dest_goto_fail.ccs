@@ -1,0 +1,17 @@
+/* A `goto` to a label the dest-attach body does not declare leaves the
+ * body, which is a fiber of the dest: ill-formed. */
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    cc_atomic_int sum = 0;
+    CCParallel h = @parallel spawn { @serial { (void)0; } } !>;
+    @parallel(h) {
+        if (sum.load() == 0)
+            goto out;
+        sum.fetch_add(1);
+    }
+out:
+    h.wait() !>;
+    return 0;
+}

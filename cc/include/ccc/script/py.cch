@@ -1681,10 +1681,30 @@ typedef struct {
 #define CC__PY_LONG_SIGN_MASK 3u
 #define CC__PY_LONG_COMPACT_LIM (2u << 3) /* _PyLong_NON_SIZE_BITS == 3 */
 
+/* Whether the runtime lays a long out that way: decided once from
+ * Py_GetVersion. Before 3.12 the slot the tag is read from is ob_size,
+ * and a small positive int would dig as 0; a runtime whose version is
+ * not known yet takes the converter. */
+static inline int cc__py_long_compact_layout(void) {
+    static int known = 0;
+    static int yes = 0;
+    if (!known) {
+        const char *v = cc__py.GetVersion ? cc__py.GetVersion() : NULL;
+        int maj = 0, min = 0;
+        if (!v) return 0;
+        if (sscanf(v, "%d.%d", &maj, &min) == 2)
+            yes = maj > 3 || (maj == 3 && min >= 12);
+        known = 1;
+    }
+    return yes;
+}
+
 static inline int cc__py_compact_ll(void *o, long long *out) {
     CC__PyLongObj *l = (CC__PyLongObj *)o;
-    uintptr_t tag = l->lv_tag;
+    uintptr_t tag;
     intptr_t sign;
+    if (!cc__py_long_compact_layout()) return 0;
+    tag = l->lv_tag;
     if (tag >= (uintptr_t)CC__PY_LONG_COMPACT_LIM) return 0;
     sign = (intptr_t)1 - (intptr_t)(tag & CC__PY_LONG_SIGN_MASK);
     *out = (long long)(sign * (intptr_t)l->digit0);
@@ -4634,7 +4654,7 @@ static inline CCPy !>(CCPyError) cc_py_new(_Bool isolated, CCArena arena) {
  * resources and nothing else will reclaim it before process exit. The process
  * interpreter is left alive: re-initializing CPython after FinalizeEx is
  * unreliable, and process exit reclaims it. Idempotent. */
-static inline void cc_py_close(CCPy *py) {
+static inline void cc__py_close_impl(CCPy *py) {
     if (!py) return;
     if (py->tier == CC__PY_TIER_PROC) {
         cc__py_iso_close(py);
@@ -4688,6 +4708,15 @@ static inline void cc_py_close(CCPy *py) {
     py->isolated = 0;
     py->tier = CC__PY_TIER_INPROC;
     py->fd = -1;
+}
+
+/* The arena in the handle is the caller's, kept by value. The value-field
+ * chain that runs after this hook (spec 3.1) would free it as if it were
+ * owned, so the hook disowns it: the chain then finds a nulled handle,
+ * which destroy treats as already done. */
+static inline void cc_py_close(CCPy *py) {
+    cc__py_close_impl(py);
+    if (py) { py->arena = cc_arena_handle(NULL); }
 }
 
 static inline void cc_py_obj_release(CCPyObj *obj) {

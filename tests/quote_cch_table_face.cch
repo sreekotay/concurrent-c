@@ -1,0 +1,15 @@
+#ifndef TESTS_QUOTE_CCH_TABLE_FACE_CCH
+#define TESTS_QUOTE_CCH_TABLE_FACE_CCH
+
+#include <ccc/std/prelude.cch>
+#include <ccc/std/table.cch>
+
+/* A face that names an instance of a generic factory family is a library
+ * face (spec 1.7): it splices into each includer, whose unit runs the
+ * family, so an includer that never spells Table::[int, int] itself still
+ * has the type and its methods. */
+typedef Table::[int, int] Counts;
+
+static inline Counts counts_new(CCArena a) { return table_new::[int, int](a); }
+
+#endif

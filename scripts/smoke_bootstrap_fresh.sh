@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # smoke_bootstrap_fresh.sh — wipe build products and rebuild from the committed
-# shadow_lower bootstrap (last-good). Canonical cold-tree check after TCC exists:
-#   * fresh-clone graph: no warm out/include or stage-1 binary
-#   * angle-include paths that need a seeded out/include/cc/shadow
+# lowerer seed (cc/bootstrap/lowerer/last-good). Canonical cold-tree check
+# after TCC exists:
+#   * fresh-clone graph: no warm out/include and no lowerer tools in hand
+#   * the seed's lowered C host-compiles against the faces it was cut with
 #   * ODR clashes linking concurrent_c.o + libshadow_comptime.a on GNU ld
-#   * stage-1 seed stamp must not recurse under make -j
+#   * the stage-zero tool rules must not recurse under make -j
 #
 # When: after seed promote / build-graph changes — not every stdlib edit.
 # See docs/build-when.md.
@@ -33,12 +34,12 @@ rm -rf out cc/bin bin
 # A true fresh clone still needs: ./scripts/fetch_submodules.sh && apply patches.
 test -f third_party/tcc/libtcc.a || die "missing third_party/tcc/libtcc.a (fetch + configure + make tcc first)"
 
-printf '== make -C cc (bootstrap shadow_lower from last-good)\n'
+printf '== make -C cc (clean tools from bootstrap/lowerer/last-good)\n'
 make -C cc CC="$HOST_CC" BUILD="$BUILD" TCC_EXT=1 \
   TCC_INC=../third_party/tcc TCC_LIB=../third_party/tcc/libtcc.a -j"$JOBS"
 
 test -x cc/bin/.ccc-bin || die "cc/bin/.ccc-bin missing"
-test -x out/cc/bin/shadow_lower -o -x cc/bin/shadow_lower || die "shadow_lower missing"
+for t in cclex ccparse cclower ccindex; do test -x out/cc/bin/${t}_cc || die "${t}_cc missing (clean seed did not build)"; done
 
 printf '== serdes hello\n'
 printf '%s\n' '#include <stdio.h>' 'int main(void){ printf("bootstrap-fresh ok\n"); return 0; }' \
@@ -46,5 +47,5 @@ printf '%s\n' '#include <stdio.h>' 'int main(void){ printf("bootstrap-fresh ok\n
 ./cc/bin/ccc run --no-cache /tmp/ccc_bootstrap_fresh_hello.ccs
 ./cc/bin/ccc --v
 
-printf 'smoke_bootstrap_fresh: ok (last-good=%s)\n' \
-  "$(cat cc/bootstrap/shadow_lower/last-good 2>/dev/null || echo '?')"
+printf 'smoke_bootstrap_fresh: ok (clean seed=%s)\n' \
+  "$(cat cc/bootstrap/lowerer/last-good 2>/dev/null || echo '?')"

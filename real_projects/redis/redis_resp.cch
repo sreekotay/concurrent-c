@@ -5,6 +5,8 @@
  * much larger values (hundreds of MB); this port documents the bound
  * instead of pretending unbounded.  Callers size `data`/`cap` (today:
  * 64 KiB on each connection fiber stack). */
+#include <string.h>
+
 typedef struct RespReader {
     char* data;
     size_t start;

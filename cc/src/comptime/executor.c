@@ -1035,7 +1035,7 @@ static TCCState* cc__exec_new_state(CCExecErrSink* sink, char* err_buf, size_t e
      * CC_INCLUDE_PATH is the compiler's own header search path (lowered .h dir
      * then raw .cch dir), colon-separated; mirror it into the executor.
      * Prefer lowered `.h` (bare `@as` lives only in `.cch`). When the env is
-     * unset (direct shadow_lower / tooling), probe checkout defaults. */
+     * unset (a tool run directly), probe checkout defaults. */
     {
         const char* inc = getenv("CC_INCLUDE_PATH");
         char tmp[2048];

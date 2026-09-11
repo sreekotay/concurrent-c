@@ -19,6 +19,11 @@ static int file_exists(const char* path) {
     fclose(f);
     return 1;
 }
+static int dir_exists(const char* path) {
+    struct stat st;
+    return path && stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+static void test_dir_from_path(const char* path, char* out, size_t cap);
 
 static int ensure_out_dir(void) {
     if (mkdir("out", 0777) == -1) {
@@ -216,21 +221,39 @@ static int run_one_test(const char* stem, const char* input_path, int compile_fa
                         int build_timeout_sec,
                         int run_timeout_sec);
 
+/* `<stem>.xfail` beside a test: the expectation files describe the behaviour
+ * the compiler should have and does not yet. A failing run is reported as
+ * XFAIL and does not count; a passing run is XPASS and counts as a failure
+ * until the sidecar is deleted, so the marker never outlives the bug.
+ */
 static int run_one_test_maybe_profile(const char* stem, const char* input_path,
                                       int compile_fail, int verbose,
                                       const char* out_dir, const char* bin_dir,
                                       int use_cache, int opt_o0,
                                       int build_timeout_sec, int run_timeout_sec) {
-    long long t0;
+    long long t0 = 0;
     int rc;
-    if (!g_cc_test_profile)
-        return run_one_test(stem, input_path, compile_fail, verbose, out_dir,
-                            bin_dir, use_cache, opt_o0, build_timeout_sec,
-                            run_timeout_sec);
-    t0 = now_ms_monotonic();
+    char tdir[512];
+    char xf[640];
+    const char* marker;
+    int xfail;
+    test_dir_from_path(input_path, tdir, sizeof(tdir));
+    snprintf(xf, sizeof(xf), "%s/%s.xfail", tdir, stem);
+    marker = xf;
+    xfail = file_exists(xf);
+    if (g_cc_test_profile) t0 = now_ms_monotonic();
     rc = run_one_test(stem, input_path, compile_fail, verbose, out_dir, bin_dir,
                       use_cache, opt_o0, build_timeout_sec, run_timeout_sec);
-    fprintf(stderr, "[TIME] %s %lldms\n", stem, now_ms_monotonic() - t0);
+    if (g_cc_test_profile)
+        fprintf(stderr, "[TIME] %s %lldms\n", stem, now_ms_monotonic() - t0);
+    if (xfail) {
+        if (rc != 0) {
+            fprintf(stderr, "[XFAIL] %s (expected; see %s)\n", stem, marker);
+            return 0;
+        }
+        fprintf(stderr, "[XPASS] %s: passes now; delete %s\n", stem, marker);
+        return 1;
+    }
     return rc;
 }
 
@@ -308,13 +331,6 @@ static int default_job_count(void) {
     return (int)n;
 }
 
-/* Parallel shadow_lower smokes (cc/shadow). Default harness skips
- * these — run scripts/test_shadow.sh (or CC_TEST_SHADOW=1 / --filter c_pp_). */
-static int test_is_shadow(const char* stem) {
-    if (!stem) return 0;
-    return strncmp(stem, "c_pp_", 5) == 0;
-}
-
 /* Stress / lost-wake / race matrix tests: useful overnight, expensive in the
  * local edit loop.  Skipped by default (--quick); include with --full. */
 static int test_is_heavy(const char* stem, const char* path) {
@@ -322,6 +338,7 @@ static int test_is_heavy(const char* stem, const char* path) {
     if (str_contains(stem, "stress")) return 1;
     if (str_contains(stem, "lostwake")) return 1;
     if (str_contains(stem, "_race")) return 1;
+    if (path && str_contains(path, "stress/break/")) return 0;
     if (path && str_contains(path, "/stress")) return 1;
     return 0;
 }
@@ -551,8 +568,8 @@ static int get_run_timeout_for_test(const char* stem, int default_timeout_sec) {
     /* Many nested ccc -e/-E subprocesses; ~11s alone, can exceed 30s under
      * --jobs contention (each child competes for CPU with the suite). */
     if (strcmp(stem, "script_oneliner_smoke") == 0) return 60;
-    /* Compact goldens + hostcc + one header beachhead; keep near default. */
-    if (strcmp(stem, "c_pp_shadow_emit_smoke") == 0) return 20;
+    /* Three cold `ccc --as=shcc` builds; ~11s alone on the clean lowerer. */
+    if (strcmp(stem, "script_shcc_bin_stem_smoke") == 0) return 30;
     /* Each shells out to `ccc build` of a py.cch TU: ~9s of backend -O2 on
      * a cold cache, over the 10s default under suite parallelism. */
     if (strcmp(stem, "py_module_import_smoke") == 0) return 30;
@@ -837,7 +854,7 @@ static int run_one_test(const char* stem,
     }
 
     /* 1) Build via ccc build (this is the build system under test).
-     * ccc is native-only (shadow_lower). Emit cache is keyed by source bytes +
+     * Emit cache is keyed by source bytes +
      * toolchain bytes; warm hits replay lowering diagnostics from emit.c.diag.
      * Erroring emits are not cached. Do not force --no-cache for diag/fail
      * tests — that papers over cache bugs. */
@@ -899,7 +916,7 @@ static int run_one_test(const char* stem,
         free(err_buf);
         arg_runs_clear(&runs);
         free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(exp_build_stderr); free(ldflags);
-        if (bad) return 1;
+        if (bad) { fprintf(stderr, "[FAIL] %s: compile_err expectation not met\n", stem); return 1; }
         fprintf(stderr, "[OK] %s\n", stem);
         return 0;
     }
@@ -1085,7 +1102,6 @@ static void usage(const char* prog) {
     fprintf(stderr, "  --quick  skip stress/lostwake/race tests (default)\n");
     fprintf(stderr, "  --full   include stress/lostwake/race tests (also CC_TEST_FULL=1)\n");
     fprintf(stderr, "  --O0     host-compile test bins with -O0 (faster cold builds; also CC_TEST_O0=1)\n");
-    fprintf(stderr, "  c_pp_*   shadow_lower smokes skipped unless CC_TEST_SHADOW=1 or --filter c_pp_\n");
 }
 
 int main(int argc, char** argv) {
@@ -1235,6 +1251,9 @@ int main(int argc, char** argv) {
             dstack[dstack_n++] = strdup((p)); \
         } while (0)
         PUSH_DIR("tests");
+        /* stress/break: programs that must compile and run, and diagnostics
+         * that must land on the user's line. Same sidecars as tests/. */
+        if (dir_exists("stress/break")) PUSH_DIR("stress/break");
         while (dstack_n > 0) {
             char* dir = dstack[--dstack_n];
             DIR* d = opendir(dir);
@@ -1309,15 +1328,6 @@ int main(int argc, char** argv) {
         }
 
         if (filter && !str_contains(stem, filter) && !str_contains(path, filter)) continue;
-        /* Default suite = production ccc. c_pp_* only with opt-in or filter. */
-        {
-            const char* shadow = getenv("CC_TEST_SHADOW");
-            int want_shadow = (shadow && strcmp(shadow, "1") == 0) || filter != NULL;
-            if (test_is_shadow(stem) && !want_shadow) {
-                if (verbose) fprintf(stderr, "[SKIP] %s (shadow: scripts/test_shadow.sh)\n", stem);
-                continue;
-            }
-        }
         if (quick && test_is_heavy(stem, path)) {
             if (verbose) fprintf(stderr, "[SKIP] %s (quick: stress/race)\n", stem);
             continue;

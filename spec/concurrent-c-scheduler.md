@@ -161,7 +161,7 @@ Coroutine binding is deferred to the first dispatching worker. Concurrent
 
 Brace-form and `@parallel for` arms go through `cc_parallel_spawn` /
 `cc_par_timed_run` (`cc/runtime/scheduler.c`). Lowering is
-`cc/shadow/pp_emit_stmt.cch`. The public inline gate is
+`cc/lower/lower_parallel.cch`. The public inline gate is
 `cc_parallel_deny_fast` / `CC_PAR_NOTE_INLINE_ARM` in
 `cc/include/ccc/cc_sched.cch`.
 
@@ -594,6 +594,6 @@ correctness.
 - `cc/runtime/minicoro.h` — coroutine implementation.
 - `cc/include/ccc/cc_sched.cch` — public API; `cc_parallel_deny_fast`,
   `CC_PAR_NOTE_INLINE_ARM`, `CCParSiteGate`.
-- `cc/shadow/pp_emit_stmt.cch` — `@parallel` lowering (inline gate + spawn).
+- `cc/lower/lower_parallel.cch` — `@parallel` lowering (inline gate + spawn).
 
 Operational testing notes live in `docs/scheduler-ops-runbook.md`.

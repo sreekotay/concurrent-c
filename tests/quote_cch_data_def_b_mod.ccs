@@ -1,0 +1,9 @@
+#!ccc ccs
+#include "unowned_faces/data_def.cch"
+
+int data_def_a(void);
+
+int main(void) {
+    int a = data_def_a();
+    return a == 4 && data_def_peek() == 4 ? 0 : 1;
+}
