@@ -1449,6 +1449,36 @@ static bool gn_lower_fragment(CcLowerer* L, CCString text, CcSpan sp, CCString* 
 }
 
 /* Whether a declaration is what makes `name` a type in this unit. */
+static bool gn_ident_char(int c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+/* A lowered declaration is C text by the time a later step asks what it
+ * defines (a variant becomes its typedefs): `typedef struct NAME {`,
+ * `struct NAME {` and `} NAME;` in that text define NAME. */
+static bool gn_raw_defines(CCSlice text, CCSlice name) {
+    size_t i = 0;
+    if (!name.len || text.len < name.len) return false;
+    while (i + name.len <= text.len) {
+        if (memcmp(text.ptr + i, name.ptr, name.len) == 0 &&
+            (i == 0 || !gn_ident_char((unsigned char)text.ptr[i - 1])) &&
+            (i + name.len == text.len || !gn_ident_char((unsigned char)text.ptr[i + name.len]))) {
+            size_t b = i;
+            size_t e = i + name.len;
+            while (b > 0 && (text.ptr[b - 1] == ' ' || text.ptr[b - 1] == '\t')) b--;
+            while (e < text.len && (text.ptr[e] == ' ' || text.ptr[e] == '\t')) e++;
+            if (b > 0 && text.ptr[b - 1] == '}' && e < text.len && text.ptr[e] == ';') return true;
+            if (e < text.len && text.ptr[e] == '{' &&
+                ((b >= 7 && memcmp(text.ptr + b - 7, "struct ", 7) == 0) ||
+                 (b >= 6 && memcmp(text.ptr + b - 6, "union ", 6) == 0) ||
+                 (b >= 5 && memcmp(text.ptr + b - 5, "enum ", 5) == 0)))
+                return true;
+        }
+        i++;
+    }
+    return false;
+}
+
 static bool gn_decl_defines(CcDecl* d, CCSlice name) {
     CCSlice got = cc_slice_empty();
     if (!name.len) return false;
@@ -1456,6 +1486,7 @@ static bool gn_decl_defines(CcDecl* d, CCSlice name) {
         case .typedef_(td): got = td.name; break;
         case .tagged(tg): { if (tg.type) (void)type_named_name(tg.type, &got); break; }
         case .variant(vd): got = vd.name; break;
+        case .raw(rt): return gn_raw_defines(rt, name);
         default: break;
     }
     return got.len != 0 && slice_eq(got, name);
@@ -1713,6 +1744,7 @@ void CcLowerer_generics(CcLowerer* L) {
                     case .empty: is_pp = true; break;
                     case .pragma_cc: is_pp = true; break;
                     case .raw: is_pp = true; break;
+                    case .link: is_pp = true; break;   /* `@link` sits among the includes */
                     default: break;
                 }
                 if (!is_pp) break;

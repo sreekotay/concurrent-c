@@ -1,0 +1,7 @@
+#pragma(@module) "quote_cch_variant_result_module_face"
+void !>(VrFail) vr_arm(int id) {
+    vr_calls++;
+    if (id < 0) return cc_err((VrFail){ .desync = {} });
+    if (id == 0) return cc_err((VrFail){ .conn = {} });
+    return cc_ok();
+}

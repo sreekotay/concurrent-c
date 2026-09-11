@@ -1,0 +1,16 @@
+#ifndef QUOTE_CCH_SPEC_ABOVE_MODULE_FACE_LIB_CCH
+#define QUOTE_CCH_SPEC_ABOVE_MODULE_FACE_LIB_CCH
+/* A library face: static bodies that use @errhandler, so it splices into
+ * each includer and lowers with it. */
+#include <ccc/std/prelude.cch>
+typedef struct SpecFoo { int x; } SpecFoo;
+static SpecFoo !>(CCError) spec_foo_check(int x) {
+    if (x < 0) return cc_err(CC_ERROR(CC_ERR_IO, "neg"));
+    return cc_ok((SpecFoo){ .x = x });
+}
+static SpecFoo !>(CCError) spec_foo_make(int x) {
+    @errhandler(CCError e) { return cc_err(e); }
+    SpecFoo f = spec_foo_check(x) !>;
+    return cc_ok(f);
+}
+#endif

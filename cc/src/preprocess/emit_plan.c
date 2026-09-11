@@ -3199,6 +3199,14 @@ size_t cc_emit_plan_compute_prelude_insert_pos(const char* src, size_t len) {
             insert_pos = (line_end < len) ? line_end + 1 : line_end;
             continue;
         }
+        /* `@link("lib")` sits among a unit's includes and is no more code
+         * than they are: the prelude runs on through it. Stopping here put
+         * every fragment above the includes that follow the directive. */
+        if (p + 5 <= line_end && memcmp(src + p, "@link", 5) == 0 &&
+            (p + 5 == line_end || !cc_is_ident_char(src[p + 5]))) {
+            insert_pos = (line_end < len) ? line_end + 1 : line_end;
+            continue;
+        }
         if (p < line_end && src[p] == '#') {
             size_t d = p + 1;
             while (d < line_end && (src[d] == ' ' || src[d] == '\t')) d++;
@@ -3296,6 +3304,12 @@ size_t cc_emit_plan_compute_container_anchor(const char* src, size_t len) {
             continue;
         }
         if (p + 1 < line_end && src[p] == '/' && src[p + 1] == '/') {
+            pos = (line_end < len) ? line_end + 1 : line_end;
+            continue;
+        }
+        /* `@link("lib")` among the includes is not the first declaration */
+        if (p + 5 <= line_end && memcmp(src + p, "@link", 5) == 0 &&
+            (p + 5 == line_end || !cc_is_ident_char(src[p + 5]))) {
             pos = (line_end < len) ? line_end + 1 : line_end;
             continue;
         }

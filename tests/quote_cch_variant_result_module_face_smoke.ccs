@@ -1,0 +1,15 @@
+/* The lowered header of a module face declares the Result spec for a
+ * function returning `void !>(VrFail)` below the variant it names, which
+ * the face itself declares. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include "quote_cch_variant_result_module_face.cch"
+
+int main(void) {
+    int bad = 0;
+    vr_arm(1) !> { return 1; };
+    vr_arm(-1) !>(e) { (void)e; bad += 1; };
+    vr_arm(0) !>(e) { (void)e; bad += 10; };
+    printf("%d %d\n", bad, vr_calls);
+    return 0;
+}
