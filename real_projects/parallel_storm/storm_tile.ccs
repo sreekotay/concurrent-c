@@ -1,0 +1,547 @@
+#!ccc ccs
+/*
+ * parallel_storm tile — same 4-way join as storm.ccs unbound/quad.
+ *
+ * The fork is still
+ *
+ *   @parallel (d < cut) { nw = …; ne = …; sw = …; se = …; }
+ *
+ * `hit` is a sequential fold. Construct returns the tree; flatten writes
+ * RGBA; drop walks. Leaves are `Child.pix` (a Vec, no heap node). A heap
+ * `Tile` exists only at a split. Each spawned arm bumps its own heap child
+ * of the frame arena (`alloc_local_grow`).
+ *
+ *   STORM_MODE=quad      default — @parallel (d < STORM_CUT)
+ *   STORM_MODE=unbound   @parallel { } at every split
+ *   STORM_SEQ=1          sequential construct
+ *   STORM_DROP=par|seq   STORM_FLAT=par|seq
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+#include <math.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "storm_rl.h"
+#include "storm_world.cch"
+
+#define STORM_FRAME_CAP 256
+
+static double g_ms_build[STORM_FRAME_CAP];
+static double g_ms_flat[STORM_FRAME_CAP];
+static double g_ms_drop[STORM_FRAME_CAP];
+static double g_ms_restore[STORM_FRAME_CAP];
+
+typedef struct Tile Tile;
+
+@variant Child {
+    pix: Vec;
+    split: Tile*;
+};
+
+struct Tile {
+    Child tl;
+    Child tr;
+    Child bl;
+    Child br;
+};
+
+static CCArena g_tiles;
+static int g_build_unbound;
+static int g_build_seq;
+static int g_drop_par;
+static int g_flat_par;
+
+static _Thread_local CCArena g_tls;
+static _Thread_local uint32_t g_tls_gen;
+static uint32_t g_frame_gen;
+
+static CCArena tls_bump(void) {
+    @errhandler(CCError e) cc_error_exit(e);
+    if (g_tls_gen != g_frame_gen) {
+        g_tls = g_tiles.create_heap_arena(megabytes(16)) !>;
+        g_tls_gen = g_frame_gen;
+    }
+    return g_tls;
+}
+
+static int child_ok(Child c) {
+    if (c.kind == .split)
+        return c.split != NULL;
+    return 1;
+}
+
+static Child child_pix(Vec c) {
+    return (Child){ .pix = c };
+}
+
+static Child child_fail(void) {
+    return (Child){ .split = NULL };
+}
+
+static Child tile_split(CCArena a, Child tl, Child tr, Child bl, Child br) {
+    Tile* t;
+    if (!child_ok(tl) || !child_ok(tr) || !child_ok(bl) || !child_ok(br))
+        return child_fail();
+    t = (Tile*)a.alloc_local_grow(sizeof(Tile), 8);
+    if (!t)
+        return child_fail();
+    t->tl = tl;
+    t->tr = tr;
+    t->bl = bl;
+    t->br = br;
+    return (Child){ .split = t };
+}
+
+static Child tile_leaf(int x0, int y0) {
+    if (x0 < 0 || y0 < 0 || x0 >= g_w || y0 >= g_h)
+        return child_pix(vec3(0.0, 0.0, 0.0));
+    return child_pix(pixel_at(x0, y0));
+}
+
+/* Join-only spawn arenas stay small. The last cut holds the inlined
+ * subtree — that L1 is sized to bump, not overflow-chunk, the Tiles. */
+static size_t arm_bytes(int size) {
+    size_t n = (size_t)size * (size_t)size;
+    size_t splits = (n + 2u) / 3u;
+    size_t b = splits * 128u + kilobytes(64);
+    if (b < kilobytes(64))
+        b = kilobytes(64);
+    if (b > megabytes(32))
+        b = megabytes(32);
+    return b;
+}
+
+static Child tile_build(uint32_t d, int x0, int y0, int size, CCArena a);
+static Child tile_build_unbound(uint32_t d, int x0, int y0, int size, CCArena a);
+static Child tile_build_quad(uint32_t d, int x0, int y0, int size, CCArena a);
+static int flatten_split(Tile* t, uint32_t d, int x0, int y0, int size);
+static int drop_split(Tile* t, uint32_t d);
+
+static Child tile_kids(uint32_t d, int x0, int y0, int size, CCArena a) {
+    int half = size / 2;
+    Child tl = tile_build(d + 1, x0, y0, half, a);
+    Child tr = tile_build(d + 1, x0 + half, y0, half, a);
+    Child bl = tile_build(d + 1, x0, y0 + half, half, a);
+    Child br = tile_build(d + 1, x0 + half, y0 + half, half, a);
+    return tile_split(a, tl, tr, bl, br);
+}
+
+static Child tile_build(uint32_t d, int x0, int y0, int size, CCArena a) {
+    int half;
+    if (d >= g_qdepth || size <= 1)
+        return tile_leaf(x0, y0);
+    half = size / 2;
+    if (half < 1)
+        return tile_leaf(x0, y0);
+    if (g_build_seq)
+        return tile_kids(d, x0, y0, size, a);
+    if (g_build_unbound)
+        return tile_build_unbound(d, x0, y0, size, a);
+    return tile_build_quad(d, x0, y0, size, a);
+}
+
+static int flatten_child(Child c, uint32_t d, int x0, int y0, int size) {
+    if (!child_ok(c))
+        return 0;
+    @switch (c) {
+        case .pix(col):
+            put_rgb(x0, y0, col);
+            return 1;
+        case .split(t):
+            return flatten_split(t, d, x0, y0, size);
+    }
+    return 0;
+}
+
+static int drop_child(Child c, uint32_t d) {
+    if (!child_ok(c))
+        return 0;
+    @switch (c) {
+        case .pix(col):
+            (void)col;
+            return 1;
+        case .split(t):
+            return drop_split(t, d);
+    }
+    return 0;
+}
+
+static Child tile_build_unbound(uint32_t d, int x0, int y0, int size, CCArena a) {
+    @errhandler(CCError e) cc_error_exit(e);
+    int half = size / 2;
+    Child tl = child_pix(vec3(0.0, 0.0, 0.0));
+    Child tr = child_pix(vec3(0.0, 0.0, 0.0));
+    Child bl = child_pix(vec3(0.0, 0.0, 0.0));
+    Child br = child_pix(vec3(0.0, 0.0, 0.0));
+    @parallel {
+        tl = tile_build(d + 1, x0, y0, half, tls_bump());
+        tr = tile_build(d + 1, x0 + half, y0, half, tls_bump());
+        bl = tile_build(d + 1, x0, y0 + half, half, tls_bump());
+        br = tile_build(d + 1, x0 + half, y0 + half, half, tls_bump());
+    } !>.wait()!>;
+    return tile_split(a, tl, tr, bl, br);
+}
+
+static Child tile_build_quad(uint32_t d, int x0, int y0, int size, CCArena a) {
+    @errhandler(CCError e) cc_error_exit(e);
+    int half = size / 2;
+    Child tl = child_pix(vec3(0.0, 0.0, 0.0));
+    Child tr = child_pix(vec3(0.0, 0.0, 0.0));
+    Child bl = child_pix(vec3(0.0, 0.0, 0.0));
+    Child br = child_pix(vec3(0.0, 0.0, 0.0));
+    CCArena a0 = a;
+    CCArena a1 = a;
+    CCArena a2 = a;
+    CCArena a3 = a;
+    if (d < g_cut) {
+        size_t need = (d + 1u < g_cut) ? kilobytes(64) : arm_bytes(half);
+        a0 = a.create_heap_arena(need) !>;
+        a1 = a.create_heap_arena(need) !>;
+        a2 = a.create_heap_arena(need) !>;
+        a3 = a.create_heap_arena(need) !>;
+    }
+    @parallel (d < g_cut) {
+        tl = tile_build(d + 1, x0, y0, half, a0);
+        tr = tile_build(d + 1, x0 + half, y0, half, a1);
+        bl = tile_build(d + 1, x0, y0 + half, half, a2);
+        br = tile_build(d + 1, x0 + half, y0 + half, half, a3);
+    } !>.wait()!>;
+    return tile_split(a, tl, tr, bl, br);
+}
+
+static int flatten_split(Tile* t, uint32_t d, int x0, int y0, int size) {
+    @errhandler(CCError e) cc_error_exit(e);
+    int half = size / 2;
+    int nw = 0;
+    int ne = 0;
+    int sw = 0;
+    int se = 0;
+    if (!t || half < 1)
+        return 0;
+    if (g_flat_par) {
+        @parallel (d < g_cut) {
+            nw = flatten_child(t->tl, d + 1, x0, y0, half);
+            ne = flatten_child(t->tr, d + 1, x0 + half, y0, half);
+            sw = flatten_child(t->bl, d + 1, x0, y0 + half, half);
+            se = flatten_child(t->br, d + 1, x0 + half, y0 + half, half);
+        } !>.wait()!>;
+        return nw + ne + sw + se;
+    }
+    return flatten_child(t->tl, d + 1, x0, y0, half)
+        + flatten_child(t->tr, d + 1, x0 + half, y0, half)
+        + flatten_child(t->bl, d + 1, x0, y0 + half, half)
+        + flatten_child(t->br, d + 1, x0 + half, y0 + half, half);
+}
+
+static int drop_split(Tile* t, uint32_t d) {
+    @errhandler(CCError e) cc_error_exit(e);
+    int nw = 0;
+    int ne = 0;
+    int sw = 0;
+    int se = 0;
+    if (!t)
+        return 0;
+    if (g_drop_par) {
+        @parallel (d < g_cut) {
+            nw = drop_child(t->tl, d + 1);
+            ne = drop_child(t->tr, d + 1);
+            sw = drop_child(t->bl, d + 1);
+            se = drop_child(t->br, d + 1);
+        } !>.wait()!>;
+        return nw + ne + sw + se;
+    }
+    return drop_child(t->tl, d + 1)
+        + drop_child(t->tr, d + 1)
+        + drop_child(t->bl, d + 1)
+        + drop_child(t->br, d + 1);
+}
+
+#define MODE_QUAD 0
+#define MODE_UNBOUND 1
+
+static int parse_mode(void) {
+    const char* s = getenv("STORM_MODE");
+    if (!s || !s[0] || strcmp(s, "quad") == 0 || strcmp(s, "cut") == 0)
+        return MODE_QUAD;
+    if (strcmp(s, "unbound") == 0)
+        return MODE_UNBOUND;
+    return -1;
+}
+
+static int parse_par_flag(const char* key, int fallback_par) {
+    const char* s = getenv(key);
+    if (!s || !s[0])
+        return fallback_par;
+    if (strcmp(s, "par") == 0 || strcmp(s, "1") == 0)
+        return 1;
+    if (strcmp(s, "seq") == 0 || strcmp(s, "0") == 0)
+        return 0;
+    return -1;
+}
+
+static size_t tree_bytes(int cover) {
+    size_t leaves = (size_t)cover * (size_t)cover;
+    size_t splits = (leaves + 2u) / 3u;
+    return splits * 128u + megabytes(8);
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    int w = (int)env_u32("STORM_W", 1024);
+    int h = (int)env_u32("STORM_H", 1024);
+    int grid = (int)env_u32("STORM_GRID", 64);
+    int seq = (int)env_u32("STORM_SEQ", 0);
+    int win_w = (int)env_u32("STORM_WIN_W", 1024);
+    int win_h = (int)env_u32("STORM_WIN_H", 1024);
+    int mode = parse_mode();
+    int drop_par = parse_par_flag("STORM_DROP", 1);
+    int flat_par = parse_par_flag("STORM_FLAT", 0);
+    int nframes = (int)env_u32("STORM_FRAMES", 0);
+    int headless = (int)env_u32("STORM_HEADLESS", 0);
+    int cover;
+    const char* title;
+    const char* mode_name;
+    const char* drop_name;
+    const char* flat_name;
+    size_t nbytes;
+    size_t heap_need;
+    Cam cam;
+    Scene scene;
+    int captured = 0;
+    int fi = 0;
+    int nkeep = 0;
+    double last_build = 0.0;
+    double last_flat = 0.0;
+    double last_drop = 0.0;
+
+    CCArena store = cc_arena_heap(megabytes(8)) @destroy;
+    if (!cc_arena_is_live(store)) {
+        eprintln("storm_tile: store arena alloc failed");
+        return 1;
+    }
+
+    if (w < 64)
+        w = 64;
+    if (h < 36)
+        h = 36;
+    if (grid < 1)
+        grid = 1;
+    if (grid > 16)
+        grid = 16;
+    if (mode < 0) {
+        eprintln("storm_tile: STORM_MODE must be quad or unbound");
+        return 1;
+    }
+    if (drop_par < 0) {
+        eprintln("storm_tile: STORM_DROP must be par or seq");
+        return 1;
+    }
+    if (flat_par < 0) {
+        eprintln("storm_tile: STORM_FLAT must be par or seq");
+        return 1;
+    }
+
+    g_cut = env_u32("STORM_CUT", 3);
+    cover = cover_pow2(w, h);
+    g_qdepth = cover_depth(cover);
+    g_build_seq = seq;
+    g_build_unbound = (mode == MODE_UNBOUND);
+    g_drop_par = drop_par;
+    g_flat_par = flat_par;
+    g_frame_gen = 1;
+    if (headless && nframes == 0)
+        nframes = 8;
+    if (nframes > STORM_FRAME_CAP)
+        nframes = STORM_FRAME_CAP;
+
+    heap_need = g_build_seq ? tree_bytes(cover) : megabytes(8);
+    {
+        CCArena frames = cc_arena_heap(heap_need) @destroy;
+        if (!cc_arena_is_live(frames)) {
+            eprintln("storm_tile: tree arena alloc failed");
+            return 1;
+        }
+        g_tiles = frames;
+
+        nbytes = (size_t)w * (size_t)h * 4u;
+        char[:] fb = store.alloc_slice_bytes(nbytes);
+        if (fb.len != nbytes) {
+            eprintln("storm_tile: framebuffer alloc failed");
+            return 1;
+        }
+
+        scene = (Scene){0};
+        if (!build_scene(&scene, grid)) {
+            eprintln("storm_tile: scene init failed");
+            return 1;
+        }
+
+        cam.pos = vec3(0.0, EYE, 6.0);
+        cam.yaw = 0.0;
+        cam.pitch = -0.12;
+
+        g_scene = &scene;
+        g_fb = (unsigned char*)fb.ptr;
+        g_w = w;
+        g_h = h;
+        g_cam = cam;
+
+        title = "parallel_storm tile quad";
+        mode_name = "quad";
+        if (mode == MODE_UNBOUND) {
+            title = "parallel_storm tile unbound";
+            mode_name = "unbound";
+        }
+        drop_name = drop_par ? "drop-par" : "drop-seq";
+        flat_name = flat_par ? "flat-par" : "flat-seq";
+        if (seq)
+            mode_name = "seq";
+        if (!headless)
+            storm_rl_init(win_w, win_h, w, h, title);
+        else
+            fprintf(stderr,
+                    "storm_tile %dx%d %s %s %s shade=%d gamma=%d cut=%u frames=%d\n",
+                    w, h, mode_name, drop_name, flat_name, shade_wanted(),
+                    fb_gamma(), g_cut, nframes);
+
+        while (headless ? (nframes == 0 || fi < nframes)
+                        : !storm_rl_should_close()) {
+            float mdx = 0.0f;
+            float mdy = 0.0f;
+            double dt = headless ? 0.016 : (double)storm_rl_dt();
+            Vec wish;
+            double speed;
+            Look look;
+            CCString hud;
+            const char* hud_c;
+            Child root;
+            double t0;
+            double t1;
+            double t2;
+            double t3;
+            double t4;
+            int bms;
+            int fms;
+            int dms;
+
+            if (!headless && nframes && fi >= nframes)
+                break;
+
+            if (dt <= 0.0 || dt > 0.08)
+                dt = 0.016;
+
+            if (!headless) {
+                if (storm_rl_key_q())
+                    break;
+                if (storm_rl_click())
+                    storm_rl_set_capture(1);
+                if (storm_rl_key_esc_pressed())
+                    storm_rl_set_capture(0);
+                captured = storm_rl_captured();
+
+                storm_rl_mouse_delta(&mdx, &mdy);
+                if (captured) {
+                    cam.yaw += (double)mdx * 0.0022;
+                    cam.pitch -= (double)mdy * 0.0022;
+                    if (cam.pitch < -1.4)
+                        cam.pitch = -1.4;
+                    if (cam.pitch > 1.4)
+                        cam.pitch = 1.4;
+                }
+
+                look = cam_look(cam, w, h);
+                wish = vec3(0.0, 0.0, 0.0);
+                if (storm_rl_key_w()) {
+                    Vec f = vec3(look.forward.x, 0.0, look.forward.z);
+                    wish = wish.add(f);
+                }
+                if (storm_rl_key_s()) {
+                    Vec f = vec3(look.forward.x, 0.0, look.forward.z);
+                    wish = wish.minus(f);
+                }
+                if (storm_rl_key_d()) {
+                    Vec r = vec3(look.right.x, 0.0, look.right.z);
+                    wish = wish.add(r);
+                }
+                if (storm_rl_key_a()) {
+                    Vec r = vec3(look.right.x, 0.0, look.right.z);
+                    wish = wish.minus(r);
+                }
+                if (wish.dot(wish) > 1.0e-8) {
+                    speed = storm_rl_key_shift() ? 10.0 : 5.0;
+                    wish = wish.norm();
+                    wish = wish.scale(speed * dt);
+                    cam.pos = cam.pos.add(wish);
+                }
+                collide(&cam, &scene);
+            } else {
+                look = cam_look(cam, w, h);
+            }
+
+            g_cam = cam;
+            g_look = look;
+
+            {
+                CCArenaCheckpoint cp = g_tiles.try_checkpoint() !>;
+                t0 = now_ms();
+                root = tile_build(0, 0, 0, cover, g_tiles);
+                t1 = now_ms();
+                if (!child_ok(root)) {
+                    eprintln("storm_tile: tree alloc failed");
+                    cp.try_restore() !>;
+                    g_frame_gen++;
+                    break;
+                }
+                (void)flatten_child(root, 0, 0, 0, cover);
+                t2 = now_ms();
+                (void)drop_child(root, 0);
+                t3 = now_ms();
+                cp.try_restore() !>;
+                g_frame_gen++;
+                t4 = now_ms();
+            }
+
+            last_build = t1 - t0;
+            last_flat = t2 - t1;
+            last_drop = t3 - t2;
+            if (fi > 0 && nkeep < STORM_FRAME_CAP) {
+                g_ms_build[nkeep] = last_build;
+                g_ms_flat[nkeep] = last_flat;
+                g_ms_drop[nkeep] = last_drop;
+                g_ms_restore[nkeep] = t4 - t3;
+                nkeep++;
+            }
+            fi++;
+
+            if (!headless) {
+                bms = (int)(last_build + 0.5);
+                fms = (int)(last_flat + 0.5);
+                dms = (int)(last_drop + 0.5);
+                {
+                    cc_arena_stack(hud_a, 256);
+                    hud = @string(`${mode_name} · ${drop_name} · b ${bms} · f ${fms} · d ${dms}`, hud_a);
+                    hud_c = hud.cstr(hud_a);
+                    if (!hud_c)
+                        hud_c = "";
+                    storm_rl_present(g_fb, hud_c);
+                }
+            }
+        }
+
+        if (!headless)
+            storm_rl_shutdown();
+        if (nkeep > 0) {
+            double mb = storm_median(g_ms_build, nkeep);
+            double mf = storm_median(g_ms_flat, nkeep);
+            double md = storm_median(g_ms_drop, nkeep);
+            double mr = storm_median(g_ms_restore, nkeep);
+            fprintf(stderr,
+                    "storm_tile median n=%d  build=%.2f  flatten=%.2f  drop=%.2f  restore=%.2f  total=%.2f ms\n",
+                    nkeep, mb, mf, md, mr, mb + mf + md + mr);
+        }
+        return 0;
+    }
+}

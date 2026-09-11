@@ -1,0 +1,87 @@
+#!/usr/bin/env -S ../../cc/bin/ccc --as=shcc
+/*
+ * Local make-facing tasks. From this folder:
+ *
+ *   ./make.shcc @
+ *   ./make.shcc @build
+ *   ./make.shcc @run
+ *   ./make.shcc @run_unbound
+ *   ./make.shcc @run_quad
+ *   ./make.shcc @run_tile
+ *   ./make.shcc @run_tile_unbound
+ *
+ * `cc_script_sh` always cds to the repo root. These tasks spawn `make`
+ * with cwd = this file's directory.
+ */
+
+static int storm_make(const char* goal) {
+    CCArena a = cc_arena_heap(kilobytes(64)) @destroy;
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    @errhandler(CCIoError e) {
+        eprintln(cc_io_error_str(e));
+        return 1;
+    }
+    CCSlice dir = cc_path_dirname(a, cc_slice_cstr(__FILE__));
+    CCCommand cmd = cc_command(a, @slice("make"));
+    cmd.arg(goal);
+    cmd.cwd(dir);
+    cmd.inherit_stdio();
+    return cmd.status() !>;
+}
+
+static int storm_run_mode(const char* mode, const char* goal) {
+    setenv("STORM_MODE", mode, 1);
+    return storm_make(goal);
+}
+
+/**
+ * @task Fetch raylib if needed and build out/storm.
+ */
+static int build() {
+    return storm_make("all");
+}
+
+/**
+ * @task Build, then walk with @parallel for over scanlines.
+ */
+static int run() {
+    return storm_make("run");
+}
+
+/**
+ * @task Same window, quadtree @parallel { } at every split.
+ */
+static int run_unbound() {
+    return storm_run_mode("unbound", "run");
+}
+
+/**
+ * @task Same tree, @parallel (d < STORM_CUT) — default cut 3.
+ */
+static int run_quad() {
+    return storm_run_mode("quad", "run");
+}
+
+/**
+ * @task ADT Tile tree: construct, flatten to the buffer, drop.
+ */
+static int run_tile() {
+    return storm_make("run-tile");
+}
+
+/**
+ * @task Same ADT, ungated @parallel { } while building.
+ */
+static int run_tile_unbound() {
+    return storm_run_mode("unbound", "run-tile");
+}
+
+/**
+ * @task Remove out/ and the raylib objects.
+ */
+static int clean() {
+    return storm_make("clean");
+}
+
+"storm: use @build, @run, @run_unbound, @run_quad, @run_tile, @run_tile_unbound, @clean (or @ to list)".println();
+return 2;

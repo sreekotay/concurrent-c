@@ -51,6 +51,11 @@ ifeq ($(BUILD),debug)
 else
   CFLAGS := $(CFLAGS_COMMON) -O2 -ffunction-sections -fdata-sections
 endif
+ifeq ($(shell uname -s),Darwin)
+  LD_GC_SECTIONS := -Wl,-dead_strip
+else
+  LD_GC_SECTIONS := -Wl,--gc-sections
+endif
 # UFCS requires the patched TCC extension (AST hooks). Enforce TCC_EXT=1.
 ifneq ($(TCC_EXT),1)
   $(error TCC_EXT must be 1 (patched TCC required for comptime / libtcc); set TCC_EXT=1 and ensure TCC_INC/TCC_LIB point to the patched tcc)
@@ -511,7 +516,7 @@ $(OUT_BINDIR)/%_cc: $(CLEAN_BOOT_DIR)/%.c $(CLEAN_BOOT_OBJ)/lower_cch.o \
 		$(OBJDIR)/runtime/concurrent_c.o $(SHADOW_COMPTIME_LIB) $(TCC_LIB_DEP)
 	@mkdir -p $(dir $@) $(CLEAN_BOOT_OBJ)
 	$(CC) $(CLEAN_BOOT_CFLAGS) -c $< -o $(CLEAN_BOOT_OBJ)/$*.o
-	$(CC) -O2 -Wl,--gc-sections $(CLEAN_BOOT_OBJ)/$*.o $(CLEAN_BOOT_OBJ)/lower_cch.o \
+	$(CC) -O2 $(LD_GC_SECTIONS) $(CLEAN_BOOT_OBJ)/$*.o $(CLEAN_BOOT_OBJ)/lower_cch.o \
 		$(abspath $(OBJDIR)/runtime/concurrent_c.o) $(LOWER_CC_COMPTIME_LIBS) -lm -o $@
 	@echo "built $@ from clean seed $(CLEAN_BOOT_VER)"
 

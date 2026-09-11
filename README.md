@@ -97,6 +97,10 @@ tutorial, idiomatic, and production code — and race their upstreams
 - [**raytracer**](real_projects/raytracer/) — Shirley weekend final scene
   in C, CC `@parallel for` over scanlines, and Go; same LCG, matching
   checksums (`./real_projects/raytracer/compare.sh`).
+- [**parallel_storm**](real_projects/parallel_storm/) — walkable
+  hello-storm leaf (sphere field, WASD + mouse look). Buffer renderer
+  (`make run`) and ADT `Tile` tree (`make run-tile`). Raylib is fetched
+  into `vendor/`, not committed.
 - [**RandomAccess**](real_projects/random_access/) — HPC Challenge GUPS;
   Chapel `ra.chpl` `-nl 1` is the upstream, CC `smp` the matched
   single-locale race (`./real_projects/random_access/compare.sh`).

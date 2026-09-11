@@ -1,0 +1,442 @@
+/*
+ * Shared walkable scene for storm.ccs (buffer) and storm_tile.ccs (ADT).
+ * Include after prelude / math / storm_rl.h from the page.
+ */
+#ifndef STORM_WORLD_CCH
+#define STORM_WORLD_CCH
+
+#include <time.h>
+
+#define SPHERE_R 0.48
+#define SPHERE_SPACING 2.2
+#define EYE 1.55
+#define FOG 0.055
+#define TMIN 0.001
+
+typedef struct Vec {
+    double x, y, z;
+} Vec;
+
+/* Infinite lattice of spheres at (i·SPACING, R, j·SPACING) — no heap list. */
+typedef struct Scene {
+    Vec sun;
+    int march; /* max XZ DDA steps per ray */
+} Scene;
+
+typedef struct Cam {
+    Vec pos;
+    double yaw;
+    double pitch;
+} Cam;
+
+typedef struct Look {
+    Vec forward;
+    Vec right;
+    Vec up;
+    double aspect;
+    double tan_half;
+} Look;
+
+static Scene* g_scene;
+static Look g_look;
+static Cam g_cam;
+static unsigned char* g_fb;
+static int g_w;
+static int g_h;
+static uint32_t g_cut;
+static uint32_t g_qdepth;
+
+static inline double now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+}
+
+static inline double storm_median(double* a, int n) {
+    int i;
+    int j;
+    if (n <= 0)
+        return 0.0;
+    for (i = 0; i < n; i++) {
+        for (j = i + 1; j < n; j++) {
+            if (a[j] < a[i]) {
+                double t = a[i];
+                a[i] = a[j];
+                a[j] = t;
+            }
+        }
+    }
+    if ((n & 1) != 0)
+        return a[n / 2];
+    return 0.5 * (a[n / 2 - 1] + a[n / 2]);
+}
+
+static inline Vec vec3(double x, double y, double z) {
+    Vec r;
+    r.x = x;
+    r.y = y;
+    r.z = z;
+    return r;
+}
+
+static inline Vec Vec_add(Vec* a, Vec b) {
+    return vec3(a->x + b.x, a->y + b.y, a->z + b.z);
+}
+
+static inline Vec Vec_minus(Vec* a, Vec b) {
+    return vec3(a->x - b.x, a->y - b.y, a->z - b.z);
+}
+
+static inline Vec Vec_scale(Vec* a, double t) {
+    return vec3(a->x * t, a->y * t, a->z * t);
+}
+
+static inline double Vec_dot(Vec* a, Vec b) {
+    return a->x * b.x + a->y * b.y + a->z * b.z;
+}
+
+static inline Vec Vec_cross(Vec* a, Vec b) {
+    return vec3(a->y * b.z - a->z * b.y, a->z * b.x - a->x * b.z, a->x * b.y - a->y * b.x);
+}
+
+static inline Vec Vec_norm(Vec* a) {
+    return Vec_scale(a, 1.0 / sqrt(Vec_dot(a, *a)));
+}
+
+static inline Vec Vec_lerp(Vec* a, Vec b, double t) {
+    Vec left = Vec_scale(a, 1.0 - t);
+    Vec right = Vec_scale(&b, t);
+    return Vec_add(&left, right);
+}
+
+static inline uint32_t env_u32(const char* key, uint32_t fallback) {
+    const char* s = getenv(key);
+    if (!s || !s[0])
+        return fallback;
+    return (uint32_t)atoi(s);
+}
+
+/* STORM_FB_GAMMA=0 — skip sqrt (measure convert vs store). Default on. */
+static inline int fb_gamma(void) {
+    static int cached = -1;
+    if (cached < 0)
+        cached = env_u32("STORM_FB_GAMMA", 1) != 0u;
+    return cached;
+}
+
+static inline unsigned char chan(double x) {
+    if (x < 0.0)
+        x = 0.0;
+    if (x > 1.0)
+        x = 1.0;
+    if (fb_gamma())
+        x = sqrt(x);
+    return (unsigned char)(x * 255.0 + 0.5);
+}
+
+static inline void put_rgb(int x, int y, Vec c) {
+    size_t i;
+    if (x < 0 || y < 0 || x >= g_w || y >= g_h)
+        return;
+    i = ((size_t)y * (size_t)g_w + (size_t)x) * 4u;
+    g_fb[i] = chan(c.x);
+    g_fb[i + 1] = chan(c.y);
+    g_fb[i + 2] = chan(c.z);
+    g_fb[i + 3] = 255;
+}
+
+static inline Vec sky(Vec d) {
+    double a = 0.5 * (d.y + 1.0);
+    Vec horizon = vec3(0.92, 0.95, 1.0);
+    Vec zenith = vec3(0.42, 0.68, 0.98);
+    if (a < 0.0)
+        a = 0.0;
+    if (a > 1.0)
+        a = 1.0;
+    return horizon.lerp(zenith, a);
+}
+
+static inline Vec checker_at(Vec p) {
+    int ix = (int)floor(p.x);
+    int iz = (int)floor(p.z);
+    if (((ix + iz) & 1) == 0)
+        return vec3(0.78, 0.78, 0.80);
+    return vec3(0.32, 0.36, 0.40);
+}
+
+static inline Vec sphere_col(void) {
+    return vec3(0.82, 0.40, 0.32);
+}
+
+static inline Vec sphere_center(int ix, int iz) {
+    return vec3((double)ix * SPHERE_SPACING, SPHERE_R, (double)iz * SPHERE_SPACING);
+}
+
+/* Ray vs one lattice sphere; updates best hit. */
+static inline int hit_sphere_ij(int ix, int iz, Vec o, Vec d, double* best,
+                                Vec* p_out, Vec* n_out, Vec* col_out) {
+    Vec c = sphere_center(ix, iz);
+    Vec oc = o.minus(c);
+    double b = oc.dot(d);
+    double c2 = oc.dot(oc) - SPHERE_R * SPHERE_R;
+    double disc = b * b - c2;
+    double t;
+    if (disc < 0.0)
+        return 0;
+    t = -b - sqrt(disc);
+    if (t <= TMIN || t >= *best)
+        return 0;
+    {
+        Vec along = d.scale(t);
+        Vec p = o.add(along);
+        Vec n = p.minus(c);
+        *best = t;
+        *p_out = p;
+        *n_out = n.norm();
+        *col_out = sphere_col();
+    }
+    return 1;
+}
+
+/* Test the four lattice corners of XZ cell (ci, cj). */
+static inline void hit_cell_spheres(int ci, int cj, Vec o, Vec d, double* best,
+                                    Vec* p_out, Vec* n_out, Vec* col_out) {
+    (void)hit_sphere_ij(ci, cj, o, d, best, p_out, n_out, col_out);
+    (void)hit_sphere_ij(ci + 1, cj, o, d, best, p_out, n_out, col_out);
+    (void)hit_sphere_ij(ci, cj + 1, o, d, best, p_out, n_out, col_out);
+    (void)hit_sphere_ij(ci + 1, cj + 1, o, d, best, p_out, n_out, col_out);
+}
+
+/* Sequential fold — ground plane + infinite sphere lattice (XZ DDA). */
+static inline int hit_world(Vec o, Vec d, double tmax, double* t_out, Vec* p_out,
+                            Vec* n_out, Vec* col_out) {
+    double best = tmax;
+    int found = 0;
+    double t_plane;
+    int march = g_scene ? g_scene->march : 64;
+    int steps;
+    int ci;
+    int cj;
+    int si;
+    int sj;
+    double t_max_xz;
+    double next_x;
+    double next_z;
+    double t_dx;
+    double t_dz;
+    double inv_dx;
+    double inv_dz;
+
+    if (d.y < -1.0e-8 || d.y > 1.0e-8) {
+        t_plane = -o.y / d.y;
+        if (t_plane > TMIN && t_plane < best) {
+            Vec along = d.scale(t_plane);
+            Vec p = o.add(along);
+            best = t_plane;
+            found = 1;
+            *p_out = p;
+            *n_out = vec3(0.0, 1.0, 0.0);
+            *col_out = checker_at(p);
+        }
+    }
+
+    /* 2D DDA on XZ; each cell tests its four corner spheres. */
+    if (march < 1)
+        march = 1;
+    ci = (int)floor(o.x / SPHERE_SPACING);
+    cj = (int)floor(o.z / SPHERE_SPACING);
+    si = (d.x > 1.0e-12) ? 1 : ((d.x < -1.0e-12) ? -1 : 0);
+    sj = (d.z > 1.0e-12) ? 1 : ((d.z < -1.0e-12) ? -1 : 0);
+    inv_dx = (si != 0) ? (SPHERE_SPACING / fabs(d.x)) : 1.0e30;
+    inv_dz = (sj != 0) ? (SPHERE_SPACING / fabs(d.z)) : 1.0e30;
+    if (si > 0)
+        next_x = ((double)(ci + 1) * SPHERE_SPACING - o.x) / d.x;
+    else if (si < 0)
+        next_x = ((double)ci * SPHERE_SPACING - o.x) / d.x;
+    else
+        next_x = 1.0e30;
+    if (sj > 0)
+        next_z = ((double)(cj + 1) * SPHERE_SPACING - o.z) / d.z;
+    else if (sj < 0)
+        next_z = ((double)cj * SPHERE_SPACING - o.z) / d.z;
+    else
+        next_z = 1.0e30;
+    t_dx = inv_dx;
+    t_dz = inv_dz;
+    t_max_xz = best;
+    if (t_max_xz > 1.0e6)
+        t_max_xz = 1.0e6;
+
+    {
+        Vec hp, hn, hc;
+        double b0 = best;
+        hit_cell_spheres(ci, cj, o, d, &best, &hp, &hn, &hc);
+        if (best < b0) {
+            found = 1;
+            *p_out = hp;
+            *n_out = hn;
+            *col_out = hc;
+            t_max_xz = best;
+        }
+    }
+
+    for (steps = 0; steps < march; steps++) {
+        Vec hp, hn, hc;
+        double b0;
+        if (next_x < next_z) {
+            if (next_x > t_max_xz)
+                break;
+            ci += si;
+            next_x += t_dx;
+        } else {
+            if (next_z > t_max_xz)
+                break;
+            cj += sj;
+            next_z += t_dz;
+        }
+        b0 = best;
+        hit_cell_spheres(ci, cj, o, d, &best, &hp, &hn, &hc);
+        if (best < b0) {
+            found = 1;
+            *p_out = hp;
+            *n_out = hn;
+            *col_out = hc;
+            t_max_xz = best;
+        }
+    }
+
+    if (found)
+        *t_out = best;
+    return found;
+}
+
+static inline Vec shade(Vec o, Vec d) {
+    double t = 0.0;
+    Vec p, n, col, l, sky_c, lit;
+    double diff, fog, dummy;
+    Vec ign_p, ign_n, ign_c;
+    if (!hit_world(o, d, 1.0e30, &t, &p, &n, &col))
+        return sky(d);
+    l = g_scene->sun.norm();
+    diff = n.dot(l);
+    if (diff < 0.0)
+        diff = 0.0;
+    {
+        Vec bump = n.scale(0.002);
+        Vec from = p.add(bump);
+        if (hit_world(from, l, 1.0e30, &dummy, &ign_p, &ign_n, &ign_c))
+            diff *= 0.18;
+    }
+    lit = col.scale(0.12 + 0.88 * diff);
+    fog = 1.0 - exp(-t * FOG);
+    if (fog < 0.0)
+        fog = 0.0;
+    if (fog > 1.0)
+        fog = 1.0;
+    sky_c = sky(d);
+    return lit.lerp(sky_c, fog);
+}
+
+static inline Vec ray_dir(int x, int y) {
+    double u = ((double)x + 0.5) / (double)g_w * 2.0 - 1.0;
+    double v = 1.0 - ((double)y + 0.5) / (double)g_h * 2.0;
+    Vec horiz = g_look.right.scale(u * g_look.aspect * g_look.tan_half);
+    Vec vert = g_look.up.scale(v * g_look.tan_half);
+    Vec d = g_look.forward.add(horiz);
+    d = d.add(vert);
+    return d.norm();
+}
+
+/* STORM_SHADE=0 — skip hit/shade (cheap pattern). Isolates tree / spawn /
+ * FB cost from the ray fold. Default on. */
+static inline int shade_wanted(void) {
+    static int cached = -1;
+    if (cached < 0)
+        cached = env_u32("STORM_SHADE", 1) != 0u;
+    return cached;
+}
+
+static inline Vec pixel_at(int x, int y) {
+    if (!shade_wanted()) {
+        double u = (double)((x ^ y) & 255) / 255.0;
+        return vec3(u, 0.35, 1.0 - u);
+    }
+    return shade(g_cam.pos, ray_dir(x, y));
+}
+
+static inline int cover_pow2(int w, int h) {
+    unsigned n = (unsigned)(w > h ? w : h);
+    if (n <= 1u)
+        return 1;
+    n--;
+    n |= n >> 1;
+    n |= n >> 2;
+    n |= n >> 4;
+    n |= n >> 8;
+    n |= n >> 16;
+    return (int)(n + 1u);
+}
+
+static inline uint32_t cover_depth(int cover) {
+    if (cover <= 1)
+        return 0;
+    return (uint32_t)(31 - __builtin_clz((unsigned)cover));
+}
+
+static inline Look cam_look(Cam cam, int w, int h) {
+    Look k;
+    double cp = cos(cam.pitch);
+    {
+        Vec fwd = vec3(sin(cam.yaw) * cp, sin(cam.pitch), -cos(cam.yaw) * cp);
+        Vec world_up = vec3(0.0, 1.0, 0.0);
+        Vec right;
+        Vec up;
+        k.forward = fwd.norm();
+        right = k.forward.cross(world_up);
+        k.right = right.norm();
+        up = k.right.cross(k.forward);
+        k.up = up.norm();
+    }
+    k.aspect = (double)w / (double)h;
+    k.tan_half = tan(0.5 * (60.0 * 3.14159265358979323846 / 180.0));
+    return k;
+}
+
+static inline void collide(Cam* cam, Scene* scene) {
+    int i0;
+    int j0;
+    int di;
+    int dj;
+    (void)scene;
+    i0 = (int)floor(cam->pos.x / SPHERE_SPACING);
+    j0 = (int)floor(cam->pos.z / SPHERE_SPACING);
+    for (dj = -2; dj <= 2; dj++) {
+        for (di = -2; di <= 2; di++) {
+            Vec c = sphere_center(i0 + di, j0 + dj);
+            Vec d = vec3(cam->pos.x - c.x, 0.0, cam->pos.z - c.z);
+            double lim = SPHERE_R + 0.28;
+            double d2 = d.dot(d);
+            if (d2 < lim * lim && d2 > 1.0e-8) {
+                Vec n = d.norm();
+                cam->pos.x = c.x + n.x * lim;
+                cam->pos.z = c.z + n.z * lim;
+            }
+        }
+    }
+    cam->pos.y = EYE;
+}
+
+/* STORM_GRID → DDA march steps (was finite NxN sphere vec). */
+static inline int build_scene(Scene* scene, int grid) {
+    if (!scene)
+        return 0;
+    scene->sun = vec3(0.35, 1.0, 0.25);
+    scene->march = grid > 0 ? grid : 64;
+    if (scene->march < 8)
+        scene->march = 8;
+    if (scene->march > 512)
+        scene->march = 512;
+    return 1;
+}
+
+#endif /* STORM_WORLD_CCH */

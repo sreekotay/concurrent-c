@@ -1,0 +1,345 @@
+/*
+ * Surface @parallel quadtree vs sequential — the hello storm with a
+ * real leaf.
+ *
+ * Same join as parallel_hello.ccs: recursive `@parallel { }` at every
+ * inner node, seq / unbound / cut rows. The leaf is a Whitted pixel
+ * (`trace`, 4 bounces) over a tiny read-only scene. `hit` is a
+ * sequential fold — not a fork.
+ *
+ *   par  `@parallel { }` — same-site recursive join as the u24 storm.
+ *        A 1-pixel arm is usually still CHURN; the question is whether
+ *        the gate stays CHURN or a heavy leaf goes REAL.
+ *   cut  `@parallel (d < CC_PAR_CUT)` — same arms, serial below the cut.
+ *
+ *   CC_PAR_DEPTH    default 8  (2^d × 2^d leaves; 9 is 512²)
+ *   CC_PAR_SAMPLES  default 3
+ *   CC_PAR_CUT      default 3
+ *   CC_PAR_BARE     default 1; 0 skips the ungated `par` row
+ *   CC_PAR_BOUNCES  default 4
+ *
+ * Compare: ./perf/compare_parallel_trace.sh
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+#include <math.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <time.h>
+
+#define U24_MASK 0xFFFFFFu
+#define SPHERE_CAP 8
+#define DEPTH_CAP 12
+
+typedef struct Vec {
+    double x, y, z;
+} Vec;
+
+typedef struct Sphere {
+    Vec c;
+    double r;
+    Vec col;
+} Sphere;
+
+static uint32_t g_depth = 8;
+static uint32_t g_cut = 3;
+static uint32_t g_bounces = 4;
+static int g_samples = 3;
+
+static Sphere g_spheres[SPHERE_CAP];
+static int g_nspheres = 0;
+static Vec g_light;
+
+static inline uint32_t u24(uint32_t x) {
+    return x & U24_MASK;
+}
+
+static inline Vec v3(double x, double y, double z) {
+    Vec r;
+    r.x = x;
+    r.y = y;
+    r.z = z;
+    return r;
+}
+
+static inline Vec v_add(Vec a, Vec b) { return v3(a.x + b.x, a.y + b.y, a.z + b.z); }
+static inline Vec v_sub(Vec a, Vec b) { return v3(a.x - b.x, a.y - b.y, a.z - b.z); }
+static inline Vec v_scale(Vec a, double t) { return v3(a.x * t, a.y * t, a.z * t); }
+static inline double v_dot(Vec a, Vec b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+
+static inline Vec v_norm(Vec a) {
+    return v_scale(a, 1.0 / sqrt(v_dot(a, a)));
+}
+
+static double now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+}
+
+static void sort_doubles(double* arr, int n) {
+    int i, j;
+    for (i = 0; i < n - 1; i++) {
+        for (j = i + 1; j < n; j++) {
+            if (arr[j] < arr[i]) {
+                double t = arr[i];
+                arr[i] = arr[j];
+                arr[j] = t;
+            }
+        }
+    }
+}
+
+static Sphere sphere(Vec c, double r, Vec col) {
+    Sphere s;
+    s.c = c;
+    s.r = r;
+    s.col = col;
+    return s;
+}
+
+static void demo_scene(void) {
+    g_spheres[0] = sphere(v3(0.0, -100.5, -1.0), 100.0, v3(0.8, 0.8, 0.0));
+    g_spheres[1] = sphere(v3(0.0, 0.0, -1.0), 0.5, v3(0.8, 0.3, 0.3));
+    g_spheres[2] = sphere(v3(-1.0, 0.0, -1.0), 0.5, v3(0.8, 0.8, 0.8));
+    g_spheres[3] = sphere(v3(1.0, 0.0, -1.0), 0.5, v3(0.3, 0.8, 0.3));
+    g_nspheres = 4;
+    g_light = v3(2.0, 2.0, 1.0);
+}
+
+/* Sequential fold — the leaf of the parallel tree. Nearest t > 0.001. */
+static int hit(Vec o, Vec d, double* t_out, int* si_out) {
+    double best = 1.0e30;
+    int found = 0;
+    int i;
+    for (i = 0; i < g_nspheres; i++) {
+        Sphere s = g_spheres[i];
+        Vec oc = v_sub(o, s.c);
+        double b = v_dot(oc, d);
+        double c = v_dot(oc, oc) - s.r * s.r;
+        double disc = b * b - c;
+        double t;
+        if (disc < 0.0)
+            continue;
+        t = -b - sqrt(disc);
+        if (t > 0.001 && t < best) {
+            best = t;
+            found = 1;
+            *si_out = i;
+        }
+    }
+    if (found)
+        *t_out = best;
+    return found;
+}
+
+static Vec trace(uint32_t depth, Vec o, Vec d) {
+    double t = 0.0;
+    int si = 0;
+    Sphere s;
+    Vec hp, n, l, refl, bounce;
+    double diff;
+    if (depth == 0)
+        return v3(0.0, 0.0, 0.0);
+    if (!hit(o, d, &t, &si))
+        return v3(0.5, 0.7, 1.0);
+    s = g_spheres[si];
+    hp = v_add(o, v_scale(d, t));
+    n = v_norm(v_sub(hp, s.c));
+    l = v_norm(v_sub(g_light, hp));
+    diff = v_dot(n, l);
+    if (diff < 0.0)
+        diff = 0.0;
+    refl = v_sub(d, v_scale(n, 2.0 * v_dot(n, d)));
+    bounce = trace(depth - 1, hp, refl);
+    return v_add(v_scale(s.col, diff), v_scale(bounce, 0.3));
+}
+
+static uint32_t chan(double x) {
+    if (x < 0.0)
+        x = 0.0;
+    if (x > 1.0)
+        x = 1.0;
+    return (uint32_t)(x * 255.0 + 0.5);
+}
+
+static uint32_t color_u24(Vec v) {
+    return u24((chan(v.x) << 16) | (chan(v.y) << 8) | chan(v.z));
+}
+
+static uint32_t mix4(uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
+    return u24(u24(u24(a + b) + c) + d);
+}
+
+static uint32_t leaf_at(double x, double y, double size) {
+    double h = size * 0.5;
+    Vec dir = v_norm(v3(x + h, y + h, -1.0));
+    return color_u24(trace(g_bounces, v3(0.0, 0.0, 0.0), dir));
+}
+
+static uint32_t render_seq(uint32_t d, double x, double y, double size) {
+    double h;
+    double xh, yh;
+    uint32_t d1;
+    if (d >= g_depth)
+        return leaf_at(x, y, size);
+    h = size * 0.5;
+    xh = x + h;
+    yh = y + h;
+    d1 = d + 1;
+    return mix4(render_seq(d1, x, y, h),
+                render_seq(d1, xh, y, h),
+                render_seq(d1, x, yh, h),
+                render_seq(d1, xh, yh, h));
+}
+
+static uint32_t render_par(uint32_t d, double x, double y, double size) {
+    @errhandler(CCError e) cc_error_exit(e);
+    double h;
+    double xh, yh;
+    uint32_t d1;
+    uint32_t nw = 0;
+    uint32_t ne = 0;
+    uint32_t sw = 0;
+    uint32_t se = 0;
+    if (d >= g_depth)
+        return leaf_at(x, y, size);
+    h = size * 0.5;
+    xh = x + h;
+    yh = y + h;
+    d1 = d + 1;
+    @parallel {
+        nw = render_par(d1, x, y, h);
+        ne = render_par(d1, xh, y, h);
+        sw = render_par(d1, x, yh, h);
+        se = render_par(d1, xh, yh, h);
+    } !>.wait()!>;
+    return mix4(nw, ne, sw, se);
+}
+
+static uint32_t render_cut(uint32_t d, double x, double y, double size) {
+    @errhandler(CCError e) cc_error_exit(e);
+    double h;
+    double xh, yh;
+    uint32_t d1;
+    uint32_t nw = 0;
+    uint32_t ne = 0;
+    uint32_t sw = 0;
+    uint32_t se = 0;
+    if (d >= g_depth)
+        return leaf_at(x, y, size);
+    h = size * 0.5;
+    xh = x + h;
+    yh = y + h;
+    d1 = d + 1;
+    @parallel (d < g_cut) {
+        nw = render_cut(d1, x, y, h);
+        ne = render_cut(d1, xh, y, h);
+        sw = render_cut(d1, x, yh, h);
+        se = render_cut(d1, xh, yh, h);
+    } !>.wait()!>;
+    return mix4(nw, ne, sw, se);
+}
+
+typedef uint32_t (*render_fn)(uint32_t, double, double, double);
+
+typedef struct {
+    render_fn fn;
+    uint32_t result;
+} RootEnv;
+
+static void* root_thunk(void* arg) {
+    RootEnv* e = (RootEnv*)arg;
+    e->result = e->fn(0, -1.0, -1.0, 2.0);
+    return NULL;
+}
+
+static uint32_t run_on_fiber(render_fn fn) {
+    RootEnv e;
+    e.fn = fn;
+    e.result = 0;
+    CCTask t = cc_fiber_spawn_task(root_thunk, &e);
+    if (t.kind == CC_TASK_KIND_INVALID)
+        abort();
+    (void)cc_block_on_intptr(t);
+    return e.result;
+}
+
+static double time_once(render_fn fn, uint32_t expect, int on_fiber) {
+    @errhandler(CCError e) cc_error_exit(e);
+    double t0 = now_ms();
+    uint32_t r = on_fiber ? run_on_fiber(fn) : fn(0, -1.0, -1.0, 2.0);
+    double t1 = now_ms();
+    if (r != expect) {
+        eprintln(@string(`mismatch: got=${r} expect=${expect}`, @scratch));
+        abort();
+    }
+    return t1 - t0;
+}
+
+static double median_of(render_fn fn, uint32_t expect, int on_fiber) {
+    double* xs = (double*)malloc((size_t)g_samples * sizeof(double));
+    int i;
+    double med;
+    if (!xs)
+        abort();
+    (void)time_once(fn, expect, on_fiber);
+    (void)time_once(fn, expect, on_fiber);
+    for (i = 0; i < g_samples; i++)
+        xs[i] = time_once(fn, expect, on_fiber);
+    sort_doubles(xs, g_samples);
+    med = xs[g_samples / 2];
+    free(xs);
+    return med;
+}
+
+static uint32_t env_u32(const char* key, uint32_t fallback) {
+    const char* s = getenv(key);
+    if (!s || !s[0])
+        return fallback;
+    return (uint32_t)atoi(s);
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    g_depth = env_u32("CC_PAR_DEPTH", 8);
+    g_cut = env_u32("CC_PAR_CUT", 3);
+    g_samples = (int)env_u32("CC_PAR_SAMPLES", 3);
+    g_bounces = env_u32("CC_PAR_BOUNCES", 4);
+    if (g_samples < 1)
+        g_samples = 1;
+    if (g_bounces < 1)
+        g_bounces = 1;
+    if (g_depth < 1 || g_depth > DEPTH_CAP) {
+        uint32_t cap = DEPTH_CAP;
+        eprintln(@string(`CC_PAR_DEPTH must be 1..${cap} (quadtree 2^d² leaves)`, @scratch));
+        return 1;
+    }
+
+    demo_scene();
+
+    int bare = (int)env_u32("CC_PAR_BARE", 1);
+    uint32_t expect = render_seq(0, -1.0, -1.0, 2.0);
+    double seq_ms = median_of(render_seq, expect, 0);
+    double par_ms = 0.0;
+    double vs_par = 0.0;
+    double cut_ms;
+    double vs_cut;
+
+    if (bare) {
+        par_ms = median_of(render_par, expect, 1);
+        vs_par = par_ms > 0.0 ? seq_ms / par_ms : 0.0;
+    }
+
+    cut_ms = median_of(render_cut, expect, 1);
+    vs_cut = cut_ms > 0.0 ? seq_ms / cut_ms : 0.0;
+
+    println(@string(`parallel_trace (@parallel): depth=${g_depth} cut=${g_cut} samples=${g_samples} bounces=${g_bounces} (par on fiber)`, @scratch));
+    println(@string(` seq ${expect} ${seq_ms} ms`, @scratch));
+    if (bare)
+        println(@string(` par ${expect} ${par_ms} ms vs_seq ${vs_par}x (@parallel { })`, @scratch));
+    else
+        println("  par  skipped  (CC_PAR_BARE=0)");
+    println(@string(` cut ${expect} ${cut_ms} ms vs_seq ${vs_cut}x (@parallel (d<${g_cut}))`, @scratch));
+    return 0;
+}

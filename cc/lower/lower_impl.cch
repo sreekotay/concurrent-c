@@ -463,9 +463,29 @@ static void lw_drop_cc_only(CcLowerer* L) {
 }
 
 /* `#include "x.cch"` names a local header: the C includes its lowered
- * `<rel/x.h>` (relative to the repository root, under the host's include
- * path), and the header is recorded so the tool lowers it too. Angle
- * includes are the driver's business. */
+ * `<rel/x.h>` (under the host's include path), and the header is recorded
+ * so the tool lowers it too. `rel` is against the repository root when the
+ * header lives in the checkout; otherwise against the unit's quote directory
+ * (a temp tree or an out-of-tree project). Angle includes are the driver's
+ * business. */
+
+static bool lw_rel_under(CCSlice abs, CCSlice root, CCSlice* rel) {
+    if (!root.len || abs.len <= root.len) return false;
+    if (memcmp(abs.ptr, root.ptr, root.len) != 0) return false;
+    if (abs.ptr[root.len] != '/') return false;
+    *rel = cc_slice_from_buffer((char*)abs.ptr + root.len + 1, abs.len - root.len - 1);
+    return true;
+}
+
+/* Path of a resolved local `.cch`, relative to repo root or quote dir. */
+static bool lw_local_header_rel(CcIndex* ix, CcLowerer* L, CCSlice found, CCSlice* rel) {
+    if (lw_rel_under(found, L->opts.repo_root, rel)) return true;
+    if (ix->quote_dir.len) {
+        CCSlice q = cc__canonical_path(ix, ix->quote_dir);
+        if (lw_rel_under(found, q, rel)) return true;
+    }
+    return false;
+}
 /* ---- where a lowered header's own includes belong -------------------------
  *
  * A `.cch` may name a type that a header it includes further down provides,
@@ -748,12 +768,9 @@ void CcLowerer_includes(CcLowerer* L) {
         found = cc__resolve_include(ix, L->unit->tape.path, r, &searched);
         if (!found.len) continue;   /* the index reported it */
         found = cc__canonical_path(ix, found);
-        if (found.len > L->opts.repo_root.len && memcmp(found.ptr, L->opts.repo_root.ptr, L->opts.repo_root.len) == 0 &&
-            found.ptr[L->opts.repo_root.len] == '/')
-            rel = cc_slice_from_buffer((char*)found.ptr + L->opts.repo_root.len + 1, found.len - L->opts.repo_root.len - 1);
-        else {
+        if (!lw_local_header_rel(ix, L, found, &rel)) {
             CcSpan at;
-            CCString m = @string(`local header '${r->path}' resolves outside the repository root (${found}); the clean lowerer cannot place its lowered form`, L->arena);
+            CCString m = @string(`local header '${r->path}' resolves outside the repository root and the unit's quote directory (${found}); the clean lowerer cannot place its lowered form`, L->arena);
             at.first = r->tok;
             at.last = r->tok;
             lw_error(L, at, m);
