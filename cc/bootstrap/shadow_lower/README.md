@@ -1,9 +1,11 @@
 # shadow_lower bootstrap snapshots
 
-Committed seed for the **default native front**. Deliberate freezes of the
-lowered C for `cc/shadow/shadow_lower.ccs` plus its lowered
-local-header tree. Stage-0 builds the lowerer with host `cc` without
-re-lowering that `.ccs`.
+Committed seed for the **shadow front**, the opt-in lowerer
+(`--lowerer=shadow`, `CC_LOWERER=shadow`; `make -C cc shadow` builds it).
+The default lowerer is the clean one, seeded under `cc/bootstrap/clean`.
+Deliberate freezes of the lowered C for `cc/shadow/shadow_lower.ccs` plus
+its lowered local-header tree. Stage-0 builds the lowerer with host `cc`
+without re-lowering that `.ccs`.
 
 | Path | Role | Git |
 |------|------|-----|

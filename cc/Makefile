@@ -249,7 +249,13 @@ CCINDEX_BINARY := $(OUT_BINDIR)/ccindex
 LOWER_TOOLS := $(CCLEX_BINARY) $(CCPARSE_BINARY) $(CCLOWER_BINARY) $(CCINDEX_BINARY)
 LOWER_DEPS := $(LOWER_OBJS:.o=.d) $(CCLEX_OBJ:.o=.d) $(CCPARSE_OBJ:.o=.d) $(CCLOWER_OBJ:.o=.d) $(CCINDEX_OBJ:.o=.d)
 
-all: $(CCC_SCRIPT) $(WRAPPER) $(SHADOW_LOWER_WRAPPER) $(RUNTIME_DYLIB) $(LOWER_HEADERS_STAMP) $(LOWER_LIB) $(LOWER_TOOLS)
+# The default build: driver, lowered headers, the clean lowerer's tools
+# from their seed, and the C reference tools. The shadow front is opt-in:
+# `make -C cc shadow` builds it for `--lowerer=shadow`.
+all: $(CCC_SCRIPT) $(WRAPPER) $(RUNTIME_DYLIB) $(LOWER_HEADERS_STAMP) $(LOWER_LIB) $(LOWER_TOOLS) $(CLEAN_TOOLS_CC)
+
+.PHONY: shadow
+shadow: $(SHADOW_LOWER_WRAPPER)
 
 # Patched-TCC guard: a fresh clone (or a changed patch set) gets the CC
 # hooks applied into the submodule working tree BEFORE any CC object that
@@ -483,12 +489,48 @@ ifeq ($(suffix $(TCC_LIB)),.a)
   LOWER_CC_COMPTIME_LIBS := $(abspath $(SHADOW_COMPTIME_LIB)) $(abspath $(TCC_LIB)) -ldl
 endif
 
+# Stage zero of the clean lowerer: its tools host-compiled from the seed
+# under bootstrap/clean/<last-good>, which is their lowered C (the tool,
+# the C of module `lower`, and the faces that C includes). No lowerer is
+# in hand yet; the seed is what a fresh checkout builds the tools from.
+# `lower-cc` rebuilds them from their sources with these, and
+# scripts/lowerer_selfhost.sh says whether the two agree. Ship a seed:
+# scripts/ship_clean_seed.sh --promote.
+CLEAN_BOOT_ROOT := bootstrap/clean
+CLEAN_BOOT_VER := $(shell cat $(CLEAN_BOOT_ROOT)/last-good 2>/dev/null)
+CLEAN_BOOT_DIR := $(CLEAN_BOOT_ROOT)/$(CLEAN_BOOT_VER)
+CLEAN_BOOT_OBJ := $(OBJDIR)/clean_boot
+CLEAN_BOOT_CFLAGS := -I$(CLEAN_BOOT_DIR) -I../out/include -I../cc/include -I../cc -I.. \
+	-O2 -ffunction-sections -fdata-sections -Werror=implicit-function-declaration
+CLEAN_TOOLS_CC := $(OUT_BINDIR)/cclex_cc $(OUT_BINDIR)/ccparse_cc \
+	$(OUT_BINDIR)/cclower_cc $(OUT_BINDIR)/ccindex_cc
+
+$(CLEAN_BOOT_OBJ)/lower_cch.o: $(CLEAN_BOOT_DIR)/lower_cch.c $(wildcard $(CLEAN_BOOT_DIR)/*.h) \
+		$(LOWER_HEADERS_STAMP)
+	@test -n "$(CLEAN_BOOT_VER)" || (echo "missing $(CLEAN_BOOT_ROOT)/last-good"; exit 1)
+	@mkdir -p $(CLEAN_BOOT_OBJ)
+	$(CC) $(CLEAN_BOOT_CFLAGS) -c $< -o $@
+
+$(OUT_BINDIR)/%_cc: $(CLEAN_BOOT_DIR)/%.c $(CLEAN_BOOT_OBJ)/lower_cch.o \
+		$(OBJDIR)/runtime/concurrent_c.o $(SHADOW_COMPTIME_LIB) $(TCC_LIB_DEP)
+	@mkdir -p $(dir $@) $(CLEAN_BOOT_OBJ)
+	$(CC) $(CLEAN_BOOT_CFLAGS) -c $< -o $(CLEAN_BOOT_OBJ)/$*.o
+	$(CC) -O2 -Wl,--gc-sections $(CLEAN_BOOT_OBJ)/$*.o $(CLEAN_BOOT_OBJ)/lower_cch.o \
+		$(abspath $(OBJDIR)/runtime/concurrent_c.o) $(LOWER_CC_COMPTIME_LIBS) -lm -o $@
+	@echo "built $@ from clean seed $(CLEAN_BOOT_VER)"
+
+.PHONY: clean-tools
+clean-tools: $(CLEAN_TOOLS_CC)
+
 .PHONY: lower-cc
-lower-cc: $(CCC_SCRIPT) $(SHADOW_LOWER_WRAPPER) $(LOWER_HEADERS_STAMP)
-	bin/ccc build lower/cclex.ccs -o $(OUT_BINDIR)/cclex_cc
-	bin/ccc build lower/ccparse.ccs -o $(OUT_BINDIR)/ccparse_cc
-	bin/ccc build lower/cclower.ccs --ld-flags "$(LOWER_CC_COMPTIME_LIBS)" -o $(OUT_BINDIR)/cclower_cc
-	bin/ccc build lower/ccindex.ccs -o $(OUT_BINDIR)/ccindex_cc
+# Rebuild the clean tools from their sources with the tools in hand (the
+# seeded ones on a fresh tree). Each lands beside the one that lowered it
+# and moves into place whole, so the lowerer never overwrites itself.
+lower-cc: $(CCC_SCRIPT) $(LOWER_HEADERS_STAMP) $(CLEAN_TOOLS_CC)
+	bin/ccc build --lowerer=clean lower/cclex.ccs -o $(OUT_BINDIR)/cclex_cc.new && mv -f $(OUT_BINDIR)/cclex_cc.new $(OUT_BINDIR)/cclex_cc
+	bin/ccc build --lowerer=clean lower/ccparse.ccs -o $(OUT_BINDIR)/ccparse_cc.new && mv -f $(OUT_BINDIR)/ccparse_cc.new $(OUT_BINDIR)/ccparse_cc
+	bin/ccc build --lowerer=clean lower/cclower.ccs --ld-flags "$(LOWER_CC_COMPTIME_LIBS)" -o $(OUT_BINDIR)/cclower_cc.new && mv -f $(OUT_BINDIR)/cclower_cc.new $(OUT_BINDIR)/cclower_cc
+	bin/ccc build --lowerer=clean lower/ccindex.ccs -o $(OUT_BINDIR)/ccindex_cc.new && mv -f $(OUT_BINDIR)/ccindex_cc.new $(OUT_BINDIR)/ccindex_cc
 
 # shadow_lower self-build:
 #   SHADOW_LOWER_SOURCE=bootstrap (default) — host-cc last-good snapshot

@@ -58,7 +58,7 @@ for a in "$@"; do
     --O0|-O0) opt_o0=1; args+=("--O0") ;;
     --native) ;; # no-op
     --legacy|--compare-front)
-      echo "[test] $a removed: ccc is native-only (shadow_lower)" >&2
+      echo "[test] $a removed: ccc lowers with the clean lowerer (--lowerer=shadow is the opt-in)" >&2
       exit 2
       ;;
     *) args+=("$a") ;;
@@ -129,7 +129,7 @@ fi
 # (git pull of cc/src or tcc-patches while yesterday's ccc still runs).
 need_cc=0
 if [ ! -x "./cc/bin/.ccc-bin" ]; then need_cc=1; fi
-if [ ! -x "./out/cc/bin/shadow_lower" ] && [ ! -x "./cc/bin/shadow_lower" ]; then
+if [ ! -x "./out/cc/bin/cclower_cc" ]; then
   need_cc=1
 fi
 if [ "$need_cc" = 0 ] && [ -x "./cc/bin/ccc" ]; then
@@ -179,8 +179,12 @@ if [ "$need_headers" = 1 ]; then
   make -C cc lower-headers
 fi
 
-if [ ! -x "./out/cc/bin/shadow_lower" ] && [ ! -x "./cc/bin/shadow_lower" ]; then
-  echo "[test] FAIL: needs shadow_lower (make -C cc failed?)"
+if [ ! -x "./out/cc/bin/cclower_cc" ]; then
+  echo "[test] FAIL: needs the clean lowerer, out/cc/bin/cclower_cc (make -C cc failed?)"
+  exit 1
+fi
+if [ "${CC_LOWERER:-}" = "shadow" ] && [ ! -x "./out/cc/bin/shadow_lower" ] && [ ! -x "./cc/bin/shadow_lower" ]; then
+  echo "[test] FAIL: CC_LOWERER=shadow needs shadow_lower (make -C cc shadow)"
   exit 1
 fi
 

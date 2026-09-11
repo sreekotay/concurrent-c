@@ -2538,6 +2538,22 @@ static uint64_t cc__fold_shadow_lower(uint64_t h) {
     return cc__fold_file_content(h, path);
 }
 
+static int cc__find_clean_tool(const char* name, char* dst, size_t cap);
+static int g_lowerer_clean;
+
+/* The lowerer whose bytes produced the C: the clean tool when it is the
+ * one selected, else the shadow front. A rebuilt lowerer must miss. */
+static uint64_t cc__fold_lowerer(uint64_t h) {
+    char path[PATH_MAX];
+    if (!g_lowerer_clean) return cc__fold_shadow_lower(h);
+    path[0] = 0;
+    h = cc__fnv1a64_str(h, "\x03" "cclower_cc:");
+    if (cc__find_clean_tool("cclower_cc", path, sizeof(path)) != 0)
+        return cc__fnv1a64_str(h, "<absent>");
+    h = cc__fnv1a64_str(h, path);
+    return cc__fold_file_content(h, path);
+}
+
 /* Public toolchain id (`ccc --version` / seed). Binary folds can miss when
  * find_shadow_lower resolves to the same path both sides of an overwrite,
  * or to "<absent>" from an app cwd. A seed bump must always miss. */
@@ -3422,7 +3438,7 @@ static int cc__build_one_target_objs(int idx,
                 /* mtime and size above are second-granular: fold the bytes. */
                 h = cc__fold_file_content(h, src_abs);
                 h = cc__fold_ccc_driver(h);
-                h = cc__fold_shadow_lower(h);
+                h = cc__fold_lowerer(h);
                 h = cc__fold_toolchain_id(h);
                 h = cc__fnv1a64_i64(h, (long long)cc_toolchain_content_fp());
                 emit_key = h;
@@ -3978,14 +3994,16 @@ static char g_clean_quote_dir[PATH_MAX];
 static int cc__set_lowerer_name(const char* v) {
     /* The environment carries the choice to the child runs that lower a
      * module unit, and to the key of the C they produce. */
-    if (!v || !v[0] || strcmp(v, "shadow") == 0 || strcmp(v, "native") == 0) {
-        g_lowerer_clean = 0;
-        setenv("CC_LOWERER", "shadow", 1);
-        return 0;
-    }
-    if (strcmp(v, "clean") == 0) {
+    /* The clean lowerer is the default; the shadow front is opt-in
+     * (`--lowerer=shadow`, `CC_LOWERER=shadow`) while it lasts. */
+    if (!v || !v[0] || strcmp(v, "clean") == 0) {
         g_lowerer_clean = 1;
         setenv("CC_LOWERER", "clean", 1);
+        return 0;
+    }
+    if (strcmp(v, "shadow") == 0 || strcmp(v, "native") == 0) {
+        g_lowerer_clean = 0;
+        setenv("CC_LOWERER", "shadow", 1);
         return 0;
     }
     fprintf(stderr, "cc: --lowerer must be clean or shadow (got %s)\n", v);
@@ -5496,8 +5514,8 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
                                       shadow, sizeof(shadow)) != 0) {
         if (!pin[0] && !(opt->ccc_version_pin && opt->ccc_version_pin[0])) {
             fprintf(stderr,
-                    "cc: native front requires shadow_lower "
-                    "(checkout: make -C cc; install: $PREFIX/bin/shadow_lower)\n");
+                    "cc: --lowerer=shadow requires shadow_lower "
+                    "(checkout: make -C cc shadow; install: $PREFIX/bin/shadow_lower)\n");
         }
         return -1;
     }
@@ -8276,7 +8294,7 @@ static int run_build_mode(int argc, char** argv) {
                 h = cc__fold_cc_depends(h, inputs[i]);
                 h = cc__fold_cch_includes(h, inputs[i], cc_flags);
                 h = cc__fold_ccc_driver(h);
-                h = cc__fold_shadow_lower(h);
+                h = cc__fold_lowerer(h);
                 h = cc__fold_toolchain_id(h);
                 emit_key = h;
 
@@ -9243,7 +9261,8 @@ int main(int argc, char **argv) {
     }
     /* Version may appear with --frontend=… ahead of it; scan once. */
     if (cc__scan_frontend_flags(argc, argv) != 0) return 2;
-    if (getenv("CC_LOWERER") && cc__set_lowerer_name(getenv("CC_LOWERER")) != 0) return 2;
+    /* Nothing named picks the default lowerer and tells the child runs. */
+    if (cc__set_lowerer_name(getenv("CC_LOWERER")) != 0) return 2;
     {
         int vi;
         for (vi = 1; vi < argc; vi++) {

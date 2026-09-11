@@ -345,6 +345,17 @@ differential report.
   `lower`, which the four tools include. Every `quote_cch_*` and
   `cch_face_*` row keeps its meaning; `two_includers` is a smoke, since
   two includers of one face is the normal case.
+- **The default.** The clean lowerer is the default; `--lowerer=shadow`
+  and `CC_LOWERER=shadow` opt into the shadow front while it lasts, and
+  `make -C cc shadow` builds it. A fresh checkout bootstraps on clean
+  alone: `cc/bootstrap/clean/<last-good>` holds the lowered C of the
+  four tools, the C of module `lower`, and the faces that C includes;
+  stage zero host-compiles it, `make -C cc lower-cc` rebuilds the tools
+  from source with the seeded ones, and `scripts/lowerer_selfhost.sh`
+  says whether the two agree. `scripts/ship_clean_seed.sh --promote`
+  freezes a new seed. The driver compiles and links a clean-lowered unit
+  itself, so the shadow binary is not on the clean path at all; the unit
+  cache key folds the clean tool's bytes when it is the lowerer.
 - **After M9.** A `@comptime { }` block that registers type hooks stays
   in the stage for the index; `cc_ufcs_register` is read as the `.ufcs`
   entry it is; a copied `#line` pins itself and `@linenumbers off` omits

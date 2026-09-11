@@ -231,11 +231,11 @@ static int run_one_test(const char* stem, const char* input_path, int compile_fa
  * of them the moment they disagree: either it outlives the bug on the
  * lowerer that fixed it, or deleting it turns the other one red. The
  * lowerer is whatever `CC_LOWERER` names, which is what `ccc` itself reads;
- * unset means `shadow`, its default. Both files are consulted, so a plain
+ * unset means `clean`, its default. Both files are consulted, so a plain
  * marker still speaks for every lowerer. */
 static const char* lowerer_name(void) {
     const char* v = getenv("CC_LOWERER");
-    return (v && *v) ? v : "shadow";
+    return (v && *v) ? v : "clean";
 }
 static int run_one_test_maybe_profile(const char* stem, const char* input_path,
                                       int compile_fail, int verbose,
