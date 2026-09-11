@@ -5914,6 +5914,19 @@ static _Thread_local int g_ufcs_typeformal_err = 0;
  * comment between the type name and its `::[` hide the whole site, so the
  * instantiation never happened and the raw spelling reached the C compiler.
  * Returns 1 and sets `*out_lb` to the `[`. */
+/* The generic forms the compiler itself lowers at a `::[` site. Any other
+ * name before `::[` is a generic factory family, produced by running the
+ * family's `CC_GENERIC_FACTORY` at compile time. */
+static int cc__generic_form_is_builtin(const char* gname) {
+    return strcmp(gname, "Vec") == 0 || strcmp(gname, "CCVec") == 0 ||
+           strcmp(gname, "Map") == 0 || strcmp(gname, "ArrayMap") == 0 ||
+           strcmp(gname, "vec_new") == 0 || strcmp(gname, "cc_vec_new") == 0 ||
+           strcmp(gname, "vec_from") == 0 || strcmp(gname, "cc_vec_from") == 0 ||
+           strcmp(gname, "map_new") == 0 || strcmp(gname, "cc_map_new") == 0 ||
+           strcmp(gname, "array_map_new") == 0 ||
+           strcmp(gname, "array_map_new_count") == 0;
+}
+
 static int cc__ident_generic_bracket(const char* src, size_t n, size_t id_e,
                                      size_t* out_lb) {
     size_t p = cc_skip_ws_and_comments(src, n, id_e);
@@ -8705,14 +8718,7 @@ static int cc__try_rewrite_pascal_generic(const char* src, size_t n,
     if (!fl || fl >= sizeof(gname)) return 0;
     memcpy(gname, src + i, fl);
     gname[fl] = 0;
-    if (strcmp(gname, "Vec") == 0 || strcmp(gname, "CCVec") == 0 ||
-        strcmp(gname, "Map") == 0 || strcmp(gname, "ArrayMap") == 0 ||
-        strcmp(gname, "vec_new") == 0 || strcmp(gname, "cc_vec_new") == 0 ||
-        strcmp(gname, "vec_from") == 0 || strcmp(gname, "cc_vec_from") == 0 ||
-        strcmp(gname, "map_new") == 0 || strcmp(gname, "cc_map_new") == 0 ||
-        strcmp(gname, "array_map_new") == 0 ||
-        strcmp(gname, "array_map_new_count") == 0)
-        return 0;
+    if (cc__generic_form_is_builtin(gname)) return 0;
     if (fl > 5 && strcmp(gname + fl - 5, "_make") == 0) {
         size_t k, po = 0;
         int up = 1;
@@ -15456,6 +15462,28 @@ static int cc__cch_range_has_extract_at(const char* src, size_t lo, size_t hi) {
         if (i >= hi) break;
         c = src[i];
         c2 = (i + 1 < hi) ? src[i + 1] : 0;
+        /* `Name::[...]` of a generic factory family: the instance is
+         * produced by running the family at compile time, which is the
+         * unit pipeline's; the header subset lowers only the built-in
+         * forms. Member position (`recv.m::[T]`) is a call, not a type. */
+        if (cc_is_ident_start(c) && (i == lo || !cc_is_ident_char(src[i - 1]))) {
+            size_t id_e = i;
+            while (id_e < hi && cc_is_ident_char(src[id_e])) id_e++;
+            if (cc__ident_generic_bracket(src, hi, id_e, NULL)) {
+                size_t b = cc_rskip_ws_and_comments(src, i);
+                int member_pos = (b > 0 && (src[b - 1] == '.' ||
+                                            (b > 1 && src[b - 1] == '>' &&
+                                             src[b - 2] == '-')));
+                char gname[128];
+                size_t fl = id_e - i;
+                if (fl >= sizeof(gname)) fl = sizeof(gname) - 1;
+                memcpy(gname, src + i, fl);
+                gname[fl] = 0;
+                if (!member_pos && !cc__generic_form_is_builtin(gname)) return 1;
+            }
+            i = id_e;
+            continue;
+        }
         if (c == 'C') {
             size_t mlen = 0;
             if (i + fac_len_ext <= hi && memcmp(src + i, fac_kw_ext, fac_len_ext) == 0 &&
@@ -18360,6 +18388,104 @@ static void cc__blank_comments_keep_lines(char* buf, size_t n) {
  * `include_line_no` restores `#line` after the splice. Returns 0 on
  * success, -1 when the member could not be read or a nested rewrite
  * refused. */
+/* Blank a face's outer include guard (`#ifndef X` / `#define X` first,
+ * `#endif` last) in text about to be spliced into a unit. A repeat
+ * include of a spliced face is already replaced by the driver, so the
+ * guard decides nothing; left in place it wraps the face's angle
+ * includes in a conditional on the root tape, which keeps them at the
+ * splice instead of with the unit's leading includes, and a generic
+ * instance the face names then goes out ahead of the header that
+ * declares it. Newlines are kept so line numbers hold. */
+static void cc__blank_splice_include_guard(char* body, size_t n) {
+    size_t i = 0, ls, le, p, name_at = 0, name_len = 0;
+    size_t if_ls = 0, if_le = 0, def_ls = 0, def_le = 0, end_ls = 0, end_le = 0;
+    int stage = 0;
+    if (!body || n == 0) return;
+    /* First two directives, past blanks and comments only: `#ifndef NAME`
+     * then `#define NAME`. */
+    while (i < n && stage < 2) {
+        char c = body[i];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') { i++; continue; }
+        if (c == '/' && i + 1 < n && body[i + 1] == '*') {
+            size_t e = i + 2;
+            while (e + 1 < n && !(body[e] == '*' && body[e + 1] == '/')) e++;
+            i = (e + 1 < n) ? e + 2 : n;
+            continue;
+        }
+        if (c == '/' && i + 1 < n && body[i + 1] == '/') {
+            while (i < n && body[i] != '\n') i++;
+            continue;
+        }
+        if (c != '#') return;
+        ls = i;
+        le = ls;
+        while (le < n && body[le] != '\n') le++;
+        p = ls + 1;
+        while (p < le && (body[p] == ' ' || body[p] == '\t')) p++;
+        if (stage == 0) {
+            if (!(p + 6 <= le && memcmp(body + p, "ifndef", 6) == 0 &&
+                  (p + 6 == le || !cc_is_ident_char(body[p + 6]))))
+                return;
+            p += 6;
+            while (p < le && (body[p] == ' ' || body[p] == '\t')) p++;
+            name_at = p;
+            while (p < le && cc_is_ident_char(body[p])) p++;
+            name_len = p - name_at;
+            if (!name_len) return;
+            if_ls = ls; if_le = le;
+        } else {
+            if (!(p + 6 <= le && memcmp(body + p, "define", 6) == 0 &&
+                  (p + 6 == le || !cc_is_ident_char(body[p + 6]))))
+                return;
+            p += 6;
+            while (p < le && (body[p] == ' ' || body[p] == '\t')) p++;
+            if (p + name_len > le || memcmp(body + p, body + name_at, name_len) != 0 ||
+                (p + name_len < le && cc_is_ident_char(body[p + name_len])))
+                return;
+            def_ls = ls; def_le = le;
+        }
+        stage++;
+        i = le;
+    }
+    if (stage < 2) return;
+    /* Last directive: `#endif`, with only blanks and comments after it. */
+    {
+        size_t k = n;
+        while (k > def_le) {
+            size_t e = k;
+            size_t s2;
+            while (e > def_le && (body[e - 1] == '\n' || body[e - 1] == '\r' ||
+                                  body[e - 1] == ' ' || body[e - 1] == '\t'))
+                e--;
+            if (e == def_le) return;
+            s2 = e;
+            while (s2 > def_le && body[s2 - 1] != '\n') s2--;
+            p = s2;
+            while (p < e && (body[p] == ' ' || body[p] == '\t')) p++;
+            if (p + 2 <= e && body[p] == '/' && body[p + 1] == '/') { k = s2; continue; }
+            if (e >= 2 && body[e - 1] == '/' && body[e - 2] == '*') {
+                size_t c = e - 2;
+                while (c > def_le && !(body[c - 1] == '/' && body[c] == '*')) c--;
+                if (c == def_le) return;
+                k = c - 1;
+                continue;
+            }
+            if (body[p] != '#') return;
+            p++;
+            while (p < e && (body[p] == ' ' || body[p] == '\t')) p++;
+            if (!(p + 5 <= e && memcmp(body + p, "endif", 5) == 0 &&
+                  (p + 5 == e || !cc_is_ident_char(body[p + 5]))))
+                return;
+            end_ls = s2; end_le = e;
+            break;
+        }
+        if (!end_le) return;
+    }
+    for (i = if_ls; i < if_le; i++) if (body[i] != '\n') body[i] = ' ';
+    for (i = def_ls; i < def_le; i++) if (body[i] != '\n') body[i] = ' ';
+    for (i = end_ls; i < end_le; i++) if (body[i] != '\n') body[i] = ' ';
+}
+
 static int cc__splice_impl_cch_into(char** out, size_t* out_len, size_t* out_cap,
                                     const char* child_abs,
                                     const char* current_path,
@@ -18389,6 +18515,7 @@ static int cc__splice_impl_cch_into(char** out, size_t* out_len, size_t* out_cap
     }
     if (g_rewrite_allow_impl_splice)
         cc__blank_comments_keep_lines(body, body_len);
+    cc__blank_splice_include_guard(body, body_len);
     rew = cc__rewrite_local_cch_includes_impl(body, body_len, child_abs);
     if (g_local_cch_lower_failed) {
         free(rew);
@@ -19220,6 +19347,7 @@ static char* cc__splice_member_text(const char* child_abs, int depth) {
         free(body);
         return NULL;
     }
+    cc__blank_splice_include_guard(body, body_len);
     rew = cc__splice_members_into(body, body_len, child_abs, depth + 1);
     if (g_local_cch_lower_failed) {
         free(rew);

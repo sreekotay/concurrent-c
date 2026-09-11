@@ -1,6 +1,0 @@
-The shadow path lowers a face as text before the unit's generic factory
-families are registered, so `Table::[int, int]` in an interface face is
-reported as an unknown generic and reaches the host unlowered; the clean
-lowerer emits the instance into the face's .h. The fix is the legacy
-header lowerer's (cc/src/preprocess/preprocess.c, cc_rewrite_generic_containers
-in header mode), which the clean lowerer replaces.

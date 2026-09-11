@@ -240,10 +240,12 @@ has one of three grades, decided by the text of its module unit (the face
 with its members and the library faces it includes spliced in). An
 interface face carries declarations, types and `static` helpers, inline
 or not; `T !>(E)` on a declaration, statement `!>` / `!>(e) {` inside a
-`static` body, and method-call UFCS are interface-grade. It extracts to a
-lowered `.h`, which is host-cc input; a leftover member call in that `.h`
-is an error. A face whose every definition is `static` and whose bodies
-or file-scope items use `@string`, `@errhandler`, `@defer`, `?>` or other
+`static` body, method-call UFCS, and the built-in generic forms (`Vec`,
+`Map`, `ArrayMap` and their constructors) are interface-grade. It extracts
+to a lowered `.h`, which is host-cc input; a leftover member call in that
+`.h` is an error. A face whose every definition is `static` and whose
+bodies or file-scope items use `@string`, `@errhandler`, `@defer`, `?>`,
+an instance `Name::[…]` of a generic factory family, or other
 unit-pipeline syntax is a library face: each includer compiles its own
 copy, as C does for a `static` body in a header, so the face splices into
 the including unit where its include stands and lowers with it, and it

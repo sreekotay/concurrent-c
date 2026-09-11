@@ -358,14 +358,14 @@ differential report.
   does, and `draft_as.md` says so. The shadow rebuilds from its sources
   again: four weak emit-plan stubs made `pp_ast_core.cch` an
   implementation face under spec 1.7, so its lowered `.h` lost its
-  bodies; the stubs moved to a plain C header. One gap remains the
-  shadow path's and carries `.xfail.shadow`: `Table::[K,V]` in an
-  interface face (`quote_cch_table_face_smoke`: the text header lowerer
-  meets the face before the unit's factory families are registered,
-  and its complaint prints on a clean build that then succeeds, since
-  the clean lowerer emits the instance into the `.h` itself). The clean
-  driver should stop running the text header lowerer over a quoted face
-  it lowers itself.
+  bodies; the stubs moved to a plain C header. `Table::[K,V]` in a face
+  is ordinary on both paths: an instance of a generic factory family is
+  unit-pipeline syntax, so a face that names one is a library face and
+  splices into each includer, whose unit runs the family. A spliced
+  face's outer include guard is blanked, since the driver already makes
+  a repeat include inert and the guard kept the face's angle includes
+  out of the unit's leading run, ahead of which the shadow writes its
+  generic instances.
 
 M0 and M1 carry no risk to the shipping compiler and are where work
 starts.
