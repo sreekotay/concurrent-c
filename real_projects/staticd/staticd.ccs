@@ -572,6 +572,7 @@ static const char* content_type_for(char[:] path) {
 }
 
 static bool !>(CCError) enc_date_ka(Enc* c, int ka) {
+    @errhandler(CCError e) { return cc_err(e); }
     cc_arena_stack(stamp_a, 64);
     char[:] date = http_date_now(stamp_a);
     c->hdr("Date", date) !>;

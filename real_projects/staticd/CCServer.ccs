@@ -298,7 +298,7 @@ void cc_server_start(CCServer* srv, CCSignal* stop) {
     if (!stopp) return;
     @parallel(srv->app) {
         int sig = 0;
-        sig = stopp->wait() !>(e) { (void)e; };
+        sig = stopp->wait() ?> 0;
         if (sig) srvp->shutdown();
     }
 }
