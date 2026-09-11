@@ -1,0 +1,6 @@
+#ifndef QUOTE_CCH_SPEC_ABOVE_MODULE_FACE_MOD_CCH
+#define QUOTE_CCH_SPEC_ABOVE_MODULE_FACE_MOD_CCH
+/* A module face: a body that is not static makes it one. */
+#include <ccc/std/prelude.cch>
+int spec_mod_twice(int x) { return 2 * x; }
+#endif

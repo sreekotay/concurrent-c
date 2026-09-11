@@ -1,3 +1,12 @@
+/* popen / pclose are POSIX, not C11: name the surface before any system
+ * header is read, or a strict -std=c11 host declares them implicitly and
+ * truncates the FILE* they return. */
+#if !defined(_POSIX_C_SOURCE) && !defined(_GNU_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE
+#endif
 #include "cparse.h"
 
 #include <ctype.h>

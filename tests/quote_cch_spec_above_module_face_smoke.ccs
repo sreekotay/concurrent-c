@@ -1,0 +1,16 @@
+/* A Result whose value type a spliced library face defines, and whose
+ * error type a system header provides, is used inside that face. Its spec
+ * lands above that use, not below the module face included later: the
+ * header that provides CCError is one of the includes above the face. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include "quote_cch_spec_above_module_face_lib.cch"
+#include "quote_cch_spec_above_module_face_mod.cch"
+
+int main(void) {
+    SpecFoo dflt = { .x = 9 };
+    SpecFoo f = spec_foo_make(3) !> { return 1; };
+    SpecFoo g = spec_foo_make(-1) ?> dflt;
+    printf("%d %d %d\n", f.x, g.x, spec_mod_twice(f.x));
+    return 0;
+}

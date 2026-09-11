@@ -1,0 +1,28 @@
+/* A `CC`-prefixed type's family is spelled without the prefix: `io->touch()`
+ * on a `CCIoSess*` reaches `io_sess_touch`, after `CCIoSess_touch` and
+ * `cc_io_sess_touch` are tried. The `cc_` twin still wins when both exist,
+ * and a bare type keeps its two rungs (`thing_area`, `cc_thing_area`). */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct CCIoSess { int n; } CCIoSess;
+typedef struct CCThing  { long long w; } CCThing;
+typedef struct Gauge    { long long w; } Gauge;
+
+static void io_sess_touch(CCIoSess* io, int now, int secs) { io->n = now + secs; }
+static long long cc_thing_area(CCThing* t) { return t->w * 2; }
+static long long thing_area(CCThing* t)    { return t->w * 1000; }   /* the cc_ twin wins */
+static long long cc_gauge_area(Gauge* g)   { return g->w * 3; }
+
+int main(void) {
+    CCIoSess s = { 0 };
+    CCIoSess* p = &s;
+    CCThing t = { .w = 6 };
+    Gauge g = { .w = 6 };
+    p->touch(1, 2);
+    printf("stem   %d\n", s.n);
+    s.touch(10, 5);
+    printf("stem   %d\n", s.n);
+    printf("cc_    %lld %lld\n", t.area(), g.area());
+    return 0;
+}

@@ -1993,6 +1993,32 @@ static size_t rl_after_quoted_includes(CcLowerer* L) {
     return at;
 }
 
+/* The first file-scope declaration that spells the Result `name` in its
+ * own type: a function returning it, a variable or typedef of it. */
+static size_t rl_first_use_decl(CcLowerer* L, CCSlice name) {
+    CcIndex* ix = rl_ix(L);
+    CcDeclList* decls = &L->unit->decls;
+    size_t n = decls->len();
+    size_t k;
+    for (k = 0; k < n; k++) {
+        CcDecl* d = *decls->get_ptr(k);
+        CcType* t = NULL;
+        @switch (d->k) {
+            case .func(f): t = f.type; break;
+            case .var(v): t = v.type; break;
+            case .typedef_(td): t = td.type; break;
+            default: break;
+        }
+        if (!t) continue;
+        @switch (t->k) {
+            case .func(ft): t = ft.ret; break;
+            default: break;
+        }
+        if (t && slice_eq(ix->canon(t), name)) return k;
+    }
+    return SIZE_MAX;
+}
+
 static size_t rl_spec_anchor(CcLowerer* L, CcTypeInfo* ti, size_t inc_at) {
     size_t at = inc_at;
     CCSlice vn = rl_type_base_name(ti->result_value);
@@ -2002,8 +2028,13 @@ static size_t rl_spec_anchor(CcLowerer* L, CcTypeInfo* ti, size_t inc_at) {
     if (dv != SIZE_MAX && dv + 1 > at) at = dv + 1;
     if (de != SIZE_MAX && de + 1 > at) at = de + 1;
     if (dv == SIZE_MAX || de == SIZE_MAX) {
+        /* A type from a header: below the last quoted include, unless the
+         * Result is already spelled above it -- a face spliced into the
+         * unit uses it there, and the header that provides the type is
+         * one of the includes that precede that use. */
         size_t q = rl_after_quoted_includes(L);
-        if (q > at) at = q;
+        size_t first = rl_first_use_decl(L, ti->name);
+        if (q > at && q <= first) at = q;
     }
     return at;
 }

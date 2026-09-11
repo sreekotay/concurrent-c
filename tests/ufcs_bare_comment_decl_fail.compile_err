@@ -1,6 +1,7 @@
+# Host wording differs (gcc: implicit declaration; clang: call to undeclared): pin the part both print.
 # A commented prototype declares nothing, so the lowerer sees no
 # declaration of 'ghost'; the receiver is a double with no method set,
 # so the call is emitted as ghost(u) and the host refuses it, at this
 # line: a compile error, not a link error.
 ufcs_bare_comment_decl_fail.ccs:8:
-call to undeclared function 'ghost'
+function 'ghost'

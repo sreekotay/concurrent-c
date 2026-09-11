@@ -1,0 +1,5 @@
+# Three family rungs for a CC-prefixed receiver, in ladder order.
+no UFCS method 'nope' for receiver type 'CCIoSess'
+candidate CCIoSess_nope (family spelling): not declared
+candidate cc_io_sess_nope (family spelling): not declared
+candidate io_sess_nope (family spelling): not declared

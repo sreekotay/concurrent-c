@@ -1,0 +1,11 @@
+/* The ladder for a `CC`-prefixed receiver shows all three family rungs:
+ * the exact spelling, the cc_ snake, and the stem without the prefix. */
+#include <ccc/std/prelude.cch>
+
+typedef struct CCIoSess { int n; } CCIoSess;
+
+int main(void) {
+    CCIoSess s = { 0 };
+    s.nope(1);
+    return 0;
+}

@@ -1,3 +1,4 @@
+# The host prints the origin line (gcc) or the expanded one (clang): pin the name both show.
 comptime_emit_interp_bad_type_fail.ccs:9
 not_a_real_type
-    static not_a_real_type emit_interp_bad_type_fn(void) {
+emit_interp_bad_type_fn(void) {

@@ -672,6 +672,15 @@ static int lower_header_with(Loaded* owner, CCSlice hpath, CcNameList known, boo
     H.unit = u;
     H.ds = ds;
     if (ds.has_errors()) { print_diags(&H); return 1; }
+    /* A module stage carries the implementation's own declarations below
+     * the face, and the faces the implementation includes for itself; the
+     * owner's index knows the face alone. Those includes and the stage join
+     * the index before it is lowered, so a call inside the module reaches
+     * the module's own functions and the families its includes register. */
+    if (stage) {
+        ix->load_includes(u, opts);
+        ix->add_unit(u, true);
+    }
     lw = cc_lowerer_new(u, ix, owner->lo, &H.ds);
     lw.header_mode = true;
     lw.lower_unit();

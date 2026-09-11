@@ -23216,6 +23216,24 @@ static int cc__sm_install_types_for_call(const char* src, size_t n,
     return 1;
 }
 
+/* Offset of the last `@comptime {` (the block form) in `buf`, or (size_t)-1. */
+static size_t cc__sm_comptime_block_open(const char* buf, size_t len) {
+    size_t at = (size_t)-1;
+    size_t i = 0;
+    if (!buf) return at;
+    while (i + 9 <= len) {
+        if (memcmp(buf + i, "@comptime", 9) == 0 && (i + 9 == len || !cc_is_ident_char(buf[i + 9]))) {
+            size_t j = i + 9;
+            while (j < len && (buf[j] == ' ' || buf[j] == '\t' || buf[j] == '\n' || buf[j] == '\r')) j++;
+            if (j < len && buf[j] == '{') at = i;
+            i = j;
+            continue;
+        }
+        i++;
+    }
+    return at;
+}
+
 char* cc_rewrite_static_map_calls_text(const char* src, size_t n, const char* input_path) {
     if (!src || n == 0) return NULL;
     if (!strstr(src, "static_map")) return NULL;
@@ -23328,6 +23346,24 @@ char* cc_rewrite_static_map_calls_text(const char* src, size_t n, const char* in
             failed = 1; break;
         }
         if (!cc__sm_append(&out, repl, (size_t)rn)) { failed = 1; break; }
+        /* The accessor the executor defines is spliced in after lowering,
+         * so the lowerer's index never sees it, and a site that unwraps it
+         * (`<name>_get(k) ?> dflt`) has nothing to type. Declare it where
+         * the enclosing `@comptime {` block opens, on that block's own
+         * line, so line numbers hold and the declaration precedes every
+         * use below the block. */
+        {
+            char proto[320];
+            int pn = snprintf(proto, sizeof(proto), "static const %s* %.*s_get(CCSlice key); ",
+                              value_type, (int)(a0l - 2), a0 + 1);
+            size_t at = cc__sm_comptime_block_open(out.p, out.len);
+            if (pn > 0 && (size_t)pn < sizeof(proto) && at != (size_t)-1) {
+                size_t old_len = out.len;
+                if (!cc__sm_append(&out, proto, (size_t)pn)) { failed = 1; break; }
+                memmove(out.p + at + (size_t)pn, out.p + at, old_len - at);
+                memcpy(out.p + at, proto, (size_t)pn);
+            }
+        }
         changed = 1;
         i = rparen + 1;
         s.at_line_start = 0;

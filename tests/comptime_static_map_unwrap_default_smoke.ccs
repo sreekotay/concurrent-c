@@ -1,0 +1,28 @@
+/* A static_map accessor is a pointer producer the lowerer can type: the
+ * text stage declares `<name>_get` where the `@comptime` block opens, so
+ * `?>` on a miss takes the default and `!>` on a hit unwraps. */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/static_map.cch>
+#include <stdio.h>
+
+typedef struct Spec { int kind; } Spec;
+typedef struct Entry { const char* key; Spec value; } Entry;
+
+@comptime {
+    Entry entries[] = {
+        { ".html", { 1 } },
+        { ".css",  { 2 } },
+    };
+    static_map("ext", entries, CC_STATIC_MAP_ASCII_CI);
+}
+
+static const Spec dflt = { 0 };
+
+int main(void) {
+    char[:] css = ".CSS";
+    const Spec* s = ext_get(css) ?> &dflt;
+    const Spec* t = ext_get(cc_slice_cstr(".nope")) ?> &dflt;
+    const Spec* h = ext_get(cc_slice_cstr(".html")) !> { return 1; };
+    printf("%d %d %d\n", s->kind, t->kind, h->kind);
+    return 0;
+}

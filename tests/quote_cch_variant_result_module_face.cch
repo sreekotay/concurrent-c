@@ -1,0 +1,14 @@
+#ifndef QUOTE_CCH_VARIANT_RESULT_MODULE_FACE_CCH
+#define QUOTE_CCH_VARIANT_RESULT_MODULE_FACE_CCH
+/* A module face that declares a variant and a function returning a Result
+ * over it. The variant lowers to C text before the Result specs are
+ * placed; the spec must still land below it in the lowered header. */
+#include <ccc/std/prelude.cch>
+@variant VrFail {
+    conn: void;
+    desync: void;
+};
+int vr_calls;
+void !>(VrFail) vr_arm(int id);
+#include "quote_cch_variant_result_module_face_mod.ccs"
+#endif
