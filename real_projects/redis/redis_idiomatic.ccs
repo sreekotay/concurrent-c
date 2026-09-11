@@ -243,15 +243,16 @@ typedef enum RedisOp {
     REDIS_OP_CC_MEMLOG,
 } RedisOp;
 
+#include "redis_db.cch"
+
 /* args[0] = folded command name (name_fold); args[1..] borrow the
  * current read window. Slot vector on the per-command arena. */
 typedef struct RedisCmd {
     char[:]* args;
     size_t argc;
     char name_fold[16];
-    /* Hash of args[1] for the single-key hold group. Same word as
-     * db_set / db_lookup_live so we do not hash the key twice. */
-    size_t key_hash;
+    /* Single-key hold group: key + hash word (same as db_set / lookup). */
+    RedisKey rk;
 } RedisCmd;
 
 @typehooks on RedisCmd {
@@ -309,8 +310,6 @@ static bool !>(CCError) rr_cmd_next(RespReader* reader, RedisCmd* out,
     }
     return cc_ok(1);
 }
-
-#include "redis_db.cch"
 
 static RedisOp redis_op(char[:] name) {
     @switch (name) {
@@ -572,7 +571,7 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
         RedisEntry* cell;
         if (!payload_ok(cmd->argc, 1, 1, 0))
             return enc->err("wrong number of arguments");
-        cell = db_lookup_live_h(db, keys[0], &clock, cmd->key_hash);
+        cell = db_lookup_live(db, cmd->rk, &clock);
         if (!cell) return enc->null();
         return enc_redis_value(enc, &cell->val);
     }
@@ -580,7 +579,7 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
         /* Clone under hold (sketch/go). Prep/install races under load. */
         if (!payload_ok(cmd->argc, 2, 2, 0))
             return enc->err("wrong number of arguments");
-        db_set_h(db, keys[0], keys[1], 0, cmd->key_hash) !>;
+        db_set(db, cmd->rk, keys[1], 0) !>;
         return enc->ok();
     case REDIS_OP_SETNX:
         if (!payload_ok(cmd->argc, 2, 2, 0))
@@ -617,7 +616,7 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
         RedisValue* val;
         if (!payload_ok(cmd->argc, 1, 1, 0))
             return enc->err("wrong number of arguments");
-        cell = db_lookup_live(db, keys[0], &clock);
+        cell = db_lookup_live(db, cmd->rk, &clock);
         if (!cell) return enc->integer(0);
         val = &cell->val;
         @switch (val) {
@@ -634,18 +633,16 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
     case REDIS_OP_TYPE:
         if (!payload_ok(cmd->argc, 1, 1, 0))
             return enc->err("wrong number of arguments");
-        return enc->simple(db_lookup_live(db, keys[0], &clock) ? "string"
+        return enc->simple(db_lookup_live(db, cmd->rk, &clock) ? "string"
                                                                : "none");
     case REDIS_OP_INCR:
         if (!payload_ok(cmd->argc, 1, 1, 0))
             return enc->err("wrong number of arguments");
-        return enc_int_result(enc, db_incrby_h(db, keys[0], 1, &clock,
-                                              cmd->key_hash));
+        return enc_int_result(enc, db_incrby(db, cmd->rk, 1, &clock));
     case REDIS_OP_DECR:
         if (!payload_ok(cmd->argc, 1, 1, 0))
             return enc->err("wrong number of arguments");
-        return enc_int_result(enc, db_incrby_h(db, keys[0], -1, &clock,
-                                              cmd->key_hash));
+        return enc_int_result(enc, db_incrby(db, cmd->rk, -1, &clock));
     case REDIS_OP_INCRBY: {
         char[:] delta_arg;
         int64_t delta;
@@ -653,8 +650,7 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
             return enc->err("wrong number of arguments");
         delta_arg = keys[1];
         delta = delta_arg.to_i64() !>;
-        return enc_int_result(enc, db_incrby_h(db, keys[0], delta, &clock,
-                                              cmd->key_hash));
+        return enc_int_result(enc, db_incrby(db, cmd->rk, delta, &clock));
     }
     case REDIS_OP_DECRBY: {
         char[:] delta_arg;
@@ -667,8 +663,7 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
         neg = cc_sub_i64_checked(0, delta) !> {
             return enc->err("decrement would overflow");
         };
-        return enc_int_result(enc, db_incrby_h(db, keys[0], neg, &clock,
-                                              cmd->key_hash));
+        return enc_int_result(enc, db_incrby(db, cmd->rk, neg, &clock));
     }
     case REDIS_OP_EXPIRE: {
         char[:] secs_arg;
@@ -708,7 +703,7 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
         if (!payload_ok(cmd->argc, 1, -1, 0))
             return enc->err("wrong number of arguments");
         @for (i in 0..nkeys) {
-            RedisEntry* cell = db_lookup_live(db, keys[i], &clock);
+            RedisEntry* cell = db_lookup_live(db, db_key(keys[i]), &clock);
             if (!cell) continue;
             db_remove_entry(db, keys[i], cell);
             removed++;
@@ -721,7 +716,7 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
         if (!payload_ok(cmd->argc, 1, -1, 0))
             return enc->err("wrong number of arguments");
         @for (i in 0..nkeys) {
-            if (db_lookup_live(db, keys[i], &clock)) found++;
+            if (db_lookup_live(db, db_key(keys[i]), &clock)) found++;
         }
         return enc->integer(found);
     }
@@ -733,7 +728,7 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
          * array on the wire (conn closes) — same caveat as the sketch. */
         enc->array_len(nkeys) !>;
         @for (i in 0..nkeys) {
-            RedisEntry* cell = db_lookup_live(db, keys[i], &clock);
+            RedisEntry* cell = db_lookup_live(db, db_key(keys[i]), &clock);
             if (!cell) {
                 enc->null() !>;
                 continue;
@@ -884,9 +879,9 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
     case REDIS_OP_PTTL:
     case REDIS_OP_PERSIST: {
         if (cmd->argc < 2) return enc->err("wrong number of arguments");
-        cmd->key_hash = db_hash_key(cmd->args[1]);
+        cmd->rk = db_key(cmd->args[1]);
         CCExclHold hold = shards->hold(
-            (uint64_t)db_shard_index_for_hash(db, cmd->key_hash)) @destroy;
+            (uint64_t)db_shard_index_for_hash(db, cmd->rk.h)) @destroy;
         if (!hold.held()) return enc->err("shard admission failed");
         return exec(db, cmd, enc, op);
     }

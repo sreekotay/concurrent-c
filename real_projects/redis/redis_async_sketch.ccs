@@ -14,7 +14,7 @@
  *   I/O / decode  → drop the connection (write -ERR on the first cmd if we can)
  *   command error → -ERR on the wire, client stays up
  *   encode OOM    → Err; connection dies (mid-MGET may already have array_len)
- *   CCExclHold   → maps.hold(si) @destroy (hold == hold_one); release
+ *   CCExclHold   → maps.hold(sk) @destroy (hold == hold_one); release
  *                   at scope exit. if (!held()) … — no-op when n==0.
  *                   return exec(...) still runs the destroy ledger.
  *
@@ -144,16 +144,6 @@ static bool !>(CCError) conn_array_len(Conn* c, size_t nkeys) {
     return c->write(hdr.as_slice());
 }
 
-/* Same hash word as ArrayMap routing — hold index and get/put share it. */
-static size_t key_hash(char[:] key) {
-    CCSlicePackedView view;
-    return cc_map_hash_slice_packed(cc_slice_packed_borrow_slice(&view, key));
-}
-
-static size_t shard_of(CCShardMap* maps, size_t h) {
-    return maps->index(h);
-}
-
 /* ASCII fold into caller storage — do not mutate the cloned argv. */
 static char[:] fold_name(char[:] src, char* buf, size_t cap) {
     if (src.len == 0 || src.len >= cap) {
@@ -187,10 +177,28 @@ static Hold hold_for(char[:] name) {
     }
 }
 
-/* Under the hold already taken in execute. `si` / `key_h` are the HOLD_KEY
- * shard and map hash (multi-key arms recompute per key). */
+/* Under the hold already taken in execute. HOLD_KEY passes `sk`; multi-key
+ * arms re-key per argv entry. */
+static bool !>(CCError) exec_incr(CCShard* sh, CCShardKey sk, ConnEnc conn) {
+    @errhandler(CCError e) { return cc_err(e); }
+    CCString* v = sh->get(sk);
+    int64_t n = 0;
+    if (v) {
+        char[:] s = v->as_slice();
+        int64_t parsed = s.to_i64() !>(e) {
+            (void)e;
+            return conn->err("value is not an integer");
+        };
+        n = parsed;
+    }
+    n++;
+    CCString num = @string(`${n}`, @scratch);
+    if (!sh->put(sk, num.as_slice())) return conn->err("oom");
+    return conn->integer(n);
+}
+
 static bool !>(CCError) exec(CCShardMap* maps, Cmd* c, char[:] name,
-                             size_t si, size_t key_h, ConnEnc conn) {
+                             CCShardKey sk, ConnEnc conn) {
     @errhandler(CCError e) { return cc_err(e); }
     CCShard* sh;
     CCString* v;
@@ -199,51 +207,35 @@ static bool !>(CCError) exec(CCShardMap* maps, Cmd* c, char[:] name,
 
     @switch (name) {
     case "GET":
-        sh = maps->shard(si);
+        sh = maps->shard(sk);
         if (!sh) return conn->err("internal");
-        v = sh->get_h(c->args[1], key_h);
+        v = sh->get(sk);
         if (!v) return conn->null();
         return conn->bulk(v->as_slice());
     case "SET":
         if (c->argc < 3) return conn->err("wrong number of arguments");
-        sh = maps->shard(si);
+        sh = maps->shard(sk);
         if (!sh) return conn->err("internal");
-        if (!sh->put_h(c->args[1], c->args[2], key_h)) return conn->err("oom");
+        if (!sh->put(sk, c->args[2])) return conn->err("oom");
         return conn->ok();
     case "INCR":
-        sh = maps->shard(si);
+        sh = maps->shard(sk);
         if (!sh) return conn->err("internal");
-        v = sh->get_h(c->args[1], key_h);
-        n = 0;
-        if (v) {
-            char[:] s = v->as_slice();
-            int64_t parsed = s.to_i64() !>(e) {
-                (void)e;
-                return conn->err("value is not an integer");
-            };
-            n = parsed;
-        }
-        n++;
-        {
-            CCString num = @string(`${n}`, @scratch);
-            if (!sh->put_h(c->args[1], num.as_slice(), key_h))
-                return conn->err("oom");
-        }
-        return conn->integer(n);
+        return exec_incr(sh, sk, conn);
     case "DEL":
         n = 0;
         @for (i in 1..c->argc) {
-            size_t h = key_hash(c->args[i]);
-            sh = maps->shard(shard_of(maps, h));
-            if (sh && sh->delete_h(c->args[i], h)) n++;
+            CCShardKey k = maps->key(c->args[i]);
+            sh = maps->shard(k);
+            if (sh && sh->delete(k)) n++;
         }
         return conn->integer(n);
     case "EXISTS":
         n = 0;
         @for (i in 1..c->argc) {
-            size_t h = key_hash(c->args[i]);
-            sh = maps->shard(shard_of(maps, h));
-            if (sh && sh->get_h(c->args[i], h)) n++;
+            CCShardKey k = maps->key(c->args[i]);
+            sh = maps->shard(k);
+            if (sh && sh->get(k)) n++;
         }
         return conn->integer(n);
     case "MGET":
@@ -252,9 +244,9 @@ static bool !>(CCError) exec(CCShardMap* maps, Cmd* c, char[:] name,
         nkeys = c->argc - 1;
         conn->array_len(nkeys) !>;
         @for (i in 1..c->argc) {
-            size_t h = key_hash(c->args[i]);
-            sh = maps->shard(shard_of(maps, h));
-            v = sh ? sh->get_h(c->args[i], h) : NULL;
+            CCShardKey k = maps->key(c->args[i]);
+            sh = maps->shard(k);
+            v = sh ? sh->get(k) : NULL;
             if (!v) conn->null() !>;
             else conn->bulk(v->as_slice()) !>;
         }
@@ -273,7 +265,8 @@ static size_t unique_shards(CCShardMap* maps, Cmd* c, uint64_t* names,
                             size_t cap) {
     size_t n = 0, i, j;
     for (i = 1; i < c->argc; i++) {
-        uint64_t si = (uint64_t)shard_of(maps, key_hash(c->args[i]));
+        CCShardKey sk = maps->key(c->args[i]);
+        uint64_t si = (uint64_t)maps->index(sk);
         int seen = 0;
         for (j = 0; j < n; j++) {
             if (names[j] == si) {
@@ -291,8 +284,7 @@ static bool !>(CCError) execute(CCShardMap* maps, Cmd* c, ConnEnc conn) {
     Hold h;
     char fold[16];
     char[:] name;
-    size_t si = 0;
-    size_t kh = 0;
+    CCShardKey sk = {0};
 
     if (c->argc == 0) return conn->err("empty command");
     name = fold_name(c->args[0], fold, sizeof(fold));
@@ -312,11 +304,10 @@ static bool !>(CCError) execute(CCShardMap* maps, Cmd* c, ConnEnc conn) {
 
     if (h == HOLD_KEY) {
         if (c->argc < 2) return conn->err("wrong number of arguments");
-        kh = key_hash(c->args[1]);
-        si = shard_of(maps, kh);
-        CCExclHold hold = maps->hold((uint64_t)si) @destroy;
+        sk = maps->key(c->args[1]);
+        CCExclHold hold = maps->hold(sk) @destroy;
         if (!hold.held()) return conn->err("shard admission failed");
-        return exec(maps, c, name, si, kh, conn);
+        return exec(maps, c, name, sk, conn);
     }
     if (h == HOLD_KEYS) {
         uint64_t names[K_MAX_SHARDS];
@@ -325,12 +316,12 @@ static bool !>(CCError) execute(CCShardMap* maps, Cmd* c, ConnEnc conn) {
         nnames = unique_shards(maps, c, names, (size_t)K_MAX_SHARDS);
         CCExclHold hold = maps->hold_sorted(names, nnames) @destroy;
         if (!hold.held()) return conn->err("shard admission failed");
-        return exec(maps, c, name, 0, 0, conn);
+        return exec(maps, c, name, sk, conn);
     }
     {
         CCExclHold hold = maps->hold_all() @destroy;
         if (!hold.held()) return conn->err("shard admission failed");
-        return exec(maps, c, name, 0, 0, conn);
+        return exec(maps, c, name, sk, conn);
     }
 }
 
