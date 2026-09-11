@@ -7,12 +7,12 @@ does not match the running version. Unmarked files still compile: a `.ccs` /
 
 Normative rules: [spec §1.7](../spec/concurrent-c-spec-complete.md). Shipping a
 new seed: [build-when.md](build-when.md). Seed layout:
-[bootstrap README](../cc/bootstrap/shadow_lower/README.md).
+[bootstrap README](../cc/bootstrap/lowerer/README.md).
 
 ## Strategy
 
-The lowerer (`shadow_lower`) is a frozen C snapshot, not “whatever is in
-`cc/shadow` today.” Each promote writes a folder named the full pin
+The lowerer a checkout builds is a frozen C snapshot, not “whatever is in
+`cc/lower` today.” Each promote writes a folder named the full pin
 (`MAJOR.MINOR.PATCH-SEED`, for example `0.3.4-189`). `last-good` points at the
 running pin. `ccc --version` prints that pin (`ccc 0.3.4-189`).
 
@@ -62,7 +62,7 @@ seed. `MAJOR` alone still matches.
 
 When the running toolchain matches the pin, that lowerer is used. Otherwise
 `ccc` host-cc’s the **newest** matching seed under
-`cc/bootstrap/shadow_lower/`. No matching folder is a hard error.
+`cc/bootstrap/lowerer/`. No matching folder is a hard error.
 
 ```text
 #!ccc ccs version=0.3
@@ -73,9 +73,10 @@ ccc version=0.3 --emit-c-only path.ccs
 ccc --ccc-version=0.3 run path.ccs
 ```
 
-Unpinned units, and pins that prefix the running version, use the current
-`shadow_lower`. Historical pins pay a one-time host-cc of that seed (cached
-under the build cache).
+Unpinned units, and pins that prefix the running version, use the running
+lowerer. Historical pins pay a one-time host-cc of that seed (cached under
+the build cache); the 0.3 line's seeds are the retired front's frozen C,
+kept so those pins keep lowering.
 
 ## What you can leave unmarked
 

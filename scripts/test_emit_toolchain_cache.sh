@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 # Emit cache must miss when the lowerer at a stable path is overwritten
-# (seed install replaces $PREFIX/bin/shadow_lower). Wiping out/ is not the
+# (seed install replaces the lowerer at its path). Wiping out/ is not the
 # product — the key has to carry that identity.
 set -eu
 
@@ -12,12 +12,10 @@ if [ ! -x "$CCC" ]; then
 fi
 
 SL=""
-if [ -x "$ROOT/out/cc/bin/shadow_lower" ]; then
-  SL="$ROOT/out/cc/bin/shadow_lower"
-elif [ -x "$ROOT/cc/bin/shadow_lower" ]; then
-  SL="$ROOT/cc/bin/shadow_lower"
+if [ -x "$ROOT/out/cc/bin/cclower_cc" ]; then
+  SL="$ROOT/out/cc/bin/cclower_cc"
 else
-  echo "shadow_lower not found (run: make -C cc)" >&2
+  echo "cclower_cc not found (run: make -C cc)" >&2
   exit 1
 fi
 
@@ -44,7 +42,7 @@ meta_val() {
 cp "$SL" "$tmp/sl"
 chmod +x "$tmp/sl"
 
-CC_SHADOW_LOWER="$tmp/sl" "$CCC" build --build-file "$tmp/build.cc" \
+CC_CLEAN_TOOL="$tmp/sl" "$CCC" build --build-file "$tmp/build.cc" \
   --out-dir "$tmp/out" --bin-dir "$tmp/bin" >/dev/null
 test -x "$tmp/bin/app" || { echo "missing $tmp/bin/app" >&2; exit 1; }
 m1="$(meta_val)"
@@ -53,17 +51,17 @@ m1="$(meta_val)"
 printf '#!/bin/sh\nexec "%s" "$@"\n' "$SL" >"$tmp/sl"
 chmod +x "$tmp/sl"
 
-CC_SHADOW_LOWER="$tmp/sl" "$CCC" build --build-file "$tmp/build.cc" \
+CC_CLEAN_TOOL="$tmp/sl" "$CCC" build --build-file "$tmp/build.cc" \
   --out-dir "$tmp/out" --bin-dir "$tmp/bin" >/dev/null
 m2="$(meta_val)"
 if [ "$m1" = "$m2" ]; then
-  echo "stale emit cache: same-path shadow_lower overwrite did not change emit key" >&2
+  echo "stale emit cache: same-path lowerer overwrite did not change emit key" >&2
   echo "  meta=$m1" >&2
   exit 1
 fi
 
 # Warm: same wrapper — key must stay.
-CC_SHADOW_LOWER="$tmp/sl" "$CCC" build --build-file "$tmp/build.cc" \
+CC_CLEAN_TOOL="$tmp/sl" "$CCC" build --build-file "$tmp/build.cc" \
   --out-dir "$tmp/out" --bin-dir "$tmp/bin" >/dev/null
 m3="$(meta_val)"
 if [ "$m2" != "$m3" ]; then

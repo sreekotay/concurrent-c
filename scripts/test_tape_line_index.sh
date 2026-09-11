@@ -17,7 +17,7 @@ trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/out" "$work/bin"
 
 emit_from_verbose() {
-  # shadow_lower: cc … -c "out/.cc-build/native/<hash>/emit.c" -o …
+  # verbose host-cc line: cc … -c "<dir>/emit.c" -o …
   sed -n 's/.*-c "\([^"]*\/emit\.c\)".*/\1/p' "$1" | head -1
 }
 

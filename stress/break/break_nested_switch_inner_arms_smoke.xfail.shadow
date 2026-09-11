@@ -1,1 +1,0 @@
-the inner @switch's '.num' label is resolved against the outer subject 'w', which has no such arm; moving the inner switch into a helper function works

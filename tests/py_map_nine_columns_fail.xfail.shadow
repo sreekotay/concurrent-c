@@ -1,1 +1,0 @@
-shadow does not read the call as a row batch with a bound; the ninth column reaches the CC__PY_MAPA9 trap in py.cch and the host compiler reports an undeclared 'cc__py_map_takes_at_most_8_columns' at the header line, not at the site that wrote the column

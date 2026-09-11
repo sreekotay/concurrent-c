@@ -51,7 +51,7 @@ EOF
 
 "$CCC" --verbose build --build-file "$tmp/build.cc" \
   --out-dir "$tmp/out" --bin-dir "$tmp/bin" >"$tmp/rebuild.txt" 2>&1
-if ! grep -q shadow_lower "$tmp/rebuild.txt"; then
+if ! grep -q "cc: cc .* -c " "$tmp/rebuild.txt"; then
   echo "stale emit cache: included .cch edit did not re-lower" >&2
   exit 1
 fi

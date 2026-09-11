@@ -36,8 +36,8 @@ distclean: clean
 #   make install DESTDIR=/tmp/pkg    # staged install for packaging
 #
 # The installed layout:
-#   $PREFIX/bin/ccc                   - compiler driver (default front: serdes)
-#   $PREFIX/bin/shadow_lower          - serdes lowerer (required beside ccc)
+#   $PREFIX/bin/ccc                   - compiler driver
+#   $PREFIX/bin/{cclex,ccparse,cclower,ccindex}_cc - the lowerer's tools (beside ccc)
 #   $PREFIX/include/ccc/**/*.cch      - standard library headers
 #   $PREFIX/include/ccc/**/*.rules    - grammar factories (not lowered)
 #   $PREFIX/include/ccc/**/*.h        - the same headers, pre-lowered
@@ -45,13 +45,13 @@ distclean: clean
 #   $PREFIX/lib/ccc/runtime/vendor/   - vendored third-party runtime sources
 #
 # An installed tree is self-contained: the driver resolves headers, runtime,
-# and shadow_lower from the prefix (cc_init_paths / cc__find_shadow_lower) and
+# and the lowerer's tools from the prefix (cc_init_paths / cc__find_clean_tool) and
 # never reaches back into a checkout. Consequences:
 #
 #   * ccc must be the real binary. cc/bin/ccc and out/cc/bin/ccc are wrappers
 #     that reach siblings by relative path; those paths do not survive
 #     relocation into a prefix.
-#   * shadow_lower must ship next to ccc — serdes is the default front.
+#   * the lowerer's tools must ship next to ccc.
 #   * .cch headers and runtime sources must ship pre-lowered. Lowering is a
 #     build-tree step (out/cc/bin/lower_headers), so an installed driver
 #     cannot do it on demand.
@@ -77,14 +77,11 @@ install: cc
 	install -d $(DESTDIR)$(PREFIX)/include/ccc/vendor
 	install -d $(DESTDIR)$(PREFIX)/lib/ccc/tcc/include
 	@test -x cc/bin/.ccc-bin || { echo "Error: missing cc/bin/.ccc-bin (make cc)"; exit 1; }
-	@test -x out/cc/bin/shadow_lower -o -x cc/bin/shadow_lower || { \
-		echo "Error: missing shadow_lower (make -C cc); serdes front needs it"; exit 1; }
 	install -m 755 cc/bin/.ccc-bin $(DESTDIR)$(PREFIX)/bin/ccc
-	@if [ -x out/cc/bin/shadow_lower ]; then \
-		install -m 755 out/cc/bin/shadow_lower $(DESTDIR)$(PREFIX)/bin/shadow_lower; \
-	else \
-		install -m 755 cc/bin/shadow_lower $(DESTDIR)$(PREFIX)/bin/shadow_lower; \
-	fi
+	@for t in cclex ccparse cclower ccindex; do \
+		test -x out/cc/bin/$${t}_cc || { echo "Error: missing out/cc/bin/$${t}_cc (make cc)"; exit 1; }; \
+		install -m 755 out/cc/bin/$${t}_cc $(DESTDIR)$(PREFIX)/bin/$${t}_cc; \
+	done
 	install -m 644 cc/include/ccc/*.cch $(DESTDIR)$(PREFIX)/include/ccc/
 	install -m 644 cc/include/ccc/std/*.cch $(DESTDIR)$(PREFIX)/include/ccc/std/
 	install -m 644 cc/include/ccc/std/*.rules $(DESTDIR)$(PREFIX)/include/ccc/std/
@@ -142,7 +139,8 @@ install-check:
 uninstall:
 	@echo "Uninstalling Concurrent-C from $(DESTDIR)$(PREFIX)..."
 	rm -f $(DESTDIR)$(PREFIX)/bin/ccc
-	rm -f $(DESTDIR)$(PREFIX)/bin/shadow_lower
+	rm -f $(DESTDIR)$(PREFIX)/bin/cclex_cc $(DESTDIR)$(PREFIX)/bin/ccparse_cc \
+		$(DESTDIR)$(PREFIX)/bin/cclower_cc $(DESTDIR)$(PREFIX)/bin/ccindex_cc
 	rm -rf $(DESTDIR)$(PREFIX)/lib/ccc
 	rm -rf $(DESTDIR)$(PREFIX)/include/ccc
 	@echo "Uninstalled."
@@ -188,17 +186,12 @@ lower-cc: cc
 	CC_NO_CACHE=1 $(MAKE) -C $(CC_DIR) lower-cc
 
 # Prefer using ccc itself for tests (the runner drives ./cc/bin/ccc).
-# The default run is the reference lowerer. The two lines after it are the
-# clean lowerer's gate -- its self-hosting fixed point, and the stress/break
-# rows it is ahead of the reference on -- so the clean path cannot rot
-# between full differential runs (scripts/lowerer_diff.sh, ~40 minutes).
-# The harness cache is off for that run: the default run just filled it
-# with the reference's products under the same names.
+# The suite, then the lowerer's self-hosting fixed point: the tools the
+# seed built and the tools those built from source must agree.
 test: cc tools lower-cc out-of-tree-smoke out-of-tree-module-smoke runtime-variant-smoke
 	@./scripts/check_patched_tcc.sh
 	@./tools/cc_test
 	@./scripts/lowerer_selfhost.sh
-	@CC_TEST_NO_CACHE=1 CC_LOWERER=clean ./tools/cc_test --quick --filter break_
 
 # Smoke: verify `ccc` can compile a source file that lives outside the repo
 # tree.  Regression guard for `cc_path_find_repo_root` -> header include

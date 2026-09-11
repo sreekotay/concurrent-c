@@ -28,9 +28,8 @@ of it, and the milestone plan. The audit it answers is
    block that only registers type hooks stays, so the index reads the
    registrations as it reads `@typehooks`, and the lowerer drops it), and
    writes the result under `out/.cc-build/clean_comptime/` with
-   `#line 1 "<user file>"` on top. Those are the text passes the shadow
-   path runs, and they keep the line count, so positions name the user's
-   lines. The stage is a deliberate compromise: the comptime seam
+   `#line 1 "<user file>"` on top. Every one of those passes keeps the
+   line count, so positions name the user's lines. The stage is a deliberate compromise: the comptime seam
    fed AST spans (§2.6, M7) replaces it, and the lowerer then reads the
    user's bytes.
 4. **No fixed buffers for user-sized text.** Names, spans, expressions
@@ -43,7 +42,7 @@ of it, and the milestone plan. The audit it answers is
    declaration index that way. The names the lowerer carries in code are
    the work list: the ambient receivers
    `cc_std_out.write` / `std_out.write` (the table `cc_ufcs_ambient_rows`
-   in `cc_ufcs_families.h`, shared with the shadow lowerer); the scalar
+   in `cc_ufcs_families.h`); the scalar
    type spellings that `type_of(T).kind` folds and that a dynamic family's
    missing destination is diagnosed against; the C library exits (`exit`,
    `_exit`, `abort`, `longjmp`, `cc_error_exit`, `cc_abort`) that count as
@@ -56,16 +55,15 @@ of it, and the milestone plan. The audit it answers is
 6. **One TU model, stated once.** The user TU, the runtime unity TU, the
    lowered headers, the comptime seam and the cache keys are defined in
    one place and the same code path serves `.ccs`, `.cch` and `.shcc`.
-7. **Builds by fixed point.** The clean lowerer is a Concurrent-C program
-   built by the shadow compiler (`make -C cc lower-cc` runs `bin/ccc build
-   lower/cclower.ccs`), so it inherits that compiler's committed seed and
-   promote step; it ships no bootstrap seed of its own, and a
-   `#!ccc` version pin is honoured only when it names the running
-   toolchain. `scripts/lowerer_selfhost.sh` is the gate: the shadow-built
-   lowerer lowers its own sources, the host C compiler builds that, and the
-   second binary must lower the same sources to the same bytes. Committing
-   the seed that gate produces, so that a C compiler alone builds the tree
-   with no sed-patched snapshot and no promote step, is M8.
+7. **Builds by fixed point.** The lowerer is a Concurrent-C program built
+   with the tools in hand (`make -C cc lower-cc` runs `bin/ccc build
+   lower/cclower.ccs`), and it ships its own seed:
+   `cc/bootstrap/lowerer/<last-good>` is the lowered C a fresh checkout
+   host-compiles at stage zero, with no lowerer in hand.
+   `scripts/lowerer_selfhost.sh` is the gate: the tools lower their own
+   sources, the host C compiler builds that, and the second binary must
+   lower the same sources to the same bytes. `./scripts/ship_seed.sh
+   --promote` freezes the seed that gate produced.
 
 ## 2. The language surface
 
@@ -237,12 +235,9 @@ in the idiom of [`docs/the-cc-way.md`](../the-cc-way.md):
   let a `CcExpr*` be used where the span or the kind is all that matters.
 
 A lowerer that pins every line and never clips is what makes a committed
-pre-lowered seed trustworthy. Until the clean lowerer lowers itself it is
-built by the shadow compiler, in the shapes that compiler accepts
-(`stress/break/break_ast_cc_way_smoke.ccs` is the list, each shape it
-avoids pinned by a sibling `break_*` test). `scripts/lowerer_selfhost.sh`
-checks the fixed point; once it holds, the emitted C is committed as the
-seed and the shadow seed retires.
+pre-lowered seed trustworthy. `scripts/lowerer_selfhost.sh` checks the
+fixed point, and the C it agrees on is what `ship_seed.sh --promote`
+commits.
 
 **The C11 spine as reference.** A C11 lexer, parser, printer and index
 (`cc/lower/lex.c`, `parse.c`, `print.c`, `index.c`, with `ast.c`,
@@ -250,25 +245,25 @@ seed and the shadow seed retires.
 round-trip against the corpus. `make -C cc` builds them as `cclex`,
 `ccparse`, `cclower` and `ccindex`, and they are the reference the
 Concurrent-C tools are gated against byte-for-byte (§6).
-They are not the shipped lowerer; they go with the switch-over in M8.
+They are not the shipped lowerer; they are the identity oracle the
+Concurrent-C tools are gated against.
 
 **Size.** The Concurrent-C lowerer is about 46k lines (`cc/lower/*.cch`,
 `*.ccs`; the largest files are `index_impl.cch` at 4.1k,
 `lower_parallel.cch` 3.9k, `lower_ufcs.cch` 3.0k, `lower_variants.cch`
 2.6k, `lower_results.cch` 2.3k, `print_impl.cch` 2.1k). The C11 spine is
-another 13k with its tests. The shadow tree it replaces is about 150k
-(`cc/shadow` 67k, `cc/src` 87k).
+another 13k with its tests. The C driver beside it is about 87k
+(`cc/src`).
 
 ## 4. Compatibility strategy
 
-- **A flag, not a fork.** `ccc --lowerer=clean` (and `CC_LOWERER`) selects
-  the new pass; the default stays the current one until parity. Both
-  produce the same artifacts in the same cache layout.
-- **Differential runner.** `scripts/lowerer_diff.sh` runs `cc_test` with
-  both lowerers and reports, per test, pass/pass, pass/fail, fail/pass,
-  with the construct list each test uses so progress is by construct.
-- **Golden emit is not the oracle.** Two lowerers may print different C;
-  the test outcome and the host diagnostics are the oracles.
+- **One lowerer.** `ccc` with nothing named uses it. `--lowerer=shadow`
+  and `CC_LOWERER=shadow` are errors.
+- **The corpus is the runner.** `cc_test`, the examples and the real
+  projects are the report, read with the construct list each test uses so
+  progress is by construct.
+- **Golden emit is not the oracle.** The test outcome and the host
+  diagnostics are.
 - **`stress/break/` grows first.** Every fragility in the audit becomes
   a program there before the code that removes it lands: the ten
   diagnostic probes with column-pinned `.compile_err`, a 3 KiB static
@@ -276,10 +271,9 @@ another 13k with its tests. The shadow tree it replaces is about 150k
   forty `@string` sites in one function, a `@grammar` inside a template
   literal, `.foo(` inside a comment inside a switch body, a user file
   under `/tmp`, nested `!>` in `@parallel` in `@scratch`.
-- **Switch-over gate.** Full `cc_test`, examples, real projects, the
-  shadow architectural smokes, and `stress/break` all green on the clean
-  lowerer; then it becomes the default and the old tree is deleted in one
-  commit.
+- **Switch-over gate.** Full `cc_test`, examples, real projects and
+  `stress/break` all green; then it is the default and the front it
+  replaces is deleted in one commit.
 
 ## 5. Milestones
 
@@ -324,16 +318,16 @@ differential report.
   sources; the host compiler builds the result; that second binary lowers
   the same sources again and the two products are byte-identical. Only the
   second product becomes the seed. With that, `cc_test`, examples, real
-  projects and `stress/break` green on the clean lowerer as the default,
-  delete `cc/shadow`, the text engine, the old seeds and promote scripts,
-  and the four cleanup documents. Nothing merges to the default branch
+  projects and `stress/break` green with it as the default, delete the
+  front it replaces, its seeds and its promote scripts, and the four
+  cleanup documents. Nothing merges to the default branch
   as the shipped lowerer before this gate passes.
 
 - **M9 Modules.** The face is the translation unit (spec §1.7, §1.8):
   an implementation `.cch` and the units that declare membership in it
   lower into one `<face>_cch.c`, compiled once and linked into every
   program whose include closure reaches the link marker of the `.h`. The
-  driver owns the mechanism and serves both lowerers: it stages the
+  driver owns the mechanism: it stages the
   module unit, lowers it in a child run of the lowerer in use, keys the
   `.h` and the C by content, and walks link markers at link time. Owner
   discovery, the splice ledger, the link-set audit with its fixed caps,
@@ -345,38 +339,34 @@ differential report.
   `lower`, which the four tools include. Every `quote_cch_*` and
   `cch_face_*` row keeps its meaning; `two_includers` is a smoke, since
   two includers of one face is the normal case.
-- **The default.** The clean lowerer is the default; `--lowerer=shadow`
-  and `CC_LOWERER=shadow` opt into the shadow front while it lasts, and
-  `make -C cc shadow` builds it. A fresh checkout bootstraps on clean
-  alone: `cc/bootstrap/clean/<last-good>` holds the lowered C of the
-  four tools, the C of module `lower`, and the faces that C includes;
-  stage zero host-compiles it, `make -C cc lower-cc` rebuilds the tools
-  from source with the seeded ones, and `scripts/lowerer_selfhost.sh`
-  says whether the two agree. `scripts/ship_clean_seed.sh --promote`
-  freezes a new seed. The driver compiles and links a clean-lowered unit
-  itself, so the shadow binary is not on the clean path at all; the unit
-  cache key folds the clean tool's bytes when it is the lowerer.
+- **The default.** The lowerer is the default and the only one. A fresh
+  checkout bootstraps on it alone: `cc/bootstrap/lowerer/<last-good>`
+  holds the lowered C of the four tools, the C of module `lower`, and the
+  faces that C includes; stage zero host-compiles it, `make -C cc
+  lower-cc` rebuilds the tools from source with the seeded ones, and
+  `scripts/lowerer_selfhost.sh` says whether the two agree.
+  `scripts/ship_seed.sh --promote` freezes a new seed. The driver compiles
+  and links a lowered unit itself; the unit cache key folds the tool's
+  bytes.
 - **After M9.** A `@comptime { }` block that registers type hooks stays
   in the stage for the index; `cc_ufcs_register` is read as the `.ufcs`
   entry it is; a copied `#line` pins itself and `@linenumbers off` omits
   it; a Result spec lands below the rewritten quoted include that
-  defines its Ok type. The typeview class (`as_arg_coerce_smoke` and
-  the six rows beside it) is ported to the shadow: its seed had bound
-  the inline handler's error through a `_Generic` projection to
-  `CCError`, and once the binder kept its exact type the by-value
-  `as:` projection at an argument was missing; the argument pass now
-  projects a bare binder through a unique face, as `lower_asargs.cch`
-  does, and `draft_as.md` says so. The shadow rebuilds from its sources
-  again: four weak emit-plan stubs made `pp_ast_core.cch` an
-  implementation face under spec 1.7, so its lowered `.h` lost its
-  bodies; the stubs moved to a plain C header. `Table::[K,V]` in a face
-  is ordinary on both paths: an instance of a generic factory family is
-  unit-pipeline syntax, so a face that names one is a library face and
-  splices into each includer, whose unit runs the family. A spliced
-  face's outer include guard is blanked, since the driver already makes
-  a repeat include inert and the guard kept the face's angle includes
-  out of the unit's leading run, ahead of which the shadow writes its
-  generic instances.
+  defines its Ok type. An argument pass projects a bare binder through a
+  unique face (`lower_asargs.cch`), so a by-value `as:` projection at an
+  argument holds when the binder kept its exact type, and `draft_as.md`
+  says so. `Table::[K,V]` in a face is ordinary: an instance of a generic
+  factory family is unit-pipeline syntax, so a face that names one is a
+  library face and splices into each includer, whose unit runs the
+  family. A spliced face's outer include guard is blanked, since the
+  driver already makes a repeat include inert and the guard kept the
+  face's angle includes out of the unit's leading run, ahead of which the
+  lowerer writes its generic instances.
+- **One line of seeds.** The front this pass replaces is deleted. The
+  seed line is one, under `cc/bootstrap/lowerer/`, and `0.4.0-400` is the
+  first pin of this lowerer. A unit pinned to an older toolchain is still
+  honoured: the two kept 0.3 seeds are frozen C, and `ccc` host-compiles
+  the one a `version=` pin names.
 
 M0 and M1 carry no risk to the shipping compiler and are where work
 starts.
@@ -393,24 +383,20 @@ starts.
   and `--dump`; `ccparse_cc --check` and `--dump` with
   `--known-types` from `ccparse_cc --collect-types` over `cc/include`;
   `cclower_cc --identity` and `--print` (the C and the `.map`).
-- `ccc --lowerer=clean FILE` (or `CC_LOWERER=clean`) stages the unit's
-  compile-time text under `out/.cc-build/clean_comptime/` (§1.3), lowers
-  it through `cclower_cc --lower` into `out/.cc-build/clean/` and finishes
-  in the driver's raw-C path. A quoted `#include "x.cch"` becomes
+- `ccc FILE` stages the unit's compile-time text under
+  `out/.cc-build/clean_comptime/` (§1.3), lowers it through
+  `cclower_cc --lower` into `out/.cc-build/clean/` and finishes in the
+  driver's raw-C path. A quoted `#include "x.cch"` becomes
   `#include <rel/x.h>` (relative to the repository root) and the header is
   lowered in header mode to `out/.cc-build/clean/<rel>.h`, transitively;
   the tool takes the roots as `--root DIR --h-root DIR`, the typedef
   names as `--known-types F`, and the driver's schema variants, comptime
   instantiations and factory registrations as files. A `.cch` given as
-  the unit is refused: the clean path lowers `.ccs` and `.shcc` units.
-  `scripts/lowerer_diff.sh [--filter S]` runs `cc_test` on both lowerers
-  and prints the pass/fail matrix. The pass-on-shadow, fail-on-clean rows
-  are the work list of the current milestone.
+  the unit is refused: a unit is a `.ccs` or a `.shcc`.
   `scripts/lowerer_selfhost.sh [tool ...]` runs the self-hosting fixed
   point of §1.7.
-- Every shape the current compiler refuses in the lowerer's own sources is
-  a `stress/break` entry with an `.xfail`; the port avoids it until the
-  clean lowerer lands the fix. A marker speaks for every lowerer; one
-  named `.xfail.shadow` or `.xfail.clean` speaks for that lowerer only,
-  which is what a shape fixed on one and still open on the other needs.
-  When both are fixed the marker goes.
+- Every shape the compiler refuses in the lowerer's own sources is a
+  `stress/break` entry with a `<stem>.xfail`, whose first line says what
+  the compiler does today. That is the only marker `cc_test` reads: when
+  the shape lands, the test reports XPASS and counts as a failure until
+  the marker goes.

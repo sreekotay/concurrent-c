@@ -7,7 +7,7 @@
  * workers) instead of send_task on fibers.
  *
  * Note: do NOT pack results in a local struct named __result_t / field
- * __result inside the thread entry — shadow_lower treats that like send_task
+ * __result inside the thread entry — the lowerer treats that like send_task
  * result sugar and can drop the explicit `return`, so joins see NULL.
  */
 

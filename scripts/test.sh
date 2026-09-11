@@ -58,7 +58,7 @@ for a in "$@"; do
     --O0|-O0) opt_o0=1; args+=("--O0") ;;
     --native) ;; # no-op
     --legacy|--compare-front)
-      echo "[test] $a removed: ccc lowers with the clean lowerer (--lowerer=shadow is the opt-in)" >&2
+      echo "[test] $a removed: ccc lowers with the clean lowerer" >&2
       exit 2
       ;;
     *) args+=("$a") ;;
@@ -183,10 +183,6 @@ if [ ! -x "./out/cc/bin/cclower_cc" ]; then
   echo "[test] FAIL: needs the clean lowerer, out/cc/bin/cclower_cc (make -C cc failed?)"
   exit 1
 fi
-if [ "${CC_LOWERER:-}" = "shadow" ] && [ ! -x "./out/cc/bin/shadow_lower" ] && [ ! -x "./cc/bin/shadow_lower" ]; then
-  echo "[test] FAIL: CC_LOWERER=shadow needs shadow_lower (make -C cc shadow)"
-  exit 1
-fi
 
 # Refuse an incomplete checkout before ~1000 tests fail as compile_err noise.
 bash "$ROOT_DIR/scripts/check_patched_tcc.sh"
@@ -268,7 +264,6 @@ elif [ -x "./cc/bin/ccc" ]; then
     echo "[test] emit toolchain cache selftest FAILED"
     exit 1
   fi
-  # Full SERDES goldens/recipes: scripts/test_shadow.sh (not this gate).
 
   if [ "$quick" = 0 ]; then
     # @async state-machine #line accuracy on the real redis port: async poll
@@ -312,10 +307,6 @@ elif [ -x "./cc/bin/ccc" ]; then
     # runs redis_smoke.py once on a collision-safe ephemeral port.
     if ! sh scripts/test_redis_functional.sh; then
       echo "[test] redis functional smoke FAILED"
-      exit 1
-    fi
-    if ! sh scripts/test_shadow_real_projects.sh; then
-      echo "[test] native real-projects smoke FAILED"
       exit 1
     fi
   else

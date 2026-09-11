@@ -225,18 +225,7 @@ static int run_one_test(const char* stem, const char* input_path, int compile_fa
  * the compiler should have and does not yet. A failing run is reported as
  * XFAIL and does not count; a passing run is XPASS and counts as a failure
  * until the sidecar is deleted, so the marker never outlives the bug.
- *
- * `<stem>.xfail.<lowerer>` says the same of one lowerer only. Two lowerers
- * fix a bug on different days, and a single marker has to be wrong for one
- * of them the moment they disagree: either it outlives the bug on the
- * lowerer that fixed it, or deleting it turns the other one red. The
- * lowerer is whatever `CC_LOWERER` names, which is what `ccc` itself reads;
- * unset means `clean`, its default. Both files are consulted, so a plain
- * marker still speaks for every lowerer. */
-static const char* lowerer_name(void) {
-    const char* v = getenv("CC_LOWERER");
-    return (v && *v) ? v : "clean";
-}
+ */
 static int run_one_test_maybe_profile(const char* stem, const char* input_path,
                                       int compile_fail, int verbose,
                                       const char* out_dir, const char* bin_dir,
@@ -246,15 +235,12 @@ static int run_one_test_maybe_profile(const char* stem, const char* input_path,
     int rc;
     char tdir[512];
     char xf[640];
-    char xfl[704];
     const char* marker;
     int xfail;
     test_dir_from_path(input_path, tdir, sizeof(tdir));
     snprintf(xf, sizeof(xf), "%s/%s.xfail", tdir, stem);
-    snprintf(xfl, sizeof(xfl), "%s/%s.xfail.%s", tdir, stem, lowerer_name());
     marker = xf;
     xfail = file_exists(xf);
-    if (!xfail && file_exists(xfl)) { xfail = 1; marker = xfl; }
     if (g_cc_test_profile) t0 = now_ms_monotonic();
     rc = run_one_test(stem, input_path, compile_fail, verbose, out_dir, bin_dir,
                       use_cache, opt_o0, build_timeout_sec, run_timeout_sec);
@@ -343,13 +329,6 @@ static int default_job_count(void) {
     if (n < 1) n = 6;
     if (n > 16) n = 16;
     return (int)n;
-}
-
-/* Parallel shadow_lower smokes (cc/shadow). Default harness skips
- * these — run scripts/test_shadow.sh (or CC_TEST_SHADOW=1 / --filter c_pp_). */
-static int test_is_shadow(const char* stem) {
-    if (!stem) return 0;
-    return strncmp(stem, "c_pp_", 5) == 0;
 }
 
 /* Stress / lost-wake / race matrix tests: useful overnight, expensive in the
@@ -591,8 +570,6 @@ static int get_run_timeout_for_test(const char* stem, int default_timeout_sec) {
     if (strcmp(stem, "script_oneliner_smoke") == 0) return 60;
     /* Three cold `ccc --as=shcc` builds; ~11s alone on the clean lowerer. */
     if (strcmp(stem, "script_shcc_bin_stem_smoke") == 0) return 30;
-    /* Compact goldens + hostcc + one header beachhead; keep near default. */
-    if (strcmp(stem, "c_pp_shadow_emit_smoke") == 0) return 20;
     /* Each shells out to `ccc build` of a py.cch TU: ~9s of backend -O2 on
      * a cold cache, over the 10s default under suite parallelism. */
     if (strcmp(stem, "py_module_import_smoke") == 0) return 30;
@@ -877,7 +854,7 @@ static int run_one_test(const char* stem,
     }
 
     /* 1) Build via ccc build (this is the build system under test).
-     * ccc is native-only (shadow_lower). Emit cache is keyed by source bytes +
+     * Emit cache is keyed by source bytes +
      * toolchain bytes; warm hits replay lowering diagnostics from emit.c.diag.
      * Erroring emits are not cached. Do not force --no-cache for diag/fail
      * tests — that papers over cache bugs. */
@@ -1125,7 +1102,6 @@ static void usage(const char* prog) {
     fprintf(stderr, "  --quick  skip stress/lostwake/race tests (default)\n");
     fprintf(stderr, "  --full   include stress/lostwake/race tests (also CC_TEST_FULL=1)\n");
     fprintf(stderr, "  --O0     host-compile test bins with -O0 (faster cold builds; also CC_TEST_O0=1)\n");
-    fprintf(stderr, "  c_pp_*   shadow_lower smokes skipped unless CC_TEST_SHADOW=1 or --filter c_pp_\n");
 }
 
 int main(int argc, char** argv) {
@@ -1352,15 +1328,6 @@ int main(int argc, char** argv) {
         }
 
         if (filter && !str_contains(stem, filter) && !str_contains(path, filter)) continue;
-        /* Default suite = production ccc. c_pp_* only with opt-in or filter. */
-        {
-            const char* shadow = getenv("CC_TEST_SHADOW");
-            int want_shadow = (shadow && strcmp(shadow, "1") == 0) || filter != NULL;
-            if (test_is_shadow(stem) && !want_shadow) {
-                if (verbose) fprintf(stderr, "[SKIP] %s (shadow: scripts/test_shadow.sh)\n", stem);
-                continue;
-            }
-        }
         if (quick && test_is_heavy(stem, path)) {
             if (verbose) fprintf(stderr, "[SKIP] %s (quick: stress/race)\n", stem);
             continue;

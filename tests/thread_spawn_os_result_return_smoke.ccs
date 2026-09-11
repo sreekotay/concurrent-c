@@ -5,7 +5,7 @@
  *
  *   cc_thread_spawn entry that packed results in a *function-local*
  *   `typedef struct { T* __result; } __result_t` had its `return storage`
- *   stripped by shadow_lower (treated like send_task result sugar). The
+ *   stripped by the lowerer (treated like send_task result sugar). The
  *   thread fell off the end → join saw NULL → consumer bailed → producer
  *   parked on a full channel (exit 124). First block seq=0 made a wrong
  *   ordered_recv double-deref look identical.

@@ -12,7 +12,7 @@
 
 #include <ccc/cc_arena.h>
 /* Host tools (lower_headers_stage1) do not link runtime/string.c — that TU is
- * unity-included in concurrent_c.o for shadow_lower / ccc.  Take the same
+ * unity-included in concurrent_c.o for ccc and the lowerer.  Take the same
  * static-inline CCString bodies the comptime executor uses. */
 #define CC_COMPTIME 1
 #include <ccc/std/string.h>
@@ -2629,14 +2629,14 @@ static size_t cc__emit_resolve_anchor_pos(CCEmitAnchor anchor, size_t site_pos,
             pos = (size_t)(hit - src);
             while (pos > 0 && src[pos - 1] != '\n') pos--;
         } else {
-            /* No marker in this buffer. Legacy keeps harvested header
-             * `@comptime` markers via parse-input append; serdes emits from a
-             * stage1 buffer that never saw that append, so header sites
-             * (static_map in .cch) have nothing to aim at. Searching
-             * `site_line` against the TU path is wrong when the line came from
-             * a `#line` in a harvested header — e.g. pp_stage2.cch:41 colliding
-             * with shadow_lower.ccs:41 and landing *before* umbrella includes
-             * that declare PpDirSpec. Match legacy harvest-append: EOF. */
+            /* No marker in this buffer. Harvested header `@comptime` markers
+             * arrive through a parse-input append; a buffer that never saw
+             * that append has header sites (static_map in .cch) with nothing
+             * to aim at. Searching `site_line` against the TU path is wrong
+             * when the line came from a `#line` in a harvested header: a face
+             * line can collide with the same line of the unit and land
+             * *before* the umbrella includes that declare the type. Splice
+             * where harvest-append does: EOF. */
             (void)site_line;
             (void)site_pos;
             (void)input_path;

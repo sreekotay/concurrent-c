@@ -143,15 +143,11 @@ REAL_BINARY := bin/.ccc-bin
 CCC_SCRIPT  := bin/ccc
 CCC_WRAPPER_TEMPLATE := scripts/ccc_wrapper.sh
 WRAPPER := $(OUT_BINDIR)/ccc
-SHADOW_LOWER_TEMPLATE := scripts/shadow_lower.sh
-SHADOW_LOWER_SCRIPT := bin/shadow_lower
-SHADOW_LOWER_WRAPPER := $(OUT_BINDIR)/shadow_lower
-# Native shadow_lower (libtcc-linked) + host-built runtime dylib for --exe.
-SHADOW_LOWER_CCS := ../cc/shadow/shadow_lower.ccs
-SHADOW_BUILD_CCH := ../cc/shadow/shadow_build.cch
-SHADOW_TCC_C := ../cc/shadow/shadow_tcc_compile.c
+# The comptime engine (libtcc-linked): what the clean lowerer runs
+# compile-time code with, and what a pinned 0.3 seed links.
+SHADOW_TCC_C := src/comptime/shadow_tcc_compile.c
 SHADOW_TCC_OBJ := $(OBJDIR)/shadow_tcc_compile.o
-SHADOW_COMPTIME_C := ../cc/shadow/shadow_comptime.c
+SHADOW_COMPTIME_C := src/comptime/shadow_comptime.c
 SHADOW_COMPTIME_OBJ := $(OBJDIR)/shadow_comptime.o
 OUT_LIBDIR := $(dir $(OUT_BINDIR))lib
 ifeq ($(shell uname -s),Darwin)
@@ -213,7 +209,7 @@ LOWER_HEADERS_OBJS := $(LOWER_HEADERS_SRCS:%.c=$(OBJDIR)/%.o)
 # Omit arena_state.o from the archive: FFC_IMPL is also unity-included by
 # concurrent_c.o — linking both is an ODR hard-error under GNU ld. Tool
 # binaries (lower_headers*) still link arena_state.o for prov_counter/FFC;
-# shadow_lower links concurrent_c.o instead.
+# cclower_cc and a pinned 0.3 seed link concurrent_c.o instead.
 SHADOW_COMPTIME_ENGINE_OBJS := $(filter-out \
 	$(OBJDIR)/src/tools/lower_headers.o \
 	$(OBJDIR)/runtime/arena_state.o,$(LOWER_HEADERS_OBJS))
@@ -250,7 +246,7 @@ LOWER_TOOLS := $(CCLEX_BINARY) $(CCPARSE_BINARY) $(CCLOWER_BINARY) $(CCINDEX_BIN
 # The clean lowerer's tools, seeded: defined here so `all` sees them (a
 # prerequisite list expands when its rule is read). The rules are below,
 # by `lower-cc`.
-CLEAN_BOOT_ROOT := bootstrap/clean
+CLEAN_BOOT_ROOT := bootstrap/lowerer
 CLEAN_BOOT_VER := $(shell cat $(CLEAN_BOOT_ROOT)/last-good 2>/dev/null)
 CLEAN_BOOT_DIR := $(CLEAN_BOOT_ROOT)/$(CLEAN_BOOT_VER)
 CLEAN_BOOT_OBJ := $(OBJDIR)/clean_boot
@@ -265,9 +261,6 @@ LOWER_DEPS := $(LOWER_OBJS:.o=.d) $(CCLEX_OBJ:.o=.d) $(CCPARSE_OBJ:.o=.d) $(CCLO
 # from their seed, and the C reference tools. The shadow front is opt-in:
 # `make -C cc shadow` builds it for `--lowerer=shadow`.
 all: $(CCC_SCRIPT) $(WRAPPER) $(RUNTIME_DYLIB) $(LOWER_HEADERS_STAMP) $(LOWER_LIB) $(LOWER_TOOLS) $(CLEAN_TOOLS_CC)
-
-.PHONY: shadow
-shadow: $(SHADOW_LOWER_WRAPPER)
 
 # Patched-TCC guard: a fresh clone (or a changed patch set) gets the CC
 # hooks applied into the submodule working tree BEFORE any CC object that
@@ -436,18 +429,18 @@ endif
 
 $(SHADOW_TCC_OBJ): $(SHADOW_TCC_C) $(TCC_LIB_DEP)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -I../cc/shadow -c $(SHADOW_TCC_C) -o $@
+	$(CC) $(CFLAGS) -Isrc/comptime -c $(SHADOW_TCC_C) -o $@
 
 $(SHADOW_COMPTIME_OBJ): $(SHADOW_COMPTIME_C) $(TCC_LIB_DEP)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -I../cc/shadow -Isrc -c $(SHADOW_COMPTIME_C) -o $@
+	$(CC) $(CFLAGS) -Isrc/comptime -Isrc -c $(SHADOW_COMPTIME_C) -o $@
 
 $(SHADOW_COMPTIME_LIB): $(SHADOW_COMPTIME_OBJ) $(SHADOW_COMPTIME_ENGINE_OBJS)
 	@mkdir -p $(dir $@)
 	@rm -f $@
 	ar rcs $@ $^
 
-# Host-C C parser (FileTape-shaped tokens). Linked into shadow_lower.
+# Host-C C parser (FileTape-shaped tokens). Linked into a pinned 0.3 seed.
 CPARSE_LIB := $(OBJDIR)/cparse/libcparse.a
 $(OBJDIR)/cparse/cparse.o: cparse/cparse.c cparse/cparse.h
 	@mkdir -p $(dir $@)
@@ -502,12 +495,12 @@ ifeq ($(suffix $(TCC_LIB)),.a)
 endif
 
 # Stage zero of the clean lowerer: its tools host-compiled from the seed
-# under bootstrap/clean/<last-good>, which is their lowered C (the tool,
+# under bootstrap/lowerer/<last-good>, which is their lowered C (the tool,
 # the C of module `lower`, and the faces that C includes). No lowerer is
 # in hand yet; the seed is what a fresh checkout builds the tools from.
 # `lower-cc` rebuilds them from their sources with these, and
 # scripts/lowerer_selfhost.sh says whether the two agree. Ship a seed:
-# scripts/ship_clean_seed.sh --promote.
+# scripts/ship_seed.sh --promote.
 $(CLEAN_BOOT_OBJ)/lower_cch.o: $(CLEAN_BOOT_DIR)/lower_cch.c $(wildcard $(CLEAN_BOOT_DIR)/*.h) \
 		$(LOWER_HEADERS_STAMP)
 	@test -n "$(CLEAN_BOOT_VER)" || (echo "missing $(CLEAN_BOOT_ROOT)/last-good"; exit 1)
@@ -535,15 +528,13 @@ lower-cc: $(CCC_SCRIPT) $(LOWER_HEADERS_STAMP) $(CLEAN_TOOLS_CC)
 	bin/ccc build --lowerer=clean lower/cclower.ccs --ld-flags "$(LOWER_CC_COMPTIME_LIBS)" -o $(OUT_BINDIR)/cclower_cc.new && mv -f $(OUT_BINDIR)/cclower_cc.new $(OUT_BINDIR)/cclower_cc
 	bin/ccc build --lowerer=clean lower/ccindex.ccs -o $(OUT_BINDIR)/ccindex_cc.new && mv -f $(OUT_BINDIR)/ccindex_cc.new $(OUT_BINDIR)/ccindex_cc
 
-# shadow_lower self-build:
-#   SHADOW_LOWER_SOURCE=bootstrap (default) — host-cc last-good snapshot
-#   SHADOW_LOWER_SOURCE=ccs — re-lower .ccs via existing native shadow_lower
-# Promote a new seed: scripts/snapshot_shadow_lower.sh && promote_shadow_bootstrap.sh
-BOOTSTRAP_ROOT := bootstrap/shadow_lower
+# Seed line: last-good names the pin the tools above are host-compiled
+# from, and the version ccc reports. Promote a new seed: scripts/ship_seed.sh --promote.
+BOOTSTRAP_ROOT := bootstrap/lowerer
 BOOTSTRAP_VER := $(shell cat $(BOOTSTRAP_ROOT)/last-good 2>/dev/null)
 BOOTSTRAP_DIR := $(BOOTSTRAP_ROOT)/$(BOOTSTRAP_VER)
-CCC_VERSION_BASE ?= 0.3.4
-# last-good is MAJOR.MINOR.PATCH-SEED (e.g. 0.3.3-128)
+CCC_VERSION_BASE ?= 0.4.0
+# last-good is MAJOR.MINOR.PATCH-SEED (e.g. 0.4.0-400)
 CCC_BOOTSTRAP_SEED := $(lastword $(subst -, ,$(BOOTSTRAP_VER)))
 ifeq ($(CCC_BOOTSTRAP_SEED),)
   CCC_BOOTSTRAP_SEED := 0
@@ -552,147 +543,11 @@ UNIT_HEADER_CFLAGS := -DCCC_VERSION_BASE=\"$(CCC_VERSION_BASE)\" -DCCC_BOOTSTRAP
 $(OBJDIR)/src/preprocess/unit_header.o: CFLAGS += $(UNIT_HEADER_CFLAGS)
 $(OBJDIR)/src/cc_main.o: CFLAGS += $(UNIT_HEADER_CFLAGS)
 $(OBJDIR)/src/preprocess/unit_header.o $(OBJDIR)/src/cc_main.o: $(BOOTSTRAP_ROOT)/last-good
-SHADOW_LOWER_SOURCE ?= bootstrap
-# Prefer a previously built native binary when re-lowering from .ccs.
-SHADOW_LOWER_SEED_BIN := $(firstword \
-	$(wildcard $(OUT_BINDIR)/shadow_lower) \
-	$(wildcard bin/shadow_lower))
+.PHONY: shadow_lower-pin
 
-SHADOW_LOWER_CCS_DEPS := $(SHADOW_LOWER_CCS) $(SHADOW_BUILD_CCH) \
-	$(wildcard ../cc/shadow/pp_*.cch) \
-	$(wildcard ../cc/shadow/shadow_*.cch) \
-	$(wildcard ../cc/shadow/shadow_*.h) \
-	$(CPARSE_LIB)
-# last-good still spells Map/Vec init as `Foo_init(&handle)`, hook/box
-# last args as `&g_shadow_meta_ar`, and operate as `reset(&handle)`.
-# Allocate/operate take CCArena by value; rewrite only the copied tree.
-# Slot ops stay `&` (`destroy`/`free`/`adopt`/`detach`/`try_adopt`).
-SHADOW_BOOT_INC := $(OBJDIR)/shadow_boot_inc
-SHADOW_BOOT_C := $(OBJDIR)/shadow_boot_inc/shadow_lower.c
-$(SHADOW_BOOT_INC)/.stamp: $(wildcard $(BOOTSTRAP_DIR)/include/*.h) \
-		$(BOOTSTRAP_DIR)/shadow_lower.c
-	@mkdir -p $(SHADOW_BOOT_INC)
-	@for f in $(BOOTSTRAP_DIR)/include/*.h; do \
-		b=$$(basename "$$f"); \
-		sed -e 's/\([A-Za-z_][A-Za-z0-9_]*_init\)(\&g_shadow_meta_ar/\1(g_shadow_meta_ar/g' \
-		    -e 's/, \&g_shadow_meta_ar)/, g_shadow_meta_ar)/g' \
-		    -e 's/cc_arena_reset(\&/cc_arena_reset(/g' \
-		    -e 's/cc_arena_alloc(\&/cc_arena_alloc(/g' \
-		    -e 's/cc_arena_checkpoint(\&/cc_arena_checkpoint(/g' \
-			"$$f" > "$(SHADOW_BOOT_INC)/$$b"; \
-	done
-	@sed -e 's/cc_arena_reset(\&/cc_arena_reset(/g' \
-	    -e 's/cc_arena_alloc(\&/cc_arena_alloc(/g' \
-	    -e 's/cc_arena_checkpoint(\&/cc_arena_checkpoint(/g' \
-		$(BOOTSTRAP_DIR)/shadow_lower.c > $(SHADOW_BOOT_C)
-	@touch $@
-
-SHADOW_LOWER_BOOT_DEPS := $(BOOTSTRAP_DIR)/shadow_lower.c \
-	$(wildcard $(BOOTSTRAP_DIR)/include/*.h) \
-	$(SHADOW_BOOT_INC)/.stamp \
-	$(CPARSE_LIB)
-
-ifeq ($(SHADOW_LOWER_SOURCE),ccs)
-# Prefer an installed `ccc` (prefix / PATH). It extracts quoted `.cch` faces
-# into out/include/cc/shadow/*.h, then the seed lowerer emits the driver.
-# In-tree `.ccc-bin` is the fallback when nothing is installed.
-CCC_EXTRACT ?= $(shell command -v ccc 2>/dev/null)
-ifeq ($(CCC_EXTRACT),)
-  CCC_EXTRACT := $(abspath $(REAL_BINARY))
-endif
-$(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_CCS_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_COMPTIME_LIB) \
-	$(TCC_LIB_DEP) $(RUNTIME_DYLIB) $(OBJDIR)/runtime/concurrent_c.o
-	@mkdir -p $(dir $@) $(OBJDIR)
-	@test -n "$(SHADOW_LOWER_SEED_BIN)" -a -x "$(SHADOW_LOWER_SEED_BIN)" || \
-		(echo "SHADOW_LOWER_SOURCE=ccs needs an existing shadow_lower; run: make SHADOW_LOWER_SOURCE=bootstrap"; exit 1)
-	@test -n "$(CCC_EXTRACT)" -a -x "$(CCC_EXTRACT)" || \
-		(echo "SHADOW_LOWER_SOURCE=ccs needs ccc on PATH or bin/.ccc-bin"; exit 1)
-	# Host-cc of emit.c #includes out/include/cc/shadow/*.h (umbrella
-	# passthrough). Drop last-good so extract cannot adopt the pin.
-	@mkdir -p ../out/include/cc/shadow
-	@for f in ../cc/shadow/*.cch; do \
-		[ -f "$$f" ] || continue; \
-		rm -f ../out/include/cc/shadow/$$(basename "$$f" .cch).h; \
-	done
-	# concurrent_c.o supplies arena_state/FFC (omitted from libshadow_comptime.a).
-	@echo "[shadow_lower] $$(date '+%H:%M:%S') extract+emit start ($(SHADOW_LOWER_CCS) via $(CCC_EXTRACT) --emit-c-only)"
-	@t0=$$(date +%s); \
-	CC_INCLUDE_PATH="$(abspath $(OUT_INCLUDE)):$(abspath include)" \
-	$(CCC_EXTRACT) --emit-c-only --no-cache $(SHADOW_LOWER_CCS) \
-		-o $(OBJDIR)/shadow_lower.emit.c || exit $$?; \
-	echo "[shadow_lower] $$(date '+%H:%M:%S') extract+emit done ($$(($$(date +%s)-t0))s, $$(wc -c < $(OBJDIR)/shadow_lower.emit.c | tr -d ' ') bytes)"
-	@if grep -qE '^de#line' $(OBJDIR)/shadow_lower.emit.c; then \
-		echo "error: emit contains de#line (injected-token lead bug)"; exit 1; \
-	fi
-	@echo "[shadow_lower] $$(date '+%H:%M:%S') host-cc start ($(OBJDIR)/shadow_lower.emit.c)"
-	@t0=$$(date +%s); \
-	$(CC) $(CFLAGS) -o $@ $(OBJDIR)/shadow_lower.emit.c \
-		-I../out/include/cc/shadow -I../out/include -I../cc/include \
-		-I../cc/shadow -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1 \
-		$(abspath $(SHADOW_TCC_OBJ)) \
-		$(abspath $(OBJDIR)/runtime/concurrent_c.o) \
-		$(abspath $(SHADOW_COMPTIME_LIB)) \
-		$(abspath $(CPARSE_LIB)) \
-		$(LDFLAGS) $(LDLIBS) || exit $$?; \
-	echo "[shadow_lower] $$(date '+%H:%M:%S') host-cc done ($$(($$(date +%s)-t0))s)"
-	@mkdir -p $(dir $(SHADOW_LOWER_SCRIPT))
-	@# rm first: overwriting an already-executed binary in place keeps the
-	@# inode, and macOS's cached code-signature then SIGKILLs the new
-	@# contents on next exec. A fresh inode revalidates.
-	@rm -f $(SHADOW_LOWER_SCRIPT)
-	@cp $@ $(SHADOW_LOWER_SCRIPT)
-	@chmod +x $(SHADOW_LOWER_SCRIPT)
-else
-$(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_BOOT_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_COMPTIME_LIB) \
-	$(TCC_LIB_DEP) $(OBJDIR)/runtime/concurrent_c.o $(LOWER_HEADERS_STAMP)
-	@test -n "$(BOOTSTRAP_VER)" || (echo "missing $(BOOTSTRAP_ROOT)/last-good"; exit 1)
-	@test -f "$(BOOTSTRAP_DIR)/shadow_lower.c" || \
-		(echo "missing $(BOOTSTRAP_DIR)/shadow_lower.c; run snapshot+promote"; exit 1)
-	@mkdir -p $(dir $@)
-	# Seed snapshot headers at angle-include paths some emits still spell
-	# (<cc/shadow/*.h>, legacy <examples/serdes/c/*.h>). v4+ rewrites those
-	# to "foo.h" + -Iinclude/; seeding keeps older snapshots host-cc clean.
-	@mkdir -p ../out/include/cc/shadow ../out/include/examples/serdes/c
-	@# Copy-if-different: identical last-good headers must not bump mtimes.
-	@if ls $(BOOTSTRAP_DIR)/include/*.h >/dev/null 2>&1; then \
-		for f in $(BOOTSTRAP_DIR)/include/*.h; do \
-			b=$$(basename "$$f"); \
-			for dest in ../out/include/cc/shadow/$$b \
-			            ../out/include/examples/serdes/c/$$b; do \
-				if [ ! -f "$$dest" ] || ! cmp -s "$$f" "$$dest"; then \
-					cp -f "$$f" "$$dest"; \
-				fi; \
-			done; \
-		done; \
-	fi
-	# arena_state/FFC live only in concurrent_c.o (see SHADOW_COMPTIME_ENGINE_OBJS).
-	@echo "[shadow_lower] $$(date '+%H:%M:%S') host-cc bootstrap start ($(SHADOW_BOOT_C))"
-	@t0=$$(date +%s); \
-	$(CC) $(CFLAGS) -o $@ $(SHADOW_BOOT_C) \
-		-I$(SHADOW_BOOT_INC) -I$(BOOTSTRAP_DIR)/include -Iinclude -I../out/include \
-		-I../cc/shadow -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1 \
-		$(abspath $(SHADOW_TCC_OBJ)) \
-		$(abspath $(OBJDIR)/runtime/concurrent_c.o) \
-		$(abspath $(SHADOW_COMPTIME_LIB)) \
-		$(abspath $(CPARSE_LIB)) \
-		$(LDFLAGS) $(LDLIBS) || exit $$?; \
-	echo "[shadow_lower] $$(date '+%H:%M:%S') host-cc bootstrap done ($$(($$(date +%s)-t0))s)"
-	@mkdir -p $(dir $(SHADOW_LOWER_SCRIPT))
-	@# rm first: see the native rule above (macOS signature cache SIGKILL).
-	@rm -f $(SHADOW_LOWER_SCRIPT)
-	@cp $@ $(SHADOW_LOWER_SCRIPT)
-	@chmod +x $(SHADOW_LOWER_SCRIPT)
-	@echo "built $@ from bootstrap $(BOOTSTRAP_VER)"
-endif
-
-.PHONY: shadow_lower-from-bootstrap shadow_lower-from-ccs shadow_lower-pin
-shadow_lower-from-bootstrap:
-	$(MAKE) SHADOW_LOWER_SOURCE=bootstrap $(SHADOW_LOWER_WRAPPER)
-shadow_lower-from-ccs:
-	$(MAKE) SHADOW_LOWER_SOURCE=ccs $(SHADOW_LOWER_WRAPPER)
-
-# Host-cc a historical bootstrap seed into PIN_OUT (version pins).
-#   make -C cc shadow_lower-pin PIN_VER=0.3.2-110 PIN_OUT=../out/.cc-build/lowerers/0.3.2-110/shadow_lower
+# Host-cc a 0.3 seed into PIN_OUT: a unit whose version pin selects the
+# retired shadow front is lowered by that seed's frozen C. Run by ccc.
+#   make -C cc shadow_lower-pin PIN_VER=0.3.4-329 PIN_OUT=../out/.cc-build/lowerers/0.3.4-329/shadow_lower
 shadow_lower-pin:
 	@test -n "$(PIN_VER)" || (echo "shadow_lower-pin: set PIN_VER=MAJOR.MINOR.PATCH-SEED"; exit 1)
 	@test -n "$(PIN_OUT)" || (echo "shadow_lower-pin: set PIN_OUT=path"; exit 1)
@@ -701,18 +556,12 @@ shadow_lower-pin:
 	@mkdir -p $(dir $(PIN_OUT))
 	$(CC) $(CFLAGS) -o $(PIN_OUT) $(BOOTSTRAP_ROOT)/$(PIN_VER)/shadow_lower.c \
 		-I$(BOOTSTRAP_ROOT)/$(PIN_VER)/include -Iinclude -I../out/include \
-		-I../cc/shadow -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1 \
+		-Isrc/comptime -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1 \
 		$(abspath $(SHADOW_TCC_OBJ)) \
 		$(abspath $(OBJDIR)/runtime/concurrent_c.o) \
 		$(abspath $(SHADOW_COMPTIME_LIB)) \
 		$(abspath $(CPARSE_LIB)) \
 		$(LDFLAGS) $(LDLIBS)
-
-# Dev fallback wrapper (ccc run) — not installed as the primary CLI.
-$(SHADOW_LOWER_SCRIPT).sh: $(SHADOW_LOWER_TEMPLATE)
-	@mkdir -p $(dir $@)
-	@cp $(SHADOW_LOWER_TEMPLATE) $@
-	@chmod +x $@
 
 $(LOWER_HEADERS_BINARY): $(LOWER_HEADERS_OBJS) $(TCC_LIB_DEP)
 	@mkdir -p $(dir $@)

@@ -686,8 +686,8 @@ make cc -j"$jobs"
 ./cc/bin/ccc run examples/hello.ccs
 ```
 
-After that: stdlib → `make -C cc lower-headers`; lowerer faces →
-`./scripts/iterate_shadow_lower.sh`; ship seed →
-`./scripts/iterate_shadow_lower.sh --ship --smoke`. Binaries: `./cc/bin/ccc`,
-`./out/cc/bin/shadow_lower`. Architecture notes:
+After that: stdlib → `make -C cc lower-headers`; the lowerer →
+`make -C cc lower-cc` and `./scripts/lowerer_selfhost.sh`; ship seed →
+`./scripts/ship_seed.sh --promote`. Binaries: `./cc/bin/ccc`,
+`./out/cc/bin/cclower_cc`. Architecture notes:
 [cc/docs/ARCHITECTURE.md](../cc/docs/ARCHITECTURE.md).

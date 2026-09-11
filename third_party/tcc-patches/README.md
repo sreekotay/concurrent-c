@@ -29,8 +29,8 @@ make tcc-patch-regen
 ## Patch File
 
 **0001-cc-ext-hooks.patch** — minimal `CONFIG_CC_EXT` surface for libtcc
-(comptime / `cpp_expand` / `--exe`). Product syntax lowering is native
-`shadow_lower`; lowered C is ordinary C.
+(comptime / `cpp_expand` / `--exe`). Product syntax lowering is the lowerer,
+`cclower_cc`; lowered C is ordinary C.
 
 - `CONFIG_CC_EXT` build flag wiring + `CC_TCC_EXT_AVAILABLE` + `CC_TCC_EXT_ABI`
 - `pp_line` negative-delta fix (preserve user `#line` resumes)

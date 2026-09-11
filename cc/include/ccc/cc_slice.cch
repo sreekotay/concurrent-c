@@ -89,7 +89,7 @@ static inline int cc__bytes_cmp(const void *a, const void *b, size_t n) {
     return 0;
 }
 
-/* Unnamed facet (enforced by shadow_lower for the whole slice family —
+/* Unnamed facet (enforced by the lowerer for the whole slice family —
  * CCSlice / Unique / Shared / Packed / Hdr / CCSlice_T). Ordinary sites
  * may read `.ptr` / `.len` / `.id`; they may not store fields.
  * First-param CCSlice* bodies are trusted (stdlib + user methods).
@@ -136,7 +136,7 @@ typedef CCSlice CCSliceShared;
  * Members are `NAME##_<member>` — the same instance-prefix convention
  * as Vec and Map families. Header lowering strips `@typeview` and
  * `CC_GENERIC_FACTORY` from `.h` (faces and the factory remain
- * Concurrent-C / shadow facts). */
+ * Concurrent-C facts). */
 #define CC_DECL_SLICE_SPEC(NAME, T)                                            \
     typedef struct NAME {                                                      \
         CCSlice base;                                                          \

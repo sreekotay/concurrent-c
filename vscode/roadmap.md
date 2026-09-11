@@ -11,11 +11,11 @@ Language tooling for Concurrent-C, grounded in the normative specs:
 |-----------|------|--------|
 | Syntax highlighting | [`ccs-syntax/`](ccs-syntax/) | Shipped (TextMate) |
 | Language server | [`cc-lsp/`](cc-lsp/) | **Phase 1: live diags (gen / debounce / nursery)** |
-| Compiler front | [`cc/shadow/`](../cc/shadow/) | Production (`shadow_lower`) |
-| Structured diag API | [`cc/src/diag/`](../cc/src/diag/) | Designed; not wired to native front |
+| Lowerer | [`cc/lower/`](../cc/lower/) | Production (`cclower_cc`) |
+| Structured diag API | [`cc/src/diag/`](../cc/src/diag/) | Designed; not wired to the lowerer |
 | `--json-diagnostics` | — | Planned (Phase 1.5) |
 
-The native front already produces accurate `path:line:col: error:` diagnostics. The largest gap for IDE work is a stable programmatic interface beyond spawning the CLI.
+The lowerer already produces accurate `path:line:col: error:` diagnostics. The largest gap for IDE work is a stable programmatic interface beyond spawning the CLI.
 
 ## Architecture
 
@@ -28,7 +28,7 @@ The native front already produces accurate `path:line:col: error:` diagnostics. 
                                  ┌────────▼─────────┐
                                  │ ccc              │
                                  │ --emit-c-only    │
-                                 │ (shadow_lower)   │
+                                 │ (cclower_cc)     │
                                  └──────────────────┘
 ```
 
@@ -64,7 +64,7 @@ Pair with [`ccs-syntax`](ccs-syntax/) for highlighting.
 
 ### Phase 1.5 — Structured compiler output
 
-Add to `ccc` / `shadow_lower`:
+Add to `ccc` / the lowerer:
 
 ```text
 ccc --check [--json-diagnostics] <file>
@@ -76,22 +76,22 @@ ccc --check [--json-diagnostics] <file>
 
 ### Phase 2 — In-process parse API
 
-Extract a C library from the shadow pipeline (not legacy `cc/src/visitor/`):
+Extract a library from the lowerer (`cc/lower/`), not from `cc/src/visitor/`:
 
 ```c
-int cc_shadow_parse_buffer(const char *path_for_errors,
-                           const char *bytes, size_t len,
-                           CCShadowParseOptions *opts,
-                           CCShadowParseResult *out);
+int cc_lower_parse_buffer(const char *path_for_errors,
+                          const char *bytes, size_t len,
+                          CcParseOptions *opts,
+                          CcParseResult *out);
 ```
 
-Enables: unsaved buffers without temp files, faster debounce, semantic tokens from whitelist AST kinds.
+Enables: unsaved buffers without temp files, faster debounce, semantic tokens from AST node kinds.
 
 Expose stages incrementally:
 
-1. Stage-1 tape (re-lex)
-2. Stage-2 stitch (includes)
-3. Whitelist parse + safety (diagnostics without emit)
+1. Lex (tokens with file, line and column)
+2. Parse (AST with a span on every node)
+3. Index + safety (diagnostics without emit)
 
 ### Phase 3 — Semantic IDE features
 
@@ -99,7 +99,7 @@ Expose stages incrementally:
 |---------|--------|-------|
 | Hover on `@`-sigils | Language spec §1–§8 | Static markdown |
 | Hover on stdlib UFCS | Stdlib spec + `.cch` | Curated or generated |
-| Completion on UFCS | `pp_emit_typehooks.cch` harvest | Needs typehook registry |
+| Completion on UFCS | `@typehooks` read from the declaration index | Needs typehook registry |
 | Go-to-def on hooks | AST + mangling (`GENERIC_MANGLING.md`) | Hard |
 | Find references | Cross-TU index + comptime | Very hard |
 | Inlay hints | Lowered names, captures | Debug-oriented |
@@ -112,7 +112,7 @@ CC-specific semantics the LSP must eventually understand:
 - `@async` / `@await` legality
 - Generic factories (`Vec::[T]`, `map_new::[K,V]`)
 - `.cch` header units vs `.ccs` translation units
-- Stage-2 include/macro stitch (same view as compiler)
+- Includes and object-like macros (same view as the compiler)
 - `#line`-mapped locations in user source
 
 ### Phase 4 — Spec-driven documentation layer
@@ -127,7 +127,7 @@ Treat the two spec files as a doc corpus (parallel to compiler features):
 
 1. **Language id** — Single `concurrent-c` for `.ccs`, `.cch`, `.shcc` (current).
 2. **Diagnostic authority** — Compiler-only for v1; no hybrid clangd on lowered C.
-3. **Incomplete files** — Publish what the whitelist parser recovers; no silent drop.
+3. **Incomplete files** — Publish what the parser recovers; no silent drop.
 4. **Comptime** — Check mode may skip execution; surface “comptime not evaluated” as info when relevant.
 5. **Version pins** — Respect `version=` in unit headers (same as CLI).
 6. **Primary editor** — VS Code / Cursor first; LSP protocol keeps Neovim/etc. possible.
@@ -140,10 +140,10 @@ flowchart LR
     LS[Language spec]
     SS[Stdlib spec]
   end
-  subgraph compiler [shadow_lower]
-    S1[Stage-1 lex]
-    S2[Stage-2 cpp]
-    AST[Whitelist AST]
+  subgraph compiler [lowerer]
+    S1[Lex]
+    S2[Parse]
+    AST[Declaration index]
     SAF[Safety analysis]
   end
   spec --> compiler
@@ -167,7 +167,7 @@ flowchart LR
 
 ## References
 
-- Compiler architecture: [`cc/shadow/README.md`](../cc/shadow/README.md)
+- Compiler architecture: [`cc/docs/ARCHITECTURE.md`](../cc/docs/ARCHITECTURE.md)
 - Diagnostic audit: [`cc/src/diag/DIAG_AUDIT.md`](../cc/src/diag/DIAG_AUDIT.md)
 - Test oracles: [`tests/README.md`](../tests/README.md) (`*.compile_err`)
 - Build commands: [`docs/build-when.md`](../docs/build-when.md)

@@ -128,7 +128,7 @@ static void ensure_log_dir(CCArena* arena) {
     (void)cmd.status();
 }
 
-/* Host-compile stress/mem_sample.c — #if stays out of shadow_lower. */
+/* Host-compile stress/mem_sample.c — #if stays out of the lowerer. */
 static int ensure_mem_sample_o(CCArena* arena) {
     CCCommand mkdir = cc_command(arena, "mkdir");
     mkdir.arg("-p");

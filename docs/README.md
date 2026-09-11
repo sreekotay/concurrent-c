@@ -41,8 +41,8 @@ detail:
 - [Compiler architecture](../cc/docs/ARCHITECTURE.md)
 - [Compiler internals](compiler_internals.md) — what the pipeline does today, translation units, diagnostics, hard-coded tables, fragility, cleanup plan
 - [Own C parser](c-parser.md) — C23+ front, overlay vs TCC, preserve vs evaluate
-- [shadow_lower ops / layout](../cc/shadow/README.md)
-- [Bootstrap snapshots](../cc/bootstrap/shadow_lower/README.md)
+- [The lowerer](../cc/lower/LOWERING.md)
+- [Bootstrap seeds](../cc/bootstrap/lowerer/README.md)
 - [ILP32 Docker smoke](ilp32-docker.md)
 
 ## Quick Example

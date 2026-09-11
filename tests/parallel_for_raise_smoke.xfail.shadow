@@ -1,4 +1,0 @@
-The shadow lowerer does not lower a bare `!>` in the body of a bisected
-`@parallel for`: its handler copy reaches the host compiler as-is
-(`invalid type argument of '->' (have 'CCError')`). Spec 8.11.4: an error
-from `!>` in the body uses the enclosing `@errhandler`.

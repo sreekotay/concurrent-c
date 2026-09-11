@@ -207,21 +207,21 @@ int main(void) {
             failed |= expect_substr(out, cmd, "seed prefix not a match");
         }
 
-        failed |= expect_match("0.3", ver, 1, "usual minor prefix");
-        failed |= expect_match(">=0.3", ver, 1, ">= minor line");
-        failed |= expect_match(">0.3", ver, 0, "> minor line");
-        failed |= expect_match(">=0.3.4", ver, 1, ">= current patch");
-        failed |= expect_match(">0.3.4", ver, 0, "> current patch line");
-        failed |= expect_match("<0.4", ver, 1, "< next major.minor");
-        failed |= expect_match("<=0.3.4", ver, 1, "<= current patch line");
-        failed |= expect_match(">=0.3,<0.4", ver, 1, "usual range includes current");
-        failed |= expect_match("<0.4,>=0.3", ver, 1, "range reversed");
+        failed |= expect_match("0.4", ver, 1, "usual minor prefix");
+        failed |= expect_match(">=0.4", ver, 1, ">= minor line");
+        failed |= expect_match(">0.4", ver, 0, "> minor line");
+        failed |= expect_match(">=0.4.0", ver, 1, ">= current patch");
+        failed |= expect_match(">0.4.0", ver, 0, "> current patch line");
+        failed |= expect_match("<0.5", ver, 1, "< next major.minor");
+        failed |= expect_match("<=0.4.0", ver, 1, "<= current patch line");
+        failed |= expect_match(">=0.4,<0.5", ver, 1, "usual range includes current");
+        failed |= expect_match("<0.5,>=0.4", ver, 1, "range reversed");
         failed |= expect_match("0.3.2", "0.3.2-121", 1, "patch prefix");
         failed |= expect_match("0.3.2-12", "0.3.2-121", 0, "seed not a prefix");
         failed |= expect_match(">0.3", "0.4.0-1", 1, "> minor then later");
         failed |= expect_match("<0.0", ver, 0, "<0.0 misses current");
         failed |= expect_match(">99", ver, 0, ">99 misses current");
-        failed |= expect_match(">=0.3;>=0.3,<0.4", ver, 1, "AND clauses");
+        failed |= expect_match(">=0.4;>=0.4,<0.5", ver, 1, "AND clauses");
 
         snprintf(cmd, sizeof(cmd),
                  "./cc/bin/ccc 'version=>=%s' --emit-c-only "
@@ -242,10 +242,10 @@ int main(void) {
         }
 
         snprintf(cmd, sizeof(cmd),
-                 "./cc/bin/ccc version=0.4 --emit-c-only "
+                 "./cc/bin/ccc version=0.5 --emit-c-only "
                  "tests/unit_header_version_prefix_smoke.ccs");
         if (run_capture(cmd, out, sizeof(out), &ec) != 0 || ec == 0) {
-            fprintf(stderr, "FAIL CLI 0.4 vs header 0.3 should disagree:\n%s\n",
+            fprintf(stderr, "FAIL CLI 0.5 vs header 0.4 should disagree:\n%s\n",
                     out);
             failed = 1;
         } else {

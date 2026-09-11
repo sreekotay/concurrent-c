@@ -1,1 +1,0 @@
-the 'Vec::[int]' inside the case body is not lowered ('::' was not lowered); a typedef of the instance declared at file scope works

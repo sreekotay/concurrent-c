@@ -1,18 +1,17 @@
 # Own C parser
 
-The product front is `shadow_lower`. It is a Concurrent-C overlay and
-lowerer, not a C compiler. TinyCC is a backend / comptime machine for
-**already-lowered C**. Neither is the C grammar.
+The lowerer (`cc/lower/*.cch` / `*.ccs`) parses Concurrent-C and lowers it
+to C. TinyCC is a comptime machine for **already-lowered C**. Neither one
+is a general C grammar with a preprocessor of its own.
 
 This repo owns a **C23+ parser** (plus the GNU the tree actually writes).
-It is a host-C library that sits on the existing tape, not a second
-include engine and not more cases in `parse_field_simple` /
-`parse_static_fn`.
+It is a host-C library that sits on a pp-token stream, not a second
+include engine.
 
-A whitelist-only front cannot name every token (`#else` as a type name is
-the canonical failure). This repo owns a full C23+ parser instead. We do
-**not** own a C compiler: parse + two projections; host `cc` compiles
-the emit; TCC evaluates lowered C.
+A parser that names only the shapes it expects cannot name every token
+(`#else` as a type name is the canonical failure). This repo owns a full
+C23+ parser instead. We do **not** own a C compiler: parse + two
+projections; host `cc` compiles the emit; TCC evaluates lowered C.
 
 ## Layers
 
@@ -20,15 +19,14 @@ the emit; TCC evaluates lowered C.
 |-------|------|
 | **Tape** (stage-1 / stage-2) | pp-tokens, quote/angle include, `#line` |
 | **C parser** (`cc/cparse/` or similar, host C) | TU, declarators, types, stmts, cpp |
-| **shadow overlay** | `!>`, `@errhandler`, UFCS, comptime, quote-dir, `#pragma(@parallel)` |
+| **lowerer** | `!>`, `@errhandler`, UFCS, comptime, quote-dir, `#pragma(@parallel)` |
 | **TCC** | Evaluate / `--exe` lowered C. No ExtParser, no `!>` |
 
 Do not reintroduce Stub-AST or UFCS-in-TCC
 (`third_party/tcc-patches/HOOKS.md`).
 
-Write the parser in **host C**. A `.cch` front can only use the dialect
-today’s beachhead can lower, and it has to ship through `last-good`.
-Shadow and the LSP both call the library.
+Write the parser in **host C**, so it stands on its own and needs no
+lowerer to build. Tools call the library through its C header.
 
 `.ccs` is not C. First merge is C-shaped headers. Overlay later is a
 **C-superset on the same pp-token tape** (CC productions as nodes), not
@@ -51,7 +49,7 @@ It is not “all of clang’s preprocessor.” Angle `.h` stays passthrough
 | `#include` quote + angle policy | Already stage-2. Keep it. |
 | `#pragma once` | Every header. |
 | Object-like `#define` / include guards | Already stage-2. |
-| `#ifdef` / `#ifndef` / `#if` / `#elif` / `#else` / `#endif` | `process.cch`, arena, atomic, shadow. |
+| `#ifdef` / `#ifndef` / `#if` / `#elif` / `#else` / `#endif` | `process.cch`, arena, atomic. |
 | `defined`, `!` `&&` `\|\|`, integer compares | `#if defined(__APPLE__)`, `UINTPTR_MAX == UINT64_MAX`. |
 | Function-like macros, `__VA_ARGS__`, N-arg dispatch | `cc_file_read`, `cc_channel_send`, `cc_match`. |
 | `##` paste | Stdlib is a paste factory: `Name##_init`, `Map_##K##_##V`. |
@@ -99,8 +97,8 @@ default to “this Mac” and lie about `_WIN32`.
 Standalone host-C library `cc/cparse/` + `out/cc/bin/cparse-dump`.
 The parser consumes a **FileTape-shaped** stream (`IDENT` / `NUM` /
 `STR` / `CHR` / `PUNCT`, `#` is a punct; `#ifdef` is `#` + `ifdef`).
-`cparse_tokens` is the seam shadow will call. Lex + `\`-newline splice
-match stage-1 so we are not a second grammar. No UFCS rewrite, no emit rewrite. File-scope `T !>(E) name(...)` and
+`cparse_tokens` is the token seam a tool calls. Lex + `\`-newline splice
+match the lowerer's lexer so we are not a second grammar. No UFCS rewrite, no emit rewrite. File-scope `T !>(E) name(...)` and
 `@typeview` / `@comptime` / `@typehooks` are taped as C-superset
 nodes so mixed headers are units; overlay still owns their meaning.
 `--expand` runs classic cpp on the token stream.
@@ -125,41 +123,29 @@ GNU is a **corpus**, not a dialect: mid-declarator `__attribute__`,
 plus in-tree `unused` / `constructor` / `always_inline` / `noinline`
 (and `typeof` when a header uses it). Grep, then stop.
 
-When a shape moves onto this parser from shadow, **delete** the
-beachhead path. No silent fallback.
+When a shape moves onto this parser, **delete** the path it replaces.
+No silent fallback.
 
 `--expand` evaluates `#if` / `#define` / `#undef`, expands object- and
 function-like macros (`#`, `##`, `__VA_ARGS__`, hide-set), and drops
 dead arms. Oracle: token dump equals `cc -E -P -undef` on
 `tests/cparse/macros.c` and `process_fields.c`.
 
-Shadow fills `CpTok` from `FileTape` (`pp_ast_cparse.cch`) and asks
-cparse for every struct member list (`#if`, comma names, nested
-`struct` / `union`). Concurrent-C fields (`!>`, `[:]`, `[~`, generics)
-are taped as spans then re-parsed by the overlay — not flatten-as-C.
-A C declarator that only *contains* type-position sugar
-(`double (*f)(char[:] x, int!>(E) r)`) stays a C field; emit rewrites
-those spellings the same way as function parameters.
-Token and flat buffers are heap-sized; overflow fails loud. Comma
-declarators (`size_t a, b, c`) flatten to one field node per name.
+A caller fills `CpTok` from its own token stream and asks cparse for
+every struct member list (`#if`, comma names, nested `struct` / `union`).
+Concurrent-C fields (`!>`, `[:]`, `[~`, generics) come back as spans the
+caller parses — not flatten-as-C. A C declarator that only *contains*
+type-position sugar (`double (*f)(char[:] x, int!>(E) r)`) stays a C
+field; the caller rewrites those spellings the same way as function
+parameters. Token and flat buffers are heap-sized; overflow fails loud.
+Comma declarators (`size_t a, b, c`) flatten to one field node per name.
 Nested `struct` / `union` fields: flatten keeps `start`/`end` when the
-declarator outgrows `CpFlat.text` (512); emit reprints the FileTape
-span instead of chopping. File-scope functions: cparse confirms the envelope when it can;
-overlay always attaches params/body kids for emit (never whole-fn
-FileTape reprint). Bodies with Concurrent-C tokens (`!>`, `@`, `=>`, …)
-hard-parse like beachhead — cparse stmt spans are C-shaped and must
-not slice overlay chains. Pure-C bodies may use per-stmt spans; a soft
-miss tapes that one stmt only. Envelope match soft-misses to beachhead
-on pure-C shapes cparse still lacks (and on unclosed braces, so
-diagnostics keep the function name). `struct Tag *name(...)` is a
-function, not a tag decl. Result returns, defaults, and `@typeview` /
-safety / comptime stay overlay-owned. Oversized field / `#if` flatten
-text leaves `CpFlat.text` empty and reprints the FileTape span.
-Link
-`out/cc/obj/cparse/libcparse.a` into `shadow_lower`
-(`make -C cc SHADOW_LOWER_SOURCE=ccs`). Gate:
-`cparse-dump --fields` and, once the lowerer exports
-`cparse_flat_fields`, `scripts/test_cparse_overlay.sh`.
+declarator outgrows `CpFlat.text` (512), and the caller reprints the
+span instead of chopping. `struct Tag *name(...)` is a function, not a
+tag decl. Oversized field / `#if` flatten text leaves `CpFlat.text`
+empty and the span is reprinted. The library builds and ships on its own
+(`out/cc/obj/cparse/libcparse.a`, `make -C cc/cparse`). Gate:
+`cparse-dump --fields` and `scripts/test_cparse.sh`.
 
 `#elif` is a chained `#if` in the tree (`is_elif`). Preserve prints
 the `#elif` line. Evaluate / expand take the first live arm; later
@@ -180,8 +166,8 @@ directory; `<…>` searches `-I`, the emit compiler's include roots
 after macro expansion fails loud. Parse
 accepts that form so preserve of an unexpanded call does not die.
 
-`__has_builtin` is the emit compiler (`CC=` / `shadow_host_cc`), not
-the compiler that built libcparse. Today: one known clang/gcc set.
+`__has_builtin` is the emit compiler (`CC=`, or the host compiler the
+driver picks), not the compiler that built libcparse. Today: one known clang/gcc set.
 Later: a table per backend; an unknown name probes that backend
 (`$CC -E` on a one-line `#if __has_builtin(name)`) and caches
 `(compiler, name)`. Preserve does not evaluate. Not this increment.
@@ -213,14 +199,7 @@ marks `data cxx live=0`, C is not parsed. Nested `#if` inside that
 span (mid-expression in a template) is just text. Overlay still owns
 the meaning of `!>` / `@` / UFCS; cparse only tapes the span.
 
-`AST_CAP` is 32768 (shipped in last-good). Snapshot smoke links
-`libcparse.a` the same way `make -C cc` does.
-
-## After that
-
-1. Include-chapter `cc/shadow/pp_*.cch` is not a TU; the unit is
-   `shadow_lower.ccs` or a header that *is* the unit (`process.cch`).
-   Lower stays until the AST is boring.
+`AST_CAP` is 32768.
 
 ## Non-goals
 

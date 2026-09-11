@@ -32,9 +32,9 @@
 #include "comptime/const_eval.h"
 #include "cccportable.h"
 
-/* The legacy multipass front (driver.c / driver.h) has been removed; ccc is
- * native-only (shadow_lower). This typedef used to live in driver.h and only
- * carries build.cc-preloaded comptime consts through the driver. */
+/* The legacy multipass front (driver.c / driver.h) has been removed. This
+ * typedef used to live in driver.h and only carries build.cc-preloaded
+ * comptime consts through the driver. */
 typedef struct {
     const CCConstBinding* consts;
     size_t const_count;
@@ -468,7 +468,7 @@ static void cc_refresh_host_obj_root(const char* cc_bin_override) {
 
 static void cc_set_out_dir(const char* out_dir_opt, const char* bin_dir_opt) {
     /* Default and relative --out-dir / --bin-dir are always cwd. Toolchain
-     * files (includes, runtime, shadow_lower) still come from g_repo_root. */
+     * files (includes, runtime, the lowering tools) still come from g_repo_root. */
     char base[PATH_MAX];
     if (getcwd(base, sizeof(base)) == NULL) {
         strncpy(base, ".", sizeof(base));
@@ -856,7 +856,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --no-cache          Disable incremental cache (also: CC_NO_CACHE=1)\n");
     fprintf(stderr, "  -j[N], --jobs[=N]   Parallel CC_TARGET build (default 4; 0/omit N → ncpu)\n");
     fprintf(stderr, "  --frontend=native   Front end (native only; also: CC_FRONTEND=native)\n");
-    fprintf(stderr, "  --lowerer=clean     Lower with the clean lowerer (out/cc/bin/cclower_cc; also: CC_LOWERER=clean)\n");
+    fprintf(stderr, "  --lowerer=clean     The lowerer (out/cc/bin/cclower_cc), the only one; a `version=` pin below 0.4 selects a 0.3 seed\n");
     fprintf(stderr, "  --version, --v, -V  Print version (MAJOR.MINOR.PATCH-SEED)\n");
     fprintf(stderr, "  --as=ccs|cch|shcc   Unit kind (else first-line header, else suffix)\n");
     fprintf(stderr, "  version=X           Pin lowerer: MAJOR.MINOR (usual), or tighter / >=X / >X / <=X / <X, or both (>=A,<B)\n");
@@ -1155,7 +1155,7 @@ static int derive_default_obj(const char* in_path, char* out_buf, size_t out_buf
 
 /* .shcc scripts share a process-wide script cache (`$TMPDIR/cc-script-$UID`).
  * Basename-only stems collide (`make.shcc` in two trees → one `bin/make`), and
- * shadow_lower's warm link skip then keeps the wrong binary. Qualify by abs
+ * the warm link skip then keeps the wrong binary. Qualify by abs
  * path hash so each script gets its own product path. */
 static int cc__script_bin_stem(const char* in_path, char* out, size_t cap) {
     char base[96];
@@ -1983,7 +1983,7 @@ static void cc__replay_diag_sidecar(const char* c_out_path) {
 static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path);
 static int cc__find_shadow_lower(char* dst, size_t cap);
 
-/* Emit .ccs/.shcc via native shadow_lower (legacy multipass driver removed). */
+/* Emit .ccs/.shcc through the lowerer. */
 static int cc__compile_with_env(const CCBuildOptions* opt, const char* in_path, const char* out_path, const CCCompileConfig* cfg) {
     cc__apply_user_include_env(opt ? opt->cc_flags : NULL);
     if (opt && opt->sysroot_flag && opt->sysroot_flag[0])
@@ -2524,9 +2524,9 @@ static uint64_t cc__fold_ccc_driver(uint64_t h) {
     return cc__fold_file_content(h, path);
 }
 
-/* Lowering identity for emit keys. `ccc` is a wrapper; product emit is
- * `shadow_lower`. Fold that binary's bytes (not mtime): a rebuild with
- * identical size in the same second must still miss. */
+/* Lowering identity for emit keys on the 0.3 pin route, where a seed binary
+ * emits. Fold that binary's bytes (not mtime): a rebuild with identical
+ * size in the same second must still miss. */
 static uint64_t cc__fold_shadow_lower(uint64_t h) {
     char path[PATH_MAX];
     path[0] = '\0';
@@ -2541,8 +2541,8 @@ static uint64_t cc__fold_shadow_lower(uint64_t h) {
 static int cc__find_clean_tool(const char* name, char* dst, size_t cap);
 static int g_lowerer_clean;
 
-/* The lowerer whose bytes produced the C: the clean tool when it is the
- * one selected, else the shadow front. A rebuilt lowerer must miss. */
+/* The lowerer whose bytes produced the C: `cclower_cc`, or the seed binary
+ * when a `version=` pin selects the 0.3 line. A rebuilt lowerer must miss. */
 static uint64_t cc__fold_lowerer(uint64_t h) {
     char path[PATH_MAX];
     if (!g_lowerer_clean) return cc__fold_shadow_lower(h);
@@ -2555,7 +2555,7 @@ static uint64_t cc__fold_lowerer(uint64_t h) {
 }
 
 /* Public toolchain id (`ccc --version` / seed). Binary folds can miss when
- * find_shadow_lower resolves to the same path both sides of an overwrite,
+ * the lowerer resolves to the same path both sides of an overwrite,
  * or to "<absent>" from an app cwd. A seed bump must always miss. */
 static uint64_t cc__fold_toolchain_id(uint64_t h) {
     char ver[64];
@@ -3183,7 +3183,7 @@ static void cc__scan_path_for_link_directives(const char* path, char* ld_flags, 
 }
 
 /* Multi-TU `cc__link_many` used to take only CLI --ld-flags. Single-TU
- * shadow_host_link already pulls @link from emit.c and the original source;
+ * linking already pulls @link from the emitted C and the original source;
  * do the same here so a page @link is not dropped when a second .ccs joins. */
 static void cc__collect_multi_link_flags(const char* extra_ld,
                                         const char* const* inputs,
@@ -3858,8 +3858,8 @@ static int cc__load_const_bindings(const CCBuildOptions* opt, CCConstBinding* bi
 static void cc__print_comptime_targets(const char* build_path);
 static void cc__print_comptime_state(const CCBuildOptions* opt, const char* build_path, const CCConstBinding* bindings, size_t count);
 
-/* ccc is native-only (shadow_lower). The legacy multipass front is removed;
- * `--frontend=legacy` / `CC_FRONTEND=legacy` are hard errors. */
+/* The legacy multipass front is removed; `--frontend=legacy` /
+ * `CC_FRONTEND=legacy` are hard errors. */
 
 static int cc__set_frontend_name(const char* v) {
     if (!v || !v[0]) return -1;
@@ -3932,7 +3932,8 @@ static int cc__scan_frontend_flags(int argc, char** argv) {
     return 0;
 }
 
-/* Resolve native shadow_lower beside ccc (not the ccc-run wrapper).
+/* Resolve a 0.3 seed's `shadow_lower` beside ccc (not the ccc-run wrapper).
+ * It serves units whose `version=` pin selects the 0.3 line.
  * Never take a cwd-relative `out/cc/bin/shadow_lower`: from an app tree that
  * is a miss or a stale copy, and the emit key then fails to track the
  * lowerer that exec actually runs. */
@@ -3966,10 +3967,10 @@ static int cc__find_shadow_lower(char* dst, size_t cap) {
     return -1;
 }
 
-/* ---- The clean lowerer (`--lowerer=clean`, CC_LOWERER=clean) ----------
+/* ---- The lowerer ------------------------------------------------------
  * Emits C through out/cc/bin/cclower_cc (parse, index, print with #line and
- * a source map) instead of shadow_lower, then re-enters the raw-C path for
- * the host compile and link. A missing tool is an error, never a fallback. */
+ * a source map), then re-enters the raw-C path for the host compile and
+ * link. A missing tool is an error, never a fallback. */
 static int g_lowerer_clean = 0;
 /* What the unit the clean lowerer read was written against.
  *
@@ -3982,31 +3983,31 @@ static int g_lowerer_clean = 0;
  * still knows which unit it was. */
 static uint64_t g_clean_src_key = 0;
 
-/* The directory the unit was written in, on the clean path.
+/* The directory the unit was written in.
  *
- * The clean branch hands the host compiler the C it emitted into
+ * The driver hands the host compiler the C the lowerer emitted into
  * out/.cc-build/clean, so the directory a quoted `#include "x.h"` resolves
- * against is that one and not the unit's own. The shadow path never loses
- * it: its `in_path` stays the source. Kept as content, not as a pointer --
- * the buffer it is copied from is a block local. */
+ * against is that one and not the unit's own. Kept as content, not as a
+ * pointer -- the buffer it is copied from is a block local. */
 static char g_clean_quote_dir[PATH_MAX];
 
 static int cc__set_lowerer_name(const char* v) {
     /* The environment carries the choice to the child runs that lower a
      * module unit, and to the key of the C they produce. */
-    /* The clean lowerer is the default; the shadow front is opt-in
-     * (`--lowerer=shadow`, `CC_LOWERER=shadow`) while it lasts. */
+    /* There is one lowerer and it is the default. A `version=` pin below
+     * 0.4 selects a 0.3 seed instead; `--lowerer=shadow` is an error. */
     if (!v || !v[0] || strcmp(v, "clean") == 0) {
         g_lowerer_clean = 1;
         setenv("CC_LOWERER", "clean", 1);
         return 0;
     }
     if (strcmp(v, "shadow") == 0 || strcmp(v, "native") == 0) {
-        g_lowerer_clean = 0;
-        setenv("CC_LOWERER", "shadow", 1);
-        return 0;
+        fprintf(stderr,
+                "cc: the shadow front is retired; a `version=` pin below 0.4 "
+                "still selects a 0.3 seed (got --lowerer=%s)\n", v);
+        return -1;
     }
-    fprintf(stderr, "cc: --lowerer must be clean or shadow (got %s)\n", v);
+    fprintf(stderr, "cc: --lowerer must be clean (got %s)\n", v);
     return -1;
 }
 
@@ -4025,11 +4026,14 @@ static int cc__find_clean_tool(const char* name, char* dst, size_t cap) {
         if ((size_t)snprintf(dst, cap, "%s/out/cc/bin/%s", g_repo_root, name) < cap && access(dst, X_OK) == 0) return 0;
         if ((size_t)snprintf(dst, cap, "%s/bin/%s", g_repo_root, name) < cap && access(dst, X_OK) == 0) return 0;
     }
-    if (cc__find_shadow_lower(shadow, sizeof(shadow)) != 0) return -1;
-    snprintf(dir, sizeof(dir), "%s", shadow);
-    cc__dirname_inplace(dir);
-    if ((size_t)snprintf(dst, cap, "%s/%s", dir, name) >= cap) return -1;
-    return access(dst, X_OK) == 0 ? 0 : -1;
+    /* An installed prefix: the tools ship beside ccc ($PREFIX/bin). */
+    if (g_ccc_path[0]) {
+        snprintf(dir, sizeof(dir), "%s", g_ccc_path);
+        cc__dirname_inplace(dir);
+        if (dir[0] && (size_t)snprintf(dst, cap, "%s/%s", dir, name) < cap && access(dst, X_OK) == 0) return 0;
+    }
+    (void)shadow;
+    return -1;
 }
 
 static void cc__clean_collect_cch(const char* dir, FILE* out, int depth) {
@@ -4074,7 +4078,9 @@ static int cc__clean_known_types(char* dst, size_t cap) {
     }
     snprintf(dir, sizeof(dir), "%s/.cc-build/clean", g_out_root);
     (void)cc__mkdir_p(dir);
-    snprintf(list, sizeof(list), "%s/stdlib_cch.txt", dir);
+    /* Scratch names carry the pid: units lower in parallel and share this
+     * root, and the collected list lands under its final name whole. */
+    snprintf(list, sizeof(list), "%s/stdlib_cch.%ld.txt", dir, (long)getpid());
     snprintf(dst, cap, "%s/known_types.txt", dir);
     snprintf(key_path, sizeof(key_path), "%s/known_types.key", dir);
     f = fopen(list, "w");
@@ -4092,10 +4098,10 @@ static int cc__clean_known_types(char* dst, size_t cap) {
         if (n) h = cc__fold_file_content(h, line);
     }
     fclose(f);
-    if (file_exists(dst) && cc__read_u64_file(key_path, &prev) == 0 && prev == h) return 0;
+    if (file_exists(dst) && cc__read_u64_file(key_path, &prev) == 0 && prev == h) { unlink(list); return 0; }
     /* Two passes: the second sees the names the first collected. */
-    snprintf(tmp1, sizeof(tmp1), "%s/known_types.pass1", dir);
-    snprintf(tmp, sizeof(tmp), "%s/known_types.tmp", dir);
+    snprintf(tmp1, sizeof(tmp1), "%s/known_types.%ld.pass1", dir, (long)getpid());
+    snprintf(tmp, sizeof(tmp), "%s/known_types.%ld.tmp", dir, (long)getpid());
     unlink(tmp1);
     unlink(tmp);
     {
@@ -4128,6 +4134,8 @@ static int cc__clean_known_types(char* dst, size_t cap) {
             (void)rc;
         }
     }
+    unlink(tmp1);
+    unlink(list);
     if (rename(tmp, dst) != 0) { fprintf(stderr, "cc: clean lowerer: cannot write %s\n", dst); return -1; }
     (void)cc__write_u64_file(key_path, h);
     return 0;
@@ -4197,7 +4205,7 @@ static int cc__exec_comptime_blocks_for_clean(const char* raw, size_t raw_len,
      * them — and `static_map` is one of those functions, declared in
      * `<ccc/std/static_map.cch>`. Without this the block calling it compiles
      * and runs and emits nothing, which is a table that silently is not
-     * there. Appended, in the order the shadow path appends it. */
+     * there. Appended in harvest order. */
     if (cc__append_harvest(&buf, &len, cc_harvest_local_header_factories()) != 0 ||
         cc__append_harvest(&buf, &len, cc_harvest_header_comptime_functions()) != 0 ||
         cc__append_harvest(&buf, &len, cc_harvest_local_header_comptime_blocks()) != 0) {
@@ -4220,11 +4228,11 @@ static int cc__exec_comptime_blocks_for_clean(const char* raw, size_t raw_len,
     return rc;
 }
 
-/* Compile time, before the clean lowerer sees the unit.
+/* Compile time, before the lowerer sees the unit.
  *
  * `@comptime if` / `@comptime for` decide what source there is to lower at
  * all, and `@grammar` bodies are raw bytes no parser may read. Those are
- * resolved here, by the same engine the shadow path runs, and the lowerer
+ * resolved here, by the comptime engine, and the lowerer
  * is handed the source that survived. What it is NOT handed is C: the
  * type-scoped and template passes are left off, so `Tweet.parse(...)` and
  * `@string(`...`)` reach the lowerer as the language, for its own steps to
@@ -4259,10 +4267,9 @@ static int cc__materialize_comptime_for_clean(const char* in_path, char* out_ccs
     /* The members of the module this unit roots define their bodies here.
      *
      * A module is one translation unit (spec 1.7): the root and the
-     * units that declare membership in it. The shadow path splices each
-     * member where its include stood, in the same pass that turns the
-     * other includes into lowered `.h` — and the clean lowerer resolves
-     * those includes itself, so only the splice is handed over. Without
+     * units that declare membership in it. The driver splices each member
+     * where its include stood; the lowerer resolves the other includes
+     * itself, so only the splice is handed over. Without
      * it a member's definitions land in no translation unit at all and
      * the link is what says so. The member's own text goes in, so its
      * `@`-forms lower with the unit. */
@@ -4309,8 +4316,8 @@ static int cc__materialize_comptime_for_clean(const char* in_path, char* out_ccs
     cc_emit_plan_collect_comptime_instantiations(buf, len);
     {
         /* A block that registers type hooks stays: the lowerer's index
-         * reads `cc_type_register(...)` off it, as the shadow scanner
-         * reads it off the source, and the lowerer drops the block. */
+         * reads `cc_type_register(...)` off it as it reads `@typehooks`,
+         * and the lowerer drops the block. */
         char* blanked = cc_comptime_blank_blocks_ex(buf, len,
                                                     CC_BLANK_KEEP_VALUE | CC_BLANK_KEEP_FN | CC_BLANK_KEEP_HOOKS);
         free(buf);
@@ -4354,9 +4361,8 @@ static int cc__materialize_comptime_for_clean(const char* in_path, char* out_ccs
  * kind/`u` layout and projection rules as `@variant`. The engine emits its
  * declaration into the source the lowerer reads, so the index has the type
  * and every enumerator; what nothing in that text says is that it is a
- * tagged union. The engine queues each one it declares — how the shadow
- * path learns the same fact — and the lowerer is a separate process, so
- * the queue is written where it can read it. */
+ * tagged union. The engine queues each one it declares, and the lowerer is
+ * a separate process, so the queue is written where it can read it. */
 static int cc__write_schema_variants(char* out_path, size_t cap) {
     int n = cc_variant_schema_pending_count();
     char dir[PATH_MAX];
@@ -5171,7 +5177,7 @@ static int cc__append_build_cc_defines(char* buf, size_t cap, size_t* cflen,
     return 0;
 }
 
-/* .shcc → content-keyed .ccs for native shadow_lower (prelude / main /
+/* .shcc → content-keyed .ccs the lowerer reads (prelude / main /
  * default @errhandler / @task). Host compile stays on whatever CC= is. */
 static int cc__materialize_shcc_for_native(const char* shcc_path, char* out_ccs,
                                            size_t cap) {
@@ -5196,8 +5202,8 @@ static int cc__materialize_shcc_for_native(const char* shcc_path, char* out_ccs,
         fprintf(stderr, "cc: .shcc rewrite failed for %s\n", shcc_path);
         return -1;
     }
-    /* Same naked print→cc_* alias as legacy canonicalize (shadow has no
-     * preprocessor pass for it). Member UFCS left untouched. */
+    /* Same naked print→cc_* alias as legacy canonicalize (no preprocessor
+     * pass does it now). Member UFCS left untouched. */
     {
         char* prints = cc_rewrite_naked_print_aliases(rewritten, rw_len);
         if (prints) {
@@ -5229,7 +5235,7 @@ static int cc__materialize_shcc_for_native(const char* shcc_path, char* out_ccs,
     return 0;
 }
 
-/* Strip a recognized #!ccc / OS-shebang unit header so last-good shadow_lower
+/* Strip a recognized #!ccc / OS-shebang unit header so a seeded lowerer
  * (extension-based) never sees the magic line. Stamp #line so diagnostics
  * still name the original file. */
 static int cc__materialize_strip_header(const char* in_path, CCUnitKind kind,
@@ -5329,7 +5335,7 @@ static int cc__bootstrap_pin_folder(const char* pin, char* folder, size_t cap) {
         return 0;
     }
     if (!g_repo_root[0]) return -1;
-    snprintf(dirpath, sizeof(dirpath), "%s/cc/bootstrap/shadow_lower",
+    snprintf(dirpath, sizeof(dirpath), "%s/cc/bootstrap/lowerer",
              g_repo_root);
     d = opendir(dirpath);
     if (!d) return -1;
@@ -5337,9 +5343,14 @@ static int cc__bootstrap_pin_folder(const char* pin, char* folder, size_t cap) {
     while ((de = readdir(d)) != NULL) {
         if (de->d_name[0] == '.') continue;
         if (!cc_ccc_version_matches(pin, de->d_name)) continue;
-        snprintf(seed_c, sizeof(seed_c), "%s/%s/shadow_lower.c", dirpath,
-                 de->d_name);
-        if (stat(seed_c, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        /* Two shapes of seed: the clean tools (cclower.c and its module)
+         * from 0.4.0-400 on, the shadow front (shadow_lower.c) before. */
+        snprintf(seed_c, sizeof(seed_c), "%s/%s/cclower.c", dirpath, de->d_name);
+        if (stat(seed_c, &st) != 0 || !S_ISREG(st.st_mode)) {
+            snprintf(seed_c, sizeof(seed_c), "%s/%s/shadow_lower.c", dirpath,
+                     de->d_name);
+            if (stat(seed_c, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        }
         if (!have_best || cc_ccc_version_cmp(de->d_name, best) > 0) {
             snprintf(best, sizeof(best), "%s", de->d_name);
             have_best = 1;
@@ -5350,6 +5361,16 @@ static int cc__bootstrap_pin_folder(const char* pin, char* folder, size_t cap) {
     if (strlen(best) + 1 > cap) return -1;
     snprintf(folder, cap, "%s", best);
     return 0;
+}
+
+/* A pin folder of the retired front: it holds shadow_lower.c, and a unit
+ * pinned to it is lowered by that seed, not by the clean lowerer. */
+static int cc__pin_folder_is_shadow(const char* folder) {
+    char seed_c[PATH_MAX];
+    if (!folder || !folder[0] || !g_repo_root[0]) return 0;
+    snprintf(seed_c, sizeof(seed_c), "%s/cc/bootstrap/lowerer/%s/shadow_lower.c",
+             g_repo_root, folder);
+    return access(seed_c, R_OK) == 0;
 }
 
 /* Host-cc a bootstrap seed's prelowered shadow_lower.c when the pin does not
@@ -5382,7 +5403,7 @@ static int cc__ensure_pinned_shadow_lower(const char* pin, char* dst, size_t cap
         return -1;
     }
     snprintf(seed_c, sizeof(seed_c),
-             "%s/cc/bootstrap/shadow_lower/%s/shadow_lower.c", g_repo_root,
+             "%s/cc/bootstrap/lowerer/%s/shadow_lower.c", g_repo_root,
              folder);
     if (access(seed_c, R_OK) != 0) {
         fprintf(stderr,
@@ -5399,17 +5420,38 @@ static int cc__ensure_pinned_shadow_lower(const char* pin, char* dst, size_t cap
         snprintf(dst, cap, "%s", out_bin);
         return 0;
     }
+    /* The seed's host compile is a build step of the toolchain, not of the
+     * unit: its output goes to a log beside the binary and is shown only
+     * when it fails, so a pinned unit's own diagnostics stay its own. */
+    {
+        char bin_dir[PATH_MAX];
+        snprintf(bin_dir, sizeof(bin_dir), "%s", out_bin);
+        cc__dirname_inplace(bin_dir);
+        if (cc__mkdir_p(bin_dir) != 0) {
+            fprintf(stderr, "cc: version pin %s: cannot create %s\n", pin, bin_dir);
+            return -1;
+        }
+    }
     {
         int n = snprintf(cmd, sizeof(cmd),
-                         "make -C \"%s/cc\" shadow_lower-pin PIN_VER=%s "
-                         "PIN_OUT=\"%s\"",
-                         g_repo_root, folder, out_bin);
+                         "make -s -C \"%s/cc\" shadow_lower-pin PIN_VER=%s "
+                         "PIN_OUT=\"%s\" > \"%s.build.log\" 2>&1",
+                         g_repo_root, folder, out_bin, out_bin);
         if (n < 0 || (size_t)n >= sizeof(cmd)) {
             fprintf(stderr, "cc: version pin %s: make command too long\n", pin);
             return -1;
         }
     }
     if (system(cmd) != 0) {
+        char log_path[PATH_MAX + 16];
+        FILE* lf;
+        snprintf(log_path, sizeof(log_path), "%s.build.log", out_bin);
+        lf = fopen(log_path, "r");
+        if (lf) {
+            char line[1024];
+            while (fgets(line, sizeof(line), lf)) fputs(line, stderr);
+            fclose(lf);
+        }
         fprintf(stderr,
                 "cc: version pin %s: failed to host-cc bootstrap seed %s\n",
                 pin, folder);
@@ -5425,10 +5467,12 @@ static int cc__ensure_pinned_shadow_lower(const char* pin, char* dst, size_t cap
     return 0;
 }
 
-/* Delegate .ccs/.shcc build/emit to native shadow_lower (owns cache + host-cc/link).
- * Driver loads build.cc / CLI -D, handles dumps/dry-run, and forwards host
- * flags. Options contract: forward, handle here, or hard error — never drop.
- * .shcc is rewritten to a temp .ccs first (script entry); host CC is unchanged. */
+/* Delegate .ccs/.shcc build/emit to a 0.3 seed binary, for a unit whose
+ * `version=` pin selects that line. The seed owns its cache and its own
+ * host-cc/link. Driver loads build.cc / CLI -D, handles dumps/dry-run, and
+ * forwards host flags. Options contract: forward, handle here, or hard
+ * error — never drop. .shcc is rewritten to a temp .ccs first (script
+ * entry); host CC is unchanged. */
 static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path) {
     long long t_fn = cc__now_ms();
     long long t_span;
@@ -5521,7 +5565,7 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
     }
     cc__prof_span("find_shadow_lower", t_span);
     /* Installed / non-prebuilt layouts: build or locate concurrent_c.o and
-     * hand it to shadow_lower (it only probes checkout-relative paths). */
+     * hand it to the seed binary (it only probes checkout-relative paths). */
     t_span = cc__now_ms();
     {
         char runtime_obj[PATH_MAX];
@@ -5608,7 +5652,7 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
         cflen += (size_t)n;
     }
     /* Absolute include roots: installed prefix has no checkout-relative
-     * out/include or cc/include for shadow_lower's hardcoded -I probes. */
+     * out/include or cc/include for the seed binary's hardcoded -I probes. */
     if (g_cc_lowered_include[0] && file_exists(g_cc_lowered_include)) {
         int n = snprintf(cc_flags_buf + cflen, sizeof(cc_flags_buf) - cflen,
                          "%s-I%s", cflen ? " " : "", g_cc_lowered_include);
@@ -5670,7 +5714,7 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
                  cc_flags_buf);
         argv[argc++] = cc_flags_arg;
     }
-    /* The link happens inside shadow_lower. The module objects the unit
+    /* The link happens inside the seed binary. The module objects the unit
      * reaches are found here first, from the same lowered headers the
      * lowering will hit in the cache, and ride on the link flags ahead
      * of the flags given on the command line: an archive named there
@@ -5760,10 +5804,10 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         fprintf(stderr, "cc: missing input or c_out_path\n");
         return -1;
     }
-    /* Native front: delegate CC units to shadow_lower.
+    /* CC units lower here; a unit pinned to the 0.3 line goes to its seed.
      * Scripts are rewritten to a temp .ccs inside cc__run_shadow_lower.
-     * --compile = emit C via shadow_lower, then host cc -c (driver-side).
-     * Py modules keep the caller's -fPIC/-shared flags; shadow_lower forwards. */
+     * --compile = emit C, then host cc -c (driver-side).
+     * Py modules keep the caller's -fPIC/-shared flags; both routes forward. */
     if (cc__want_native_front()) {
         CCUnitKind uk = CC_UNIT_KIND_UNKNOWN;
         char pin[CC_CCC_VERSION_PIN_CAP];
@@ -5774,7 +5818,20 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             fprintf(stderr, "%s\n", uerr);
             return -1;
         }
-        if (g_lowerer_clean && (uk == CC_UNIT_KIND_CCS || uk == CC_UNIT_KIND_SHCC || uk == CC_UNIT_KIND_CCH)) {
+        /* A pin that resolves to a 0.3 seed names the retired front: that
+         * seed's frozen C lowers the unit (the route below), not the clean
+         * lowerer. Any other unit is the clean lowerer's. */
+        int pin_shadow = 0;
+        {
+            const char* wp = pin[0] ? pin : opt->ccc_version_pin;
+            char pf[64];
+            if (wp && wp[0] && cc_ccc_version_spec_ok(wp) &&
+                cc__bootstrap_pin_folder(wp, pf, sizeof(pf)) == 0 &&
+                cc__pin_folder_is_shadow(pf))
+                pin_shadow = 1;
+        }
+        if (g_lowerer_clean && !pin_shadow &&
+            (uk == CC_UNIT_KIND_CCS || uk == CC_UNIT_KIND_SHCC || uk == CC_UNIT_KIND_CCH)) {
             /* Clean lowerer: emit C beside the cache, then continue as raw C
              * (include rewrite, host compile, link happen in the driver). */
             char dir[PATH_MAX], clean_c[PATH_MAX], stem[128];
@@ -5788,11 +5845,11 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
                 fprintf(stderr, "cc: the clean lowerer does not lower header units yet (%s)\n", opt->in_path);
                 return -1;
             }
-            /* A pin names the toolchain the unit is written against. The
-             * clean lowerer ships no bootstrap seeds of its own, so it can
-             * honour a pin only when the pin resolves to the running
-             * toolchain; a pin that names anything else is refused where it
-             * was written rather than lowered by a toolchain it excludes. */
+            /* A pin names the toolchain the unit is written against. A pin
+             * that resolves to the running seed is this run; one that
+             * resolves to another clean seed has no built tools yet and is
+             * refused where it was written rather than lowered by a
+             * toolchain it excludes. */
             if (want_pin && want_pin[0]) {
                 char pin_current[64];
                 char pin_folder[64];
@@ -5810,16 +5867,16 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
                 cc_ccc_version_current(pin_current, sizeof(pin_current));
                 if (!cc_ccc_version_equal(pin_folder, pin_current)) {
                     fprintf(stderr,
-                            "cc: version pin %s: the clean lowerer has no "
-                            "bootstrap seed %s to run\n",
+                            "cc: version pin %s: seed %s is not the running "
+                            "toolchain and has no built tools\n",
                             want_pin, pin_folder);
                     return -1;
                 }
             }
             if (uk == CC_UNIT_KIND_SHCC) {
                 /* A script is a unit once its prelude, main and default
-                   handler are in place: lower the same wrapper the shadow
-                   path lowers, so the two see one program. */
+                   handler are in place: lower that wrapper, so every route
+                   sees one program. */
                 if (cc__materialize_shcc_for_native(opt->in_path, clean_shcc_wrap,
                                                     sizeof(clean_shcc_wrap)) != 0)
                     return -1;
@@ -6050,7 +6107,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         if (multiple) build_path = NULL;
         if (build_path && cc__stat_sig(build_path, &build_sig) != 0) { build_sig.mtime_sec = 0; build_sig.size = 0; }
         /* Emit is host-agnostic: key on the lowering toolchain
-         * (shadow_lower content + ccc driver), not the host C compiler. */
+         * (lowerer content + ccc driver), not the host C compiler. */
         if (cc__stat_sig(g_ccc_sig_path[0] ? g_ccc_sig_path : g_ccc_path, &ccc_sig) != 0) { ccc_sig.mtime_sec = 0; ccc_sig.size = 0; }
 
         uint64_t h = 1469598103934665603ULL;

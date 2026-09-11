@@ -105,7 +105,7 @@ docker run --rm -v "$PWD":/src:ro -w /src node:20-bookworm bash -lc '
 ```
 
 Prefer a **fresh** `ccc build` of `cc_python.ccs` on Linux when available;
-the vendored C in `npm/cc-python/vendor/` may lag `cc/shadow` HEAD.
+the vendored C in `npm/cc-python/vendor/` may lag `cc/lower` HEAD.
 `scripts/sanitize_bridge.sh` emits that vendor tree on the host when missing
 (CI checkouts never ship it; the Docker mount is read-only).
 
@@ -135,7 +135,7 @@ companion once a TSan Node is available.
 ## Latest receipt — 2026-08-19
 
 **Host:** macOS 26, arm64, Apple clang; Linux via Docker (`linux/arm64`, `seccomp=unconfined`)  
-**Seed:** `shadow_lower` last-good **0.3.3-173**
+**Seed:** last-good **0.3.3-173**
 
 ### CC runtime — green
 
@@ -206,12 +206,12 @@ fuzz findings are noise.
 | Target | Approach |
 |--------|----------|
 | Channel / nursery API | Existing stress + `libFuzzer` on sequences of send/recv/close/cancel |
-| shadow_lower | Already has parser/corpus paths; expand only if lowering bugs outpace smokes |
+| lowerer | Already has parser/corpus paths; expand only if lowering bugs outpace smokes |
 
 ### Low value / defer
 
 - Fuzzing Node’s own ABI or CPython internals
-- Blind AFL on `.ccs` files (grammar is large; smokes + shadow tests denser)
+- Blind AFL on `.ccs` files (grammar is large; smokes + lowerer tests denser)
 - Multi-GB / cgroup fuzz (machine-bound; keep soak-only)
 
 ### Suggested order

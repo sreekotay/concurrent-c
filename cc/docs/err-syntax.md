@@ -1,9 +1,9 @@
 # Result unwrap & error-syntax lowering
 
-> **Scope: legacy front implementation.** Language semantics apply to both
-> fronts; the pass files below are the multipass text-rewrite path
-> (`--frontend=legacy`). Serdes lowers the same surface in
-> `cc/shadow/pp_emit_unwrap.cch` / related emit modules.
+> **Scope: the text passes.** The pass files below (`cc/src/visitor/`) serve
+> header lowering and the comptime seam in the driver. The lowerer lowers the
+> same surface in `cc/lower/lower_results.cch`; the C it emits is written down
+> in `cc/lower/LOWERING.md`.
 
 Normative semantics live in `[spec/concurrent-c-spec-complete.md` §2.2](../../spec/concurrent-c-spec-complete.md). This document describes the **legacy compiler implementation** only. It covers both the new-surface pass (`pass_result_unwrap.c`, primary) and the older `@err` surface pass (`pass_err_syntax.c`, still live during phases 1-3).
 

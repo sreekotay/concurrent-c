@@ -203,8 +203,8 @@ size_t ccj_map_bucket_index_from_itr();
 
 /* map_impl defines CC_MAP_DECL_ARENA. Do not include it on the default
  * host-CCS path: that pulls cc_containers (string.h / stdlib.h) into
- * every TU. Parser mode needs the stub macro; shadow_lower host-cc
- * (SHADOW_HAVE_LIBTCC) still spells CC_MAP_DECL_ARENA in last-good.
+ * every TU. Parser mode needs the stub macro; a 0.3 pin seed, host-compiled
+ * with SHADOW_HAVE_LIBTCC, still spells CC_MAP_DECL_ARENA.
  * User Map TUs get the body from map.cch / emit-plan map.h. */
 #if defined(CC_PARSER_MODE) || defined(SHADOW_HAVE_LIBTCC)
 #include "map_impl.cch"

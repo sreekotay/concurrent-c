@@ -1,5 +1,5 @@
 /* Owner TU includes an include-only umbrella that nests an impl chapter.
- * Same shape as shadow_lower.ccs → c_pp_spike.cch → pp_ast_core.cch. */
+ * Same shape as cclower.ccs → lower.cch → lower_impl.cch. */
 #include "quote_cch_include_only_umbrella.cch"
 
 int main(void) {

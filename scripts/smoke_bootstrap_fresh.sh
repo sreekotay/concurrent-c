@@ -33,7 +33,7 @@ rm -rf out cc/bin bin
 # A true fresh clone still needs: ./scripts/fetch_submodules.sh && apply patches.
 test -f third_party/tcc/libtcc.a || die "missing third_party/tcc/libtcc.a (fetch + configure + make tcc first)"
 
-printf '== make -C cc (clean tools from bootstrap/clean/last-good)\n'
+printf '== make -C cc (clean tools from bootstrap/lowerer/last-good)\n'
 make -C cc CC="$HOST_CC" BUILD="$BUILD" TCC_EXT=1 \
   TCC_INC=../third_party/tcc TCC_LIB=../third_party/tcc/libtcc.a -j"$JOBS"
 
@@ -47,4 +47,4 @@ printf '%s\n' '#include <stdio.h>' 'int main(void){ printf("bootstrap-fresh ok\n
 ./cc/bin/ccc --v
 
 printf 'smoke_bootstrap_fresh: ok (clean seed=%s)\n' \
-  "$(cat cc/bootstrap/clean/last-good 2>/dev/null || echo '?')"
+  "$(cat cc/bootstrap/lowerer/last-good 2>/dev/null || echo '?')"

@@ -123,7 +123,7 @@ tutorial, idiomatic, and production code — and race their upstreams
 
 Specimens are picked from problems that already have an owner.
 
-Compiler internals: [architecture](cc/docs/ARCHITECTURE.md), [shadow_lower ops / layout](cc/shadow/README.md), [bootstrap](cc/bootstrap/shadow_lower/README.md), [debug vars](cc/src/diag/DEBUG_VARS.md).
+Compiler internals: [architecture](cc/docs/ARCHITECTURE.md), [the lowerer](cc/lower/LOWERING.md), [bootstrap](cc/bootstrap/lowerer/README.md), [debug vars](cc/src/diag/DEBUG_VARS.md).
 
 ### Install
 
@@ -225,7 +225,7 @@ Installed layout:
 ```
 $PREFIX/
 ├── bin/ccc
-├── bin/shadow_lower
+├── bin/{cclex,ccparse,cclower,ccindex}_cc   # the lowerer's tools
 ├── include/ccc/          # .cch and pre-lowered .h
 └── lib/ccc/
     ├── runtime/          # pre-lowered runtime (compiled on first use)

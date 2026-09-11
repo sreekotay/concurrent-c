@@ -185,7 +185,7 @@ static int test_try_adopt_result(void) {
     return 0;
 }
 
-/* Header-pinned Alloc (shadow_lower seeds it — no in-TU redeclaration). */
+/* Header-pinned Alloc (the lowerer seeds it — no in-TU redeclaration). */
 static void bump(@typeview(Alloc) CCArena* a) {
     void* p = a->alloc(16, 8);
     if (p) printf("  alloc face OK\n");

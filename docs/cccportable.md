@@ -1,7 +1,7 @@
 # cccportable — consumer host-C snapshot
 
 A portable tree so teammates and CI compile emitted C with host `cc` and never
-invoke `ccc`. It is not a compiler sysroot: no `.cch`, no `shadow_lower`.
+invoke `ccc`. It is not a compiler sysroot: no `.cch`, no lowerer.
 `--sysroot` remains host-cc cross-compile.
 
 The snapshot pins the headers and runtime it vendors; it does not select a

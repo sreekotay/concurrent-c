@@ -15,7 +15,8 @@
 
 #define BLOCK_SIZE (128 * 1024)
 #define DICT_SIZE  32768
-/* zlib uInt is unsigned int. Shadow #if does not see UINT_MAX. */
+/* zlib uInt is unsigned int. The lowerer does not evaluate #if, so it does
+ * not see UINT_MAX. */
 _Static_assert(BLOCK_SIZE <= UINT_MAX, "BLOCK_SIZE must fit zlib uInt");
 _Static_assert((BLOCK_SIZE + (BLOCK_SIZE >> 3) + 1024) <= UINT_MAX,
                "deflate_cap(BLOCK_SIZE) must fit zlib uInt");

@@ -1,16 +1,16 @@
 # Concurrent-C Compiler Architecture
 
-**Status:** Authoritative architecture for the **default** `ccc` front
-(**native** / `shadow_lower`).
-**Audience:** anyone changing how `.ccs` / `.cch` become C, or proposing a
-redesign of that path.
+**Status:** Authoritative architecture for how `.ccs` / `.cch` become C.
+**Audience:** anyone changing that path, or proposing a redesign of it.
 
-The multipass text-rewrite / TCC stub-AST front has been removed; `ccc` is
-native-only (`shadow_lower`).
+There is one lowerer. Its sources are `cc/lower/*.cch` / `*.ccs`; its tools
+are `out/cc/bin/cclex_cc`, `ccparse_cc`, `cclower_cc` and `ccindex_cc`. The
+driver `ccc` (`cc/src/cc_main.c`, C) prepares the unit, runs the lowerer,
+and compiles and links what it emits.
 
-Operational detail, file layout, gaps, and promote workflow live in
-[`cc/shadow/README.md`](../../cc/shadow/README.md). Bootstrap snapshots:
-[`cc/bootstrap/shadow_lower/README.md`](../bootstrap/shadow_lower/README.md).
+The C each construct lowers to is written down in
+[`cc/lower/LOWERING.md`](../lower/LOWERING.md). Seeds and the promote
+workflow: [`cc/bootstrap/lowerer/README.md`](../bootstrap/lowerer/README.md).
 
 ---
 
@@ -18,28 +18,32 @@ Operational detail, file layout, gaps, and promote workflow live in
 
 ```text
 .ccs / .cch bytes
-    → stage 1  FileTape (pp-tokens + comment spans, path-keyed cache)
-    → stage 2  stitch (#include / object-like #define / guards)  ← closed early
-    → whitelist AST (emit + diags + safety — not a compiler IR)
-         ├─ shadow_emit_c → .c  → host cc + concurrent_c.o
-         └─ shadow_emit_h → .h  → host cc -c
-    comptime: prepare/exec/splice via libshadow_comptime (+ TCC), not the lowerer
+    → driver (cc/src/cc_main.c)
+         harvest, prepare and execute the unit's `@comptime` blocks (libtcc),
+         splice the fragments back, splice the module's members,
+         stage the result under out/.cc-build/clean_comptime/
+    → cclower_cc --lower
+         lex    → tokens; every token carries file, offset, line, column
+         parse  → AST; every node carries the span it came from
+         index  → declarations of this unit and of every `.cch` it includes
+         lower  → AST to AST, one step per construct family
+         print  → C with `#line`, and a `.map` beside it
+    → driver
+         host cc -c the lowered C, then link with the runtime and @link libs
 ```
 
-`ccc` is a thin driver: find `shadow_lower`, forward options, ensure runtime,
-invoke host `cc`. Lowering lives in `cc/shadow/*.ccs` / `*.cch`, shipped
-as host-cc'd bootstrap under `cc/bootstrap/shadow_lower/last-good`.
+`cclower_cc --lower` also turns a quoted `#include "x.cch"` into
+`#include <rel/x.h>` and lowers that face in header mode, transitively, under
+`--root` / `--h-root`. Nothing on this path rewrites text to make a construct
+parse.
 
 Three layers:
 
 | Layer | Role | Reparses |
 |-------|------|----------|
-| **Tape** | Stage-1 lex + Stage-2 stitch | 0 — stitch is upfront and closed |
-| **Whitelist AST** | Parse CC surface; attach sticky trivia; safety | 0 — emit walks the tree once |
-| **Emit + host** | One C/`#line` product; cache; host `cc` (or `--exe` libtcc) | 0 on the CC surface |
-
-No multipass text rewrite of CC sugar. Opaque C blobs may pass through as text
-by policy; that is not a second lowering IR.
+| **Tokens** | One lexer for C plus the CC tokens; comments and blank lines are tokens | 0 |
+| **AST + index** | Recursive-descent parse; every fact about a name comes from a declaration | 0 |
+| **Print + host** | One C product with `#line` and a source map; driver-side `cc -c` and link | 0 |
 
 ---
 
@@ -48,10 +52,11 @@ by policy; that is not a second lowering IR.
 | If you want to … | Read |
 |------------------|------|
 | Why this shape | §2 (constraints) + §3 (layers) + §4 (ADRs) |
-| What the pipeline actually does today, where it is fragile, what it hard-codes | [`docs/compiler_internals.md`](../../docs/compiler_internals.md) |
-| What each source file owns | [cc/shadow/README.md](../../cc/shadow/README.md) Layout |
-| Bootstrap / promote | [bootstrap README](../bootstrap/shadow_lower/README.md) |
-| What's still missing | [Own C parser](../../docs/c-parser.md); shadow_lower README **Next gaps** |
+| What the pipeline does today, and where it is fragile | [`docs/compiler_internals.md`](../../docs/compiler_internals.md) |
+| The C a construct lowers to | [`cc/lower/LOWERING.md`](../lower/LOWERING.md) |
+| What each lowering step owns | the step list at the top of [`cc/lower/lower.cch`](../lower/lower.cch) |
+| Bootstrap / promote | [bootstrap README](../bootstrap/lowerer/README.md) |
+| What the index still cannot answer from a declaration | [`cc/lower/INDEX_GAPS.md`](../lower/INDEX_GAPS.md) |
 | `@grammar` / wire SERDES | [`spec/cc_serdes.md`](../../spec/cc_serdes.md) |
 
 ---
@@ -66,15 +71,17 @@ apply/patch → impossible by construction
 ```
 
 Quiet success that means "couldn't" is forbidden (see root `CLAUDE.md`).
-Concrete corollaries for this front:
+Concrete corollaries here:
 
-- Stage-2 `#if` never guesses the true arm — unimplemented → hard error or
-  explicit passthrough-by-design, never a silent wrong branch.
-- Typed/instance UFCS miss → diagnose; do not invent `Map_*_*` callees.
-- Snapshot angle-includes and ODR link bugs must fail the cold `make` path,
-  not only the machine that generated the snapshot.
+- A construct a step cannot lower is a diagnostic at its position, never a
+  node left for the host compiler to trip over.
+- A UFCS miss on a bound receiver is diagnosed; no callee is invented.
+- Steps after an erroring step still run, so one file reports every error it
+  has, and the driver refuses to print C when the sink has errors.
+- Seed and ODR bugs must fail the cold `make` path, not only the machine
+  that generated the seed.
 - Driver options the lowerer cannot honor must **refuse** or be handled in
-  `ccc` before exec — never silently dropped. `build.cc` / `-D` / dumps /
+  `ccc` before exec, never silently dropped. `build.cc` / `-D` / dumps /
   `--compile` are handled in the driver and forwarded as host flags.
 
 ---
@@ -83,173 +90,169 @@ Concrete corollaries for this front:
 
 ### C1. We emit C; we do not own a C compiler
 
-Host `cc` (and optionally libtcc for `--exe` / comptime) compiles and links.
-The lowerer's job is a **readable C product** with `#line` back to user
-source — not an optimizing IR, not a second C frontend.
+Host `cc` (and libtcc for comptime) compiles and links. The lowerer's job is
+a **readable C product** with `#line` back to user source, not an optimizing
+IR and not a second C frontend.
 
-**Therefore:** grow a whitelist AST only where emit, diagnostics, or safety
-need structure. Already-legal C (enum lists, switch cases, opaque static-fn
-bodies, `AST_RAW_LINE`) may pass through as text. That is product policy, not
-an invitation to reintroduce string-soup rewriting of CC surface.
+**Therefore:** the AST models the whole surface the corpus writes, C
+included. Nothing is copied through as text in the hope that the host
+compiler accepts it.
 
 ### C2. CC surface is not a C lexer vocabulary
 
-`T[:]`, `T!>(E)`, `int[~4 >]`, `() => {…}`, `!>`, `@destroy`, etc. cannot be
-honestly tokenized by a C lexer. The legacy front solved this with ~16
-text-preprocess passes before TCC.
+`T[:]`, `T!>(E)`, `int[~4 >]`, `() => {…}`, `!>`, `@destroy` cannot be
+honestly tokenized by a C lexer.
 
-**Therefore:** Stage-1 uses a **pp-token grammar** (`pp_tok.rules`) that knows
-CC tokens; Stage-2 stitches a closed cpp subset; the whitelist parser builds
-structure from that tape. There is no "rewrite to C-shaped text, then hope
-TCC's stub AST sees it" loop on the product path.
+**Therefore:** one lexer owns C plus the CC tokens, including backtick
+templates with `${` nesting, and the parser builds structure from those
+tokens. Comments and blank lines are tokens so the printer can replay them.
 
 ### C3. Diagnostics and safety need user coordinates
 
-Errors must say `path:line:col` on the original `.ccs` / `.cch`. Provenance /
-move / channel / unwrap checks need enough structure to refuse unprovable
+Errors must say `path:line:col` on the original `.ccs` / `.cch`. Provenance,
+move, channel and unwrap checks need enough structure to refuse unprovable
 cases loudly.
 
-**Therefore:** trivia (lead comments, `#line`, `tok_off` / `file_id`) sticks
-at parse. Emit prints; it does not recover comments by rescanning strings.
-Safety walks the whitelist AST (and typed tables), not a post-mangle buffer.
+**Therefore:** every token and every node carries its span; a node a step
+creates copies the span of the node it replaces. The printer emits `#line`
+from those spans and records, per emitted line, the user file, line and
+column in a `.map` beside the C.
 
 ### C4. The lowerer must bootstrap from a C compiler alone
 
 A fresh clone with only host `cc` (plus patched `libtcc.a` for the driver)
-must produce a working `shadow_lower` without already having native.
+must produce working tools without already having them.
 
-**Therefore:** committed bootstrap snapshots under
-`cc/bootstrap/shadow_lower/MAJOR.MINOR.PATCH-N/` (pointer `last-good`). Source of truth is
-only `cc/shadow/*.ccs` / `*.cch` — every behavior fix is edited there first.
-`out/include/cc/shadow/*.h` is a build product, not a second source tree.
-Ship face changes via
-`SHADOW_LOWER_SOURCE=ccs` → `snapshot_shadow_lower.sh` →
-`promote_shadow_bootstrap.sh` — never by editing `out/include` or an existing
-pin folder to “land” a fix, never by patching `last-good`'s tree in place, and
-never by copying `*.cch` onto `out/include/cc/shadow/*.h`. Promote creates a
-**new** `MAJOR.MINOR.PATCH-N` and flips `last-good`; that is the only way a face change enters
-the committed seed.
-Cold rebuild on a second platform is part of the gate — not optional smoke
-on the generating machine only. See
-[`cc/bootstrap/shadow_lower/README.md`](../bootstrap/shadow_lower/README.md).
+**Therefore:** committed seeds under
+`cc/bootstrap/lowerer/MAJOR.MINOR.PATCH-SEED/`, with `last-good` naming the
+running pin (`0.4.0-400`). A pin holds the lowered C of the four tools, the
+C of module `lower` (`lower_cch.c`) and the faces that C includes; stage zero
+of `make -C cc` host-compiles it. Source of truth is only `cc/lower/*.cch` /
+`*.ccs`: every behaviour fix is edited there first, and a seed is
+regenerate-only. `make -C cc lower-cc` rebuilds the tools from source with
+the seeded ones, `./scripts/lowerer_selfhost.sh` is the fixed-point gate, and
+`./scripts/ship_seed.sh --promote` freezes a new pin and flips `last-good`.
+Cold rebuild on a second platform is part of the gate. The two 0.3 seeds that
+remain are frozen C, kept so that a unit whose `#!ccc … version=` pin selects
+the 0.3 line is lowered by the seed it names. `install` ships
+`$PREFIX/bin/ccc` and the four tools beside it.
 
 ### C5. Comptime is a seam, not the lowerer
 
-`@comptime` / `@emit` / factory instantiation still run through
-`shadow_comptime.c` + `libshadow_comptime.a` (prepare / exec / splice, TCC
-where needed). The tape/AST/emit spine does not become a comptime VM.
+`@comptime` / `@emit` / factory instantiation run in the driver
+(`cc/src/comptime/`, archived as `libshadow_comptime.a`, with libtcc where
+needed): harvest, prepare, execute, splice. The lowerer reads the staged
+unit that pipeline produced. A block that only registers type hooks stays in
+the stage, because the index reads `cc_type_register(...)` off it as it reads
+`@typehooks`, and the lowering drops the block.
 
-**Therefore:** Stage-1 may see resolved `@comptime if` spelling and blanked
-`@comptime` blocks; remaining holes are seam completeness, not "add another
-emit peel."
+**Therefore:** the lex/parse/index/lower/print spine does not become a
+comptime VM. Remaining holes are seam completeness, not another peel.
 
 **TCC sees only C.** Attributes (`as:`, …) are AST facts used while lowering;
-product and comptime session buffers must not carry them (no comment-encoded
-`as:`). Native `.ccs` path runs a **type pass** first when the harvested TU
-contains `@comptime` (blank those sites, whitelist emit → `__cc_rf_T[]` +
-`cc_ct_field_reg_*`); TCC sessions get a **slim prelude** (`__cc_rf_*`
-tables only — not full type-pass TUs or re-injected typedefs). Comptime
-prepare/exec reads `is_as` from that registry via `cc_reflect_field_*`;
-header-only `.fields` / `.methods` use Concurrent-C text plus registered
-included `.cch` (no full-TU CPP reflection view). Then the product lower runs.
-Post-emit `shadow_product_host_c_ok` refuses leftover CC surface (`!>`, `[:]`,
-`::`, `as:`, …), skipping preprocessor lines.
+the product and the comptime session buffers must not carry them.
 
 ---
 
 ## 3. Layers
 
-### L1 — Tape (stage 1 + stage 2)
+### L1 — Tokens
 
-- **Stage 1:** lex `.ccs` / `.cch` → `FileTape` (tokens + comment spans).
-  Cache is path-keyed and env-free.
-- **Stage 2:** splice `#include`, object-like `#define`, simple include
-  guards. Directive policy is exhaustive: implement, passthrough-by-design,
-  or hard error. Stitch finishes **before** AST; emit never re-expands.
+`cc/lower/lex.cch` lexes bytes into a tape of tokens. Each token carries
+`file_id`, offset, line and column; comments, blank lines and `#line` are
+tokens, so positions rebase and the printer can replay trivia.
 
-### L2 — Whitelist AST
+### L2 — AST and index
 
-Parser modules (`pp_ast_parse_*.cch`) build only the node shapes emit and
-safety need: stmts, unwrap/bang, spawn/closure, TU/externals, typed calls /
-UFCS forms, sticky trivia. Umbrella headers preserve include order for tools;
-splits are for readability, not pipeline stages.
+`cc/lower/parse_*.cch` is a recursive-descent parser for C plus the CC forms,
+producing a variant AST with a span on every node. Errors carry spans and the
+parser recovers at statement boundaries, so one file reports every error.
 
-This is **not** a general C/CC IR. Missing shape → extend the whitelist or
-keep the span opaque — do not add a post-parse text mangler for CC sugar.
+`cc/lower/index_impl.cch` holds the declaration index: functions, types,
+Result specs, UFCS registrations and attributes, from this unit and from
+every `.cch` it includes, parsed by the same parser. Whether `f` returns a
+Result, whether `T` has a `destroy`, which method set `x.f()` resolves
+against, and whether a call may be discarded are all answered from
+declarations, not from a table of names in the compiler.
 
-### L3 — Emit + host consume
+### L3 — Lowering, print, host
 
-- `shadow_emit_c` / `shadow_emit_h` walk the tree once.
-- UFCS lowers through structured parts (`shadow_ufcs_lower_parts`); leftover
-  peel is for unbound/opaque text only, left-to-right — not a second IR.
-- Product CLI (`shadow_lower.ccs`): emit text, host-cc with emit/obj cache
-  under `out/.cc-build/native/<fp>/`, or `--exe` (libtcc from the emit buffer).
-- Succession metric: **warm host-cc rebuild parity**, not libtcc-vs-clang.
+Lowering is AST to AST. `CcLowerer_lower_unit` runs one step per construct
+family, in order: results, cleanup, includes, own, generics, slices, slice
+arguments, strings, `as:` arguments, string switch, closures, create, for-in,
+deadline, parallel, async, channels, variants, UFCS. Each step rewrites nodes
+in place and copies the span of the node it replaces.
 
-`ccc` (`cc/src/cc_main.c`) locates `shadow_lower`, forwards the options
-contract (release/debug/flags/target/sysroot/no-runtime/dry-run), ensures
-`concurrent_c.o` / runtime, and refuses unimplemented contract fields.
+The printer walks the C nodes and writes lines, emitting `#line` at every
+file or line change and recording the source map. Long constructs print one
+operand per line.
+
+The driver then compiles the product with host `cc` and links it with the
+runtime object, the module objects the unit reaches, and the `@link` libs.
+It also owns paths and modes, `build.cc`, unit kind and `version=` pin
+resolution, cache keys, and the runtime object.
 
 ---
 
 ## 4. ADRs
 
-### ADR-S1: Whitelist AST as beachhead; own C parser next
+### ADR-S1: One structured pass, no text rewriting of CC surface
 
-**Decision:** The shipping front is still a whitelist AST. The ceiling is
-an owned C parser on this tape — see [`docs/c-parser.md`](../../docs/c-parser.md).
-**Rejected:** Growing `parse_field_simple` / `parse_static_fn` forever;
-reintroducing a TCC ExtParser; treating “opaque C” as a substitute for
-declarators and `#if`.
-**Why:** The whitelist shipped the overlay. It cannot own C grammar
-(`#else` as a type name, mid-declarator `__attribute__`). We still do
-not own a C *compiler* (C1).
+**Decision:** The lowerer parses the language into an AST and prints C from
+it. A shape the parser does not model is a diagnostic, not a span copied
+through.
+**Rejected:** A whitelist parser with opaque spans; a post-parse expression
+mangler; teaching the host compiler to parse CC.
+**Why:** C1 to C3. A pass that can bail out quietly cannot be trusted with
+positions, and a seed of its output cannot be trusted at all.
 
-### ADR-S2: Stitch early; never re-expand in emit
+### ADR-S2: Declarations are the only table
 
-**Decision:** Stage-2 closes includes/defines/guards before AST.
-**Rejected:** Macro expansion interleaved with emit or post-parse rescans.
-**Why:** Coordinate stability and "trivia sticky" require a finished tape.
+**Decision:** Every fact about a name comes from its declaration through the
+index: attributes, type hooks, `CC_DECL_*` macros, `.rules` files.
+**Rejected:** Name tables in the compiler for print families, destroy
+callees, map key hashes or method sets.
+**Why:** A user type with the same declarations must get the same treatment.
+What the lowerer still carries in code is the work list in
+`cc/lower/INDEX_GAPS.md`.
 
-### ADR-S3: Zero post-parse mangling of CC surface
+### ADR-S3: Spans, not coordinates recomputed later
 
-**Decision:** CC sugar is structured at parse or handled at a typed emit site.
-**Rejected:** Beachhead expression pipelines / string rewrite of `!>` / UFCS /
-channels after parse (`shadow_lower_expr_beachhead` and kin).
-**Escape:** `SHADOW_RAW_BODY_REWRITE` defaults **off**; opaque C copy is the
-product default. Architectural smokes assert mangling helpers stay gone.
+**Decision:** Spans stick from lex to print; scaffolds that expand one
+statement into many pin every generated line to that statement.
+**Rejected:** Re-scanning emitted text for a needle to place a diagnostic.
+**Why:** C3, and a host diagnostic that comes back through the source map.
 
-### ADR-S4: Driver / lowerer split + bootstrap freeze
+### ADR-S4: Driver / lowerer split and a frozen seed
 
-**Decision:** `ccc` (C) drives `shadow_lower` (CC, bootstrapped from committed
-lowered C). Source of truth is the `.ccs` tree; `last-good` is the cold-start
-seed.
-**Rejected:** Shipping only a prebuilt binary; or requiring native to build
-native with no snapshot.
-**Why:** C4. Promote remains a human-gated snapshot, verified portable.
+**Decision:** `ccc` (C) prepares the unit, runs the tools, compiles and
+links. The tools are Concurrent-C, bootstrapped from committed lowered C.
+Source of truth is `cc/lower`; `last-good` is the cold-start seed.
+**Rejected:** Shipping only a prebuilt binary; requiring the tools to build
+themselves with no seed; hand-editing a pin to land a fix.
+**Why:** C4. Promote stays a human-gated snapshot behind the selfhost gate.
 
 ### ADR-S5: Host `cc` is the product compiler; TCC is specialized
 
-**Decision:** Default link path is emit → host `cc` + runtime. TCC serves
-comptime / `--exe` / driver parse hooks — not the everyday lower→run path.
-**Rejected:** Making libtcc the succession metric for "native is done."
+**Decision:** The default path is lower, then host `cc` plus runtime. TCC
+serves comptime and driver parse hooks, not the everyday lower-and-run path.
+**Rejected:** Making libtcc the succession metric.
 
-### ADR-S6: Native-only product front
+### ADR-S6: One lowerer
 
-**Decision:** `ccc` is **native-only** (`shadow_lower`). The multipass
-visitor / TCC stub-AST front is removed; `--frontend=legacy` /
-`CC_FRONTEND=legacy` are hard errors.
-**Rejected:** Dual-front; silent fallback between fronts.
+**Decision:** One lowering path ships. `--lowerer=shadow` and
+`CC_LOWERER=shadow` are errors. A unit pinned to the 0.3 line is lowered by
+that line's frozen seed, which `ccc` builds on demand.
+**Rejected:** Two fronts side by side; silent fallback between them.
 
 ---
 
 ## 5. Non-goals
 
-- C23 `#embed` / modules / parsing system headers through this front
+- C23 `#embed` / modules / parsing system headers through this path
   (classic project-unit cpp is [`docs/c-parser.md`](../../docs/c-parser.md))
-- A general compiler IR or SSA-style mid-end inside `shadow_lower`
-- Porting `cc/src/visitor/pass_*.c` scanners onto the tape
-- Merging legacy Phase-N reparse counts into the native success metric
+- A general compiler IR or SSA-style mid-end inside the lowerer
+- Reviving `cc/src/visitor/pass_*.c` scanners as a product path
 - Quietly accepting driver flags the lowerer ignores
 
 ---
@@ -258,15 +261,16 @@ visitor / TCC stub-AST front is removed; `--frontend=legacy` /
 
 In priority order (fail mass × language value):
 
-1. Richer safety / points-to so unprovable move/channel/unwrap refuses dominate.
-2. Closing the comptime/factory seam (dylib factories, type-register/UFCS
-   comptime, header-local `static_map`) without pulling TCC into emit.
-3. First-class `@variant` and a real `@async`/`@await` state machine (replace
-   poll-wrapper beachhead).
-4. Shrinking leftover UFCS peel and `@string` template special cases.
+1. Richer safety / points-to so unprovable move, channel and unwrap cases
+   refuse loudly rather than compile.
+2. Closing the comptime and factory seam (dylib factories, type-register and
+   UFCS comptime, header-local `static_map`) without pulling TCC into the
+   lowering steps.
+3. A real `@async` / `@await` state machine in place of the poll wrapper.
+4. Emptying `cc/lower/INDEX_GAPS.md`: each entry is a declaration form that
+   replaces a name the lowerer carries in code.
 
-A redesign that reintroduces multipass text rewrite of CC surface, or that
-requires a full C parser before those land, fights C1–C3.
+A redesign that reintroduces text rewriting of CC surface fights C1 to C3.
 
 ---
 
@@ -274,10 +278,10 @@ requires a full C parser before those land, fights C1–C3.
 
 | Name | Means |
 |------|--------|
-| **native front** | This architecture: tape → whitelist AST → emit (`--frontend=native`) |
-| **`shadow_lower`** | The product lowerer binary / `.ccs` implementing that front |
-| **`spec/cc_serdes.md`** | `@grammar` engines and **wire** serialization — unrelated to this front; C23 tok+syn experiment lives under `examples/serdes/c23/` |
-| **`cc/shadow/`** | Source tree for `shadow_lower` (`.ccs` / `.cch`) |
+| **the lowerer** | This architecture: tokens → AST + index → lowering steps → print |
+| **`cclower_cc`** | The tool that lowers a unit; `cclex_cc`, `ccparse_cc` and `ccindex_cc` are its siblings |
+| **`cc/lower/`** | Source tree for all four (`.ccs` / `.cch`) |
+| **`spec/cc_serdes.md`** | `@grammar` engines and **wire** serialization, unrelated to this path; the C23 tok+syn experiment lives under `examples/serdes/c23/` |
 
-Prefer "**native**" / "`shadow_lower`" for the compiler. **SERDES** means only
-grammar / wire serialization (`spec/cc_serdes.md`, `examples/serdes/{json,resp}`).
+**SERDES** means only grammar and wire serialization (`spec/cc_serdes.md`,
+`examples/serdes/{json,resp}`).

@@ -42,7 +42,7 @@ if find "$out/.cc-build/shcc_native" -name '*.*.ccs' | grep -q .; then
     fail "pid-suffixed shcc wrap still present:
 $(ls -la "$out/.cc-build/shcc_native")"
 fi
-if grep -E 'shadow_lower: .*-c ' "$err2" >/dev/null; then
+if grep -E '^cc: cc .* -c ' "$err2" >/dev/null; then
     fail "second shcc run recompiled (cache miss):
 $(cat "$err2")"
 fi
@@ -61,7 +61,7 @@ if find "$out/.cc-build/unit_native" -name '*.*.ccs' | grep -q .; then
     fail "pid-suffixed unit wrap still present:
 $(ls -la "$out/.cc-build/unit_native")"
 fi
-if grep -E 'shadow_lower: .*-c ' "$err2" >/dev/null; then
+if grep -E '^cc: cc .* -c ' "$err2" >/dev/null; then
     fail "second ccs build recompiled (cache miss):
 $(cat "$err2")"
 fi

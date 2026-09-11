@@ -1,3 +1,0 @@
-The shadow lowerer lets the `goto` reach the host compiler
-(`label 'out' used but not defined`) instead of refusing it as a jump out
-of a dest body (spec 8.11, dest bodies).

@@ -12561,7 +12561,7 @@ static char* cc_preprocess_pipeline_ex(const char* input, size_t input_len, cons
                  * "'{' expected (got ';')" with nothing pointing here.
                  * Forward tags suffice: parser-mode TCC never evaluates an
                  * unselected arm's body, and the real compile emits its own
-                 * roster from complete types (shadow_lower / host cc). */
+                 * roster from complete types (the lowerer / host cc). */
                 for (size_t ri = 0; ri < cc_result_fn_registry_count(); ri++) {
                     const char* t = cc_result_fn_registry_result_type_at(ri);
                     if (!t || strncmp(t, "CCResult_", 9) != 0) continue;
@@ -16926,7 +16926,7 @@ static size_t cc__skip_to_stmt_end(const char* src, size_t n, size_t i);
 
 /* One scan of a buffer → defined type names. Hoist used to call
  * cc__header_defines_type once per identifier (full-file memcmp each
- * time). Shadow self-emit spent ~5 minutes there. */
+ * time). Lowering the compiler's own sources spent ~5 minutes there. */
 typedef struct {
     const char* src;
     size_t n;
@@ -18310,7 +18310,7 @@ static int cc__resolve_rewrite_root_ccs(const char* input_path,
 }
 
 /* Extra quoted-include root when dirname(current_path) is a cache wrap.
- * Same sources as shadow_fill_quote_dir: SHADOW_QUOTE_DIR, else #line. */
+ * Same sources the lowerer resolves from: SHADOW_QUOTE_DIR, else #line. */
 static void cc__fill_quoted_cch_search_dir(const char* src, size_t n,
                                            char* dst, size_t cap) {
     const char* env;
@@ -18343,12 +18343,11 @@ static int cc__path_ends_with(const char* p, const char* suf) {
     return n >= s && memcmp(p + n - s, suf, s) == 0;
 }
 
-/* Comments of a spliced member become spaces, newline for newline. The
- * shadow parser takes an opaque switch body by matching braces over the
- * bytes with only string and character literals understood, so an
- * apostrophe in a comment inside the body swallows the closing brace.
- * The member text is the tape those bytes come from; its comments carry
- * nothing the lowering reads. */
+/* Comments of a spliced member become spaces, newline for newline. A
+ * scanner that matches braces over the bytes of an opaque body, knowing
+ * only string and character literals, reads a brace or an apostrophe in
+ * a comment as code. The member text is what those bytes come from; its
+ * comments carry nothing the lowering reads. */
 static void cc__blank_comments_keep_lines(char* buf, size_t n) {
     size_t i = 0;
     while (i < n) {
@@ -18953,7 +18952,7 @@ static const char* cc__lower_local_cch_header_in(const char* abs_src) {
     }
     /* Never write raw `.cch` into the `.h` — that looks like a successful lower. */
     if (!lowered) CC__LOWER_GIVE_UP("lower");
-    /* Header lower is text, not shadow UFCS. `flag.store(1)` in a face
+    /* Header lower is text, not the lowerer's UFCS. `flag.store(1)` in a face
      * (pigz_cc cut_short) must become `cc_atomic_store` before the
      * leftover-member-call check. */
     {
@@ -19059,7 +19058,7 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
     if (cc__dirname_local(current_path, current_dir, sizeof(current_dir)) != 0) return NULL;
     /* Unit-header wraps live under unit_native/; quoted `.cch` sits next to
      * the original source.  Try dirname(current) first (C include rules),
-     * then SHADOW_QUOTE_DIR / #line — same roots the tape uses later. */
+     * then SHADOW_QUOTE_DIR / #line — same roots the lowerer uses later. */
     cc__fill_quoted_cch_search_dir(src, n, search_dir, sizeof(search_dir));
     while (i < n) {
         size_t line_end = i;
@@ -19621,11 +19620,9 @@ char* cc_splice_module_members(const char* src, size_t input_len,
  * an include as prologue only ahead of the first declaration; under a
  * face guard, or in a member spliced after the code of the root, the
  * declarations it hoists would land ahead of the prelude and the host
- * headers. The clean lowerer hoists its Result specs and generic
- * instances ahead of every include, so the faces that define their types
- * go first as well; the shadow lowerer hoists the arm records of a
- * variant ahead of a quoted include in the prologue and takes the faces
- * where the unit wrote them. An include under a conditional other than a
+ * headers. The lowerer hoists its Result specs and generic instances
+ * ahead of every include, so with `faces_first` the faces that define
+ * their types go first as well. An include under a conditional other than a
  * guard (`#ifndef NAME` then `#define NAME`) stays where it is. The
  * members are already spliced into `src`, so a quoted `.cch` left in it
  * is a face. Repeated where the unit wrote them, the includes are inert. */
@@ -19964,7 +19961,7 @@ static const CCLoweredLocalHeader* cc__find_lowered_header_by_include_path(const
     return NULL;
 }
 
-/* Shadow UFCS maps bare `.store` / `.load` / `.cas` / `.fetch_add` to
+/* The lowerer's UFCS maps bare `.store` / `.load` / `.cas` / `.fetch_add` to
  * `cc_atomic_*`. Header extract is text-only; rewrite those here so a
  * face can keep `g_pipeline_error.store(1)` (pigz_cc). */
 static int cc__atomic_ufcs_meth(const char* s, size_t n, size_t k,
@@ -21430,7 +21427,7 @@ char* cc_preprocess_include_expanded(const char* input_path) {
  * Structural members (`.kind`, `.nfields`, `.name`, `.fields[...]`) are a later
  * D1 increment that reads the type graph; only numeric layout lands here.
  * Runs in `cc__apply_phase1_canonical_passes` (parse path) AND on the
- * shadow_lower emit path (the product `.c` is produced there).
+ * emit path (the product `.c` is produced there).
  *
  * D1.1 adds the *structural* members the compiler can decide by name:
  *   - `.name`    -> `"T"` (constexpr string literal; the display spelling)
@@ -24833,9 +24830,9 @@ static int cc__try_expand_comptime_for(const char* src, size_t n, const char* in
     if (!(p + 3 <= n && memcmp(src + p, "for", 3) == 0 &&
           (p + 3 >= n || !cc_is_ident_char(src[p + 3])))) return 0;
 
-    /* Native shadow's whitelist cannot lower `@comptime for` that lives in a
-     * harvested/spliced `.cch`. Expanding it here looks like success while the
-     * subset still cannot represent the form — refuse loudly. */
+    /* A `@comptime for` that lives in a harvested or spliced `.cch` cannot be
+     * lowered where it lands. Expanding it here looks like success while the
+     * form still has no representation — refuse loudly. */
     {
         const char* bm = CC_IMPL_CCH_BEGIN_MARK;
         const char* em = CC_IMPL_CCH_END_MARK;
@@ -25807,7 +25804,7 @@ static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
              * because its statement has no `!>` / `?>` operator.
              *
              * Visitor unwrap-destroy also runs this rewrite on header /
-             * factory text that never goes through shadow_lower parse. */
+             * factory text the lowerer never parses. */
             if (cc_contains_token_top_level(chain->src, chain->len, "@destroy")) {
                 char* ud_out = NULL;
                 size_t ud_out_len = 0;

@@ -6,7 +6,7 @@
  * Fail-closed: integrity, ovf drain, residual gross, double-release, and
  * (when RSS sampling works) soft residual RSS bound after free.
  *
- * Build (link host mem_sample.o — #if in headers is stripped by shadow_lower):
+ * Build (link host mem_sample.o — #if in headers is stripped by the lowerer):
  *   cc -O2 -c stress/mem_sample.c -o stress/out/mem_sample.o
  *   ./cc/bin/ccc build --release stress/arena_lifetime_chaos.ccs \
  *       -o stress/out/arena_lifetime_chaos --ld-flags stress/out/mem_sample.o

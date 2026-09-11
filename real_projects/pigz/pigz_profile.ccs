@@ -163,7 +163,7 @@ void* compress_task_wrapper(void* arg) {
     cc_atomic_fetch_add(&g_end_to_end_ns, (long long)(done_ns - spawn_ns));
 
     /* Return the payload pointer. Do not pack `__result_t` / `__result` —
-     * shadow_lower treats that as send_task sugar and drops the return. */
+     * the lowerer treats that as send_task sugar and drops the return. */
     return cc_is_err(res) ? NULL : (void*)cc_unwrap_as(res, CompressedResult*);
 }
 

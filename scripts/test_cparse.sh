@@ -580,9 +580,5 @@ has "$fl" 'field extra_a' || fail "fields missing extra_a"
 has "$fl" 'field extra_b' || fail "fields missing extra_b"
 has "$fl" 'field extra_c' || fail "fields missing extra_c"
 
-if [ -x out/cc/bin/shadow_lower ] &&
-   nm -g out/cc/bin/shadow_lower 2>/dev/null | grep -q cparse_flat_fields; then
-    sh scripts/test_cparse_overlay.sh || fail "overlay"
-fi
 
 echo "[test_cparse] ok"

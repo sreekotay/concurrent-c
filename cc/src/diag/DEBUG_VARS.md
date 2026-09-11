@@ -1,8 +1,8 @@
 # CC_DEBUG_* environment variables (I6)
 
 > **Historical.** These variables instrumented the removed multipass
-> text-rewrite / reparse path. `ccc` is native (`shadow_lower`); use
-> `ccc --emit-c-inspect` / `out/.cc-build/native/` for that front.
+> text-rewrite / reparse path. For the lowerer use `ccc --emit-c-inspect` and
+> the lowered C under `out/.cc-build/clean/`.
 > Remaining preprocess/comptime seams may still honor a subset.
 
 All debug output uses the prefix `[cc:<phase>]`.

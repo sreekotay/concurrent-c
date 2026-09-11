@@ -220,8 +220,8 @@ matches `0.3.3-156`). PATCH and SEED tighten the match (`0.3.2` matches
 `0.3.2-121`; `0.3.2-12` does not). A shorter prefix (`0`) also matches.
 The running toolchain lowers an unpinned unit, and also a pin that
 prefixes the running version. Otherwise the newest matching seed's
-prelowered `shadow_lower.c` is host-cc'd. A pin with no matching seed is
-an error.
+prelowered C is host-compiled and lowers the unit. A pin with no matching
+seed is an error.
 
 `--as=ccs|cch|shcc` and `version=` / `--ccc-version=` on the `ccc` command
 line must agree with the file header when both are present. A header that
