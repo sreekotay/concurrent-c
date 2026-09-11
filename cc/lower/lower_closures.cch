@@ -328,7 +328,9 @@ static CCString kl_env_text(KStep* st, uint32_t id, KCapList* caps, size_t arity
     sb.push_cstr(" */\ntypedef struct ", a);
     sb.push_slice(env, a);
     sb.push_cstr(" {\n", a);
-    if (!n) sb.push_cstr("    char __unused;\n", a);
+    /* Not `__unused`: Darwin headers define that as an attribute macro, which
+     * turns `char __unused;` into an empty declaration (-Wmissing-declarations). */
+    if (!n) sb.push_cstr("    char cc__closure_env_pad;\n", a);
     for (i = 0; i < n; i++) {
         KCap* c = *caps->get_ptr(i);
         sb.push_cstr("    ", a);

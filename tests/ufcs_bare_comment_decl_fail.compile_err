@@ -3,4 +3,4 @@
 # so the call is emitted as ghost(u) and the host refuses it, at this
 # line: a compile error, not a link error.
 ufcs_bare_comment_decl_fail.ccs:8:
-implicit declaration of function 'ghost'
+call to undeclared function 'ghost'

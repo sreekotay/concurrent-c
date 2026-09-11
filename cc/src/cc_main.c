@@ -1982,6 +1982,8 @@ static void cc__replay_diag_sidecar(const char* c_out_path) {
 
 static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path);
 static int cc__find_shadow_lower(char* dst, size_t cap);
+typedef struct CCBuildSummary CCBuildSummary;
+static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary_out);
 
 /* Emit .ccs/.shcc through the lowerer. */
 static int cc__compile_with_env(const CCBuildOptions* opt, const char* in_path, const char* out_path, const CCCompileConfig* cfg) {
@@ -2097,7 +2099,11 @@ static int cc__compile_with_env(const CCBuildOptions* opt, const char* in_path, 
             }
             local_opt.in_path = in_path;
             local_opt.c_out_path = out_path;
-            rc = cc__run_shadow_lower(&local_opt, out_path);
+            /* This helper only materializes C. Multi-file build used to call
+             * the retired shadow seed here; route through compile_with_build
+             * so the clean lowerer (and module-of-one faces) apply. */
+            local_opt.mode = CC_MODE_EMIT_C;
+            rc = compile_with_build(&local_opt, NULL);
             }
         }
 
@@ -2164,7 +2170,7 @@ static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
                                  size_t out_runtime_cap,
                                  int* out_reused);
 
-typedef struct {
+typedef struct CCBuildSummary {
     const char* c_out_path;
     const char* obj_out_path;
     const char* bin_out_path;
@@ -4350,12 +4356,33 @@ static int cc__materialize_comptime_for_clean(const char* in_path, char* out_ccs
     }
     {
         /* the stage still names the user's file: the prepare passes keep
-         * the line count, so line N there is line N here */
-        size_t hn = strlen(in_path) + 32;
+         * the line count, so line N there is line N here. A unit_native wrap
+         * starts with `#line N "origin"` — stamp that path, not the wrap. */
+        char line_path[PATH_MAX];
+        const char* stamp = in_path;
+        {
+            FILE* lf = fopen(in_path, "rb");
+            char line[PATH_MAX + 64];
+            line_path[0] = '\0';
+            if (lf && fgets(line, sizeof(line), lf)) {
+                char* q = NULL;
+                if (strncmp(line, "#line ", 6) == 0) q = strchr(line, '"');
+                if (q) {
+                    char* e = strchr(q + 1, '"');
+                    if (e && (size_t)(e - (q + 1)) < sizeof(line_path)) {
+                        memcpy(line_path, q + 1, (size_t)(e - (q + 1)));
+                        line_path[e - (q + 1)] = '\0';
+                        stamp = line_path;
+                    }
+                }
+            }
+            if (lf) fclose(lf);
+        }
+        size_t hn = strlen(stamp) + 32;
         char* with = (char*)malloc(hn + len + 1);
         int k;
         if (!with) { free(buf); return -1; }
-        k = snprintf(with, hn, "#line 1 \"%s\"\n", in_path);
+        k = snprintf(with, hn, "#line 1 \"%s\"\n", stamp);
         memcpy(with + k, buf, len);
         with[k + len] = '\0';
         free(buf);

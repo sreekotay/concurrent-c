@@ -9,7 +9,8 @@
  * `hit` is a sequential fold. Construct returns the tree; flatten writes
  * RGBA; drop walks. Leaves are `Child.pix` (a Vec, no heap node). A heap
  * `Tile` exists only at a split. Each spawned arm bumps its own heap child
- * of the frame arena (`alloc_local_grow`).
+ * of the frame arena (`alloc_local_grow`). Reset destroys those children
+ * at the end of the frame.
  *
  *   STORM_MODE=quad      default — @parallel (d < STORM_CUT)
  *   STORM_MODE=unbound   @parallel { } at every split
@@ -485,13 +486,12 @@ int main(void) {
             g_look = look;
 
             {
-                CCArenaCheckpoint cp = g_tiles.try_checkpoint() !>;
                 t0 = now_ms();
                 root = tile_build(0, 0, 0, cover, g_tiles);
                 t1 = now_ms();
                 if (!child_ok(root)) {
                     eprintln("storm_tile: tree alloc failed");
-                    cp.try_restore() !>;
+                    g_tiles.reset();
                     g_frame_gen++;
                     break;
                 }
@@ -499,7 +499,9 @@ int main(void) {
                 t2 = now_ms();
                 (void)drop_child(root, 0);
                 t3 = now_ms();
-                cp.try_restore() !>;
+                /* Heap children are contents: reset destroys them. A bump
+                 * restore rewinds g_tiles but was not returning the mmaps. */
+                g_tiles.reset();
                 g_frame_gen++;
                 t4 = now_ms();
             }
