@@ -2145,13 +2145,20 @@ static void vt_switch_exhaustive(VStep* st, CcStmt* s, VInfo* vi, CcStmt* body, 
         bool seen = false;
         for (i = 0; i < n && !seen; i++) {
             CcStmt* t = *stmts->get_ptr(i);
-            @switch (t->k) {
-                case .case_(c): {
-                    if (c.is_default) has_default = true;
-                    else if (slice_eq(vt_case_arm(st, vi, c), arm->name)) seen = true;
-                    break;
+            /* a label's statement may itself be a label (`case .a: case .b:
+             * body;`): every case on that chain is an arm of this switch */
+            while (t && !seen) {
+                CcStmt* next = NULL;
+                @switch (t->k) {
+                    case .case_(c): {
+                        if (c.is_default) has_default = true;
+                        else if (slice_eq(vt_case_arm(st, vi, c), arm->name)) seen = true;
+                        next = c.inner;
+                        break;
+                    }
+                    default: break;
                 }
-                default: break;
+                t = next;
             }
         }
         if (!seen) {
@@ -2167,6 +2174,38 @@ static void vt_switch_exhaustive(VStep* st, CcStmt* s, VInfo* vi, CcStmt* body, 
         CCString m = @string(`switch on variant '${vname}' is not exhaustive: missing arms ${missing} (add the missing cases or a 'default:' to opt out)`, L->arena);
         if (at_word) vt_error_at_word(L, s->span, m);
         else lw_error(L, s->span, m);
+    }
+}
+
+/* Stacked labels nest: `case .a: case .b: body` makes `.b` the statement of
+ * `.a`. Each arm label on the chain below `first` is a label of this switch
+ * and is rewritten to its tag where it stands; a plain label or `default:`
+ * on the chain is left alone. A binding needs a body of its own. */
+static void vt_rewrite_stacked(VStep* st, VInfo* vi, CcStmt* first) {
+    CcLowerer* L = st->L;
+    CcStmt* nt = first;
+    while (nt && nt->k.kind == CcStmtK_case_) {
+        CcCase nc;
+        VArm* na;
+        CcSpan ndot;
+        @switch (nt->k) {
+            case .case_(x): nc = x; break;
+            default: break;
+        }
+        if (!nc.arm.len) { nt = nc.inner; continue; }
+        ndot = vt_span1(nt->span.first + 1);
+        na = vt_arm(vi, nc.arm);
+        if (!na) { vt_no_arm(st, vi, nc.arm, ndot); return; }
+        if (nc.bind.len) {
+            CCSlice an = nc.arm;
+            CCString m = @string(`the binding of '.${an}' needs a body of its own: it cannot share one with the label above it`, L->arena);
+            lw_error(L, ndot, m);
+        }
+        nc.lo = vt_tag_ident(st, vi, nc.arm, ndot);
+        nc.arm = cc_slice_empty();
+        nc.bind = cc_slice_empty();
+        nt->k = { .case_ = nc };
+        nt = nc.inner;
     }
 }
 
@@ -2188,7 +2227,13 @@ static void vt_switch_cases_rewrite(VStep* st, VInfo* vi, CcStmt* body, CcExpr* 
             case .case_(x): c = x; is_case = true; break;
             default: break;
         }
-        if (!is_case || !c.arm.len) { out.push(t); continue; }
+        if (!is_case) { out.push(t); continue; }
+        if (!c.arm.len) {
+            /* a plain label or `default:` may head a chain of arm labels */
+            vt_rewrite_stacked(st, vi, c.inner);
+            out.push(t);
+            continue;
+        }
         {
             VArm* arm = vt_arm(vi, c.arm);
             CcSpan dot = vt_span1(t->span.first + 1);
@@ -2198,6 +2243,7 @@ static void vt_switch_cases_rewrite(VStep* st, VInfo* vi, CcStmt* body, CcExpr* 
                 continue;
             }
             c.lo = vt_tag_ident(st, vi, c.arm, dot);
+            vt_rewrite_stacked(st, vi, c.inner);
             if (c.bind.len) {
                 CcStmt* blk = lw_block(L, t->span);
                 CcMember mb;

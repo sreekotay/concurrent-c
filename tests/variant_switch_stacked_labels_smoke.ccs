@@ -1,0 +1,41 @@
+/* Stacked labels on a variant switch: `case .a: case .b: body` nests `.b`
+ * as the statement of `.a`. Every label on the chain counts for
+ * exhaustiveness and lowers to its tag, and a plain C label or `default:`
+ * may sit in the chain too. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+@variant Method { get: void; head: void; options: void; other: void; };
+
+static int sends_body(Method m) {
+    @switch (m) {
+    case .head:
+        return 0;
+    case .get:
+    case .options:
+    case .other:
+        return 1;
+    }
+    return -1;
+}
+
+static int weight(Method m) {
+    @switch (m) {
+    case .get:
+    case .head:
+        return 1;
+    default:
+    case .options:
+        return 2;
+    }
+}
+
+int main(void) {
+    Method g = (Method){ .get = {} };
+    Method h = (Method){ .head = {} };
+    Method o = (Method){ .options = {} };
+    Method x = (Method){ .other = {} };
+    printf("%d %d %d %d\n", sends_body(g), sends_body(h), sends_body(o), sends_body(x));
+    printf("%d %d %d %d\n", weight(g), weight(h), weight(o), weight(x));
+    return 0;
+}
