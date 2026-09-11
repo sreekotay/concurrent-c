@@ -7046,12 +7046,10 @@ static int cc__link_many(const CCBuildOptions* opt,
         cc__pathlist_free(&mod_objs);
         return -1;
     }
-    snprintf(cmd, sizeof(cmd), "%s %s %s %s %s",
+    snprintf(cmd, sizeof(cmd), "%s %s %s",
              cc_bin,
              target_part ? target_part : "",
-             sysroot_part ? sysroot_part : "",
-             ldflags_env ? ldflags_env : "",
-             opt->ld_flags ? opt->ld_flags : "");
+             sysroot_part ? sysroot_part : "");
     if (is_tcc) cc__append_tcc_host_flags(cmd, sizeof(cmd), cc_bin);
     // TCC doesn't support -Wl,-dead_strip or -Wl,--gc-sections
     if (!is_tcc) {
@@ -7073,6 +7071,17 @@ static int cc__link_many(const CCBuildOptions* opt,
     if (runtime_obj && runtime_obj[0]) {
         strncat(cmd, " ", sizeof(cmd) - strlen(cmd) - 1);
         strncat(cmd, runtime_obj, sizeof(cmd) - strlen(cmd) - 1);
+    }
+    /* Libraries after every object: an archive named by @link or LDFLAGS
+     * is scanned once, where it stands, and must stand after the objects
+     * that need it. */
+    if (ldflags_env && ldflags_env[0]) {
+        strncat(cmd, " ", sizeof(cmd) - strlen(cmd) - 1);
+        strncat(cmd, ldflags_env, sizeof(cmd) - strlen(cmd) - 1);
+    }
+    if (opt->ld_flags && opt->ld_flags[0]) {
+        strncat(cmd, " ", sizeof(cmd) - strlen(cmd) - 1);
+        strncat(cmd, opt->ld_flags, sizeof(cmd) - strlen(cmd) - 1);
     }
     strncat(cmd, " -o ", sizeof(cmd) - strlen(cmd) - 1);
     strncat(cmd, bin_out_path, sizeof(cmd) - strlen(cmd) - 1);
