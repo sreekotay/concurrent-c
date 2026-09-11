@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # smoke_bootstrap_fresh.sh — wipe build products and rebuild from the committed
-# shadow_lower bootstrap (last-good). Canonical cold-tree check after TCC exists:
-#   * fresh-clone graph: no warm out/include or stage-1 binary
-#   * angle-include paths that need a seeded out/include/cc/shadow
+# lowerer seed (cc/bootstrap/lowerer/last-good). Canonical cold-tree check
+# after TCC exists:
+#   * fresh-clone graph: no warm out/include and no lowerer tools in hand
+#   * the seed's lowered C host-compiles against the faces it was cut with
 #   * ODR clashes linking concurrent_c.o + libshadow_comptime.a on GNU ld
-#   * stage-1 seed stamp must not recurse under make -j
+#   * the stage-zero tool rules must not recurse under make -j
 #
 # When: after seed promote / build-graph changes — not every stdlib edit.
 # See docs/build-when.md.
