@@ -17,8 +17,8 @@ trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/out" "$work/bin"
 
 emit_from_verbose() {
-  # verbose host-cc line: cc … -c "<dir>/emit.c" -o …
-  sed -n 's/.*-c "\([^"]*\/emit\.c\)".*/\1/p' "$1" | head -1
+  # verbose host-cc line: cc … -c <dir>/<stem>.c -o …
+  sed -n 's/.*-c \([^ ]*\.c\) .*/\1/p' "$1" | head -1
 }
 
 # --- success path: `#line 1000` on a cold lower; warm cache still runs ---
@@ -30,7 +30,7 @@ grep -q "tape_line_index_smoke ok" "$work/run.cold" \
   || fail "cold smoke stdout"
 
 emit="$(emit_from_verbose "$work/stderr.cold")"
-[ -n "$emit" ] && [ -f "$emit" ] || fail "cold: emit.c path missing in verbose log"
+[ -n "$emit" ] && [ -f "$emit" ] || fail "cold: materialized .c path missing in verbose log"
 grep -q '#line 1000' "$emit" || fail "cold emit missing #line 1000"
 grep -q 'virt_ok' "$emit" || fail "cold emit missing virt_ok path"
 
@@ -41,7 +41,7 @@ grep -q 'virt_ok' "$emit" || fail "cold emit missing virt_ok path"
 grep -q "tape_line_index_smoke ok" "$work/run.warm" \
   || fail "warm smoke stdout"
 # Cached rebuild must not rewrite the product without the remapped #line.
-[ -f "$emit" ] || fail "warm: cold emit.c disappeared"
+[ -f "$emit" ] || fail "warm: cold materialized .c disappeared"
 grep -q '#line 1000' "$emit" || fail "warm emit missing #line 1000"
 
 # --- fail path: two cached builds both report the remapped locus ---
