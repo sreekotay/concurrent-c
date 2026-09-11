@@ -14,7 +14,7 @@ trap 'rm -rf "$work"' EXIT
 
 cat >"$work/t.shcc" <<'EOF'
 #!/usr/bin/env -S ccc
-io.println("ok") !>;
+println("ok") !>;
 EOF
 
 cat >"$work/t.ccs" <<'EOF'

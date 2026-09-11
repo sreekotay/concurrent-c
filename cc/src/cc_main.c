@@ -2484,6 +2484,29 @@ static int cc__materialize_host_c(const char* src, const char* dst) {
         free(rewritten);
         return -1;
     }
+    {
+        FILE* cur = fopen(dst, "rb");
+        if (cur) {
+            long clen;
+            char* cbuf;
+            int same = 0;
+            if (fseek(cur, 0, SEEK_END) == 0 && (clen = ftell(cur)) >= 0 &&
+                fseek(cur, 0, SEEK_SET) == 0 &&
+                (size_t)clen == to_write_len &&
+                (cbuf = (char*)malloc((size_t)clen + 1)) != NULL) {
+                if (fread(cbuf, 1, (size_t)clen, cur) == (size_t)clen &&
+                    memcmp(cbuf, to_write, to_write_len) == 0)
+                    same = 1;
+                free(cbuf);
+            }
+            fclose(cur);
+            if (same) {
+                free(buf);
+                free(rewritten);
+                return 0;
+            }
+        }
+    }
     out = fopen(dst, "wb");
     if (!out) {
         free(buf);
@@ -5836,11 +5859,13 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
              * (include rewrite, host compile, link happen in the driver). */
             char dir[PATH_MAX], clean_c[PATH_MAX], stem[128];
             char clean_shcc_wrap[PATH_MAX];
+            char clean_unit_wrap[PATH_MAX];
             char clean_qdir[PATH_MAX];
             const char* clean_orig = opt->in_path;
             const char* want_pin = pin[0] ? pin : opt->ccc_version_pin;
             CCBuildOptions o2;
             CCBuildOptions o_shcc;
+            CCBuildOptions o_unit;
             if (uk == CC_UNIT_KIND_CCH) {
                 fprintf(stderr, "cc: the clean lowerer does not lower header units yet (%s)\n", opt->in_path);
                 return -1;
@@ -5883,6 +5908,15 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
                 o_shcc = *opt;
                 o_shcc.in_path = clean_shcc_wrap;
                 opt = &o_shcc;
+            } else if (uk == CC_UNIT_KIND_CCS) {
+                if (cc__materialize_strip_header(opt->in_path, uk, clean_unit_wrap,
+                                                 sizeof(clean_unit_wrap)) != 0)
+                    return -1;
+                if (strcmp(clean_unit_wrap, opt->in_path) != 0) {
+                    o_unit = *opt;
+                    o_unit.in_path = clean_unit_wrap;
+                    opt = &o_unit;
+                }
             }
             /* a stage lives in the cache, so quoted includes still resolve
              * against the directory the user wrote the unit in */
@@ -5902,14 +5936,14 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
              * on as `--no-line`. */
             {
                 size_t rn = 0;
-                char* raw = cc__read_all_file(opt->in_path, &rn);
+                char* raw = cc__read_all_file(clean_orig, &rn);
                 char perr[192];
                 int po = 0;
                 if (raw) {
                     int perr_line = 0;
                     if (cc_file_start_pragmas(raw, rn, &po, &clean_no_line, NULL, 0, perr,
                                               sizeof(perr), &perr_line) != 0) {
-                        fprintf(stderr, "%s:%d: error: %s\n", opt->in_path, perr_line, perr);
+                        fprintf(stderr, "%s:%d: error: %s\n", clean_orig, perr_line, perr);
                         free(raw);
                         return -1;
                     }
@@ -6097,7 +6131,12 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
     uint64_t emit_key = 0;
     int cache_ok = !cc__cache_disabled(opt->no_cache);
     char stem[128];
-    cc__stem_from_path(opt->in_path, stem, sizeof(stem));
+    /* Host .meta / .obj / .d keys follow the emitted C stem (out/t.c → `t`),
+     * not a materialized wrap or clean cache path the lowerer read. */
+    if (opt->c_out_path && opt->c_out_path[0])
+        cc__stem_from_path(opt->c_out_path, stem, sizeof(stem));
+    else
+        cc__stem_from_path(opt->in_path, stem, sizeof(stem));
     char meta_path[PATH_MAX];
     cc__cache_key_paths(meta_path, sizeof(meta_path), NULL, 0, stem);
     if (!is_raw_c && cache_ok) {
@@ -6163,8 +6202,11 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
 
     /* Rewrite @link("lib") to host-C markers before cc -c. The clean lowerer
      * emits @link at file scope; materialized .c re-enters as raw C and must
-     * still be rewritten (same as @link from lowered headers). */
-    if (opt->c_out_path) {
+     * still be rewritten (same as @link from lowered headers). Skip when emit
+     * was reused: postprocess already ran on the cached .c and touching it
+     * again would bump mtime and force a host recompile. */
+    if (opt->c_out_path &&
+        (!summary_out || summary_out->did_emit_c)) {
         cc__postprocess_link_directives(opt->c_out_path);
     }
 
@@ -6203,12 +6245,14 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
     if (cache_ok) {
         uint64_t h = 1469598103934665603ULL;
         if (is_raw_c) {
-            CCFileSig in_sig;
-            (void)cc__stat_sig(opt->in_path, &in_sig);
-            h = cc__fnv1a64_str(h, opt->in_path);
-            h = cc__fnv1a64_i64(h, in_sig.mtime_sec);
-            h = cc__fnv1a64_i64(h, in_sig.size);
-            h = cc__fold_file_content(h, opt->in_path);
+            /* Host cc -c reads c_out_path (materialized from the clean cache
+             * when this is a re-entry). Content-fold only: the cache .c is
+             * rewritten in place each lower and mtime is not stable. */
+            const char* src = (opt->c_out_path && opt->c_out_path[0])
+                                  ? opt->c_out_path
+                                  : opt->in_path;
+            h = cc__fnv1a64_str(h, src);
+            h = cc__fold_file_content(h, src);
             h = cc__fnv1a64_i64(h, (long long)g_clean_src_key);
         } else {
             h = cc__fnv1a64_i64(h, (long long)emit_key);
