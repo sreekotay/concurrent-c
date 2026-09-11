@@ -14,6 +14,7 @@
 
 #include <errno.h>
 #include <pthread.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdatomic.h>
@@ -188,6 +189,13 @@ struct CCNurseryHost {
     _Atomic size_t alive_count;
     fiber_v2* _Atomic alive_waiter;
     wake_primitive alive_wake;
+    /* Wait-mode handoff after the last notify. 1 = owner may free once
+     * alive_count is 0. Cleared on each worker-frees spawn; the closer
+     * (prev == 1) stores 1 only after wake_all returns. Without this,
+     * wait can observe count == 0 and free while the closer still writes
+     * alive_wake (ASan heap-use-after-free in wake_primitive_wake_all).
+     * Vacuous 1 when no child was ever spawned. */
+    _Atomic int wake_published;
 
     /* LIVE → JOINING (wait) or LEFT (leave). After leave the
      * handle is consumed; EMPTY frees the object. */
@@ -279,6 +287,7 @@ static CCNurseryHost* cc__nursery_alloc(void) {
     wake_primitive_init(&n->alive_wake);
     atomic_store_explicit(&n->alive_count, 0, memory_order_relaxed);
     atomic_store_explicit(&n->alive_waiter, NULL, memory_order_relaxed);
+    atomic_store_explicit(&n->wake_published, 1, memory_order_relaxed);
     n->deadline.tv_sec = 0;
     n->deadline.tv_nsec = 0;
     n->closing = NULL;
@@ -638,6 +647,10 @@ static int cc__nursery_spawn_errno(CCNurseryHost* n, void* (*fn)(void*), void* a
         return CC__NURSERY_SPAWN_CANCELLED;
     }
     if (worker_frees) {
+        /* Clear before publishing the child so a racing DEAD cannot
+         * finish wake_all and set wake_published while we still intend
+         * another spawn / wait handoff. */
+        atomic_store_explicit(&n->wake_published, 0, memory_order_relaxed);
         atomic_fetch_add_explicit(&n->alive_count, 1, memory_order_relaxed);
     }
     pthread_mutex_unlock(&n->mu);
@@ -813,6 +826,7 @@ static int cc__nursery_init_body(CCNurseryHost* n) {
     wake_primitive_init(&n->alive_wake);
     atomic_store_explicit(&n->alive_count, 0, memory_order_relaxed);
     atomic_store_explicit(&n->alive_waiter, NULL, memory_order_relaxed);
+    atomic_store_explicit(&n->wake_published, 1, memory_order_relaxed);
     n->deadline.tv_sec = 0;
     n->deadline.tv_nsec = 0;
     n->closing = NULL;
@@ -900,6 +914,9 @@ void cc_nursery_notify_child_done(CCNurseryHost* n) {
         fiber_v2* waiter = atomic_exchange_explicit(&n->alive_waiter, NULL, memory_order_acq_rel);
         if (waiter) sched_v2_signal(waiter);
         wake_primitive_wake_all(&n->alive_wake);
+        /* Publish only after wake_all: wait may have already seen
+         * alive_count == 0 and be racing free_host. */
+        atomic_store_explicit(&n->wake_published, 1, memory_order_release);
     }
     /* Every other `prev`: not the closer. `n` must not be touched again —
      * another child may take the count to zero and free it any time. */
@@ -950,6 +967,8 @@ CCResult_void_CCError cc_nursery_wait_host(CCNurseryHost* n) {
             fiber_v2* expected = self;
             (void)atomic_compare_exchange_strong_explicit(&n->alive_waiter, &expected, NULL,
                     memory_order_acq_rel, memory_order_relaxed);
+            while (!atomic_load_explicit(&n->wake_published, memory_order_acquire))
+                sched_v2_yield();
         } else {
             for (;;) {
                 uint32_t gen = atomic_load_explicit(&n->alive_wake.value, memory_order_acquire);
@@ -957,6 +976,8 @@ CCResult_void_CCError cc_nursery_wait_host(CCNurseryHost* n) {
                      CC_NURSERY_ALIVE_COUNT_MASK) == 0) break;
                 wake_primitive_wait(&n->alive_wake, gen);
             }
+            while (!atomic_load_explicit(&n->wake_published, memory_order_acquire))
+                sched_yield();
         }
     } else {
         /* Classic path: spec says join children first, then close channels.
