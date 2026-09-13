@@ -1,0 +1,25 @@
+/* `typedef struct ThBox ThBox;` lives in a plain C header the index does
+ * not read; the body `struct ThBox { ... }` is in this unit. A field of a
+ * `ThBox*` is typed through the tag, so a method on that field resolves,
+ * a walk over it types its element, and the type's own methods resolve. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include "typedef_from_c_header_member_ufcs.h"
+
+struct ThBox { Vec::[int] items; int n; };
+
+static int th_box_total(ThBox* b) {
+    int t = 0;
+    @for (v in b->items) t += v;
+    return t + b->n;
+}
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(64)) @destroy;
+    ThBox box = { .items = vec_new::[int](a), .n = 5 };
+    ThBox* p = &box;
+    p->items.push(1);
+    box.items.push(2);
+    printf("%zu %d\n", p->items.len(), p->total());
+    return 0;
+}
