@@ -1,0 +1,2 @@
+/* Plain C read by the comptime function that includes it. */
+static const int k_rows[] = { 1, 2, 3, 4 };

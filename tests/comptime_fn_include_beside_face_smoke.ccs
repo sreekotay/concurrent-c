@@ -1,0 +1,13 @@
+/* A `@comptime` function written in a face in another directory includes
+ * a table beside that face by bare name. The include resolves beside the
+ * face, as a compiler resolves a quoted include beside the file it is in. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include "comptime_face/comptime_fn_include_beside_face.cch"
+
+@comptime { cc_emit_cstr(CC_EMIT_AT_COMPTIME_SITE, beside_face_build()); }
+
+int main(void) {
+    printf("%d %d\n", BESIDE_FACE_TOTAL, beside_face_double(BESIDE_FACE_TOTAL));
+    return 0;
+}
