@@ -2000,31 +2000,68 @@ static bool uf_subject_matches(CCSlice subj, CCSlice base, size_t* score) {
 /* The `@typeview` that governs `base` under `view` (an empty view is the
  * unnamed one). Every unit the index read is searched: a view declared in a
  * header binds the bindings this unit writes. */
-static bool uf_view_for(CcIndex* ix, CCSlice base, CCSlice view, CcTypeview* out) {
+/* The `@typeview` declarations of every unit the index read, with their
+ * subjects, in declaration order. A field access asks for the view of its
+ * base type, and a unit has many field accesses and few views: the walk
+ * over every declaration of every unit is paid once per index state, not
+ * once per access. The list is rebuilt when a unit joins or a unit grows. */
+typedef struct UfViewEntry {
+    CCSlice subj;
+    CcTypeview tv;
+} UfViewEntry;
+typedef struct UfViewList {
+    CcIndex* ix;
+    size_t n_units;
+    size_t n_decls;
+    Vec::[UfViewEntry] entries;
+    bool live;
+} UfViewList;
+static UfViewList g_uf_views;
+
+static Vec::[UfViewEntry]* uf_views_of(CcIndex* ix) {
     CcUnitList* unitv = &ix->units;
     size_t nu = unitv->len();
+    size_t nd = 0;
     size_t i;
-    size_t best = 0;
-    bool found = false;
+    for (i = 0; i < nu; i++) nd += (*unitv->get_ptr(i))->decls.len();
+    if (g_uf_views.live && g_uf_views.ix == ix && g_uf_views.n_units == nu && g_uf_views.n_decls == nd)
+        return &g_uf_views.entries;
+    g_uf_views.entries = vec_new::[UfViewEntry](ix->arena);
     for (i = 0; i < nu; i++) {
         CcUnit* u = *unitv->get_ptr(i);
         CcDeclList* declv = &u->decls;
-        size_t nd = declv->len();
+        size_t n = declv->len();
         size_t k;
-        for (k = 0; k < nd; k++) {
+        for (k = 0; k < n; k++) {
             CcDecl* d = *declv->get_ptr(k);
-            CcTypeview tv;
-            CCSlice subj;
-            size_t score = 0;
-            if (!uf_decl_typeview(d, &tv)) continue;
-            if (!slice_eq(tv.view, view)) continue;
-            subj = cc__hook_subject_text(ix, u, d->span);
-            if (!uf_subject_matches(subj, base, &score)) continue;
-            if (found && score <= best) continue;
-            best = score;
-            found = true;
-            *out = tv;
+            UfViewEntry e;
+            if (!uf_decl_typeview(d, &e.tv)) continue;
+            e.subj = cc__hook_subject_text(ix, u, d->span);
+            g_uf_views.entries.push(e);
         }
+    }
+    g_uf_views.ix = ix;
+    g_uf_views.n_units = nu;
+    g_uf_views.n_decls = nd;
+    g_uf_views.live = true;
+    return &g_uf_views.entries;
+}
+
+static bool uf_view_for(CcIndex* ix, CCSlice base, CCSlice view, CcTypeview* out) {
+    Vec::[UfViewEntry]* views = uf_views_of(ix);
+    size_t n = views->len();
+    size_t i;
+    size_t best = 0;
+    bool found = false;
+    for (i = 0; i < n; i++) {
+        UfViewEntry* e = views->get_ptr(i);
+        size_t score = 0;
+        if (!slice_eq(e->tv.view, view)) continue;
+        if (!uf_subject_matches(e->subj, base, &score)) continue;
+        if (found && score <= best) continue;
+        best = score;
+        found = true;
+        *out = e->tv;
     }
     return found;
 }

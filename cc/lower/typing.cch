@@ -21,6 +21,7 @@ static CcSym* sym_any(CcIndex* ix, CCSlice name) {
 typedef struct Scope Scope;
 struct Scope {
     Scope* up;
+    bool live;                  /* the lists exist; most blocks declare nothing */
     CcNameList names;
     CcTypeList types;
 };
@@ -54,9 +55,9 @@ typedef struct Walker {
 
 static void sc_push(Walker* w) {
     Scope* sc = cc_arena_alloc(w->arena, sizeof(Scope), _Alignof(Scope));
+    memset(sc, 0, sizeof(*sc));
     sc->up = w->scope;
-    sc->names = vec_new::[CCSlice](w->arena);
-    sc->types = vec_new::[CcTypeRef](w->arena);
+    sc->live = false;
     w->scope = sc;
 }
 
@@ -66,6 +67,11 @@ static void sc_declare(Walker* w, CCSlice name, CcType* type) {
     CcNameList* namev;
     CcTypeList* typev;
     if (!name.len || !w->scope) return;
+    if (!w->scope->live) {
+        w->scope->names = vec_new::[CCSlice](w->arena);
+        w->scope->types = vec_new::[CcTypeRef](w->arena);
+        w->scope->live = true;
+    }
     namev = &w->scope->names;
     typev = &w->scope->types;
     namev->push(name);
@@ -77,7 +83,9 @@ static CcType* sc_lookup(Walker* w, CCSlice name) {
     for (sc = w->scope; sc; sc = sc->up) {
         CcNameList* namev = &sc->names;
         CcTypeList* typev = &sc->types;
-        size_t i = namev->len();
+        size_t i;
+        if (!sc->live) continue;
+        i = namev->len();
         while (i--)
             if (slice_eq(*namev->get_ptr(i), name)) return *typev->get_ptr(i);
     }

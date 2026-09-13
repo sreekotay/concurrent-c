@@ -2031,10 +2031,15 @@ static void pr_init_ctx(Pr* p, CCString* out, const CcTape* tape, CCArena a, CcD
     p->src = (const char*)tape->src.ptr;
     p->len = (uint32_t)tape->src.len;
     p->marks = &tp->marks;
-    p->lines = vec_new::[uint32_t](a);
-    p->lines.push(0u);
-    for (i = 0; i < p->len; i++)
-        if (p->src[i] == '\n') p->lines.push(i + 1);
+    /* the lexer's table; a tape built by hand carries none, and gets one here */
+    if (tape->line_starts.len()) {
+        p->lines = tape->line_starts;
+    } else {
+        p->lines = vec_new::[uint32_t](a);
+        p->lines.push(0u);
+        for (i = 0; i < p->len; i++)
+            if (p->src[i] == '\n') p->lines.push(i + 1);
+    }
     p->ds = ds;
     p->opts = opts;
     if (p->opts.path.len == 0) p->opts.path = tape->path.len ? tape->path : CC_SLICE_LIT("<input>");

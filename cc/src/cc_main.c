@@ -823,6 +823,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "  %s portable-install DIR                    (consumer host-C tree)\n", prog);
     fprintf(stderr, "Modes:\n");
     fprintf(stderr, "  --emit-c-only       Stop after emitting C (output defaults to out/<stem>.c)\n");
+    fprintf(stderr, "  --emit-module-c     FILE is a module face: emit the C of its module unit (`<face>_cch.c`) and stop\n");
     fprintf(stderr, "  --emit-c-inspect[=PATH]  Dump the merged translation unit for inspection\n");
     fprintf(stderr, "                      (out/<stem>.inspect.c by default); best-effort even when\n");
     fprintf(stderr, "                      the build fails in a generic factory. Build still runs.\n");
@@ -4217,15 +4218,21 @@ static int cc__exec_comptime_blocks_for_clean(const char* raw, size_t raw_len,
     size_t len = raw_len;
     char* r;
     int rc = 0;
+    long long t;
     if (!buf) return -1;
     memcpy(buf, raw, raw_len);
     buf[raw_len] = '\0';
     cc_reset_included_cch_sources();
+    t = cc__now_ms();
     r = cc_rewrite_local_cch_includes_to_lowered_headers(buf, len, in_path);
     if (cc_local_header_lower_failed()) { free(r); free(buf); return -1; }
     if (r) { free(buf); buf = r; len = strlen(buf); }
+    cc__prof_span("    ct_rewrite_local", t);
+    t = cc__now_ms();
     r = cc_rewrite_system_cch_includes_to_lowered_headers(buf, len);
     if (r) { free(buf); buf = r; len = strlen(buf); }
+    cc__prof_span("    ct_rewrite_system", t);
+    t = cc__now_ms();
     /* What the includes just stopped carrying.
      *
      * A `.cch` include became the lowered `.h` it stands for, because the
@@ -4241,6 +4248,8 @@ static int cc__exec_comptime_blocks_for_clean(const char* raw, size_t raw_len,
         free(buf);
         return -1;
     }
+    cc__prof_span("    ct_harvest", t);
+    t = cc__now_ms();
     /* Not the value pass: `@comptime(expr)` is the lowerer's, and running
      * it here too would evaluate every site twice and report a bad one
      * from a copy that is thrown away. */
@@ -4249,10 +4258,13 @@ static int cc__exec_comptime_blocks_for_clean(const char* raw, size_t raw_len,
         free(buf);
         return -1;
     }
+    cc__prof_span("    ct_prepare_all", t);
+    t = cc__now_ms();
     cc_emit_plan_clear_generic_factory_registrations();
     cc_emit_plan_clear_comptime_fragments();
     if (cc_emit_plan_exec_comptime_blocks(buf, len, in_path) != 0) rc = -1;
     else cc_emit_plan_collect_comptime_emits(buf, len);
+    cc__prof_span("    ct_exec_tu", t);
     free(buf);
     return rc;
 }
@@ -4278,6 +4290,7 @@ static int cc__materialize_comptime_for_clean(const char* in_path, char* out_ccs
     uint64_t h;
     char dir[PATH_MAX];
     char path[PATH_MAX];
+    long long t_step;
     if (!in_path || !out_ccs || !cap) return -1;
     out_ccs[0] = '\0';
     buf = cc__read_all_file(in_path, &len);
@@ -4289,10 +4302,13 @@ static int cc__materialize_comptime_for_clean(const char* in_path, char* out_ccs
      * executor is a C compiler, so it needs the lowered `.h` a `.cch`
      * include stands for, which the lowerer wants left alone. What the
      * blocks emit is collected now and spliced into the C after lowering. */
+    t_step = cc__now_ms();
     if (cc__exec_comptime_blocks_for_clean(buf, len, in_path) != 0) {
         free(buf);
         return -1;
     }
+    cc__prof_span("  ct_exec_blocks", t_step);
+    t_step = cc__now_ms();
     /* The members of the module this unit roots define their bodies here.
      *
      * A module is one translation unit (spec 1.7): the root and the
@@ -4315,6 +4331,8 @@ static int cc__materialize_comptime_for_clean(const char* in_path, char* out_ccs
             len = strlen(buf);
         }
     }
+    cc__prof_span("  ct_splice_members", t_step);
+    t_step = cc__now_ms();
     /* A `#define` body may be written in the language.
      *
      * The lowerer reads the unit with its directives intact, so a macro
@@ -4337,6 +4355,8 @@ static int cc__materialize_comptime_for_clean(const char* in_path, char* out_ccs
         free(buf);
         return -1;
     }
+    cc__prof_span("  ct_prepare_source", t_step);
+    t_step = cc__now_ms();
     /* `cc_instantiate_vec("int")` asks for a monomorph the body then names
      * only as `CCVec_int`. Blanking is about to take the request out of the
      * text the lowerer reads, so it is collected here, while it is still
@@ -5169,18 +5189,20 @@ static int cc__write_module_stages_for_clean(const char* unit_path, const char* 
 
 static int cc__run_clean_lowerer(const char* in_path, const char* c_out,
                                  const char* quote_dir, int no_line,
-                                 const char* modules_path) {
+                                 const char* modules_path, int verbose) {
     char tool[PATH_MAX], known[PATH_MAX], incdir[PATH_MAX], hroot[PATH_MAX];
     char schema[PATH_MAX];
     char insts[PATH_MAX];
     char facs[PATH_MAX];
     char* argv[28];
     int argc = 0, rc;
+    long long t0 = cc__now_ms();
     if (cc__find_clean_tool("cclower_cc", tool, sizeof(tool)) != 0) {
         fprintf(stderr, "cc: clean lowerer not built (out/cc/bin/cclower_cc missing): run `make -C cc lower-cc`\n");
         return -1;
     }
     if (cc__clean_known_types(known, sizeof(known)) != 0) return -1;
+    cc__prof_span("clean_known_types", t0);
     if (!g_repo_root[0]) { fprintf(stderr, "cc: clean lowerer: no repository root for cc/include\n"); return -1; }
     snprintf(incdir, sizeof(incdir), "%s/cc/include", g_repo_root);
     /* lowered local headers go beside the lowered C: `<tests/x.h>` resolves through the emit dir's -I */
@@ -5212,6 +5234,7 @@ static int cc__run_clean_lowerer(const char* in_path, const char* c_out,
         argv[argc++] = (char*)"--factories";
         argv[argc++] = facs;
     }
+    cc__prof_span("clean_side_tables", t0);
     if (quote_dir && quote_dir[0]) {
         argv[argc++] = (char*)"--quote-dir";
         argv[argc++] = (char*)quote_dir;
@@ -5223,7 +5246,15 @@ static int cc__run_clean_lowerer(const char* in_path, const char* c_out,
     argv[argc++] = (char*)"-o";
     argv[argc++] = (char*)c_out;
     argv[argc] = NULL;
+    if (verbose) {
+        int k;
+        fprintf(stderr, "cc: clean lowerer:");
+        for (k = 0; argv[k]; k++) fprintf(stderr, " %s", argv[k]);
+        fprintf(stderr, "\n");
+    }
+    t0 = cc__now_ms();
     rc = cc__run_argv(argv);
+    cc__prof_span_arg("clean_lower_child", in_path, t0);
     if (rc != 0) {
         fprintf(stderr, "cc: clean lowerer failed (rc=%d) on %s\n", rc, in_path);
         return -1;
@@ -6026,9 +6057,11 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
                  * the lowerer was then handed its own output as its input. */
                 static char clean_ct[PATH_MAX];
                 static CCBuildOptions o_ct;
+                long long t_ct = cc__now_ms();
                 if (cc__materialize_comptime_for_clean(opt->in_path, clean_ct,
                                                        sizeof(clean_ct)) != 0)
                     return -1;
+                cc__prof_span_arg("clean_comptime", opt->in_path, t_ct);
                 if (clean_ct[0]) {
                     o_ct = *opt;
                     o_ct.in_path = clean_ct;
@@ -6043,9 +6076,17 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             if (cc__fmt_path(clean_modules, sizeof(clean_modules), "%s/%s.%016llx.modules", dir, stem,
                              (unsigned long long)cc__fold_file_content(1469598103934665603ULL, opt->in_path)) != 0)
                 return -1;
-            if (cc__write_module_stages_for_clean(clean_orig, dir, clean_modules) != 0) return -1;
-            if (cc__run_clean_lowerer(opt->in_path, clean_c, clean_qdir, clean_no_line, clean_modules) != 0) return -1;
-            if (cc__splice_comptime_into_clean(clean_c, clean_orig) != 0) return -1;
+            {
+                long long t_st = cc__now_ms();
+                if (cc__write_module_stages_for_clean(clean_orig, dir, clean_modules) != 0) return -1;
+                cc__prof_span("clean_module_stages", t_st);
+            }
+            if (cc__run_clean_lowerer(opt->in_path, clean_c, clean_qdir, clean_no_line, clean_modules, opt->verbose) != 0) return -1;
+            {
+                long long t_sp = cc__now_ms();
+                if (cc__splice_comptime_into_clean(clean_c, clean_orig) != 0) return -1;
+                cc__prof_span("clean_splice", t_sp);
+            }
             if (opt->mode == CC_MODE_EMIT_C) {
                 if (cc__materialize_host_c(clean_c, opt->c_out_path) != 0) return -1;
                 cc__postprocess_link_directives(opt->c_out_path);
@@ -9814,6 +9855,7 @@ int main(int argc, char **argv) {
     int keep_c = 1;
     int verbose = 0;
     int no_cache = 0;
+    int emit_module_c = 0;
     int dump_comptime = 0;
     CCMode mode = CC_MODE_LINK;
     CCUnitKind unit_kind = CC_UNIT_KIND_UNKNOWN;
@@ -9839,6 +9881,7 @@ int main(int argc, char **argv) {
             if (tf > 0) continue;
         }
         if (strcmp(argv[i], "--emit-c-only") == 0) { mode = CC_MODE_EMIT_C; continue; }
+        if (strcmp(argv[i], "--emit-module-c") == 0) { mode = CC_MODE_EMIT_C; emit_module_c = 1; continue; }
         if (strcmp(argv[i], "--emit-c-inspect") == 0) { g_emit_c_inspect = 1; continue; }
         if (strncmp(argv[i], "--emit-c-inspect=", 17) == 0) { g_emit_c_inspect = 1; g_emit_c_inspect_path = argv[i] + 17; continue; }
         if (strcmp(argv[i], "--compile") == 0) { mode = CC_MODE_COMPILE; continue; }
@@ -10282,7 +10325,17 @@ int main(int argc, char **argv) {
         .ccc_version_pin = version_pin[0] ? version_pin : NULL,
     };
     CCBuildSummary sum;
-    int err = compile_with_build(&opt, &sum);
+    int err;
+    if (emit_module_c) {
+        /* The module unit of a face, as the link would lower it: the face
+         * with its members spliced in, lowered as one source unit. What a
+         * link caches under the module key is written to the C output here,
+         * with no host compile and no link. */
+        err = cc__ensure_module_c(&opt, in_path_abs, c_out);
+        for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
+        return err == 0 ? 0 : 1;
+    }
+    err = compile_with_build(&opt, &sum);
     for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
     return err == 0 ? 0 : 1;
 }

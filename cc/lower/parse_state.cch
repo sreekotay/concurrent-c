@@ -77,6 +77,8 @@ struct PFrame {
 typedef struct PSyms {
     CCArena arena;
     Map::[CCSlice, PSymRef] top;    /* name -> innermost binding */
+    Map::[CCSlice, PSymRef] base;   /* the known type names, read only, shared */
+    bool has_base;
     PFrame* frame;
     int depth;
 } PSyms;
@@ -149,6 +151,7 @@ static PSyms* syms_new(CCArena a) {
     PFrame* fr = cc_arena_alloc(a, sizeof(PFrame), _Alignof(PFrame));
     s->arena = a;
     s->top = map_new::[CCSlice, PSymRef](a);
+    s->has_base = false;
     fr->outer = NULL;
     fr->syms = vec_new::[PSymRef](a);
     fr->depth = 0;
@@ -157,9 +160,79 @@ static PSyms* syms_new(CCArena a) {
     return s;
 }
 
+/* The known type names a parser starts from, as one file-scope binding
+ * each. Every parse of a unit, a header, or a probe of a macro expansion
+ * starts from the same list, and there are thousands of names on it, so
+ * the bindings are built once per list and shared: a parser reads them
+ * behind its own map and never writes one (a file-scope binding is never
+ * popped, and a shadowing binding links down to it without touching it).
+ * The names are copied, so the list the caller handed over may go away. */
+typedef struct KnownBase {
+    uint64_t hash;
+    size_t len;
+    Map::[CCSlice, PSymRef] map;
+    bool live;
+} KnownBase;
+static KnownBase g_known_base;
+static CCArena g_known_base_arena;
+static bool g_known_base_arena_live;
+
+static uint64_t known_hash(Vec::[CCSlice]* known) {
+    uint64_t h = 1469598103934665603ULL;
+    size_t i;
+    size_t n = known->len();
+    for (i = 0; i < n; i++) {
+        CCSlice nm = *known->get_ptr(i);
+        size_t k;
+        for (k = 0; k < nm.len; k++) { h ^= (unsigned char)nm.ptr[k]; h *= 1099511628211ULL; }
+        h ^= 0xff; h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static void syms_use_known(PSyms* s, Vec::[CCSlice]* known) {
+    size_t n = known->len();
+    uint64_t h;
+    if (!n) return;
+    h = known_hash(known);
+    if (!g_known_base.live || g_known_base.len != n || g_known_base.hash != h) {
+        CCArena a;
+        size_t i;
+        if (!g_known_base_arena_live) {
+            g_known_base_arena = cc_arena_heap(megabytes(64));
+            g_known_base_arena_live = true;
+        }
+        a = g_known_base_arena;
+        g_known_base.map = map_new::[CCSlice, PSymRef](a);
+        for (i = 0; i < n; i++) {
+            CCSlice nm = *known->get_ptr(i);
+            char* copy = cc_arena_alloc(a, nm.len + 1, 1);
+            PSym* sy;
+            memcpy(copy, nm.ptr, nm.len);
+            copy[nm.len] = 0;
+            sy = cc_arena_alloc(a, sizeof(PSym), _Alignof(PSym));
+            sy->name = cc_slice_from_buffer(copy, nm.len);
+            sy->is_type = true;
+            sy->depth = 0;
+            sy->shadowed = NULL;
+            g_known_base.map->insert(sy->name, sy);
+        }
+        g_known_base.hash = h;
+        g_known_base.len = n;
+        g_known_base.live = true;
+    }
+    s->base = g_known_base.map;
+    s->has_base = true;
+}
+
 static PSym* sym_lookup(PSyms* s, CCSlice k) {
     PSymRef* slot = s->top->get_ptr(k);
-    return slot ? *slot : NULL;
+    if (slot) return *slot;
+    if (s->has_base) {
+        slot = s->base->get_ptr(k);
+        return slot ? *slot : NULL;
+    }
+    return NULL;
 }
 
 static void sym_declare(PSyms* s, CCSlice k, bool is_type) {
@@ -753,12 +826,7 @@ static P parser_new(CcUnit* u, CcParseOpts opts, CcDiags* ds, CCArena a) {
     p.pp = vec_new::[PpCond](a);
     p.bind_stmt = NULL;
     p.in_slot = false;
-    {
-        Vec::[CCSlice]* known = &opts.known_types;
-        size_t i;
-        size_t n = known->len();
-        for (i = 0; i < n; i++) sym_declare(p.syms, *known->get_ptr(i), true);
-    }
+    syms_use_known(p.syms, &opts.known_types);
     return p;
 }
 

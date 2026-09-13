@@ -81,6 +81,7 @@ typedef struct CcTape {
     CCSlice src;            /* the whole file; every token slice points into it */
     Vec::[CcToken] toks;    /* ends with one CC_TK_EOF whose lead is the trailing trivia */
     Vec::[CcLineMark] marks;
+    Vec::[uint32_t] line_starts; /* byte offset of each physical line start; [0] == 0 */
     uint32_t n_errors;      /* CC_TK_ERROR tokens; each also reported to the sink */
 } CcTape;
 

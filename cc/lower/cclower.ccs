@@ -23,6 +23,30 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
+
+/* `CC_CCC_PROFILE=1`: one line per step on stderr, as the driver prints its own. */
+static bool prof_on(void) {
+    static int once = 0, on = 0;
+    if (!once) {
+        const char* e = getenv("CC_CCC_PROFILE");
+        on = e && e[0] && e[0] != '0';
+        once = 1;
+    }
+    return on != 0;
+}
+static long long prof_now(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (long long)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
+static void prof_span(const char* name, const char* arg, long long t0) {
+    const char* base;
+    if (!prof_on()) return;
+    base = arg ? strrchr(arg, '/') : NULL;
+    base = base ? base + 1 : (arg ? arg : "");
+    fprintf(stderr, "cclower_profile: %-22s %5lld ms  %s\n", name, prof_now() - t0, base);
+}
 
 typedef Vec::[CCSlice] CcNameList;
 
@@ -501,6 +525,7 @@ static bool load_lowered(Loaded* L, const char* path, CcNameList known, CCArena 
     CcIndex* ix;
     CcLowerOpts lo;
     CcLowerer lw;
+    long long t0;
     CCSlice pathsl = cc_slice_from_buffer((char*)path, strlen(path));
     /* every field, not just the ones this function names: a `CcLowerOpts`
      * filled one field at a time hands the lowerer garbage for any field
@@ -527,11 +552,14 @@ static bool load_lowered(Loaded* L, const char* path, CcNameList known, CCArena 
     }
     opts.mode = mode_for(path);
     opts.known_types = known;
+    t0 = prof_now();
     {
         CcDiags scratch = CcDiags_new(a);
         CcTape tape = cc_lex(pathsl, L->src, &scratch, a);
         ix->preload_includes(&tape, opts);
     }
+    prof_span("unit_preload_includes", path, t0);
+    t0 = prof_now();
     {
         CcNameList all = vec_new::[CCSlice](a);
         CcNameList from_ix = ix->known_types();
@@ -550,6 +578,7 @@ static bool load_lowered(Loaded* L, const char* path, CcNameList known, CCArena 
     }
     L->unit = cc_parse_unit(pathsl, L->src, opts, &L->ds, a);
     ix->add_unit(L->unit, opts.mode == CC_UNIT_HEADER);
+    prof_span("unit_parse_index", path, t0);
     if (L->ds.has_errors()) return true;   /* parse errors: print nothing but the diagnostics */
     lo.line_directives = true;
     if (g_schema_variants) {
@@ -575,8 +604,10 @@ static bool load_lowered(Loaded* L, const char* path, CcNameList known, CCArena 
         lo.strict_unhandled = !(strict && strcmp(strict, "0") == 0);
     }
     lo.repo_root = g_root;
+    t0 = prof_now();
     lw = cc_lowerer_new(L->unit, ix, lo, &L->ds);
     lw.lower_unit();
+    prof_span("unit_lower", path, t0);
     L->lw = lw;
     L->lowered = true;
     L->ix = ix;
@@ -652,6 +683,7 @@ static int lower_header_with(Loaded* owner, CCSlice hpath, CcNameList known, boo
     const char* read_from = stage ? stage : h_c;
     CCSlice text;
     int rc = 0;
+    long long t0 = prof_now();
     memset(&H, 0, sizeof(H));
     H.arena = a;
     H.path = h_c;
@@ -681,9 +713,13 @@ static int lower_header_with(Loaded* owner, CCSlice hpath, CcNameList known, boo
         ix->load_includes(u, opts);
         ix->add_unit(u, true);
     }
+    prof_span("header_parse_index", h_c, t0);
+    t0 = prof_now();
     lw = cc_lowerer_new(u, ix, owner->lo, &H.ds);
     lw.header_mode = true;
     lw.lower_unit();
+    prof_span("header_lower", h_c, t0);
+    t0 = prof_now();
     H.lw = lw;
     H.lowered = true;
     note_headers(&H, todo, keep);
@@ -720,6 +756,7 @@ static int lower_header_with(Loaded* owner, CCSlice hpath, CcNameList known, boo
             }
         }
         if (!write_product(out_c, text, &prod.map, a)) rc = 2;
+        prof_span("header_print_write", h_c, t0);
         print_diags(&H);
         if (H.ds.n_errors) rc = 1;
     }
@@ -779,6 +816,7 @@ static int run_print(const char* path, CcNameList known, const char* out_path, b
     int problems;
     uint32_t n_parse_errors;
     CCSlice text;
+    long long t0;
     memset(&L, 0, sizeof(L));
     if (lower) { if (!load_lowered(&L, path, known, a)) return 2; }
     else if (!load(&L, path, known, a)) return 2;
@@ -791,6 +829,7 @@ static int run_print(const char* path, CcNameList known, const char* out_path, b
     po.header_mode = header_mode;
     po.header_owned = false;
     po.path = cc_slice_from_buffer((char*)path, strlen(path));
+    t0 = prof_now();
     CcProduct prod = cc_print_unit(L.unit, NULL, po, &L.ds, a) !>(e) {
         fprintf(stderr, "cclower: %s: %.*s\n", path, (int)e.msg.len, e.msg.ptr);
         return 2;
@@ -801,6 +840,7 @@ static int run_print(const char* path, CcNameList known, const char* out_path, b
     } else {
         fwrite(text.ptr, 1, text.len, stdout);
     }
+    prof_span("unit_print_write", path, t0);
     problems = verify_map(text, &prod.map, line_directives, stderr, a);
     print_diags(&L);
     if (L.ds.n_errors) {
