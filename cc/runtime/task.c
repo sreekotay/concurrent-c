@@ -453,6 +453,14 @@ static void cc__set_fiber_v2_task(CCTask* t, fiber_v2* f) {
     fv->fiber = f;
 }
 
+void cc_task_bind_fiber_v2(CCTask* t, void* fiber) {
+    if (!t) return;
+    memset(t, 0, sizeof(*t));
+    if (!fiber) return;
+    t->kind = CC_TASK_KIND_FIBER_V2;
+    cc__set_fiber_v2_task(t, (fiber_v2*)fiber);
+}
+
 /* Spawn an M:N fiber task.
  *
  * Post V2-promotion: this is a source-compat alias for

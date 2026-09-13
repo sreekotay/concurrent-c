@@ -160,6 +160,21 @@ CCTask cc_parallel_spawn(void* (*fn)(void*), void* arg);
 CCTask cc_parallel_spawn_admit(void* (*fn)(void*), void* arg);
 void cc_parallel_join(CCTask t);
 
+/* Wait-for @parallel join handle: kind + fiber, not a 128-byte CCTask.
+ * The lowering keeps this off the CHURN path; admit stores one across
+ * the first arm and joins it. Dest-live / `spawn` still use CCTask. */
+#if defined(CC_PARSER_MODE)
+typedef int CCParJoin;
+#else
+typedef struct CCParJoin {
+    int kind;
+    void* fiber;
+} CCParJoin;
+#endif
+
+CCParJoin cc_parallel_spawn_arm(void* (*fn)(void*), void* arg);
+void cc_parallel_join_arm(CCParJoin j);
+
 /* ----------------------------------------------------------------------------
  * Inline deny gate for lowered @parallel spawns.
  *
@@ -179,9 +194,9 @@ void cc_parallel_join(CCTask t);
  *     CCParTls* __cc_pt = cc__par_tls();            // one TLS lookup
  *     cc_parallel_deny_enter(__cc_pt, dest);
  *     if (cc_parallel_deny_fast(__cc_pt, &__cc_par_site_N, __cc_par_thunk_N))
- *         __cc_par_t_N = cc__task_invalid();        // join runs arm inline
+ *         denied = 1;                             // join spells the arm
  *     else
- *         __cc_par_t_N = cc_parallel_spawn(__cc_par_thunk_N, &__cc_par_e_N);
+ *         __cc_par_t_N = cc_parallel_spawn_arm(__cc_par_thunk_N, &__cc_par_e_N);
  *     ...
  *     cc_parallel_deny_leave(__cc_pt);
  *
@@ -198,6 +213,7 @@ void cc_parallel_join(CCTask t);
 typedef struct CCParSiteGate {
     int state;      /* CC_PAR_GATE_CHURN or not; other values private */
     int deny_depth; /* written; unused on the CHURN fast path */
+    uint32_t tick;  /* CHURN resample; racy increment, 1-in-2^20 */
 } CCParSiteGate;
 
 /* Resolve the gate record for a thunk. Never NULL: when the adaptive
@@ -254,6 +270,11 @@ static inline int cc__par_deny_fast(CCParTls* pt, void** slot,
     (void)fn;
     return 0;
 }
+static inline int cc_parallel_churn_skip(void** slot, void* (*fn)(void*)) {
+    (void)slot;
+    (void)fn;
+    return 0;
+}
 static inline void cc__par_note_inline_arm(CCParTls* pt) { (void)pt; }
 #else
 extern _Thread_local CCParTls __cc_par_tls;
@@ -274,6 +295,23 @@ static inline int cc__par_deny_fast(CCParTls* pt, void** slot,
     if (!pt) pt = cc__par_tls();
     /* 1-in-2^20: unstick a wrong CHURN without a spawn storm. */
     if (((++pt->tick) & 0xfffffu) == 0)
+        return 0;
+    return 1;
+}
+
+/* Wait-for CHURN: one static load, no TLS. Nested nodes of a classified
+ * site run as sequential. Does not resolve the gate — deny_fast / spawn
+ * fill `*slot` during learning, so virgin sampling is unchanged.
+ * 1-in-2^20 falls through so a wrong CHURN can still resample. */
+static inline int cc_parallel_churn_skip(void** slot, void* (*fn)(void*)) {
+    CCParSiteGate* s;
+    (void)fn;
+    if (!slot)
+        return 0;
+    s = (CCParSiteGate*)*slot;
+    if (!s || *(volatile const int*)&s->state != CC_PAR_GATE_CHURN)
+        return 0;
+    if ((++*(volatile uint32_t*)&s->tick & 0xfffffu) == 0)
         return 0;
     return 1;
 }

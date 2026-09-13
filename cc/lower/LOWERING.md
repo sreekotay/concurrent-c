@@ -732,9 +732,21 @@ changes things it is not entitled to see later. Either way the
 assignment target is an address — the caller's own binding is what the
 arm has to write — and so is the handle the site binds, since a copy of
 a handle is one nothing else can pause. The runtime may refuse the site
-(`cc_parallel_deny_fast`) and a spawn may fail; both run the same thunk
-inline at the join, so the arms happen either way and the only difference
-is whether they overlapped.
+(`cc_parallel_deny_fast`) and a spawn may fail. A wait-for expression arm
+is then spelled on the caller — the assignment as written — so deny does
+not call the thunk or take a 128-byte `CCTask`. Once the site is CHURN,
+`cc_parallel_churn_skip` takes that sequential spelling with no TLS:
+nested nodes of a classified site do not fetch the deny block. Serial and
+raising arms still run the thunk at the join. Dest-live / `spawn` still use `CCTask`
+and `cc_parallel_spawn_admit`; a refused or failed spawn there dies rather
+than running inline. Wait-for plants a `CCParJoin` (kind + fiber) and
+fills the environment only on admit.
+
+A gated wait-for (`@parallel (pred)` / `seq (cond)`) tests the predicate
+once. When it is false the arms are spelled with no TLS and no join
+handle. When it is true a `noinline` helper (`__cc_par_<n>_0_par`) runs
+the compact spawn/join path, so sequential recursive calls below the cut
+do not carry that helper's frame or a TLS fetch.
 
 An arm becomes a thunk that evaluates one expression and writes at most
 one outer name through an out pointer, so the parser refuses the shapes

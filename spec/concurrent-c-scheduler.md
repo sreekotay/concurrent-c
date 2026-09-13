@@ -161,14 +161,22 @@ Coroutine binding is deferred to the first dispatching worker. Concurrent
 ## `@parallel` spawn gate
 
 Brace-form and `@parallel for` arms go through `cc_parallel_spawn` /
-`cc_par_timed_run` (`cc/runtime/scheduler.c`). Lowering is
+`cc_par_timed_run` (`cc/runtime/scheduler.c`). Wait-for brace-form
+admits through `cc_parallel_spawn_arm` and joins with
+`cc_parallel_join_arm` (`CCParJoin`: kind + fiber). Lowering is
 `cc/lower/lower_parallel.cch`. The public inline gate is
 `cc_parallel_deny_fast` / `CC_PAR_NOTE_INLINE_ARM` in
 `cc/include/ccc/cc_sched.cch`.
 
 If this site's leaf arms are cheaper than a spawn, the gate does not spawn
-except a 1-in-2^20 resample. A denied spawn returns an INVALID task; the
-join runs the arm inline. Nothing strands. REAL work is never denied.
+except a 1-in-2^20 resample. A denied wait-for site fills no environment and
+spells an expression arm on the caller (serial / raising arms still run the
+thunk). After the site is CHURN, `cc_parallel_churn_skip` runs those spelled
+arms with no TLS and no deny stack; nested nodes of that site are sequential.
+A gated wait-for (`@parallel (pred)`) spells that same sequential path when
+the predicate is false, in the caller, and runs spawn/join from a noinline
+helper when it is true — sequential recursive calls below a cut do not
+fetch TLS. Nothing strands. REAL work is never denied.
 
 `@parallel wait`, nursery, and `cc_nursery_spawn*` do not go through
 `cc_parallel_spawn`.

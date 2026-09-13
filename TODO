@@ -10,7 +10,7 @@ Not “C, but with more conveniences,” and not “trust the programmer instead
 - comptime at the right time - e.g. mimetype
 - promote Table from staticd - compare to wstore5
   standing: ./perf/compare_table_wstore.sh stand
-  twin: perf/wstore_table.ccs (Table rows; gaps vs wheel/always-new in header)
+  twin: perf/wstore_table.ccs (Table + CCTemporalIndex wheel; in-place rows)
 - areana - consider size slabs vs age heapds - 3 tier reconsider
 - hoist CCServer from staticd (parking exclusives for shared state; narrow CS; step-steal opt-in only)
 - try redis with table and ccserver

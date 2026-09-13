@@ -7,6 +7,10 @@
 #include <ccc/std/task.cch>
 #include "fiber_internal.h"
 
+typedef struct fiber_v2 fiber_v2;
+fiber_v2* cc_task_fiber_v2(CCTask t);
+void cc_task_bind_fiber_v2(CCTask* t, void* fiber);
+
 #include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -402,6 +406,7 @@ typedef struct {
     /* Prefix is CCParSiteGate (cc_sched.cch). Keep first, keep in order. */
     _Atomic int      state;
     _Atomic int      deny_depth; /* adapt_backlog, written before CHURN */
+    uint32_t         tick;       /* CCParSiteGate.tick; CHURN resample */
     _Atomic(void*)   fn;
     _Atomic uint32_t cheap_streak; /* consecutive cheap while REAL */
     /* Set when any wrapped arm suspends (join or channel). The virgin
@@ -417,6 +422,7 @@ typedef struct {
 _Static_assert(offsetof(cc_par_site, state) == offsetof(CCParSiteGate, state) &&
                offsetof(cc_par_site, deny_depth) ==
                    offsetof(CCParSiteGate, deny_depth) &&
+               offsetof(cc_par_site, tick) == offsetof(CCParSiteGate, tick) &&
                sizeof(int) == sizeof(_Atomic int),
                "cc_par_site prefix must match public CCParSiteGate");
 
@@ -723,6 +729,24 @@ CCTask cc_parallel_spawn_admit(void* (*fn)(void*), void* arg) {
 }
 
 void cc_parallel_join(CCTask t) {
+    (void)cc_block_on_intptr(t);
+}
+
+CCParJoin cc_parallel_spawn_arm(void* (*fn)(void*), void* arg) {
+    CCTask t = cc_parallel_spawn(fn, arg);
+    CCParJoin j;
+    j.kind = (int)t.kind;
+    j.fiber = (t.kind == CC_TASK_KIND_FIBER_V2) ? (void*)cc_task_fiber_v2(t) : NULL;
+    return j;
+}
+
+void cc_parallel_join_arm(CCParJoin j) {
+    CCTask t;
+    if (j.kind == (int)CC_TASK_KIND_INVALID)
+        return;
+    cc_task_bind_fiber_v2(&t, j.fiber);
+    if (j.kind != (int)CC_TASK_KIND_FIBER_V2)
+        t.kind = (CCTaskKind)j.kind;
     (void)cc_block_on_intptr(t);
 }
 

@@ -158,7 +158,91 @@ int main(void) {
         free(cheap_c);
         return 1;
     }
+    if (!strstr(cheap_c, "cc_parallel_spawn_arm(")) {
+        fprintf(stderr, "FAIL unmarked join missing cc_parallel_spawn_arm\n");
+        free(cheap_c);
+        return 1;
+    }
+    if (!strstr(cheap_c, "cc_parallel_join_arm(")) {
+        fprintf(stderr, "FAIL unmarked join missing cc_parallel_join_arm\n");
+        free(cheap_c);
+        return 1;
+    }
+    if (!strstr(cheap_c, "CCParJoin")) {
+        fprintf(stderr, "FAIL unmarked join missing CCParJoin\n");
+        free(cheap_c);
+        return 1;
+    }
+    if (strstr(cheap_c, "CCTask __cc_par_")) {
+        fprintf(stderr, "FAIL unmarked join still plants CCTask\n");
+        free(cheap_c);
+        return 1;
+    }
+    if (strstr(cheap_c, "_t, sizeof(")) {
+        fprintf(stderr, "FAIL unmarked join still zeros a task\n");
+        free(cheap_c);
+        return 1;
+    }
+    if (!strstr(cheap_c, "b = 2")) {
+        fprintf(stderr, "FAIL unmarked deny path missing spelled assignment\n");
+        free(cheap_c);
+        return 1;
+    }
+    if (strstr(cheap_c, "_thunk(&")) {
+        fprintf(stderr, "FAIL unmarked deny path still calls the thunk\n");
+        free(cheap_c);
+        return 1;
+    }
+    if (!strstr(cheap_c, "cc_parallel_churn_skip(")) {
+        fprintf(stderr, "FAIL unmarked join missing cc_parallel_churn_skip\n");
+        free(cheap_c);
+        return 1;
+    }
     free(cheap_c);
+
+    {
+        const char* gated_fix =
+            "#include <ccc/std/prelude.cch>\n"
+            "int main(void) {\n"
+            "    @errhandler(CCError e) { return 1; }\n"
+            "    int a = 0, b = 0, spawn = 0;\n"
+            "    @parallel (spawn) {\n"
+            "        a = 10;\n"
+            "        b = 20;\n"
+            "    } !>.wait()!>;\n"
+            "    return a + b;\n"
+            "}\n";
+        char* gated_c = NULL;
+        rc = emit_c(gated_fix, "par_gated_seq", &gated_c);
+        if (rc)
+            return rc;
+        if (strstr(gated_c, "cc_parallel_churn_skip(")) {
+            fprintf(stderr, "FAIL gated join used churn_skip\n");
+            free(gated_c);
+            return 1;
+        }
+        if (!strstr(gated_c, "__attribute__((noinline))")) {
+            fprintf(stderr, "FAIL gated join missing noinline helper\n");
+            free(gated_c);
+            return 1;
+        }
+        if (!strstr(gated_c, "_par(")) {
+            fprintf(stderr, "FAIL gated join missing _par helper\n");
+            free(gated_c);
+            return 1;
+        }
+        if (!strstr(gated_c, "a = 10")) {
+            fprintf(stderr, "FAIL gated seq path missing spelled assignment\n");
+            free(gated_c);
+            return 1;
+        }
+        if (!strstr(gated_c, "cc_parallel_spawn_arm(")) {
+            fprintf(stderr, "FAIL gated helper missing spawn_arm\n");
+            free(gated_c);
+            return 1;
+        }
+        free(gated_c);
+    }
 
     puts("parallel_spawn_admit_shape_smoke: OK");
     return 0;

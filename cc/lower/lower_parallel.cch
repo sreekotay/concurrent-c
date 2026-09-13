@@ -12,8 +12,9 @@
  * addresses.
  *
  * The runtime may refuse to spawn (`cc_parallel_deny_fast`), and a spawn
- * may fail. Both fall back to running the thunk inline, so the arms run
- * either way and the difference is only whether they overlapped.
+ * may fail. A wait-for expression arm is then spelled on the caller — the
+ * assignment as written, not a trip through the thunk. A serial or
+ * raising arm still runs the thunk, so those bodies are emitted once.
  *
  * `spawn` is the same block with one promise added: every arm but the
  * first is running while the block is, so the runtime may not deny one and
@@ -38,6 +39,7 @@ typedef struct PCap {
 } PCap;
 typedef PCap* PCapRef;
 typedef Vec::[PCapRef] PCapList;
+typedef Vec::[PCapList] PCapLists;
 
 /* A site that binds a handle: the handle outlives the block, so its
  * declaration goes before it, in the list the block sits in. */
@@ -660,8 +662,9 @@ static CcDecl* pl_thunk_decl(PStep* st, uint32_t id, uint32_t k, PCapList* caps,
     return d;
 }
 
-/* The spawn, and the join that always runs: a refused or failed spawn
- * runs the same thunk inline, so the arm happens either way. */
+/* The spawn, and the join that always runs: a refused or failed wait-for
+ * spawn spells an expression arm on the caller, or runs the thunk for a
+ * serial / raising body, so the arm happens either way. */
 static CcExpr* pl_sizeof(CcLowerer* L, CCSlice name, CcSpan sp) {
     CCString s = @string(`sizeof(${name})`, L->arena);
     return lw_text(L, s, sp);
@@ -673,37 +676,14 @@ static void pl_zero(CcLowerer* L, CcStmt* blk, CCSlice name, CcSpan sp) {
                                           pl_sizeof(L, name, sp), sp), sp));
 }
 
-/* The environment an arm runs from: declared, zeroed and filled. Nothing
- * here starts anything, so it stands on both schedules -- a gated site
- * fills the environment once and then decides whether to spawn. */
-static void pl_env_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
-                         PCapList* caps, CCSlice target, CCSlice bind,
-                         CCSlice join_cell, CcSpan sp) {
-    CCSlice env = pl_name(L, id, k, "_env_t");
+/* The fields of the environment, assigned so a wait-for admit can skip
+ * zeroing the struct. Dest-live fills at the same time it allocates. */
+static void pl_env_fill(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
+                        PCapList* caps, CCSlice target, CCSlice bind,
+                        CCSlice join_cell, CcSpan sp) {
     CCSlice e = pl_name(L, id, k, "_e");
-    CCSlice task = pl_name(L, id, k, "_t");
-    CCSlice denied = pl_name(L, id, k, "_d");
-    size_t n = caps->len();
+    size_t n = caps ? caps->len() : 0;
     size_t i;
-    if (bind.len) {
-        /* the arm outlives the block, so its environment does too */
-        CcType* pt = cc_type_pointer(cc_type_named(env, sp, L->arena), sp, L->arena);
-        CCString mk = @string(`(${env}*)cc__heap_alloc(sizeof(${env}))`, L->arena);
-        lw_push(blk, lw_decl_stmt(L, pt, e, lw_text(L, mk, sp), sp));
-        lw_push(blk, lw_if(L, lw_not(L, lw_ident(L, e, sp), sp),
-                           lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_die"),
-                                                    lw_text(L, @string(`"dest-live oom"`, L->arena), sp), sp), sp),
-                           NULL, sp));
-        lw_push(blk, lw_expr_stmt(L, lw_call2(L, cstr_slice("cc__bytes_zero"), lw_ident(L, e, sp),
-                                              pl_sizeof(L, env, sp), sp), sp));
-    } else {
-        lw_push(blk, lw_decl_stmt(L, cc_type_named(env, sp, L->arena), e, NULL, sp));
-        pl_zero(L, blk, e, sp);
-    }
-    lw_push(blk, lw_decl_stmt(L, cc_type_named(cstr_slice("CCTask"), sp, L->arena), task, NULL, sp));
-    lw_push(blk, lw_decl_stmt(L, cc_type_named(cstr_slice("int"), sp, L->arena), denied,
-                              lw_text(L, @string(`0`, L->arena), sp), sp));
-    pl_zero(L, blk, task, sp);
     for (i = 0; i < n; i++) {
         PCap* c = *caps->get_ptr(i);
         CcExpr* slot = cc_expr_member(lw_ident(L, e, sp), c->name, bind.len != 0, sp, L->arena);
@@ -728,11 +708,53 @@ static void pl_env_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
     }
 }
 
+/* The environment an arm runs from. Wait-for declares a compact join
+ * handle and leaves the env unfilled until admit: a denied CHURN site
+ * never takes a 128-byte CCTask or writes the env. Dest-live / `spawn`
+ * still plant CCTask and fill immediately. */
+static void pl_env_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
+                         PCapList* caps, CCSlice target, CCSlice bind,
+                         CCSlice join_cell, bool compact, CcSpan sp) {
+    CCSlice env = pl_name(L, id, k, "_env_t");
+    CCSlice e = pl_name(L, id, k, "_e");
+    CCSlice task = pl_name(L, id, k, "_t");
+    CCSlice denied = pl_name(L, id, k, "_d");
+    if (bind.len) {
+        /* the arm outlives the block, so its environment does too */
+        CcType* pt = cc_type_pointer(cc_type_named(env, sp, L->arena), sp, L->arena);
+        CCString mk = @string(`(${env}*)cc__heap_alloc(sizeof(${env}))`, L->arena);
+        lw_push(blk, lw_decl_stmt(L, pt, e, lw_text(L, mk, sp), sp));
+        lw_push(blk, lw_if(L, lw_not(L, lw_ident(L, e, sp), sp),
+                           lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_die"),
+                                                    lw_text(L, @string(`"dest-live oom"`, L->arena), sp), sp), sp),
+                           NULL, sp));
+        lw_push(blk, lw_expr_stmt(L, lw_call2(L, cstr_slice("cc__bytes_zero"), lw_ident(L, e, sp),
+                                              pl_sizeof(L, env, sp), sp), sp));
+        compact = false;
+    } else {
+        lw_push(blk, lw_decl_stmt(L, cc_type_named(env, sp, L->arena), e, NULL, sp));
+        if (!compact) pl_zero(L, blk, e, sp);
+    }
+    if (compact) {
+        lw_push(blk, lw_decl_stmt(L, cc_type_named(cstr_slice("CCParJoin"), sp, L->arena), task,
+                                  lw_text(L, @string(`{0}`, L->arena), sp), sp));
+        lw_push(blk, lw_decl_stmt(L, cc_type_named(cstr_slice("int"), sp, L->arena), denied,
+                                  lw_text(L, @string(`0`, L->arena), sp), sp));
+        return;
+    }
+    lw_push(blk, lw_decl_stmt(L, cc_type_named(cstr_slice("CCTask"), sp, L->arena), task, NULL, sp));
+    lw_push(blk, lw_decl_stmt(L, cc_type_named(cstr_slice("int"), sp, L->arena), denied,
+                              lw_text(L, @string(`0`, L->arena), sp), sp));
+    pl_zero(L, blk, task, sp);
+    pl_env_fill(L, blk, id, k, caps, target, bind, join_cell, sp);
+}
+
 /* Offering the arm to the runtime. This is the half a gate skips: when the
  * site runs its arms in order, nothing is spawned and the thunks are
  * called on the caller instead. */
 static void pl_fire_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
-                          CCSlice bind, bool spawn, CcSpan sp) {
+                          CCSlice bind, bool spawn, bool compact,
+                          PCapList* caps, CCSlice target, CCSlice join_cell, CcSpan sp) {
     CCSlice thunk = pl_name(L, id, k, "_thunk");
     CCSlice e = pl_name(L, id, k, "_e");
     CCSlice site = pl_name(L, id, k, "_site");
@@ -759,6 +781,7 @@ static void pl_fire_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
         lw_push(blk, lw_expr_stmt(L, admit, sp));
         (void)site;
         (void)denied;
+        (void)compact;
         return;
     }
     if (spawn) {
@@ -770,6 +793,7 @@ static void pl_fire_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
         lw_push(blk, lw_expr_stmt(L, lw_assign(L, lw_ident(L, task, sp), sp_call, sp), sp));
         (void)site;
         (void)denied;
+        (void)compact;
         return;
     }
     {
@@ -785,8 +809,15 @@ static void pl_fire_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
                                                 lw_text(L, @string(`1`, L->arena), sp), sp), sp));
         lw_push(then, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_note_denied"),
                                                lw_ident(L, cstr_slice("__cc_pt"), sp), sp), sp));
+        /* a serial / raising deny still runs the thunk; fill so it does not
+         * read an empty env. Expression deny spells the arm and ignores this. */
+        if (compact) {
+            pl_env_fill(L, then, id, k, caps, target, bind, join_cell, sp);
+            pl_env_fill(L, els, id, k, caps, target, bind, join_cell, sp);
+        }
         lw_push(els, lw_expr_stmt(L, lw_assign(L, lw_ident(L, task, sp),
-                                               lw_call2(L, cstr_slice("cc_parallel_spawn"),
+                                               lw_call2(L, compact ? cstr_slice("cc_parallel_spawn_arm")
+                                                                    : cstr_slice("cc_parallel_spawn"),
                                                         lw_ident(L, thunk, sp),
                                                         cc_expr_unary(CC_OP_ADDR, lw_ident(L, e, sp), sp, L->arena),
                                                         sp), sp), sp));
@@ -796,13 +827,13 @@ static void pl_fire_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
 
 static void pl_spawn_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
                            PCapList* caps, CCSlice target, CCSlice bind, CcSpan sp) {
-    pl_env_stmts(L, blk, id, k, caps, target, bind, cc_slice_empty(), sp);
-    pl_fire_stmts(L, blk, id, k, bind, false, sp);
+    pl_env_stmts(L, blk, id, k, caps, target, bind, cc_slice_empty(), false, sp);
+    pl_fire_stmts(L, blk, id, k, bind, false, false, NULL, cc_slice_empty(), cc_slice_empty(), sp);
 }
 
 /* The arm on the caller: the same thunk a spawn would have run, called
- * straight through. The arms are emitted once and the gate picks the route
- * to them, so this is how the sequential schedule reaches an arm. */
+ * straight through. Serial / raising wait-for arms still reach here; an
+ * expression wait-for is spelled instead. */
 static void pl_inline_call(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k, CcSpan sp) {
     CCSlice thunk = pl_name(L, id, k, "_thunk");
     CCSlice e = pl_name(L, id, k, "_e");
@@ -815,7 +846,14 @@ static void pl_inline_call(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k, C
     lw_push(blk, lw_expr_stmt(L, cast, sp));
 }
 
-static void pl_join_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k, bool spawn, CcSpan sp) {
+static void pl_run_inline(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
+                          CCSlice spell, CcSpan sp) {
+    if (spell.len) lw_push(blk, lw_expr_stmt(L, lw_ident(L, spell, sp), sp));
+    else pl_inline_call(L, blk, id, k, sp);
+}
+
+static void pl_join_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
+                          bool spawn, bool compact, CCSlice spell, CcSpan sp) {
     CCSlice thunk = pl_name(L, id, k, "_thunk");
     CCSlice e = pl_name(L, id, k, "_e");
     CCSlice task = pl_name(L, id, k, "_t");
@@ -841,13 +879,143 @@ static void pl_join_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k, bo
         (void)e;
         (void)denied;
         (void)cond;
+        (void)compact;
+        (void)spell;
         return;
     }
-    lw_push(then, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_join"), lw_ident(L, task, sp), sp), sp));
+    lw_push(then, lw_expr_stmt(L, lw_call1(L, compact ? cstr_slice("cc_parallel_join_arm")
+                                                    : cstr_slice("cc_parallel_join"),
+                                            lw_ident(L, task, sp), sp), sp));
     lw_push(els, lw_expr_stmt(L, lw_call1(L, cstr_slice("CC_PAR_NOTE_INLINE_ARM"),
                                           lw_ident(L, cstr_slice("__cc_pt"), sp), sp), sp));
-    pl_inline_call(L, els, id, k, sp);
+    pl_run_inline(L, els, id, k, spell, sp);
     lw_push(blk, lw_if(L, cond, then, els, sp));
+}
+
+static void pl_splice(CcStmt* dst, CcStmt* src);
+
+/* A dest or capture already on the helper's parameter list. */
+static bool pl_cap_named(PCapList* v, CCSlice name) {
+    size_t n = v->len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        PCap* c = *v->get_ptr(i);
+        if (slice_eq(c->name, name)) return true;
+    }
+    return false;
+}
+
+static CCSlice pl_gated_dst_name(CcLowerer* L, CCSlice name) {
+    CCString s = @string(`__cc_dst_${name}`, L->arena);
+    return lw_keep(L, &s);
+}
+
+/* The spawn/join of a gated wait-for, off the sequential recursive frame.
+ * Locals of this helper must not live in the function that walks `!pred`:
+ * that walk is the cut, and a 128-byte frame + TLS there is the tax. */
+static CcDecl* pl_gated_par_decl(PStep* st, uint32_t id, CcStmt* slow,
+                                 PCapList* dests, PCapList* caps, CcSpan sp) {
+    CcLowerer* L = st->L;
+    CcStmt* body = lw_block(L, sp);
+    CcParamList params = vec_new::[CcParam](L->arena);
+    CcType* fn_type = cc__type_blank(sp, L->arena);
+    CcFuncType ft;
+    CcFuncDecl fd;
+    CcDecl* d;
+    size_t i;
+    size_t nd = dests->len();
+    size_t nc = caps->len();
+    for (i = 0; i < nd; i++) {
+        PCap* c = *dests->get_ptr(i);
+        CcParam p;
+        CcExpr* slot = cc_expr_unary(CC_OP_DEREF, lw_ident(L, pl_gated_dst_name(L, c->name), sp), sp, L->arena);
+        memset(&p, 0, sizeof(p));
+        p.span = sp;
+        p.type = cc_type_pointer(c->type, sp, L->arena);
+        p.name = pl_gated_dst_name(L, c->name);
+        p.attrs = vec_new::[CcAttr](L->arena);
+        params.push(p);
+        lw_push(body, lw_decl_stmt(L, c->type, c->name, slot, sp));
+    }
+    for (i = 0; i < nc; i++) {
+        PCap* c = *caps->get_ptr(i);
+        CcParam p;
+        memset(&p, 0, sizeof(p));
+        p.span = sp;
+        p.type = c->type;
+        p.name = c->name;
+        p.attrs = vec_new::[CcAttr](L->arena);
+        params.push(p);
+    }
+    pl_splice(body, slow);
+    for (i = 0; i < nd; i++) {
+        PCap* c = *dests->get_ptr(i);
+        CcExpr* slot = cc_expr_unary(CC_OP_DEREF, lw_ident(L, pl_gated_dst_name(L, c->name), sp), sp, L->arena);
+        lw_push(body, lw_expr_stmt(L, lw_assign(L, slot, lw_ident(L, c->name, sp), sp), sp));
+    }
+    memset(&ft, 0, sizeof(ft));
+    ft.ret = cc_type_named(cstr_slice("void"), sp, L->arena);
+    ft.params = params;
+    ft.has_prototype = true;
+    { CcTypeK tk = { .func = ft }; fn_type->k = tk; }
+    memset(&fd, 0, sizeof(fd));
+    fd.type = fn_type;
+    fd.name = pl_name(L, id, 0, "_par");
+    fd.body = body;
+    d = cc_arena_alloc(L->arena, sizeof(CcDecl), _Alignof(CcDecl));
+    memset(d, 0, sizeof(*d));
+    d->span = sp;
+    d->specs = CC_SPEC_STATIC;
+    d->attrs = vec_new::[CcAttr](L->arena);
+    { CcDeclK dk = { .func = fd }; d->k = dk; }
+    return d;
+}
+
+static void pl_gated_par_fwd(PStep* st, uint32_t id, PCapList* dests, PCapList* caps) {
+    CcLowerer* L = st->L;
+    CCArena a = L->arena;
+    CCString t = cc_string_new();
+    size_t i;
+    size_t nd = dests->len();
+    size_t nc = caps->len();
+    bool any = false;
+    t.push_cstr("__attribute__((noinline)) static void ", a);
+    t.push_slice(pl_name(L, id, 0, "_par"), a);
+    t.push_cstr("(", a);
+    for (i = 0; i < nd; i++) {
+        PCap* c = *dests->get_ptr(i);
+        CCSlice tn = L->ix->canon(c->type);
+        if (any) t.push_cstr(", ", a);
+        t.push_slice(tn, a);
+        t.push_cstr("*", a);
+        any = true;
+    }
+    for (i = 0; i < nc; i++) {
+        PCap* c = *caps->get_ptr(i);
+        CCSlice tn = L->ix->canon(c->type);
+        if (any) t.push_cstr(", ", a);
+        t.push_slice(tn, a);
+        any = true;
+    }
+    if (!any) t.push_cstr("void", a);
+    t.push_cstr(");\n", a);
+    pl_host(st); st->fwd.push_slice(t.as_slice(), L->arena);
+}
+
+static CcStmt* pl_gated_par_call(CcLowerer* L, uint32_t id, PCapList* dests,
+                                  PCapList* caps, CcSpan sp) {
+    CcExpr* call = lw_call0(L, pl_name(L, id, 0, "_par"), sp);
+    CcExprList* args = lw_call_args(call);
+    size_t i;
+    for (i = 0; i < dests->len(); i++) {
+        PCap* c = *dests->get_ptr(i);
+        args->push(cc_expr_unary(CC_OP_ADDR, lw_ident(L, c->name, sp), sp, L->arena));
+    }
+    for (i = 0; i < caps->len(); i++) {
+        PCap* c = *caps->get_ptr(i);
+        args->push(lw_ident(L, c->name, sp));
+    }
+    return lw_expr_stmt(L, call, sp);
 }
 
 
@@ -1775,6 +1943,28 @@ static bool pl_arm_raises(CcParallelArm* arm) {
     return pl_body_raises(arm->serial);
 }
 
+static CCSlice pl_spell_arm(CcLowerer* L, CcParallelArm* arm) {
+    CCString t;
+    if (!arm || !arm->expr || arm->serial || pl_arm_raises(arm))
+        return cc_slice_empty();
+    t = lw_spell_expr(L, arm->expr);
+    if (arm->target.len) {
+        CCSlice tgt = arm->target;
+        CCString s = @string(`${tgt} = ${t}`, L->arena);
+        return lw_keep(L, &s);
+    }
+    return lw_keep(L, &t);
+}
+
+static void pl_splice(CcStmt* dst, CcStmt* src) {
+    CcStmtList* from = lw_block_stmts(src);
+    size_t n;
+    size_t i;
+    if (!from) return;
+    n = from->len();
+    for (i = 0; i < n; i++) lw_push(dst, *from->get_ptr(i));
+}
+
 /* The error type the exit cell carries: the one the handlers of the
  * function take. The join raises the cell into the innermost handler in scope after
  * the block, so every handler the function carries has to take that one
@@ -1982,7 +2172,14 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
     bool hdeclared;
     CcExpr* gate;
     bool gated;
+    bool compact;
+    bool try_skip;
+    bool gate_fast;
     CCSlice gname;
+    CcNameList inlines;
+    PCapLists capsv;
+    CcStmt* body;
+    CcStmt* slow;
     CCSlice pj_ty = cc_slice_empty();       /* the exit cell's type, when there is one */
     CCSlice pj_var = cc_slice_empty();      /* the cell itself, on the caller */
     CCSlice pj_ptr = cc_slice_empty();      /* what the caller's arm claims through */
@@ -2164,8 +2361,6 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
         lw_push(blk, lw_expr_stmt(L, lw_assign(L, lw_ident(L, hspell, sp),
                                                lw_call0(L, cstr_slice("cc_parallel_dest"), sp), sp), sp));
     }
-    lw_push(blk, lw_decl_stmt(L, cc_type_pointer(cc_type_named(cstr_slice("CCParTls"), sp, L->arena), sp, L->arena),
-                              cstr_slice("__cc_pt"), lw_call0(L, cstr_slice("cc__par_tls"), sp), sp));
     if (pj_ty.len) {
         CcType* pt = cc_type_pointer(cc_type_named(pj_ty, sp, L->arena), sp, L->arena);
         CcExpr* addr = cc_expr_unary(CC_OP_ADDR, lw_ident(L, pj_var, sp), sp, L->arena);
@@ -2176,11 +2371,32 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
     gate = p.pred ? p.pred : p.seq;
     gated = gate != NULL;
     gname = gated ? pl_gate_name(L, id) : cc_slice_empty();
+    /* wait-for: compact join, env filled only on admit, expression arms
+     * spelled on deny / seq rather than run through the thunk */
+    compact = !hspell.len && !p.spawn;
+    inlines = vec_new::[CCSlice](L->arena);
+    capsv = vec_new::[PCapList](L->arena);
+    try_skip = compact && !gated && first == 1 && !pj_ty.len;
+    gate_fast = compact && gated && first == 1 && !pj_ty.len;
+    if (gate_fast) {
+        if (!pl_spell_arm(L, armv->get_ptr(0)).len) gate_fast = false;
+        for (i = first; i < n && gate_fast; i++) {
+            if (!pl_spell_arm(L, armv->get_ptr(i)).len) gate_fast = false;
+        }
+    }
+    slow = NULL;
+    body = blk;
+    if (try_skip || gate_fast) {
+        slow = lw_block(L, sp);
+        body = slow;
+    }
+    lw_push(body, lw_decl_stmt(L, cc_type_pointer(cc_type_named(cstr_slice("CCParTls"), sp, L->arena), sp, L->arena),
+                                cstr_slice("__cc_pt"), lw_call0(L, cstr_slice("cc__par_tls"), sp), sp));
     if (!gated) {
         CcExpr* who = lw_text(L, @string(`NULL`, L->arena), sp);
         if (hspell.len) who = cc_expr_unary(CC_OP_ADDR, lw_paren(L, lw_ident(L, hspell, sp), sp), sp, L->arena);
-        lw_push(blk, lw_expr_stmt(L, lw_call2(L, cstr_slice("cc_parallel_deny_enter"),
-                                              lw_ident(L, cstr_slice("__cc_pt"), sp), who, sp), sp));
+        lw_push(body, lw_expr_stmt(L, lw_call2(L, cstr_slice("cc_parallel_deny_enter"),
+                                                lw_ident(L, cstr_slice("__cc_pt"), sp), who, sp), sp));
     }
     /* every arm but the first is offered to the runtime -- the first too,
      * when it is the one worker of a dest-live construct */
@@ -2252,9 +2468,16 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
         }
         pl_forward(st, id, (uint32_t)i);
         {
+            CCSlice spell = cc_slice_empty();
             CCSlice pj_cell = cc_slice_empty();
-            CcStmt* ab = pl_serial_body(L, arm->serial);
+            CcStmt* ab;
             CcDecl* th;
+            /* spelled before the thunk rewrite mutates the arm */
+            if (compact && arm->expr && !arm->serial && !pl_arm_raises(arm))
+                spell = pl_spell_arm(L, arm);
+            inlines.push(spell);
+            capsv.push(caps);
+            ab = pl_serial_body(L, arm->serial);
             if (pj_ty.len) pj_cell = cstr_slice("__e->__cc_pj_ex");
             th = pl_thunk_decl(st, id, (uint32_t)i, &caps, arm->expr, ab,
                                out_type, arm->target, hspell.len != 0, pj_cell,
@@ -2271,22 +2494,40 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
                 dv->push(th);
             }
         }
-        pl_env_stmts(L, blk, id, (uint32_t)i, &caps, arm->target, hspell, pj_ptr, sp);
-        if (!gated) pl_fire_stmts(L, blk, id, (uint32_t)i, hspell, p.spawn, sp);
+        pl_env_stmts(L, body, id, (uint32_t)i, &caps, arm->target, hspell, pj_ptr, compact, sp);
+        if (!gated) pl_fire_stmts(L, body, id, (uint32_t)i, hspell, p.spawn, compact,
+                                    &caps, arm->target, pj_ptr, sp);
     }
     if (gated) {
-        /* One test, once: true when the arms run in order. The arms
-         * themselves are emitted once either way -- this chooses the route
-         * to them, not a second copy of them, because the bodies have
-         * already been rewritten in place for the thunk. */
-        CcStmt* fire = lw_block(L, sp);
+        /* One test, once: true when the arms run in order. Expression arms
+         * are spelled on the sequential path; the thunk is only the spawn
+         * route, because the body has already been rewritten in place. */
         lw_push(blk, lw_decl_stmt(L, cc_type_named(cstr_slice("int"), sp, L->arena), gname,
                                   lw_not(L, lw_paren(L, gate, sp), sp), sp));
-        lw_push(fire, lw_expr_stmt(L, lw_call2(L, cstr_slice("cc_parallel_deny_enter"),
-                                               lw_ident(L, cstr_slice("__cc_pt"), sp),
-                                               lw_text(L, @string(`NULL`, L->arena), sp), sp), sp));
-        for (i = first; i < n; i++) pl_fire_stmts(L, fire, id, (uint32_t)i, hspell, false, sp);
-        lw_push(blk, lw_if(L, lw_not(L, lw_ident(L, gname, sp), sp), fire, NULL, sp));
+        if (gate_fast) {
+            /* spawn/join lives in the noinline helper (`body` / `slow`) */
+            lw_push(body, lw_expr_stmt(L, lw_call2(L, cstr_slice("cc_parallel_deny_enter"),
+                                                   lw_ident(L, cstr_slice("__cc_pt"), sp),
+                                                   lw_text(L, @string(`NULL`, L->arena), sp), sp), sp));
+            for (i = first; i < n; i++) {
+                CcParallelArm* arm = armv->get_ptr(i);
+                PCapList* cp = capsv.get_ptr(i - first);
+                pl_fire_stmts(L, body, id, (uint32_t)i, hspell, false, compact,
+                                cp, arm->target, pj_ptr, sp);
+            }
+        } else {
+            CcStmt* fire = lw_block(L, sp);
+            lw_push(fire, lw_expr_stmt(L, lw_call2(L, cstr_slice("cc_parallel_deny_enter"),
+                                                   lw_ident(L, cstr_slice("__cc_pt"), sp),
+                                                   lw_text(L, @string(`NULL`, L->arena), sp), sp), sp));
+            for (i = first; i < n; i++) {
+                CcParallelArm* arm = armv->get_ptr(i);
+                PCapList* cp = capsv.get_ptr(i - first);
+                pl_fire_stmts(L, fire, id, (uint32_t)i, hspell, false, compact,
+                                cp, arm->target, pj_ptr, sp);
+            }
+            lw_push(blk, lw_if(L, lw_not(L, lw_ident(L, gname, sp), sp), fire, NULL, sp));
+        }
     }
     /* the first arm stays here -- unless it is the one worker of a
      * dest-live construct, which has no kick: that arm was spawned and
@@ -2305,40 +2546,152 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
              * this one run */
             if (pl_arm_raises(arm))
                 pl_arm_open_with(L, ab, pl_raise_handler(L, pj_ety, pj_ptr, lw_goto(L, pj_leave, sp), sp));
-            lw_push(blk, ab);
+            lw_push(body, ab);
         } else {
             CcExpr* e0 = arm->expr;
             if (arm->target.len) e0 = lw_assign(L, lw_ident(L, arm->target, sp), e0, sp);
-            lw_push(blk, lw_expr_stmt(L, e0, sp));
+            lw_push(body, lw_expr_stmt(L, e0, sp));
         }
     }
-    if (pj_leave.len) lw_push(blk, lw_label(L, pj_leave, lw_block(L, sp), sp));
+    if (pj_leave.len) lw_push(body, lw_label(L, pj_leave, lw_block(L, sp), sp));
     if (gated) {
-        CcStmt* joins = lw_block(L, sp);
-        CcStmt* order = lw_block(L, sp);
-        for (i = first; i < n; i++) pl_join_stmts(L, joins, id, (uint32_t)i, false, sp);
-        lw_push(joins, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_deny_leave"),
-                                                lw_ident(L, cstr_slice("__cc_pt"), sp), sp), sp));
-        /* nothing was denied on this schedule, so no note: the arms simply
-         * run after the first, in the order they were written */
-        for (i = first; i < n; i++) pl_inline_call(L, order, id, (uint32_t)i, sp);
-        if (pj_ty.len) {
-            /* an arm that left ended the block, and on this schedule the
-             * arms behind it were never started: they do not start now */
-            CCSlice cellv = pj_var;
-            CCString c = @string(`cc_atomic_load(&${cellv}.xk) < 2`, L->arena);
-            order = lw_if(L, lw_text(L, c, sp), order, NULL, sp);
+        if (gate_fast) {
+            for (i = first; i < n; i++)
+                pl_join_stmts(L, body, id, (uint32_t)i, false, compact, *inlines.get_ptr(i - first), sp);
+            lw_push(body, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_deny_leave"),
+                                                  lw_ident(L, cstr_slice("__cc_pt"), sp), sp), sp));
+        } else {
+            CcStmt* joins = lw_block(L, sp);
+            CcStmt* order = lw_block(L, sp);
+            for (i = first; i < n; i++)
+                pl_join_stmts(L, joins, id, (uint32_t)i, false, compact, *inlines.get_ptr(i - first), sp);
+            lw_push(joins, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_deny_leave"),
+                                                    lw_ident(L, cstr_slice("__cc_pt"), sp), sp), sp));
+            /* nothing was denied on this schedule, so no note: the arms simply
+             * run after the first, in the order they were written */
+            for (i = first; i < n; i++) {
+                CCSlice spell = *inlines.get_ptr(i - first);
+                if (!spell.len) {
+                    /* compact admit never filled the env; a serial thunk still needs it */
+                    CcParallelArm* arm = armv->get_ptr(i);
+                    PCapList* cp = capsv.get_ptr(i - first);
+                    pl_env_fill(L, order, id, (uint32_t)i, cp, arm->target, hspell, pj_ptr, sp);
+                }
+                pl_run_inline(L, order, id, (uint32_t)i, spell, sp);
+            }
+            if (pj_ty.len) {
+                /* an arm that left ended the block, and on this schedule the
+                 * arms behind it were never started: they do not start now */
+                CCSlice cellv = pj_var;
+                CCString c = @string(`cc_atomic_load(&${cellv}.xk) < 2`, L->arena);
+                order = lw_if(L, lw_text(L, c, sp), order, NULL, sp);
+            }
+            lw_push(blk, lw_if(L, lw_not(L, lw_ident(L, gname, sp), sp), joins, order, sp));
         }
-        lw_push(blk, lw_if(L, lw_not(L, lw_ident(L, gname, sp), sp), joins, order, sp));
     } else if (!hspell.len) {
         /* the block joins before it ends; a bound handle joins later */
-        for (i = first; i < n; i++) pl_join_stmts(L, blk, id, (uint32_t)i, p.spawn, sp);
-        lw_push(blk, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_deny_leave"),
+        for (i = first; i < n; i++)
+            pl_join_stmts(L, body, id, (uint32_t)i, p.spawn, compact, *inlines.get_ptr(i - first), sp);
+        lw_push(body, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_deny_leave"),
                                               lw_ident(L, cstr_slice("__cc_pt"), sp), sp), sp));
     } else if (hdeclared) {
         /* the block declares it, so it is hoisted above the block */
         PBind* b = pl_bind_new(st, s, p, sp);
         st->binds.push(b);
+    }
+    if (try_skip && slow) {
+        /* Once this site is CHURN, nested nodes skip TLS / deny_fast and
+         * run the arms as written. Virgin / REAL / a 1-in-2^20 resample
+         * take the spawn path below. */
+        bool ok = true;
+        CCSlice fs = pl_spell_arm(L, armv->get_ptr(0));
+        if (!fs.len) ok = false;
+        for (i = 0; i < inlines.len(); i++) {
+            if (!(*inlines.get_ptr(i)).len) ok = false;
+        }
+        if (ok) {
+            CcStmt* skipb = lw_block(L, sp);
+            CCSlice site = pl_name(L, id, (uint32_t)first, "_site");
+            CCSlice thunk = pl_name(L, id, (uint32_t)first, "_thunk");
+            CcExpr* cond = lw_call2(L, cstr_slice("cc_parallel_churn_skip"),
+                                    cc_expr_unary(CC_OP_ADDR, lw_ident(L, site, sp), sp, L->arena),
+                                    lw_ident(L, thunk, sp), sp);
+            lw_push(skipb, lw_expr_stmt(L, lw_ident(L, fs, sp), sp));
+            for (i = first; i < n; i++)
+                pl_run_inline(L, skipb, id, (uint32_t)i, *inlines.get_ptr(i - first), sp);
+            lw_push(blk, lw_if(L, cond, skipb, slow, sp));
+        } else {
+            pl_splice(blk, slow);
+        }
+    }
+    if (gate_fast && slow) {
+        /* Sequential recursive calls stay in this function (tiny frame).
+         * Spawn/join runs in a noinline helper so its TLS and env do not
+         * enlarge that walk. */
+        bool ok = true;
+        CCSlice fs = pl_spell_arm(L, armv->get_ptr(0));
+        PCapList dests = vec_new::[PCapRef](L->arena);
+        PCapList pcaps = vec_new::[PCapRef](L->arena);
+        PScan sc;
+        if (!fs.len) ok = false;
+        for (i = 0; i < inlines.len(); i++) {
+            if (!(*inlines.get_ptr(i)).len) ok = false;
+        }
+        for (i = 0; i < n && ok; i++) {
+            CcParallelArm* arm = armv->get_ptr(i);
+            CcType* t;
+            PCap* c;
+            if (!arm->target.len) continue;
+            t = sc_lookup(w, arm->target);
+            if (!t) { ok = false; break; }
+            c = cc_arena_alloc(L->arena, sizeof(PCap), _Alignof(PCap));
+            memset(c, 0, sizeof(*c));
+            c->name = arm->target;
+            c->type = t;
+            dests.push(c);
+        }
+        memset(&sc, 0, sizeof(sc));
+        sc.st = st;
+        sc.w = w;
+        sc.caps = vec_new::[PCapRef](L->arena);
+        sc.seen = vec_new::[CCSlice](L->arena);
+        sc.skip = armv->get_ptr(0)->target;
+        {
+            CcVisitor v;
+            CcParallelArm* a0 = armv->get_ptr(0);
+            memset(&v, 0, sizeof(v));
+            v.expr = pl_scan_expr;
+            v.env = &sc;
+            if (a0->serial) CcStmt_walk(a0->serial, v);
+            else if (a0->expr) CcExpr_walk(a0->expr, v);
+        }
+        for (i = 0; i < sc.caps.len(); i++) {
+            PCap* c = *sc.caps.get_ptr(i);
+            if (!pl_cap_named(&dests, c->name)) pcaps.push(c);
+        }
+        for (i = 0; i < capsv.len(); i++) {
+            PCapList* cp = capsv.get_ptr(i);
+            size_t ci;
+            for (ci = 0; ci < cp->len(); ci++) {
+                PCap* c = *cp->get_ptr(ci);
+                if (pl_cap_named(&dests, c->name) || pl_cap_named(&pcaps, c->name)) continue;
+                pcaps.push(c);
+            }
+        }
+        if (ok) {
+            CcStmt* skipb = lw_block(L, sp);
+            CcStmt* parb = lw_block(L, sp);
+            CcDecl* par = pl_gated_par_decl(st, id, slow, &dests, &pcaps, sp);
+            pl_gated_par_fwd(st, id, &dests, &pcaps);
+            st->made.push(par);
+            lw_push(skipb, lw_expr_stmt(L, lw_ident(L, fs, sp), sp));
+            for (i = first; i < n; i++)
+                pl_run_inline(L, skipb, id, (uint32_t)i, *inlines.get_ptr(i - first), sp);
+            lw_push(parb, pl_gated_par_call(L, id, &dests, &pcaps, sp));
+            lw_push(blk, lw_if(L, lw_ident(L, gname, sp), skipb, parb, sp));
+        } else {
+            pl_splice(blk, slow);
+        }
     }
     if (pj_ty.len) {
         /* every arm has finished, so whichever exit arrived first is the

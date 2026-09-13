@@ -5578,7 +5578,7 @@ T left, right;
 } !>.wait()!>;
 ```
 
-`@parallel (pred) { … }` is the same join as §8.11.1, including `@serial` arms. When `pred` is true, lowering matches §8.11.1. When `pred` is false, the arms run in order on the caller and spawn is not attempted. The body always executes; `pred` chooses scheduling, not presence. There is no `else`. An empty predicate is ill-formed. `@parallel (pred) for` is ill-formed.
+`@parallel (pred) { … }` is the same join as §8.11.1, including `@serial` arms. When `pred` is true, lowering matches §8.11.1 from a noinline helper so the sequential schedule does not carry that frame. When `pred` is false, the arms run in order on the caller and spawn is not attempted; that path does not fetch TLS. The body always executes; `pred` chooses scheduling, not presence. There is no `else`. An empty predicate is ill-formed. `@parallel (pred) for` is ill-formed.
 
 Independence is unchanged: reading another arm's destination is undefined on both paths.
 
@@ -8862,9 +8862,9 @@ maps cancellation or expiry to its own documented result as required by
 
 ### J.4 `@parallel` Lowering
 
-An assignment `@parallel` block lowers to `cc_parallel_spawn` of a file-scope thunk per arm after the first, the first arm on the caller, then `cc_parallel_join` in reverse spawn order. An assignment thunk writes `*out = <arm rhs>` through a stack environment that lives until join returns. A `@serial` thunk with an outer name copies the destination in, runs the body, and writes it back through `*out`. A statement `@serial` runs the body with no destination. If spawn returns `CC_TASK_KIND_INVALID` (adaptive deny or spawn failure), the thunk runs on the caller. `@parallel spawn`, dest-live, and dest-attach do not: a failed admit is `cc_parallel_die`. `#pragma(@parallel) off` is the sequential dest-live lowering.
+An assignment `@parallel` block lowers to `cc_parallel_spawn_arm` of a file-scope thunk per arm after the first, the first arm on the caller, then `cc_parallel_join_arm`. The join handle is a `CCParJoin` (kind + fiber), not a `CCTask`. An assignment thunk writes `*out = <arm rhs>` through a stack environment that lives until join returns; the environment is filled only if the site is admitted. A `@serial` thunk with an outer name copies the destination in, runs the body, and writes it back through `*out`. A statement `@serial` runs the body with no destination. If the site is denied or spawn returns `CC_TASK_KIND_INVALID`, an expression arm is spelled on the caller; a serial or raising arm runs the thunk. Once the site is CHURN, `cc_parallel_churn_skip` takes that spelling with no TLS. `@parallel spawn`, dest-live, and dest-attach do not: they plant `CCTask` and a failed admit is `cc_parallel_die`. `#pragma(@parallel) off` is the sequential dest-live lowering.
 
-`@parallel (pred) { … }` lowers to `if (!(pred)) {` the same arms in order `} else` a file-scope spawn helper. A false predicate does not call spawn. The helper holds `CCTask` and env so the sequential path stays a small function.
+`@parallel (pred) { … }` lowers to `if (!(pred)) {` the arms in order, spelled when they are expression arms, with no TLS `} else` a `noinline` helper that holds the compact spawn/join. A false predicate does not call spawn, fetch TLS, or plant a join handle on the sequential recursive frame.
 
 `@parallel for (i in lo..hi)` lowers to a file-scope walk that bisects `[lo, hi)`: spawn one half, walk the other, join. A span of length ≤ 1, or a failed spawn, is a C `for` over that span. The walk environment is stack-allocated at the call site and copied for the spawned half.
 

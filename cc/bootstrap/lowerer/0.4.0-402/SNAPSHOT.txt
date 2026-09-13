@@ -1,0 +1,4 @@
+git: 63fbac8f
+date: 2026-09-13T21:41:21Z
+tools: cclex ccparse cclower ccindex
+cclower_cc: 2366609799
