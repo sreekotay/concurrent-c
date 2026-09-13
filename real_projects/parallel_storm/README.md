@@ -10,7 +10,7 @@ Two pages, same leaf:
 | binary | page | what it collects |
 |---|---|---|
 | `storm` | `storm.ccs` | pixels into a flat buffer |
-| `storm_tile` | `storm_tile.ccs` | same 4-way join, `Child` tree, then flatten, then drop |
+| `storm_tile` | `storm_tile.ccs` | same 4-way join; leaf writes the buffer (no `Tile` heap) |
 
 `make run` is still the buffer renderer.
 
@@ -23,10 +23,8 @@ Three forks on the buffer page:
 | `quad` | same tree, `@parallel (d < STORM_CUT)` (default cut 3) |
 
 The tile page is the same quadtree fork as buffer `unbound` / `quad`
-(not scanlines). Four-way join returns a `Child` (inline `pix`, heap
-`Tile` only at a split), flatten writes RGBA, drop walks. Spawned arms
-bump exclusive heap children of the frame arena; a per-frame checkpoint
-restores. Default framebuffer is 1024², same as the buffer page.
+(not scanlines). The tree is the join: the leaf `put_rgb`s; drop is
+`wait()`. Default framebuffer is 1024².
 
 Raylib is a **not-in-git** fetch (`vendor/raylib`, gitignored). The CC page
 does not include `raylib.h` — `storm_rl.c` is the window.
@@ -59,10 +57,8 @@ Click to look. Esc releases the mouse. WASD move, shift sprint, Q quit.
 | `STORM_MODE` | `for` (`storm`) / `quad` (`storm_tile`) | see above |
 | `STORM_CUT` | 3 | quadtree spawn levels |
 | `STORM_SEQ=1` | 0 | sequential, no spawn |
-| `STORM_SHADE=0` | 1 | skip hit/shade (cheap leaf); isolate tree/FB |
+| `STORM_SHADE=0` | 1 | skip hit/shade (cheap leaf); isolate spawn/FB |
 | `STORM_FB_GAMMA=0` | 1 | skip `sqrt` in `put_rgb` (linear bytes) |
-| `STORM_DROP` | `par` | `storm_tile` only: `par` / `seq` |
-| `STORM_FLAT` | `seq` | `storm_tile` only: `par` / `seq` |
 
 The checksum join that started this is still `perf/parallel_trace.ccs`.
 This folder is the same leaf, on screen.

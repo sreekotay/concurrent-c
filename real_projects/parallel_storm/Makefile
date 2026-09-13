@@ -12,10 +12,8 @@
 #   STORM_SHADE=0       trivial leaf (no hit/shade)
 #   STORM_FB_GAMMA=0    linear FB bytes (skip sqrt)
 #
-#   make run-tile      ADT construct / flatten / drop (storm_tile.ccs)
-#   STORM_W/H           tile default 256×256 (1024² is ~1.4M nodes)
-#   STORM_DROP          par (default) | seq
-#   STORM_FLAT          seq (default) | par
+#   make run-tile      same 4-way join; leaf writes the buffer (storm_tile.ccs)
+#   STORM_MODE          quad (default) | unbound
 
 CCC ?= $(shell test -x ../../cc/bin/ccc && echo ../../cc/bin/ccc || echo ../../out/cc/bin/ccc)
 CC ?= cc

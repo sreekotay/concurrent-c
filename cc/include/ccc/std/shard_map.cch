@@ -40,10 +40,10 @@
 #include <ccc/cc_exclusive.cch>
 #include <ccc/std/string.cch>
 #include <ccc/std/slice_packed.cch>
-#include <ccc/std/array_map.cch>
+#include <ccc/std/table.cch>
 
-CC_ARRAY_MAP_DECL(CCSlicePacked, CCString, CCShardMapTable,
-                  cc_map_hash_slice_packed, cc_map_eq_slice_packed)
+CC_TABLE_DECL(CCSlicePacked, CCString, CCShardMapTable,
+              cc_map_hash_slice_packed, cc_map_eq_slice_packed)
 
 /* ---- One shard cell ---- */
 

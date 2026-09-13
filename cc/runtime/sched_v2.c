@@ -348,6 +348,9 @@ typedef struct {
      * the live prefix when a grow episode is armed. */
     _Atomic uint64_t parks;
     wake_primitive wake;
+    /* Sysmon sets this to retire an idle worker above the eager cap.
+     * The worker exits the loop cleanly and clears alive. */
+    _Atomic int  retiring;
 } thread_v2;
 
 /* ============================================================================
@@ -744,14 +747,18 @@ static _Atomic int g_v2_running_workers = 0;
  * Per recheck, sysmon samples (ready_queue.pops, slot park sums,
  * v2_now_ns) against the episode baseline. With depth =
  * ready_queue.count and n = num_threads, grow one worker iff:
- *   - the pool's aggregate drain rate is below one pop per worker per
- *     g_v2_grow_rate_us (workers blocked or running long CPU arms), OR
+ *   - depth > 0 and the pool's aggregate drain rate is below one pop
+ *     per worker per g_v2_grow_rate_us (workers blocked or running long
+ *     CPU arms with more work waiting), OR
  *   - depth >= 2*n (backlog relative to pool size), sustained across
  *     g_v2_grow_depth_dwell consecutive rechecks,
  * AND the episode is not run-to-park: parks since baseline do not
  * exceed half the pops. A high park fraction is recv/accept or lock
  * wait multiplexing — extra workers add traffic. A low park fraction
- * with a slow drain is CPU-bound work still occupying workers.
+ * with a slow drain and a non-empty queue is CPU-bound work still
+ * occupying workers while more fibers sit ready. An empty queue with
+ * nobody idle is the whole remaining set already running — extra
+ * workers cannot help until something is waiting.
  * Otherwise hold: a shallow, briskly-draining queue is park/wake
  * churn; a deep, high-park queue is a nursery accept/request wave.
  * Both rate and depth scale with pool size; the rate is normalized
@@ -762,15 +769,17 @@ static _Atomic int g_v2_running_workers = 0;
  * every worker idle and the ready queue empty, or one spare worker
  * plus an empty queue persisting for SCHED_V2_GROW_SLACK_NS (a single
  * park between CPU-bound arms is not slack). depth==0 with nobody idle
- * is saturation — keep sampling so the rate trigger can recruit.
- * The env knobs below are test overrides; defaults settle from the
- * workload.
+ * is saturation, not slack: keep the episode armed so a later queued
+ * fiber can still hit the rate trigger. Do not grow on that empty
+ * queue. Idle workers above the eager cap are released once slack
+ * holds — the pool settles to the work that is actually there.
+ * The env knobs below are test overrides; defaults settle from
+ * the workload.
  *
  * An optional slow-tick escalation (CC_V2_GROW_ESCALATE_TICKS, default
  * off) can additionally grow on sustained backlog regardless of rate;
  * see g_v2_grow_escalate_ticks.
- *
- * The pool remains a ratchet: workers are never culled. */
+ */
 static int g_v2_eager_threads = 2;
 static int g_v2_grow_recheck_us = 25;
 /* Hold threshold, in "microseconds per pop per worker": the pool is
@@ -806,11 +815,12 @@ static int g_v2_grow_depth_dwell = 3;
  * Default 0 (disabled): measured across the perf suite, the rate/depth
  * triggers alone recruit correctly for every workload shape — CPU-bound
  * fibers don't park, so they produce a near-zero pop rate and grow via
- * the stall trigger; a high pop rate only comes from park/wake churn,
- * where holding is right. Escalation's only observed steady-state effect
- * was converting held contention regimes back to a full (over-recruited)
- * pool. Kept as opt-in insurance for a workload that pops briskly AND
- * scales with workers, should one appear. */
+ * the stall trigger while the ready queue is non-empty; a high pop
+ * rate only comes from park/wake churn, where holding is right.
+ * Escalation's only observed steady-state effect was converting held
+ * contention regimes back to a full (over-recruited) pool. Kept as
+ * opt-in insurance for a workload that pops briskly AND scales with
+ * workers, should one appear. */
 static int g_v2_grow_escalate_ticks = 0;
 /* Dwell before a spare worker + empty queue counts as slack. One
  * recheck of idle is a park between long arms, not spare capacity. */
@@ -822,6 +832,7 @@ static _Atomic uint64_t g_v2_grow_backlog = 0;    /* recheck: deep queue  */
 static _Atomic uint64_t g_v2_grow_escalate = 0;   /* slow-tick escalation */
 static _Atomic uint64_t g_v2_grow_held = 0;       /* recheck decided hold */
 static _Atomic uint64_t g_v2_grow_parked = 0;     /* hold: run-to-park     */
+static _Atomic uint64_t g_v2_grow_shrink = 0;     /* idle workers released  */
 
 /* Coro-pool high-water cap (tunable via CC_V2_CORO_POOL_MAX).
  *
@@ -1177,7 +1188,53 @@ static void sched_v2_init_worker_slot(int id) {
     atomic_store_explicit(&g_v2.threads[id].generation, 0,
                           memory_order_release);
     atomic_store_explicit(&g_v2.threads[id].parks, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_v2.threads[id].retiring, 0, memory_order_relaxed);
     wake_primitive_init(&g_v2.threads[id].wake);
+}
+
+/* Release the last worker if it is idle and above the eager cap. */
+static int sched_v2_try_retire_last_idle(void) {
+    int n;
+    int i;
+    int exp = 1;
+    pthread_mutex_lock(&g_v2.start_mu);
+    n = atomic_load_explicit(&g_v2.num_threads, memory_order_acquire);
+    if (n <= g_v2_eager_threads) {
+        pthread_mutex_unlock(&g_v2.start_mu);
+        return 0;
+    }
+    i = n - 1;
+    if (!atomic_compare_exchange_strong_explicit(&g_v2.threads[i].is_idle, &exp, 0,
+            memory_order_acq_rel, memory_order_relaxed)) {
+        pthread_mutex_unlock(&g_v2.start_mu);
+        return 0;
+    }
+    atomic_fetch_sub_explicit(&g_v2.idle_workers, 1, memory_order_acq_rel);
+    atomic_store_explicit(&g_v2.threads[i].retiring, 1, memory_order_release);
+    pthread_detach(g_v2.threads[i].handle);
+    wake_primitive_wake_one(&g_v2.threads[i].wake);
+    while (atomic_load_explicit(&g_v2.threads[i].alive, memory_order_acquire))
+        sched_yield();
+    atomic_store_explicit(&g_v2.num_threads, n - 1, memory_order_release);
+    atomic_store_explicit(&g_v2.threads[i].retiring, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_v2.threads[i].dispatch_epoch, 0, memory_order_relaxed);
+    wake_primitive_init(&g_v2.threads[i].wake);
+    V2_STAT_INC(g_v2_grow_shrink);
+    pthread_mutex_unlock(&g_v2.start_mu);
+    return 1;
+}
+
+static void sched_v2_settle_pool(void) {
+    for (;;) {
+        size_t depth = atomic_load_explicit(&g_v2.ready_queue.count,
+                                           memory_order_relaxed);
+        int n = atomic_load_explicit(&g_v2.num_threads, memory_order_acquire);
+        int idle = atomic_load_explicit(&g_v2.idle_workers, memory_order_acquire);
+        if (depth != 0 || n <= g_v2_eager_threads || idle <= 0)
+            return;
+        if (!sched_v2_try_retire_last_idle())
+            return;
+    }
 }
 
 static inline int sched_v2_finish_join(fiber_v2* f, void** out_result) {
@@ -2058,6 +2115,9 @@ static void* thread_v2_main(void* arg) {
     }
 
     while (atomic_load_explicit(&g_v2.running, memory_order_acquire)) {
+        if (atomic_load_explicit(&g_v2.threads[tid].retiring,
+                                  memory_order_acquire))
+            break;
         /* Admission gate: try to register as one of the (up to)
          * g_v2_target_active running workers. If target is disabled
          * (0), try_admit_running always succeeds. If target is saturated,
@@ -2440,6 +2500,8 @@ static void* sched_v2_sysmon_main(void* arg) {
                 grow_have_baseline = 0;
                 grow_depth_streak = 0;
                 grow_slack_since_ns = 0;
+                if (slack_done)
+                    sched_v2_settle_pool();
             } else {
                 uint64_t pops = atomic_load_explicit(&g_v2.ready_queue.pops,
                                                      memory_order_relaxed);
@@ -2485,7 +2547,11 @@ static void* sched_v2_sysmon_main(void* arg) {
                             grow_depth_streak = 0;
                         int depth_grow = depth_hit && !run_to_park &&
                                          grow_depth_streak >= g_v2_grow_depth_dwell;
-                        if (rate_slow && !run_to_park) {
+                        /* Rate-grow only while something is waiting. A
+                         * CHURN-inlined tree (or any single CPU fiber)
+                         * occupies a worker with depth==0; more threads
+                         * cannot run work that is not queued. */
+                        if (rate_slow && !run_to_park && depth > 0) {
                             V2_STAT_INC(g_v2_grow_stall);
                             grow_depth_streak = 0;
                             (void)sched_v2_try_expand_pool();
@@ -2519,6 +2585,16 @@ static void* sched_v2_sysmon_main(void* arg) {
 
         /* Syscall-age eviction runs every tick: cheap scan, high payoff. */
         sched_v2_sysmon_evict_aged_workers();
+
+        /* Empty queue + spare workers: release extras down to the eager cap. */
+        {
+            size_t depth = atomic_load_explicit(&g_v2.ready_queue.count,
+                                                 memory_order_relaxed);
+            int n = atomic_load_explicit(&g_v2.num_threads, memory_order_acquire);
+            int idle = atomic_load_explicit(&g_v2.idle_workers, memory_order_acquire);
+            if (depth == 0 && idle > 0 && n > g_v2_eager_threads)
+                sched_v2_settle_pool();
+        }
 
         /* Park-deadline wakeup: signal any fiber whose @with_deadline
          * has expired while it was parked.  Short-circuits to a single
@@ -2765,7 +2841,7 @@ static void sched_v2_atexit_dump_stats(void) {
             (unsigned long long)atomic_load_explicit(&g_v2_worker_busy_from_recheck, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_worker_busy_from_wake, memory_order_relaxed));
     fprintf(stderr, "[sched_v2 stats] grow (eager<=%d recheck=%dus rate=%dus/pop/worker depth_x=%d dwell=%d esc=%d): requests=%llu "
-                    "stall=%llu backlog=%llu escalate=%llu held=%llu parked=%llu final_threads=%d/%d\n",
+                    "stall=%llu backlog=%llu escalate=%llu held=%llu parked=%llu shrink=%llu final_threads=%d/%d\n",
             g_v2_eager_threads, g_v2_grow_recheck_us, g_v2_grow_rate_us,
             g_v2_grow_depth_mult, g_v2_grow_depth_dwell, g_v2_grow_escalate_ticks,
             (unsigned long long)atomic_load_explicit(&g_v2_grow_requests, memory_order_relaxed),
@@ -2774,6 +2850,7 @@ static void sched_v2_atexit_dump_stats(void) {
             (unsigned long long)atomic_load_explicit(&g_v2_grow_escalate, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_grow_held, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_grow_parked, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_grow_shrink, memory_order_relaxed),
             atomic_load_explicit(&g_v2.num_threads, memory_order_relaxed),
             g_v2.max_threads);
     fprintf(stderr, "[sched_v2 stats] spin_before_park=%d: hit=%llu miss=%llu\n",

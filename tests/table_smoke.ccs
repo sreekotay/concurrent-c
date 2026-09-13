@@ -1,7 +1,5 @@
-/* table sugar: Table::[K,V] / table_new::[K,V] / table_new_count::[K,V].
- * Local opt-in — not in prelude yet. */
+/* table sugar: Table::[K,V] / table_new::[K,V] / table_new_count::[K,V]. */
 #include <ccc/std/prelude.cch>
-#include <ccc/std/table.cch>
 #include <stdio.h>
 
 int main(void) {

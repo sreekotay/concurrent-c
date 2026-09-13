@@ -58,6 +58,7 @@ static int stagger_cap(void) {
 /* Arena owned until detach; @defer(err) frees on any error return. */
 static CompressedResult* !>(CCIoError) compress_slice(CCSlice data, long seq,
                                                      bool is_last, int level) {
+    @errhandler(CCError e) { return cc_err(cc_io_error(e)); }
     size_t arena_size = data.len + (data.len >> 3) + 8192;
 
     CCArena res_arena = cc_arena_heap(arena_size);

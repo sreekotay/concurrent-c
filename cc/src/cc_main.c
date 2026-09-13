@@ -4106,7 +4106,10 @@ static int cc__clean_known_types(char* dst, size_t cap) {
         return -1;
     }
     snprintf(dir, sizeof(dir), "%s/.cc-build/clean", g_out_root);
-    (void)cc__mkdir_p(dir);
+    if (cc__mkdir_p(dir) != 0) {
+        fprintf(stderr, "cc: clean lowerer: cannot create %s\n", dir);
+        return -1;
+    }
     /* Scratch names carry the pid: units lower in parallel and share this
      * root, and the collected list lands under its final name whole. */
     snprintf(list, sizeof(list), "%s/stdlib_cch.%ld.txt", dir, (long)getpid());
@@ -4114,8 +4117,16 @@ static int cc__clean_known_types(char* dst, size_t cap) {
     snprintf(key_path, sizeof(key_path), "%s/known_types.key", dir);
     f = fopen(list, "w");
     if (!f) return -1;
-    snprintf(tmp, sizeof(tmp), "%s/cc/include", g_repo_root);
-    cc__clean_collect_cch(tmp, f, 0);
+    /* Dev: <repo>/cc/include. Install / CC_HOME: <prefix>/include (g_cc_include). */
+    {
+        const char* inc = g_cc_include[0] ? g_cc_include : NULL;
+        char fallback[PATH_MAX];
+        if (!inc) {
+            snprintf(fallback, sizeof(fallback), "%s/cc/include", g_repo_root);
+            inc = fallback;
+        }
+        cc__clean_collect_cch(inc, f, 0);
+    }
     fclose(f);
     h = cc__fold_file_content(h, ccparse);
     h = cc__fnv1a64_i64(h, (long long)cc_toolchain_content_fp());
@@ -5161,8 +5172,15 @@ static int cc__run_clean_lowerer(const char* in_path, const char* c_out,
         return -1;
     }
     if (cc__clean_known_types(known, sizeof(known)) != 0) return -1;
-    if (!g_repo_root[0]) { fprintf(stderr, "cc: clean lowerer: no repository root for cc/include\n"); return -1; }
-    snprintf(incdir, sizeof(incdir), "%s/cc/include", g_repo_root);
+    if (!g_cc_include[0] && !g_repo_root[0]) {
+        fprintf(stderr, "cc: clean lowerer: no include root (cc/include)\n");
+        return -1;
+    }
+    /* Dev: <repo>/cc/include. Install / CC_HOME: <prefix>/include. */
+    if (g_cc_include[0])
+        snprintf(incdir, sizeof(incdir), "%s", g_cc_include);
+    else
+        snprintf(incdir, sizeof(incdir), "%s/cc/include", g_repo_root);
     /* lowered local headers go beside the lowered C: `<tests/x.h>` resolves through the emit dir's -I */
     snprintf(hroot, sizeof(hroot), "%s/.cc-build/clean", g_out_root);
     argv[argc++] = tool;
@@ -5171,7 +5189,7 @@ static int cc__run_clean_lowerer(const char* in_path, const char* c_out,
     argv[argc++] = (char*)"-I";
     argv[argc++] = incdir;
     argv[argc++] = (char*)"--root";
-    argv[argc++] = g_repo_root;
+    argv[argc++] = g_repo_root[0] ? g_repo_root : g_cc_include;
     argv[argc++] = (char*)"--h-root";
     argv[argc++] = hroot;
     argv[argc++] = (char*)"--known-types";

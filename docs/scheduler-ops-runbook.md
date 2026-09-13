@@ -88,7 +88,10 @@ timing.
 
 ## Worker pool growth
 
-The pool is a ratchet: workers are created on demand and never culled.
+The pool is a ratchet on the grow path and settles on slack: workers
+are created on demand and released when the ready queue is empty and a
+spare worker persists (~200 µs, or one sysmon tick). Extras above the
+eager cap (default 2) do not stay for the life of the process.
 Growth happens on two paths:
 
 - **Inline** — a push that finds work queued and no idle worker creates a
@@ -108,17 +111,17 @@ demand episode and tracks the cumulative drain rate. Per recheck it grows
 one worker iff a rate or depth trigger fires **and** the episode is not
 run-to-park:
 
-- **rate** — aggregate drain rate is below one pop per worker per
-  `CC_V2_GROW_RATE_US` (default 100us): workers blocked or running long
-  CPU arms; or
+- **rate** — ready queue non-empty and aggregate drain rate is below one
+  pop per worker per `CC_V2_GROW_RATE_US` (default 100us): workers blocked
+  or running long CPU arms with more work waiting; or
 - **depth** — ready-queue depth >= `CC_V2_GROW_DEPTH_X` (default 2) times
   the current pool size, on `CC_V2_GROW_DEPTH_DWELL` (default 3)
   consecutive rechecks; 0 disables the depth trigger. A completion wave
   that drains in tens of us does not survive the dwell;
 - **run-to-park** — parks since the baseline exceed half the pops. Recv,
   accept, and lock-wait multiplexing look like stall or backlog; extra
-  workers add traffic. A low park fraction with a slow drain is CPU-bound
-  work still occupying workers.
+  workers add traffic. A low park fraction with a slow drain and a
+  non-empty queue is CPU-bound work still occupying workers.
 
 The rate and depth knobs are independent: the rate is normalized by elapsed
 time since the episode baseline, so a faster recheck cadence changes only
@@ -129,15 +132,16 @@ Otherwise it holds. The episode ends (flag cleared, re-armed by the next
 qualifying push) when the pool is at cap, admission is gated, or there is
 true slack: every worker idle and the queue empty, or a spare worker plus
 an empty queue persisting ~200 µs. An empty queue with every worker busy
-is saturation (CPU-bound arms still running), not slack; a single park
-between long arms is not slack either. The episode stays armed so the
-rate trigger can keep recruiting.
+is saturation (the live fibers are the whole remaining set), not slack;
+a single park between long arms is not slack either. The episode stays
+armed so a later queued fiber can still recruit. The rate trigger does
+not grow on that empty queue.
 
 CPU-bound fibers don't park, so they generate a near-zero pop rate and
-recruit via the rate trigger. A high pop rate is park/wake churn
-(contended locks) or a nursery request wave; both hold. `CC_V2_GROW_RATE_US`
-has a wide flat optimum (50–200us measured equivalent; at 25us and below
-recruitment starts to leak on contended-lock workloads).
+recruit via the rate trigger while work is waiting. A high pop rate is
+park/wake churn (contended locks) or a nursery request wave; both hold.
+`CC_V2_GROW_RATE_US` has a wide flat optimum (50–200us measured equivalent;
+at 25us and below recruitment starts to leak on contended-lock workloads).
 
 `CC_V2_GROW_ESCALATE_TICKS` (default 0 = off) is opt-in insurance: after N
 consecutive slow ticks with a non-empty queue and nobody idle, grow one
@@ -154,6 +158,7 @@ With `CC_V2_STATS=1` the dump includes a growth line:
 - `escalate` — workers added by slow-tick escalation
 - `held` — rechecks that decided not to grow
 - `parked` — rechecks that would have grown but the episode was run-to-park
+- `shrink` — idle workers released back toward the eager cap
 - `final_threads` — pool size at exit / cap
 
 A contended-lock workload that holds at a small `final_threads` with a large

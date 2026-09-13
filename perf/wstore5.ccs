@@ -159,9 +159,6 @@ static CCExclHold shard_hold(CCEpochKeys* st, uint64_t si) {
     return st->locks.hold_one(si);
 }
 
-#if defined(__GNUC__)
-__attribute__((noinline))
-#endif
 static double now_us(void) {
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
@@ -335,6 +332,7 @@ static int never_is_page(const CCEpochShard* s, const Bucket* b) {
 }
 
 static bool !>(CCError) bucket_ensure_recs(CCEpochShard* s, Bucket* b) {
+    @errhandler(CCError e) { return cc_err(e); }
     if (b->recs.valid()) return cc_ok(true);
     b->recs = s->owner.create_heap_arena(gen_l1()) !>;
     if (never_is_page(s, b)) {
@@ -919,7 +917,9 @@ static void shard_free(CCEpochShard* s) {
 }
 
 static size_t shard_keys(CCEpochShard* s) {
-    return s->map ? s->map->len() : 0;
+    /* Hand DECL WstoreIdx: prefer explicit len — UFCS `map->len()` can peel
+     * to cc_shard_map_len after shard_map is in the prelude. */
+    return s->map ? WstoreIdx_len(s->map) : 0;
 }
 
 static void shard_never_bytes(const CCEpochShard* s, size_t* live, size_t* dead) {
@@ -1136,12 +1136,15 @@ static size_t rss_kib(void) {
         return SIZE_MAX;
     return (size_t)(info.resident_size / 1024);
 #else
-    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    CCArena a = cc_arena_heap(kilobytes(4));
     CCResult_CCFile_CCIoError fr = cc_file_open(CC_SLICE_LIT("/proc/self/status"));
     char line_buf[256];
     CCSlice line;
     size_t v = 0;
-    if (cc_is_err(fr)) return SIZE_MAX;
+    if (cc_is_err(fr)) {
+        if (cc_arena_valid(a)) cc_arena_destroy(&a);
+        return SIZE_MAX;
+    }
     CCFile f = cc_value(fr);
     for (;;) {
         CCResult_bool_CCIoError lr = cc_file_read_line_into(&f, a, &line);
@@ -1153,6 +1156,7 @@ static size_t rss_kib(void) {
         if (sscanf(line_buf, "VmRSS: %zu", &v) == 1) break;
     }
     cc_file_close(&f);
+    if (cc_arena_valid(a)) cc_arena_destroy(&a);
     return v ? v : SIZE_MAX;
 #endif
 }

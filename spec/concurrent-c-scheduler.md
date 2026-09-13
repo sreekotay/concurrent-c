@@ -27,8 +27,9 @@ fiber handoff goes through the ready queue.
 
 Worker count defaults to `sysconf(_SC_NPROCESSORS_ONLN)`, capped at
 `V2_MAX_THREADS` (256), overridable via `CC_V2_THREADS` (or `CC_WORKERS`).
-The live pool starts at one worker and grows on demand up to that cap;
-workers are never culled. See Worker pool growth.
+The live pool starts at one worker and grows on demand up to that cap.
+Idle workers above the eager cap are released when the ready queue is
+empty and slack holds. See Worker pool growth.
 
 ### Correctness goals
 
@@ -358,7 +359,8 @@ bounds the latency of a skipped wake to one sysmon interval.
 ## Worker pool growth
 
 The pool starts at one worker and grows on demand up to the worker cap.
-Workers are never culled.
+Idle workers above the eager cap (default 2) are released when the ready
+queue is empty and slack holds.
 
 A push that finds no idle worker creates a thread inline while the pool is
 below the eager cap (default 2). Beyond that the push arms a one-shot
@@ -367,8 +369,9 @@ grow-pending flag and sysmon decides.
 While grow-pending is set, sysmon rechecks on a short cadence (default
 25 µs). It grows one worker when both:
 
-- the cumulative drain rate since the episode baseline is below one pop
-  per worker per 100 µs (workers blocked or running long CPU arms), or
+- the ready queue is non-empty and the cumulative drain rate since the
+  episode baseline is below one pop per worker per 100 µs (workers
+  blocked or running long CPU arms with more work waiting), or
   ready-queue depth is at least twice the live pool on three consecutive
   rechecks; and
 - parks since the baseline do not exceed half the pops.
@@ -381,16 +384,19 @@ microseconds; it does not survive the dwell.
 
 A high park fraction is run-to-park multiplexing (recv, accept, named
 exclusive wait). Extra workers add traffic, not progress. A low park
-fraction with a slow drain is CPU-bound work still occupying workers.
+fraction with a slow drain and a non-empty ready queue is CPU-bound work
+still occupying workers while more fibers sit ready.
 
 Otherwise it holds. A high pop rate on a shallow queue is park/wake churn.
 
 An episode ends when the pool is at cap, admission is gated, or there is
 true slack: every worker idle and the ready queue empty, or a spare
 worker plus an empty queue that persists (~200 µs). An empty queue with
-every worker busy is saturation, not slack; a single park between
-CPU-bound arms is not slack either. The episode stays armed so the rate
-trigger can keep recruiting.
+every worker busy is saturation, not slack — the live fibers are the
+whole remaining set. Extra workers cannot run work that is not waiting,
+so the rate trigger does not grow on an empty queue. The episode stays
+armed through saturation so a later queued fiber can still recruit.
+A single park between CPU-bound arms is not slack.
 
 `CC_V2_EAGER_THREADS`, `CC_V2_GROW_RECHECK_US`, `CC_V2_GROW_RATE_US`,
 `CC_V2_GROW_DEPTH_X`, `CC_V2_GROW_DEPTH_DWELL`, and

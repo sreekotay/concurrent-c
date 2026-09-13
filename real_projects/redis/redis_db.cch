@@ -44,9 +44,9 @@ typedef struct RedisEntry {
 } RedisEntry;
 
 /* Keys are CCSlicePacked (8B): dense rows stay narrow; empty probe slots 4 B. */
-typedef ArrayMap::[CCSlicePacked, RedisEntry] RedisDbMap;
+typedef Table::[CCSlicePacked, RedisEntry] RedisDbMap;
 /* key → absolute expire ms; absent / missing ⇒ no TTL. */
-typedef ArrayMap::[CCSlicePacked, int64_t] RedisExpiresMap;
+typedef Table::[CCSlicePacked, int64_t] RedisExpiresMap;
 
 /* One hash shard: entries + expires + key bytes for that shard. */
 typedef struct RedisDbShard {
@@ -67,7 +67,7 @@ typedef struct RedisDb {
     RedisDbShard* shards;
 } RedisDb;
 
-/* Key → shard index (same hash as ArrayMap key routing). */
+/* Key → shard index (same hash as Table / ArrayMap key routing). */
 static size_t db_shard_index_for_hash(const RedisDb* db, size_t hash) {
     if (!db || db->shard_count == 0) return 0;
     return hash & db->shard_mask;
@@ -209,10 +209,10 @@ static bool db_init(RedisDb* db, size_t bucket_count, size_t shard_count) {
         if (!db_init_key_arena(&db->shards[i].key_arena, key_arena_root))
             goto fail;
         db->shards[i].entries =
-            array_map_new_count::[CCSlicePacked, RedisEntry](db->map_arena, per_shard);
+            table_new_count::[CCSlicePacked, RedisEntry](db->map_arena, per_shard);
         if (!db->shards[i].entries) goto fail;
         /* Side expires dict starts small; grows only for keys that get a TTL. */
-        db->shards[i].expires = array_map_new::[CCSlicePacked, int64_t](db->map_arena);
+        db->shards[i].expires = table_new::[CCSlicePacked, int64_t](db->map_arena);
         if (!db->shards[i].expires) goto fail;
     }
     return true;

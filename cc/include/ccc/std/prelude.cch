@@ -37,6 +37,7 @@
 #include <ccc/cc_turnstile.cch>
 #include "map_forward.cch"
 #include "array_map.cch"
+#include "table.cch"
 #include "shard_map.cch"
 #include "dir.cch"
 #include "process.cch"

@@ -11,9 +11,6 @@
  *   STORM_MODE=for       default — @parallel for over scanlines
  *   STORM_MODE=unbound   quadtree, @parallel { } at every split
  *   STORM_MODE=quad      same tree, @parallel (d < STORM_CUT)
- *
- * ADT construct/flatten/drop is storm_tile.ccs — this file stays the
- * buffer renderer.
  */
 #include <ccc/std/prelude.cch>
 #include <ccc/stdio.cch>

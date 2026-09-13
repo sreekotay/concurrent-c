@@ -3,6 +3,7 @@ redis_c/
 
 # Local build output
 out/
+bin/
 tmp/
 
 # Download artifacts

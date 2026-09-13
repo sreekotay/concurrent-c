@@ -63,14 +63,14 @@ static int run_quad() {
 }
 
 /**
- * @task ADT Tile tree: construct, flatten to the buffer, drop.
+ * @task Quadtree fork; leaf writes the buffer (no Tile heap).
  */
 static int run_tile() {
     return storm_make("run-tile");
 }
 
 /**
- * @task Same ADT, ungated @parallel { } while building.
+ * @task Same join, ungated @parallel { } at every split.
  */
 static int run_tile_unbound() {
     return storm_run_mode("unbound", "run-tile");

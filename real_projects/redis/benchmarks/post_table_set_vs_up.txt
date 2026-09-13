@@ -1,0 +1,44 @@
+tmp dir: /var/folders/12/04b0tf2d79b7d7wdgzwx12yr0000gn/T/bench_robust.XXXXXX.YyFOsjDQ4B
+[warmup]
+   upstream  set   rps=628140.69
+   idiomatic set   rps=2673796.75
+[mem] CC.MEMLOG post-warmup
+[round 1/5]
+   upstream  set   rps=1930501.88
+   idiomatic set   rps=2673796.75
+[round 2/5]
+   upstream  set   rps=1838235.25
+   idiomatic set   rps=2747252.75
+[round 3/5]
+   upstream  set   rps=1901140.62
+   idiomatic set   rps=2717391.25
+[round 4/5]
+   upstream  set   rps=1718213.00
+   idiomatic set   rps=2272727.25
+[round 5/5]
+   upstream  set   rps=1547987.50
+   idiomatic set   rps=2145922.75
+[mem] CC.MEMLOG final
+
+== bench_robust summary ==
+rounds=5 requests_per_round=500000 clients=50 pipeline=16 mget_keys=8 cc_workers=default
+labels=upstream,idiomatic include_sketch=0 include_parallel=0 include_go=0
+sample_interval=0.05s  samples_taken: upstream=60  idiomatic=60
+
+[SET]
+  label          mean   median      min      max   stddev    cv%
+  upstream     1.787M   1.838M   1.548M   1.931M   0.157M   8.8%
+  idiomatic    2.511M   2.674M   2.146M   2.747M   0.281M  11.2%
+  idiomatic/upstream median: 1.455x  (SEPARATED)
+
+[RESOURCE PEAKS] (sampled every 0.05 s across the whole run)
+  label        peak_rss   peak_threads
+  upstream        7.8MB              3
+  idiomatic      13.0MB              4
+
+[MEM GAP] footprint − (map+key+value live); remainder ≈ runtime/fibers/overflow/frag
+  phase           footprint    logical        gap      map      key    value     arenas        src
+  owner-ready        1.41MB     42.5KB     1.37MB   42.5KB       0B       0B    16.05MB  mach_phys
+  post-warmup       12.73MB     2.44MB    10.29MB   1.68MB  781.2KB       0B    17.69MB  mach_phys
+  final             12.78MB     2.44MB    10.34MB   1.68MB  781.2KB       0B    17.69MB  mach_phys
+
