@@ -1,0 +1,13 @@
+/* `@ok(v);` is for the body of an expression-position `!>`: at statement
+ * position there is no value to receive. */
+#include <ccc/std/prelude.cch>
+
+static int !>(CCError) parse_pos(int x) {
+    if (x < 0) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "negative"));
+    return cc_ok(x);
+}
+
+int main(void) {
+    parse_pos(-1) !> { @ok(3); };
+    return 0;
+}

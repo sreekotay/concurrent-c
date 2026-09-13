@@ -887,6 +887,10 @@ static void dump_stmt_c(Dump* d, const CcStmt* s, int depth) {
             dump_expr(d, ef.err, depth + 1);
             break;
         }
+        case .ok_yield(oy):
+            dump_pos(d, s->span);
+            dump_expr(d, oy.value, depth + 1);
+            break;
         case .unwrap(us):
             dump_pos(d, s->span);
             dump_expr(d, us.e, depth + 1);
@@ -1579,6 +1583,7 @@ static void walk_stmt_b(CcVisitor* v, CcStmt* s) {
         case .cancel_defer: break;
         case .errhandler(eh): walk_type(v, eh.err_type); walk_stmt(v, eh.body); break;
         case .err_fwd(ef): walk_expr(v, ef.err); break;
+        case .ok_yield(oy): walk_expr(v, oy.value); break;
         case .unwrap(us): walk_expr(v, us.e); break;
         default: walk_stmt_c(v, s); break;
     }

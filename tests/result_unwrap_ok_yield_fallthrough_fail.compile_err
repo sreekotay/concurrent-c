@@ -1,0 +1,2 @@
+result_unwrap_ok_yield_fallthrough_fail.ccs:11:
+body must diverge

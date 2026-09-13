@@ -1288,6 +1288,7 @@ static void own_stmt_b(Own* O, CcStmt* s) {
         case .defer(df): own_scoped(O, df.body); break;
         case .errhandler(eh): own_scoped(O, eh.body); break;
         case .err_fwd(ef): own_scan(O, ef.err); break;
+        case .ok_yield(oy): own_scan(O, oy.value); break;
         case .unwrap(us): own_scan(O, us.e); break;
         case .goto_(gt): own_scan(O, gt.target); break;
         case .for_in(fi): own_for_in(O, &fi); break;

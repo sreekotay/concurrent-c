@@ -988,6 +988,7 @@ static void view_stmt(StmtView* v, CcStmt* s) {
             if (expr_ident(ef.err, &nm)) v->name = nm;
             return;
         }
+        case .ok_yield(oy): v->e1 = oy.value; return;
         case .unwrap(us): v->e1 = us.e; return;
         default: view_stmt_b(v, s); return;
     }

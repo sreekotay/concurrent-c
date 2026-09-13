@@ -1,0 +1,13 @@
+/* `@ok` on one path does not excuse the other: a body that can reach its
+ * end without diverging leaves the target unassigned. */
+#include <ccc/std/prelude.cch>
+
+static int !>(CCError) parse_pos(int x) {
+    if (x < 0) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "negative"));
+    return cc_ok(x);
+}
+
+int main(void) {
+    int v = parse_pos(-1) !> { if (v) @ok(3); };
+    return v;
+}

@@ -406,6 +406,7 @@ typedef struct CcErrFwd {      /* @err(e); -- `@errhandler(e);` is the same forw
     bool delegate;              /* written `@errhandler(e);`: the delegation spelling, which
                                  * an `@err` body may use and nothing else may */
 } CcErrFwd;
+typedef struct CcOkYield { CcExpr* value; } CcOkYield;   /* @ok(v); -- the value an expression-position `!>` body yields */
 typedef struct CcUnwrapStmt { CcExpr* e; } CcUnwrapStmt;                  /* e !>;  e !> body; */
 typedef struct CcForIn {        /* for (x in xs) / @for (&x in xs) / @for (a, b in xs, ys) / for (i in lo..hi) */
     CCSlice bind;
@@ -485,6 +486,7 @@ typedef struct CcComptimeFor { CCSlice bind; CcExpr* over; CcStmtList stmts; } C
     cancel_defer:  CcCancelDefer;
     errhandler:    CcErrhandler;
     err_fwd:       CcErrFwd;
+    ok_yield:      CcOkYield;
     unwrap:        CcUnwrapStmt;
     for_in:        CcForIn;
     parallel:      CcParallel;

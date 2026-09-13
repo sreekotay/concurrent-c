@@ -303,6 +303,7 @@ CCSlice CcStmt_kind_name(const CcStmt* s) {
         case .cancel_defer: return CC_SLICE_LIT("@" "cancel_defer");
         case .errhandler: return CC_SLICE_LIT("@" "errhandler");
         case .err_fwd: return CC_SLICE_LIT("@" "err");
+        case .ok_yield: return CC_SLICE_LIT("@" "ok");
         case .unwrap: return CC_SLICE_LIT("!> statement");
         case .for_in: return CC_SLICE_LIT("for in");
         case .parallel: return CC_SLICE_LIT("@" "parallel");
