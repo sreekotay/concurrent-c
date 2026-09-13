@@ -56,7 +56,7 @@ Two operators; three modifiers:
 | | Maps |
 |--|--|
 | `?>` | `E → T` — stay a value (`x ?> default`) |
-| `!>` | `E →` control flow — leave (`x !> { … }` / `x !>;`) |
+| `!>` | `E →` control flow — leave (`x !> { … }` / `x !>;`); `@ok(v);` inside the body ends it with `v` as the value |
 
 | Modifier | Does |
 |----------|------|
