@@ -64,10 +64,10 @@ fi
 
 # A module face's implementation (`m.ccs` beside `m.cch`) is staged under a
 # stable name; editing the .ccs must refresh that stage, or the includer
-# silently links the old module. Under the checkout: a module face is
-# placed against the repository root.
-mkdir -p "$ROOT/out"
-mod="$(mktemp -d "$ROOT/out/emit_cch_mod.XXXXXX")"
+# silently links the old module. Outside the checkout: the face the link
+# marker names is read off the lowered header, not placed against the
+# repository root.
+mod="$(mktemp -d)"
 trap 'rm -rf "$tmp" "$mod"' EXIT
 
 cat >"$mod/m.cch" <<'EOF'
