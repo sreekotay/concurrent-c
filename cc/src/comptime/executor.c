@@ -100,10 +100,26 @@ static void cc__comptime_fn_rebuild_blob(void) {
     }
     for (size_t i = 0; i < cc__comptime_fn_count; i++) {
         const CCComptimeFnEntry* e = &cc__comptime_fns[i];
-        size_t need = cc__comptime_fn_defs_len + e->def_len + 2;
+        /* Each definition under its own `#line`: the compiler names the
+         * file it came from in a diagnostic, and a quoted `#include`
+         * inside the body resolves beside that file, not beside whatever
+         * the previous definition's directive named. */
+        char ld[1100];
+        size_t ldn = 0;
+        if (e->def_file && e->def_file[0] && e->def_line > 0) {
+            int k = snprintf(ld, sizeof(ld), "#line %d \"%s\"\n", e->def_line, e->def_file);
+            if (k > 0 && (size_t)k < sizeof(ld)) ldn = (size_t)k;
+        }
+        size_t need = cc__comptime_fn_defs_len + ldn + e->def_len + 3;
         char* nb = (char*)realloc(cc__comptime_fn_defs_blob, need);
         if (!nb) return;
         cc__comptime_fn_defs_blob = nb;
+        if (ldn) {
+            if (cc__comptime_fn_defs_len > 0 && cc__comptime_fn_defs_blob[cc__comptime_fn_defs_len - 1] != '\n')
+                cc__comptime_fn_defs_blob[cc__comptime_fn_defs_len++] = '\n';
+            memcpy(cc__comptime_fn_defs_blob + cc__comptime_fn_defs_len, ld, ldn);
+            cc__comptime_fn_defs_len += ldn;
+        }
         memcpy(cc__comptime_fn_defs_blob + cc__comptime_fn_defs_len, e->def, e->def_len);
         cc__comptime_fn_defs_len += e->def_len;
         cc__comptime_fn_defs_blob[cc__comptime_fn_defs_len++] = '\n';
@@ -176,9 +192,126 @@ static int cc__resolve_origin(const char* src, size_t at,
     return file[0] ? 1 : 0;
 }
 
+static int cc__parse_line_directive(const char* s, size_t len,
+                                    long* out_n, char* fbuf, size_t fcap);
+
+/* A body the compiler reads from memory has no directory, and the `#line`
+ * name it carries lends none: a quoted `#include "rel"` in it would be
+ * searched on the include path alone. A compiler reading the file itself
+ * looks beside that file first, so the same is done here, before the
+ * body is handed over: a relative quoted include is rewritten to the
+ * path beside the file the text is from -- `base_file`, or the file the
+ * nearest `#line` above names -- when that file exists. Every other line
+ * is kept, and the line count holds. Returns a new buffer, or NULL when
+ * nothing changed. */
+static const char* cc__line_directive_file(const char* s, size_t len, char* fbuf, size_t fcap) {
+    long n = 0;
+    if (cc__parse_line_directive(s, len, &n, fbuf, fcap) && fbuf[0]) return fbuf;
+    return NULL;
+}
+
+char* cc_comptime_resolve_quoted_includes(const char* text, size_t len, const char* base_file,
+                                          size_t* out_len) {
+    char cur[1024];
+    char* out = NULL;
+    size_t on = 0, oc = 0;
+    size_t i = 0;
+    int changed = 0;
+    if (out_len) *out_len = 0;
+    if (!text || len == 0) return NULL;
+    cur[0] = '\0';
+    if (base_file && base_file[0]) snprintf(cur, sizeof(cur), "%s", base_file);
+    while (i < len) {
+        size_t ls = i, le = i;
+        size_t p, q, qe;
+        char lf[1024];
+        while (le < len && text[le] != '\n') le++;
+        if (cc__line_directive_file(text + ls, le - ls, lf, sizeof(lf))) snprintf(cur, sizeof(cur), "%s", lf);
+        p = ls;
+        while (p < le && (text[p] == ' ' || text[p] == '\t')) p++;
+        if (p < le && text[p] == '#' && cur[0]) {
+            const char* slash = strrchr(cur, '/');
+            q = p + 1;
+            while (q < le && (text[q] == ' ' || text[q] == '\t')) q++;
+            if (slash && q + 7 <= le && memcmp(text + q, "include", 7) == 0) {
+                q += 7;
+                while (q < le && (text[q] == ' ' || text[q] == '\t')) q++;
+                if (q < le && text[q] == '"' && q + 1 < le && text[q + 1] != '/') {
+                    qe = q + 1;
+                    while (qe < le && text[qe] != '"') qe++;
+                    if (qe < le) {
+                        char abs[2048];
+                        int k = snprintf(abs, sizeof(abs), "%.*s/%.*s", (int)(slash - cur), cur,
+                                         (int)(qe - q - 1), text + q + 1);
+                        if (k > 0 && (size_t)k < sizeof(abs) && access(abs, R_OK) == 0) {
+                            char line[2200];
+                            int m = snprintf(line, sizeof(line), "%.*s#include \"%s\"%.*s", (int)(p - ls), text + ls,
+                                             abs, (int)(le - qe - 1), text + qe + 1);
+                            if (m > 0 && (size_t)m < sizeof(line)) {
+                                if (!out) {
+                                    oc = len + 4096;
+                                    out = (char*)malloc(oc);
+                                    if (!out) return NULL;
+                                    memcpy(out, text, ls);
+                                    on = ls;
+                                }
+                                if (on + (size_t)m + 2 > oc) {
+                                    char* nb;
+                                    oc = (on + (size_t)m + 2) * 2;
+                                    nb = (char*)realloc(out, oc);
+                                    if (!nb) { free(out); return NULL; }
+                                    out = nb;
+                                }
+                                memcpy(out + on, line, (size_t)m);
+                                on += (size_t)m;
+                                if (le < len) out[on++] = '\n';
+                                changed = 1;
+                                i = (le < len) ? le + 1 : le;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (out) {
+            size_t seg = ((le < len) ? le + 1 : le) - ls;
+            if (on + seg + 1 > oc) {
+                char* nb;
+                oc = (on + seg + 1) * 2;
+                nb = (char*)realloc(out, oc);
+                if (!nb) { free(out); return NULL; }
+                out = nb;
+            }
+            memcpy(out + on, text + ls, seg);
+            on += seg;
+        }
+        i = (le < len) ? le + 1 : le;
+    }
+    if (!changed) { free(out); return NULL; }
+    out[on] = '\0';
+    if (out_len) *out_len = on;
+    return out;
+}
+
+static int cc__comptime_fn_register_text(const char* name, const char* def, size_t def_len,
+                                         int def_line, const char* def_file);
 static int cc__comptime_fn_register(const char* name, const char* def, size_t def_len,
                                     int def_line, const char* def_file) {
     if (!name || !name[0] || !def || def_len == 0) return 0;
+    /* the body's own quoted includes, beside the file it came from */
+    char* rw = NULL;
+    size_t rwn = 0;
+    int rc;
+    rw = cc_comptime_resolve_quoted_includes(def, def_len, def_file, &rwn);
+    if (rw) { def = rw; def_len = rwn; }
+    rc = cc__comptime_fn_register_text(name, def, def_len, def_line, def_file);
+    free(rw);
+    return rc;
+}
+
+static int cc__comptime_fn_register_text(const char* name, const char* def, size_t def_len,
+                                         int def_line, const char* def_file) {
     if (cc__comptime_fn_count >= CC_COMPTIME_FN_MAX) {
         snprintf(cc__comptime_fn_scan_err, sizeof(cc__comptime_fn_scan_err),
                  "too many @comptime functions (max %d)", CC_COMPTIME_FN_MAX);
@@ -1335,6 +1468,12 @@ int cc_comptime_exec_block_body(const char* body, size_t body_len,
                 free(lowered);
                 lowered = tof;
             }
+        }
+        {
+            size_t rn = 0;
+            char* rw = cc_comptime_resolve_quoted_includes(lowered, strlen(lowered),
+                                                           opts ? opts->input_path : NULL, &rn);
+            if (rw) { free(lowered); lowered = rw; }
         }
         tu = cc__exec_build_tu(lowered, strlen(lowered),
                                opts ? opts->input_path : NULL,

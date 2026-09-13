@@ -4703,10 +4703,30 @@ static int cc__marker_of_h(const char* h_abs, char* face, size_t fcap,
     name[end - at] = 0;
     n = strlen(name);
     if (n < 7 || strcmp(name + n - 6, "_cch.c") != 0) return 0;
-    if (name[0] == '/') {
-        if (cc__fmt_path(face, fcap, "%.*s.cch", (int)(n - 6), name) != 0) return 0;
-    } else if (cc__fmt_path(face, fcap, "%s/%.*s.cch", g_repo_root, (int)(n - 6), name) != 0) {
-        return 0;
+    /* The `#line 1 "<face>"` under the marker names the face itself,
+     * wherever it lives: a face outside the repository carries a name
+     * relative to its unit's quote directory, which the root cannot
+     * resolve. The name is the fallback for a header without the line. */
+    face[0] = 0;
+    {
+        const char* ln = strstr(end, "#line 1 \"");
+        if (ln) {
+            const char* q = ln + strlen("#line 1 \"");
+            const char* qe = strchr(q, '"');
+            size_t ql = qe ? (size_t)(qe - q) : 0;
+            if (ql > 4 && ql < fcap && memcmp(q + ql - 4, ".cch", 4) == 0) {
+                memcpy(face, q, ql);
+                face[ql] = 0;
+                if (access(face, R_OK) != 0) face[0] = 0;
+            }
+        }
+    }
+    if (!face[0]) {
+        if (name[0] == '/') {
+            if (cc__fmt_path(face, fcap, "%.*s.cch", (int)(n - 6), name) != 0) return 0;
+        } else if (cc__fmt_path(face, fcap, "%s/%.*s.cch", g_repo_root, (int)(n - 6), name) != 0) {
+            return 0;
+        }
     }
     base = strrchr(name, '/');
     base = base ? base + 1 : name;

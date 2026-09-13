@@ -237,6 +237,20 @@ static bool second_is_type(P* p, uint32_t y) {
     return false;
 }
 
+/* In `X Y ...` with X unknown: does Y begin a type of its own, so that X
+ * is a specifier macro? A keyword that starts a type does (`EXPORT int`,
+ * `local struct S`). A qualifier alone does not: `Foo const *p` is `Foo`
+ * qualified, from a header the parser did not read, and the qualifiers
+ * are looked past for the type that would make X a macro. */
+static bool macro_then_type(P* p, uint32_t i) {
+    Kw k = kw_of(p, i);
+    if (k == KW_NONE) return false;
+    if (!is_qual_kw(k)) return is_type_start(p, i);
+    while (is_qual_kw(kw_of(p, i))) i++;
+    if (!is_type_start(p, i)) return false;
+    return kw_of(p, i) != KW_NONE || name_is_type(p, tok_name(p, i));
+}
+
 /* Can the identifier at `i`, unknown to the scope stack, be taken as a type
  * name in specifier position? */
 static bool unknown_ident_is_type(P* p, uint32_t i) {
@@ -637,7 +651,7 @@ static void parse_specs(P* p, Specs* S, bool force_type) {
                 /* `static_inline void f()` / `local voidpf f()` / `CC_A CC_B void f()`: a macro
                  * used as a specifier; the next identifier must itself be a type that is followed by a
                  * declarator (so `uint16_t u16[:] = ...` keeps u16 as the declarator) */
-                if ((is_type_start(p, p->i + 1) && kw_of(p, p->i + 1) != KW_NONE) ||
+                if (macro_then_type(p, p->i + 1) ||
                     (tk(p, 1)->kind == CC_TK_AT_WORD && (tok_is_word(p, p->i + 1, "async") ||
                     tok_is_word(p, p->i + 1, "blocking") || tok_is_word(p, p->i + 1, "nonblocking") || tok_is_word(p, p->i + 1, "noblock"))) ||
                     (!force_type && tk(p, 1)->kind == CC_TK_IDENT && kw_of(p, p->i + 1) == KW_NONE && !name_is_var(p, tok_name(p, p->i + 1)) &&

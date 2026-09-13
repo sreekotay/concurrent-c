@@ -1,0 +1,25 @@
+#ifndef COMPTIME_FN_INCLUDE_BESIDE_FACE_CCH
+#define COMPTIME_FN_INCLUDE_BESIDE_FACE_CCH
+/* A library face in its own directory. The `@comptime` function below
+ * includes a table beside this face by a bare name: it resolves beside
+ * the face, not beside the unit, and not beside whatever face the
+ * comptime unit carried before it. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int beside_face_double(int x) {
+    @errhandler(CCError e) { (void)e; return -1; }
+    return 2 * x;
+}
+
+@comptime static const char* beside_face_build(void) {
+    #include "beside_face_rows.cch"
+    static char buf[256];
+    size_t n = 0;
+    int total = 0;
+    size_t i;
+    for (i = 0; i < sizeof(k_rows) / sizeof(k_rows[0]); i++) total += k_rows[i];
+    n += (size_t)snprintf(buf + n, sizeof(buf) - n, "enum { BESIDE_FACE_TOTAL = %d };\n", total);
+    return buf;
+}
+#endif

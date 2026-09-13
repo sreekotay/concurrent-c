@@ -188,7 +188,26 @@ static bool struct_of_type(Walker* w, CcType* t, int depth, CcRecordType* out) {
     if (type_named_name(t, &nm) && nm.len) {
         CCSlice cn = ix->canon(t);
         sym = sym_any(ix, cn);
-        if (!sym || sym->kind != CC_SYM_TYPE) return false;
+        while (sym && sym->kind != CC_SYM_TYPE) sym = sym->same_name;
+        if (!sym) {
+            /* `typedef struct X X;` in a C header the index does not read,
+             * the body `struct X { ... }` in a unit it does: the name is
+             * the tag's record. Only a plain name with a tag spelled the
+             * same, and only one that has a body. */
+            const char* tags[2] = { "struct ", "union " };
+            int k;
+            for (k = 0; k < 2 && !sym; k++) {
+                CCString sb = cc_string_new();
+                CcSym* ts;
+                CcRecordType trc;
+                sb.push_cstr(tags[k], w->arena);
+                sb.push_slice(cn, w->arena);
+                ts = sym_any(ix, cc_string_persist_slice(w->arena, &sb));
+                while (ts && ts->kind != CC_SYM_TYPE) ts = ts->same_name;
+                if (ts && ts->type && type_record(ts->type, &trc) && trc.fields.len()) sym = ts;
+            }
+            if (!sym) return false;
+        }
         if (sym->type == t) return false;
         return struct_of_type(w, sym->type, depth + 1, out);
     }
@@ -969,6 +988,7 @@ static void view_stmt(StmtView* v, CcStmt* s) {
             if (expr_ident(ef.err, &nm)) v->name = nm;
             return;
         }
+        case .ok_yield(oy): v->e1 = oy.value; return;
         case .unwrap(us): v->e1 = us.e; return;
         default: view_stmt_b(v, s); return;
     }

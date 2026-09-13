@@ -2,15 +2,16 @@
  * Recipe: every form of !> / ?> / @errhandler / @destroy
  *
  * One file, one pipeline — the whole shape of !> / ?> / @errhandler /
- * @destroy. Expected stdout lives in the matching .stdout (see tests/
- * version); CI also uses this as a regression sentinel.
+ * @destroy. scripts/smoke.sh builds and runs it; the printed lines are
+ * the record.
  *
- * The combinations below are NOT eleven things to learn: they are two
+ * The combinations below are NOT twelve things to learn: they are two
  * operators — ?> (E → T) and !> (E → control flow) — composed with
  * orthogonal modifiers: (e) exposes E, bare !> routes E to the
- * enclosing @errhandler, and @destroy attaches cleanup to successful
+ * enclosing @errhandler, @ok(v) lets a !> body end as a value after
+ * its statements ran, and @destroy attaches cleanup to successful
  * declaration construction. This file enumerates the products; the
- * grammar is 2 + 3.
+ * grammar is 2 + 4.
  *
  * Sections:
  *    1. @errhandler default (top of scope)
@@ -20,10 +21,11 @@
  *    5. `!>(e) { ... } @destroy { ... }` split across lines
  *    6. `!> @destroy { ... }` (no handler, defaults to @errhandler)
  *    7. `?>` with a fallback expression
- *    8. `?>` + `@destroy` on one line
- *    9. Bodyless `@destroy;` on a builtin-owned type (CCNursery , CCChan*)
- *   10. `!> { ... } @destroy { ... }` on a builtin-owned type (one line)
- *   11. Same as 10 but split across lines
+ *    8. `!>(e) { ...; @ok(v); }` — a `!>` body that ends as a value
+ *    9. `?>` + `@destroy` on one line
+ *   10. Bodyless `@destroy;` on a builtin-owned type (CCNursery , CCChan*)
+ *   11. `!> { ... } @destroy { ... }` on a builtin-owned type (one line)
+ *   12. Same as 11 but split across lines
  */
 #include <ccc/cc_runtime.cch>
 #include <ccc/stdio.cch>
@@ -76,11 +78,19 @@ int main(void) {
     char* with_default = maybe_null(1) ?> "fallback";
     println(@string(`with_default=${with_default}`, @scratch));
 
-    /* 8. ?> with @destroy after, single-line. */
+    /* 8. `@ok(v);` ends a `!>` body with the value the unwrap yields: the
+     *    statements before it run on the error path, then control goes on
+     *    past the site with v as the value. With nothing before @ok this
+     *    is exactly `?> v`; the body is for the logging, counting or
+     *    repair that `?>` cannot carry. The binder is in scope. */
+    char* ok_value = maybe_null(1) !>(e) { cc_error_log(e); @ok("fallback"); };
+    println(@string(`ok_value=${ok_value}`, @scratch));
+
+    /* 9. ?> with @destroy after, single-line. */
     char* qmark_dest = maybe_null(0) ?> "fallback" @destroy { println("destroy qmark_dest"); };
     println(@string(`qmark_dest=${qmark_dest}`, @scratch));
 
-    /* 9. Bodyless `@destroy;` on builtin-owned types (no user cleanup body). */
+    /* 10. Bodyless `@destroy;` on builtin-owned types (no user cleanup body). */
     CCNursery n = cc_nursery_create() !> @destroy;
     (void)n;
 
@@ -91,12 +101,12 @@ int main(void) {
         @destroy;
     (void)ch;
 
-    /* 10. Same line: `!>(e) STMT @destroy { body }` with a builtin-
+    /* 11. Same line: `!>(e) STMT @destroy { body }` with a builtin-
      *     owned type — the auto-free runs AFTER the user body. */
     CCNursery n2 = cc_nursery_create() !>(e) { cc_error_exit(e); } @destroy { println("destroy n2 (user)"); };
     (void)n2;
 
-    /* 11. Split `@destroy` across lines on a builtin-owned type — both the
+    /* 12. Split `@destroy` across lines on a builtin-owned type — both the
      *     user body and the auto-free should run. */
     CCNursery n3 = cc_nursery_create()
         !>(e) {

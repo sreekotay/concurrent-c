@@ -864,6 +864,16 @@ static CcStmt* mk_err_fwd(P* p, CcExpr* e, uint32_t first, bool delegate) {
     return s;
 }
 
+/* `@ok(v);`: the value an expression-position `!>` body yields */
+static CcStmt* mk_ok_yield(P* p, CcExpr* e, uint32_t first) {
+    CcOkYield oy;
+    CcStmt* s;
+    oy.value = e;
+    s = cc__stmt_blank(span_from(p, first), p->arena);
+    s->k = { .ok_yield = oy };
+    return s;
+}
+
 static CcStmt* parse_errhandler(P* p) {
     uint32_t first = p->i;
     CcErrhandler eh;
@@ -1081,6 +1091,17 @@ static CcStmt* parse_at_stmt(P* p) {
             end_stmt(p, lit_w, first);
         }
         return mk_err_fwd(p, e, first, false);
+    }
+    if (at_word(p, "ok")) {
+        CcExpr* e;
+        adv(p);
+        const char* lit_w = "@ok(v)";
+        e = parse_paren_expr(p, lit_w);
+        {
+            const char* lit_w = "@ok(v)";
+            end_stmt(p, lit_w, first);
+        }
+        return mk_ok_yield(p, e, first);
     }
     if (at_word(p, "parallel")) return parse_parallel(p);
     if (at_word(p, "serial")) {

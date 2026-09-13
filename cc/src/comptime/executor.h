@@ -32,6 +32,11 @@ void cc_comptime_fn_registry_set_prelude(const char* prelude);
  * empty or already present as a substring of the current prelude. */
 void cc_comptime_fn_registry_append_prelude(const char* text);
 const char* cc_comptime_fn_registry_defs(void);
+/* `#include "rel"` lines of a body read from memory, resolved beside the
+ * file the text is from (or the nearest `#line` above): a new buffer, or
+ * NULL when nothing changed. */
+char* cc_comptime_resolve_quoted_includes(const char* text, size_t len, const char* base_file,
+                                          size_t* out_len);
 const char* cc_comptime_fn_registry_lookup_def(const char* name);
 int cc_comptime_fn_registry_lookup_line(const char* name);
 /* #line-resolved source file of a registered @comptime fn, or NULL if no

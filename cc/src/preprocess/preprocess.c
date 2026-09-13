@@ -20624,8 +20624,14 @@ char* cc_harvest_header_comptime_functions(void) {
                     if (out_len > 0 && out[out_len - 1] != '\n')
                         cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
                     cc_sb_append_cstr(&out, &out_len, &out_cap, ld);
-                    cc_sb_append(&out, &out_len, &out_cap,
-                                 src + start, body_r + 1 - start);
+                    {
+                        /* the body's quoted includes, beside this face */
+                        size_t rn = 0;
+                        char* rw = cc_comptime_resolve_quoted_includes(src + start, body_r + 1 - start, path, &rn);
+                        if (rw) cc_sb_append(&out, &out_len, &out_cap, rw, rn);
+                        else cc_sb_append(&out, &out_len, &out_cap, src + start, body_r + 1 - start);
+                        free(rw);
+                    }
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
                 }
                 any = 1;
@@ -20680,7 +20686,14 @@ static int cc__harvest_cch_comptime_blocks_from(const char* path, char** out,
             if (*out_len > 0 && (*out)[*out_len - 1] != '\n')
                 cc_sb_append_cstr(out, out_len, out_cap, "\n");
             cc_sb_append_cstr(out, out_len, out_cap, ld);
-            cc_sb_append(out, out_len, out_cap, src + start, body_r + 1 - start);
+            {
+                /* the block's quoted includes, beside this face */
+                size_t rn = 0;
+                char* rw = cc_comptime_resolve_quoted_includes(src + start, body_r + 1 - start, path, &rn);
+                if (rw) cc_sb_append(out, out_len, out_cap, rw, rn);
+                else cc_sb_append(out, out_len, out_cap, src + start, body_r + 1 - start);
+                free(rw);
+            }
             cc_sb_append_cstr(out, out_len, out_cap, "\n");
         }
         any = 1;

@@ -40,7 +40,42 @@ typedef struct RFn {
     CcTypeInfoList rlocal_specs;/* the Result each one holds, parallel to `rlocals` */
     bool dest_body;             /* this function IS a dest body: the frame's `@errhandler` stands
                                  * where this fiber never returns through */
+    CcExpr* ok_target;          /* the value slot an `@ok(v);` in the body being lowered fills, or NULL */
+    CCSlice ok_label;           /* the label past the body that `@ok` jumps to */
+    bool ok_used;               /* an `@ok` was lowered against ok_target */
+    int n_ok;                   /* labels made so far in this function */
 } RFn;
+
+/* The `@ok` context of one expression-position body: entered before the
+ * body is lowered, left after, so bodies nest. */
+typedef struct ROk { CcExpr* target; CCSlice label; bool used; } ROk;
+
+static ROk rl_ok_enter(RFn* fn, CcExpr* target, CcSpan sp) {
+    CcLowerer* L = fn->L;
+    ROk prev;
+    prev.target = fn->ok_target;
+    prev.label = fn->ok_label;
+    prev.used = fn->ok_used;
+    fn->ok_target = target;
+    fn->ok_used = false;
+    fn->ok_label = cc_slice_empty();
+    if (target) {
+        int k = fn->n_ok++;
+        CCString nm = @string(`__cc_ok_${k}`, L->arena);
+        fn->ok_label = lw_keep(L, &nm);
+    }
+    (void)sp;
+    return prev;
+}
+
+/* Leaves the body's context; returns the label when an `@ok` used it. */
+static CCSlice rl_ok_leave(RFn* fn, ROk prev) {
+    CCSlice used = fn->ok_used ? fn->ok_label : cc_slice_empty();
+    fn->ok_target = prev.target;
+    fn->ok_label = prev.label;
+    fn->ok_used = prev.used;
+    return used;
+}
 
 /* The message a bare `!>` with nothing to resolve to gets. In a dest body the
  * frame's handler exists and is simply not reachable from a fiber of the dest,
@@ -428,6 +463,7 @@ static bool rl_diverges(CcLowerer* L, const CcStmt* s) {
         case .break_: return true;
         case .continue_: return true;
         case .err_fwd: return true;    /* `@err(e);` jumps to the handler */
+        case .ok_yield: return true;   /* `@ok(v);` leaves the body with its value */
         default: return rl_diverges_b(L, s);
     }
 }
@@ -1135,9 +1171,10 @@ static CcStmt* rl_scaffold_ex(RFn* fn, CcExpr* uw, CcExpr* target, bool target_r
     }
     if (form == 2) {
         CcStmt* on_err = lw_block(L, sp);
+        CCSlice ok_lbl = cc_slice_empty();
         if (target && !value_is_void && (!body || !rl_diverges(L, body))) {
             /* the target would be left unassigned past the body */
-            CCString m = @string(`expression-position '!>' body must diverge (return, goto, ${"@"}err, or a call that does not return)`, L->arena);
+            CCString m = @string(`expression-position '!>' body must diverge (return, goto, ${"@"}err, ${"@"}ok, or a call that does not return)`, L->arena);
             lw_error(L, sp, m);
             return NULL;
         }
@@ -1147,13 +1184,19 @@ static CcStmt* rl_scaffold_ex(RFn* fn, CcExpr* uw, CcExpr* target, bool target_r
             CcNameList* bs = &fn->binders;
             size_t nb = bs->len();
             CcStmt* lowered;
+            /* `@ok(v)` in the body writes the value slot the target reads below */
+            ROk prev = rl_ok_enter(fn, (target && !value_is_void) ? rl_r_value2(L, sp, ptr) : NULL, sp);
             if (binder.len) bs->push(binder);
             lowered = rl_body(fn, body);
             bs->truncate(nb);
+            ok_lbl = rl_ok_leave(fn, prev);
             lw_push(on_err, lowered);
         }
         lw_push(blk, lw_if(L, lw_not(L, rl_r_ok2(L, sp, ptr), sp), on_err, NULL, sp));
-        if (target && !value_is_void) lw_push(blk, lw_expr_stmt(L, lw_assign(L, target, rl_r_value2(L, sp, ptr), sp), sp));
+        if (target && !value_is_void) {
+            CcStmt* take = lw_expr_stmt(L, lw_assign(L, target, rl_r_value2(L, sp, ptr), sp), sp);
+            lw_push(blk, ok_lbl.len ? lw_label(L, ok_lbl, take, sp) : take);
+        }
         return blk;
     }
     /* form 3: ?> fallback */
@@ -1473,6 +1516,23 @@ static void rl_stmts(RFn* fn, CcStmtList* list) {
                 after_err_fwd = !ef.delegate;
                 break;
             }
+            case .ok_yield(oy): {
+                /* the value slot of the `!>` whose body this is, then past
+                 * the body: what a `?>` fallback does, after the statements
+                 * before it ran */
+                CcStmt* blk = lw_block(L, s->span);
+                if (!fn->ok_target) {
+                    CCString m = @string(`'${"@"}ok(v)' ends the body of an expression-position '!>' with its value; nothing here receives one`, L->arena);
+                    lw_error(L, s->span, m);
+                } else {
+                    lw_push(blk, lw_expr_stmt(L, lw_assign(L, fn->ok_target, lw_paren(L, oy.value, s->span), s->span), s->span));
+                    lw_push(blk, lw_goto(L, fn->ok_label, s->span));
+                    fn->ok_used = true;
+                }
+                pushed = blk;
+                handled = true;
+                break;
+            }
             default: break;
         }
         if (pushed) out.push(pushed);
@@ -1632,6 +1692,7 @@ static bool rl_scaffold_expr(RFn* fn, CcExpr* e) {
     bool value_is_void = false;
     bool ptr = false;   /* the null unwrap: a pointer call, NULL is the error */
     CcStmtExpr se;
+    CCSlice ok_lbl = cc_slice_empty();   /* set when an `@ok` in the body jumps past it */
     *uw = *e;
     @switch (uw->k) {
         case .unwrap(u): inner = u.a; form = 1; break;
@@ -1689,7 +1750,7 @@ static bool rl_scaffold_expr(RFn* fn, CcExpr* e) {
     } else if (form == 2) {
         CcStmt* on_err = lw_block(L, sp);
         if (!body || !rl_diverges(L, body)) {
-            CCString m = @string(`expression-position '!>' body must diverge (return, goto, ${"@"}err, or a call that does not return)`, L->arena);
+            CCString m = @string(`expression-position '!>' body must diverge (return, goto, ${"@"}err, ${"@"}ok, or a call that does not return)`, L->arena);
             lw_error(L, sp, m);
             return false;
         }
@@ -1699,9 +1760,12 @@ static bool rl_scaffold_expr(RFn* fn, CcExpr* e) {
             CcNameList* bs = &fn->binders;
             size_t nb = bs->len();
             CcStmt* lowered;
+            /* `@ok(v)` writes the value slot the expression reads below */
+            ROk prev = rl_ok_enter(fn, value_is_void ? NULL : rl_r_value2(L, sp, ptr), sp);
             if (binder.len) bs->push(binder);
             lowered = rl_body(fn, body);
             bs->truncate(nb);
+            ok_lbl = rl_ok_leave(fn, prev);
             lw_push(on_err, lowered);
         }
         lw_push(blk, lw_if(L, lw_not(L, rl_r_ok2(L, sp, ptr), sp), on_err, NULL, sp));
@@ -1732,7 +1796,10 @@ static bool rl_scaffold_expr(RFn* fn, CcExpr* e) {
             return true;
         }
     }
-    if (!value_is_void) lw_push(blk, lw_expr_stmt(L, rl_r_value2(L, sp, ptr), sp));
+    if (!value_is_void) {
+        CcStmt* take = lw_expr_stmt(L, rl_r_value2(L, sp, ptr), sp);
+        lw_push(blk, ok_lbl.len ? lw_label(L, ok_lbl, take, sp) : take);
+    }
     se.block = blk;
     e->k = { .stmt_expr = se };
     return true;

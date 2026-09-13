@@ -307,6 +307,8 @@ static void cc__type_resolve_hooks(CcIndex* ix, CcTypeInfo* info);
 static void cc__type_instantiate(CcIndex* ix, CcTypeInfo* info);
 static bool cc__infer_family(CcIndex* ix, CcTypeInfo* t);
 
+static CCSlice cc__cat3(CcIndex* ix, const char* a, CCSlice b, const char* c);
+
 CcTypeInfo* CcIndex_type_get(CcIndex* ix, CCSlice canonical) {
     CcTypeInfo* t = cc__type_find(ix, canonical);
     if (t) return t;
@@ -314,6 +316,15 @@ CcTypeInfo* CcIndex_type_get(CcIndex* ix, CCSlice canonical) {
     memset(t, 0, sizeof(*t));
     t->name = cc__ix_copy(ix, canonical);
     t->sym = cc__sym_find_kind(ix, canonical, CC_SYM_TYPE);
+    /* `typedef struct X X;` in a C header the index does not read, with
+     * the body `struct X { ... }` in a unit it does: the name is the tag's
+     * type. Only a plain name with a defined tag of the same spelling. */
+    if (!t->sym && canonical.len && !cc__ix_contains(canonical.ptr, canonical.len, " ") &&
+        !cc__ix_contains(canonical.ptr, canonical.len, "*")) {
+        CcSym* tag = cc__sym_find_kind(ix, cc__cat3(ix, "struct ", canonical, ""), CC_SYM_TYPE);
+        if (!tag || !tag->is_definition) tag = cc__sym_find_kind(ix, cc__cat3(ix, "union ", canonical, ""), CC_SYM_TYPE);
+        if (tag && tag->is_definition) t->sym = tag;
+    }
     t->methods = vec_new::[CcMethodRef](ix->arena);
     t->targs = vec_new::[CcTypeRef](ix->arena);
     ix->type_map->insert(t->name, t);

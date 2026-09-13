@@ -87,6 +87,7 @@ Two operators; three modifiers:
 |--|--|
 | `?>` | `E → T` — stay a value (`x ?> default`) |
 | `!>` | `E →` control flow — leave (`x !> { … }` / `x !>;`) |
+| `@ok(v);` | inside an expression-position `x !> { … }` body: end it with `v` as the value — `?> v` with the body's statements run first |
 
 | Modifier | Does |
 |----------|------|
@@ -204,7 +205,7 @@ Projection (`v.num` / `p->num`) is legal only when protected:
 | `@switch (v)` / `@switch (p)` / `@switch (h.cell)` / `@switch (r->del)` + `case .arm:` / `case .arm(bind):` | each case dominates that arm; optional payload bind; every arm (`default:` forfeits the check) |
 | `if (v.kind == .arm)` in the same block | syntactic, not data-flow |
 | `v.arm ?> fallback` | inactive → value of the arm's type |
-| `v.arm !> { … }` | inactive → handler (must diverge) |
+| `v.arm !> { … }` | inactive → handler (must diverge, or end with `@ok(v);`) |
 
 Value, pointer, or **field-path** subject. Prefer `case .arm(bind):` when the
 case body needs the payload without a local-copy rebind:

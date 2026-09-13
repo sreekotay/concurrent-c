@@ -1,0 +1,37 @@
+/* `@ok(v);` ends an expression-position `!>` body with the value the
+ * unwrap yields: `x = f() !> { …; @ok(3); }` is `x = f() ?> 3` with the
+ * statements before `@ok` run first on the error path. The declaration,
+ * assignment and nested-expression forms take it; a binder is in scope;
+ * a body that also returns on another path keeps that path. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int !>(CCError) parse_pos(int x) {
+    if (x < 0) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "negative"));
+    return cc_ok(x);
+}
+
+static int g_logged;
+
+static int use(int x, int fallback) {
+    int v1 = parse_pos(x) !> { g_logged++; @ok(fallback); };
+    int v2 = parse_pos(x) ?> fallback;
+    int v3;
+    v3 = parse_pos(x) !>(e) { g_logged += (int)e.kind != 0 ? 10 : 100; @ok(fallback * 2); };
+    int v4 = 100 + (parse_pos(x) !> { @ok(-1); });
+    if (v1 != v2) return -999;
+    return v1 + v3 + v4;
+}
+
+static int early(int x) {
+    int v = parse_pos(x) !> { if (x == -7) return 7; @ok(0); };
+    return v + 1;
+}
+
+int main(void) {
+    int a = use(5, 9);
+    int b = use(-1, 9);
+    printf("%d %d %d\n", a, b, g_logged);
+    printf("%d %d %d\n", early(3), early(-1), early(-7));
+    return 0;
+}
