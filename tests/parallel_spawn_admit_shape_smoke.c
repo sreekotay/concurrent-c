@@ -201,6 +201,35 @@ int main(void) {
     free(cheap_c);
 
     {
+        /* one-arm wait-for never plants a sibling thunk; skip would name it */
+        const char* one_fix =
+            "#include <ccc/std/prelude.cch>\n"
+            "int main(void) {\n"
+            "    @errhandler(CCError e) { return 1; }\n"
+            "    int a = 0;\n"
+            "    @parallel {\n"
+            "        a = 41;\n"
+            "    } !>.wait()!>;\n"
+            "    return a;\n"
+            "}\n";
+        char* one_c = NULL;
+        rc = emit_c(one_fix, "par_one_arm_wait", &one_c);
+        if (rc)
+            return rc;
+        if (strstr(one_c, "cc_parallel_churn_skip(")) {
+            fprintf(stderr, "FAIL one-arm wait-for emitted cc_parallel_churn_skip\n");
+            free(one_c);
+            return 1;
+        }
+        if (strstr(one_c, "_thunk(") || strstr(one_c, "_site")) {
+            fprintf(stderr, "FAIL one-arm wait-for planted a sibling thunk\n");
+            free(one_c);
+            return 1;
+        }
+        free(one_c);
+    }
+
+    {
         const char* gated_fix =
             "#include <ccc/std/prelude.cch>\n"
             "int main(void) {\n"

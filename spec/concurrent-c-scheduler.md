@@ -169,9 +169,11 @@ admits through `cc_parallel_spawn_arm` and joins with
 `cc/include/ccc/cc_sched.cch`.
 
 If this site's leaf arms are cheaper than a spawn, the gate does not spawn
-except a 1-in-2^20 resample. A denied wait-for site fills no environment and
-spells an expression arm on the caller (serial / raising arms still run the
-thunk). After the site is CHURN, `cc_parallel_churn_skip` runs those spelled
+except a 1-in-2^20 resample. A wrapped virgin arm that nested-spawns the
+same thunk commits CHURN at that inner spawn so a recursive tree cannot
+mmap a fiber stack per node before the first clean leaf sample. A denied
+wait-for site fills no environment and spells an expression arm on the caller
+(serial / raising arms still run the thunk). After the site is CHURN, `cc_parallel_churn_skip` runs those spelled
 arms with no TLS and no deny stack; nested nodes of that site are sequential.
 A gated wait-for (`@parallel (pred)`) spells that same sequential path when
 the predicate is false, in the caller, and runs spawn/join from a noinline

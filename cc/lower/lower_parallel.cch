@@ -2376,7 +2376,9 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
     compact = !hspell.len && !p.spawn;
     inlines = vec_new::[CCSlice](L->arena);
     capsv = vec_new::[PCapList](L->arena);
-    try_skip = compact && !gated && first == 1 && !pj_ty.len;
+    /* skip names the first spawned arm's site/thunk; a one-arm wait-for
+     * has neither, and the only arm already runs on the caller */
+    try_skip = compact && !gated && first == 1 && n > first && !pj_ty.len;
     gate_fast = compact && gated && first == 1 && !pj_ty.len;
     if (gate_fast) {
         if (!pl_spell_arm(L, armv->get_ptr(0)).len) gate_fast = false;

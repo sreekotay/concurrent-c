@@ -43,6 +43,7 @@ typedef struct cc_rt_tls {
     CCParTls par;            /* @parallel gate block (cc__par_tls) */
     void* par_site_fn;
     void* par_site;          /* cc_par_site* */
+    void* par_sampling;     /* cc_par_site* currently wrapped for a sample */
 } cc_rt_tls;
 
 static pthread_key_t cc_rt_tls_key;

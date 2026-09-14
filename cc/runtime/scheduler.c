@@ -376,6 +376,11 @@ uint32_t sched_v2_current_fiber_suspends(void);
  * Denied arms run inline at the join, so nothing strands. A shallow
  * ready queue is not a reason to admit: a recursive cheap tree keeps
  * the queue empty and would otherwise become a spawn/wake storm.
+ * A wrapped virgin arm that nested-spawns the same thunk is that storm:
+ * the first clean leaf sample is at the bottom of the tree, and workers
+ * drain the queue fast enough that FLOOD_DEPTH never trips. Commit
+ * CHURN at the inner spawn so the rest of the tree skips instead of
+ * mmaping a 2 MB stack per node.
  *
  * A site is a @parallel thunk pointer. Clean leaf-arm CPU time below
  * CC_PAR_CHURN_NS (default 8us) is cheap; at or above is heavy. Heavy
@@ -528,10 +533,19 @@ static void cc_par_adapt_dump(void) {
 #if defined(__TINYC__)
 #define tls_par_site_fn (cc_rt_tls_get()->par_site_fn)
 #define tls_par_site (*(cc_par_site**)&(cc_rt_tls_get()->par_site))
+#define tls_par_sampling (*(cc_par_site**)&(cc_rt_tls_get()->par_sampling))
 #else
 static __thread void* tls_par_site_fn = NULL;
 static __thread cc_par_site* tls_par_site = NULL;
+static __thread cc_par_site* tls_par_sampling = NULL;
 #endif
+
+static void cc_par_site_commit_churn(cc_par_site* s) {
+    /* deny_depth before state: inline gate reads state first. */
+    atomic_store_explicit(&s->deny_depth, cc_parallel_adapt_backlog(),
+                          memory_order_relaxed);
+    atomic_store_explicit(&s->state, CC_PAR_SITE_CHURN, memory_order_release);
+}
 
 static cc_par_site* cc_par_site_get_slow(void* (*fn)(void*)) {
     uintptr_t h = (uintptr_t)fn;
@@ -593,12 +607,16 @@ typedef struct {
 
 static void* cc_par_timed_run(void* p) {
     cc_par_timed w = *(cc_par_timed*)p;
+    cc_par_site* prev;
     free(p);
     uint32_t s0 = sched_v2_current_fiber_suspends();
     uint64_t d0 = tls_par_denials;
     uint64_t c0 = tls_par_spawn_calls;
     uint64_t t0 = cc_par_cpu_ns();
+    prev = tls_par_sampling;
+    tls_par_sampling = w.site;
     void* r = w.fn(w.arg);
+    tls_par_sampling = prev;
     uint64_t dt = cc_par_cpu_ns() - t0;
     /* Leaf only: suspend, nested spawn, or absorbed denial means the
      * duration is a subtree, not a body. Sites that never sample clean
@@ -636,12 +654,7 @@ static void* cc_par_timed_run(void* p) {
             if (st == CC_PAR_SITE_VIRGIN || k >= CC_PAR_CHEAP_STREAK) {
                 atomic_store_explicit(&s->cheap_streak, 0,
                                       memory_order_relaxed);
-                /* deny_depth before state: inline gate reads state first. */
-                atomic_store_explicit(&s->deny_depth,
-                                      cc_parallel_adapt_backlog(),
-                                      memory_order_relaxed);
-                atomic_store_explicit(&s->state, CC_PAR_SITE_CHURN,
-                                      memory_order_release);
+                cc_par_site_commit_churn(s);
             }
         }
     }
@@ -658,6 +671,14 @@ CCTask cc_parallel_spawn(void* (*fn)(void*), void* arg) {
     cc_par_site* site = NULL;
     if (cc_parallel_adapt_on() && (site = cc_par_site_get(fn)) != NULL) {
         int st = atomic_load_explicit(&site->state, memory_order_relaxed);
+        /* Same thunk nested inside a wrapped arm: a recursive tree, not a
+         * leaf. Commit CHURN now — waiting for a clean leaf sample lets
+         * workers drain the queue and mmap a stack per node. REAL is
+         * not demoted; a later heavy leaf still promotes. */
+        if (tls_par_sampling == site && st == CC_PAR_SITE_VIRGIN) {
+            cc_par_site_commit_churn(site);
+            st = CC_PAR_SITE_CHURN;
+        }
         if (st == CC_PAR_SITE_CHURN) {
             /* Native: deny_fast already denied except a 1-in-2^20
              * resample, which lands here to wrap and re-measure. TCC

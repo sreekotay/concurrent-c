@@ -36,6 +36,9 @@ static uint32_t sum_par(uint32_t d, uint32_t i) {
 
 int main(void) {
     setenv("CC_PAR_ADAPT_DEBUG", "1", 1);
+    /* -O0 leaves can sit near the default 8us line; this tree is still
+     * cheaper than a spawn. */
+    setenv("CC_PAR_CHURN_NS", "100000", 1);
     uint32_t want = sum_seq(0, 0);
     uint32_t got = sum_par(0, 0);
     if (got != want) {
