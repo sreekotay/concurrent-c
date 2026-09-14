@@ -2876,11 +2876,16 @@ void cc_arena_free(CCArenaHost* a);
 
 
 /* Teardown-idempotent: second destroy on a nulled binding is a no-op.
- * Use of a dead handle after this is fail-closed at the next Host* peel. */
+ * Use of a dead handle after this is fail-closed at the next Host* peel.
+ * The binding is nulled before the host goes: a handle may live in the
+ * arena it names (a block that carries its own arena), and a write to it
+ * after the free is a write into freed memory. */
 static inline void cc_arena_destroy(CCArena* wrap) {
+    CCArenaHost* h;
     if (!wrap || !wrap->a) return;
-    cc_arena_free(wrap->a);
+    h = wrap->a;
     wrap->a = NULL;
+    cc_arena_free(h);
 }
 
 static inline CCArena cc_heap_arena(size_t bytes) {

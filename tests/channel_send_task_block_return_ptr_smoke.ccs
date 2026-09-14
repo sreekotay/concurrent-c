@@ -1,0 +1,59 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+/* A `send_task` closure whose body says `return p;` on a channel of
+ * pointers: the receiver gets the pointer, not the first bytes of what it
+ * points at, and a `return NULL;` arrives as NULL. */
+
+typedef struct Item {
+    long seq;
+    int value;
+} Item;
+
+static Item g_items[3];
+
+static Item* make_item(long seq) {
+    if (seq == 1) return NULL;
+    g_items[seq].seq = seq;
+    g_items[seq].value = (int)(seq * 10 + 1);
+    return &g_items[seq];
+}
+
+int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
+    Item*[~4 >] tx;
+    Item*[~4 ordered <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
+    int ok = 1;
+    {
+        CCNursery outer = @create() !> @destroy;
+        {
+            CCNursery inner = @create() !> @destroy;
+            (void)inner.close(tx);
+            inner.spawn(() => [tx] {
+                long seq;
+                for (seq = 0; seq < 3; seq++) {
+                    tx.send_task(() => [seq] {
+                        Item* it = make_item(seq);
+                        if (!it) return NULL;
+                        return it;
+                    });
+                }
+            }) !>;
+        }
+        long expect = 0;
+        Item* got = NULL;
+        while (cc_io_avail(rx.recv(&got))) {
+            if (expect == 1) {
+                if (got != NULL) { printf("slot 1: expected NULL\n"); ok = 0; }
+            } else if (!got || got->seq != expect || got->value != (int)(expect * 10 + 1)) {
+                printf("slot %ld: bad item\n", expect);
+                ok = 0;
+            }
+            expect++;
+        }
+        if (expect != 3) { printf("received %ld of 3\n", expect); ok = 0; }
+    }
+    printf("channel_send_task_block_return_ptr_smoke: %s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}
