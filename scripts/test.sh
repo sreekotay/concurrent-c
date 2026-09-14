@@ -234,6 +234,15 @@ elif [ -x "./cc/bin/ccc" ]; then
     echo "[test] ifdef passthrough selftest FAILED"
     exit 1
   fi
+  # The comptime template prelude header is generated: a hand edit to the
+  # header that the generator does not produce is lost on the next make.
+  tpl_gen="$(mktemp)"
+  if ! sh tools/gen_emit_tpl_prelude.sh "$tpl_gen" >/dev/null || ! cmp -s "$tpl_gen" cc/src/comptime/emit_tpl_prelude.inc.h; then
+    rm -f "$tpl_gen"
+    echo "[test] cc/src/comptime/emit_tpl_prelude.inc.h is not what tools/gen_emit_tpl_prelude.sh generates: edit the core or the generator, then regenerate"
+    exit 1
+  fi
+  rm -f "$tpl_gen"
   # Step-1 owned C parser: preserve + evaluate on fixtures (not shadow).
   if ! sh scripts/test_cparse.sh; then
     echo "[test] cparse step-1 selftest FAILED"
