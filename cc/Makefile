@@ -553,7 +553,7 @@ $(OBJDIR)/src/preprocess/unit_header.o $(OBJDIR)/src/cc_main.o: $(BOOTSTRAP_ROOT
 # Host-cc a 0.3 seed into PIN_OUT: a unit whose version pin selects the
 # retired shadow front is lowered by that seed's frozen C. Run by ccc.
 #   make -C cc shadow_lower-pin PIN_VER=0.3.4-329 PIN_OUT=../out/.cc-build/lowerers/0.3.4-329/shadow_lower
-shadow_lower-pin:
+shadow_lower-pin: $(SHADOW_TCC_OBJ) $(SHADOW_COMPTIME_LIB) $(CPARSE_LIB) $(OBJDIR)/runtime/concurrent_c.o
 	@test -n "$(PIN_VER)" || (echo "shadow_lower-pin: set PIN_VER=MAJOR.MINOR.PATCH-SEED"; exit 1)
 	@test -n "$(PIN_OUT)" || (echo "shadow_lower-pin: set PIN_OUT=path"; exit 1)
 	@test -f $(BOOTSTRAP_ROOT)/$(PIN_VER)/shadow_lower.c || \

@@ -626,6 +626,7 @@ CcTape cc_lex(CCSlice path, CCSlice src, CcDiags* ds, CCArena a) {
         const CcToken* last = tp->toks.get_ptr(n_toks - 1);
         if (last->kind == CC_TK_EOF) break;
     }
+    L.tape.line_starts = L.line_starts;
     return L.tape;
 }
 

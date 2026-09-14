@@ -1,0 +1,32 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+/* A block that carries the handle of the arena it lives in, destroyed
+ * through that handle: the binding is nulled before the host goes, so the
+ * write never lands in freed memory. */
+
+typedef struct Block {
+    long seq;
+    CCArena arena;
+} Block;
+
+static Block* make_block(long seq) {
+    CCArena a = cc_arena_heap(4096) @destroy;
+    if (!cc_arena_is_live(a)) return NULL;
+    Block* b = cc_arena_alloc_T(Block, a);
+    if (!b) return NULL;
+    b->seq = seq;
+    b->arena = a.detach() !>(e) { (void)e; return NULL; };
+    return b;
+}
+
+int main(void) {
+    long i;
+    for (i = 0; i < 64; i++) {
+        Block* b = make_block(i);
+        if (!b || b->seq != i) { printf("block %ld\n", i); return 1; }
+        b->arena.free();
+    }
+    printf("arena_destroy_handle_in_own_arena_smoke: PASS\n");
+    return 0;
+}

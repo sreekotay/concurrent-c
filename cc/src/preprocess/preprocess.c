@@ -15403,6 +15403,8 @@ static int cc__file_scope_fn_def_end(const char* src, size_t n, size_t at,
                                      size_t* end);
 static int cc__fn_decl_has_static(const char* src, size_t n, size_t at,
                                   size_t fn_end);
+static int cc__fn_decl_has_static_from(const char* src, size_t n, size_t lo,
+                                       size_t fn_end);
 static size_t cc__skip_file_scope_item(const char* src, size_t n, size_t i);
 
 /* A file-scope item that exists only at compile time: a `@comptime`
@@ -15614,13 +15616,83 @@ static int cc__file_scope_item_is_data_def(const char* src, size_t n, size_t i) 
     return cc__file_scope_data_eq(src, n, i) != 0;
 }
 
+/* Where the declaration that contains `at` begins: the first byte after
+ * the last `;`, `}`, directive line, or blank line ahead of `at`. The
+ * cursor resumes a scan over the same text from where the last call
+ * stopped, so a pass that asks left to right pays for the text once
+ * rather than once per item. */
+typedef struct CCDeclStartCursor {
+    const char* src;
+    size_t n;
+    size_t q;
+    size_t last;
+    int at_bol;
+    CCScannerState scan;
+} CCDeclStartCursor;
+
+static void cc__decl_start_cursor_init(CCDeclStartCursor* c, const char* src, size_t n) {
+    c->src = src;
+    c->n = n;
+    c->q = 0;
+    c->last = 0;
+    c->at_bol = 1;
+    cc_scanner_init(&c->scan);
+}
+
+static size_t cc__decl_start_before_cur(CCDeclStartCursor* c, size_t at) {
+    const char* src = c->src;
+    size_t n = c->n;
+    size_t q = c->q;
+    size_t last = c->last;
+    int at_bol = c->at_bol;
+    CCScannerState scan = c->scan;
+    if (at < q) {
+        /* asked for a point already passed: start over */
+        q = 0;
+        last = 0;
+        at_bol = 1;
+        cc_scanner_init(&scan);
+    }
+    while (q < at && q < n) {
+        size_t before = q;
+        if (cc_scanner_skip_non_code(&scan, src, n, &q)) {
+            size_t k;
+            for (k = before; k < q; k++) at_bol = src[k] == '\n' ? 1 : (src[k] == ' ' || src[k] == '\t') ? at_bol : 0;
+            continue;
+        }
+        if (src[q] == ';' || src[q] == '}') { last = q + 1; at_bol = 0; q++; continue; }
+        if (src[q] == '#' && at_bol) {
+            while (q < n && src[q] != '\n') q++;
+            if (q < n) q++;
+            last = q;
+            at_bol = 1;
+            continue;
+        }
+        if (src[q] == '\n') {
+            if (at_bol) last = q + 1; /* a blank line */
+            at_bol = 1;
+            q++;
+            continue;
+        }
+        if (src[q] != ' ' && src[q] != '\t') at_bol = 0;
+        q++;
+    }
+    c->q = q;
+    c->last = last;
+    c->at_bol = at_bol;
+    c->scan = scan;
+    return last > at ? at : last;
+}
+
 static int cc__cch_text_grade(const char* src, size_t n) {
     size_t i = 0;
     int needs_owner = 0;
     int has_at = 0;
     CCScannerState scan;
+    CCDeclStartCursor decl_cur;
     if (!src || n == 0) return CC_GRADE_INTERFACE;
     cc_scanner_init(&scan);
+    cc__decl_start_cursor_init(&decl_cur, src, n);
     while (i < n) {
         size_t before = i;
         size_t fn_end = 0;
@@ -15640,8 +15712,10 @@ static int cc__cch_text_grade(const char* src, size_t n) {
             continue;
         }
         if (cc__file_scope_fn_def_end(src, n, i, &fn_end)) {
-            if (getenv("CC_GRADE_DEBUG")) { size_t k; fprintf(stderr, "cc: grade fn static=%d [", cc__fn_decl_has_static(src, n, i, fn_end)); for (k = i; k < fn_end && k < i + 70; k++) fputc(src[k] == '\n' ? '|' : src[k], stderr); fprintf(stderr, "]\n"); }
-            if (!cc__fn_decl_has_static(src, n, i, fn_end)) {
+            int is_static = cc__fn_decl_has_static_from(
+                src, n, cc__decl_start_before_cur(&decl_cur, i), fn_end);
+            if (getenv("CC_GRADE_DEBUG")) { size_t k; fprintf(stderr, "cc: grade fn static=%d [", is_static); for (k = i; k < fn_end && k < i + 70; k++) fputc(src[k] == '\n' ? '|' : src[k], stderr); fprintf(stderr, "]\n"); }
+            if (!is_static) {
                 /* A body the module owns. */
                 needs_owner = 1;
                 i = fn_end;
@@ -16428,36 +16502,25 @@ static char* cc__omit_static_file_scope_fns(const char* src, size_t n) {
  * a walk back can land inside a comment, and a scan that starts there
  * takes an apostrophe in prose for a character literal. */
 static size_t cc__decl_start_before(const char* src, size_t n, size_t at) {
-    size_t q = 0;
-    size_t last = 0;
-    int at_bol = 1;
+    CCDeclStartCursor c;
+    cc__decl_start_cursor_init(&c, src, n);
+    return cc__decl_start_before_cur(&c, at);
+}
+
+static int cc__fn_decl_has_static_from(const char* src, size_t n, size_t lo,
+                                       size_t fn_end) {
+    size_t q;
     CCScannerState scan;
+    if (!src || lo >= n) return 0;
     cc_scanner_init(&scan);
-    while (q < at && q < n) {
-        size_t before = q;
-        if (cc_scanner_skip_non_code(&scan, src, n, &q)) {
-            size_t k;
-            for (k = before; k < q; k++) at_bol = src[k] == '\n' ? 1 : (src[k] == ' ' || src[k] == '\t') ? at_bol : 0;
-            continue;
-        }
-        if (src[q] == ';' || src[q] == '}') { last = q + 1; at_bol = 0; q++; continue; }
-        if (src[q] == '#' && at_bol) {
-            while (q < n && src[q] != '\n') q++;
-            if (q < n) q++;
-            last = q;
-            at_bol = 1;
-            continue;
-        }
-        if (src[q] == '\n') {
-            if (at_bol) last = q + 1; /* a blank line */
-            at_bol = 1;
-            q++;
-            continue;
-        }
-        if (src[q] != ' ' && src[q] != '\t') at_bol = 0;
+    q = lo;
+    while (q < fn_end && q < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &q)) continue;
+        if (cc__kw_at(src, n, q, "static")) return 1;
+        if (src[q] == '{') return 0;
         q++;
     }
-    return last > at ? at : last;
+    return 0;
 }
 
 static int cc__fn_decl_has_static(const char* src, size_t n, size_t at,

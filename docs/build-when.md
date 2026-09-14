@@ -86,6 +86,14 @@ Optional **large-TU emit stress** (after lowerer changes that touch stmt / walk 
 
 Sensitive config: **`CCC_HOST_CC=tcc` on ARM32** — TCC host-compiles the bootstrap seed. Split `CCC_HOST_CC=cc CCC_BACKEND_CC=tcc` isolates product TCC codegen from lowerer host codegen. See [ilp32-docker.md](ilp32-docker.md#pigz-compare).
 
+## Where the time goes
+
+`CC_CCC_PROFILE=1` makes the driver and the lowerer print one line per step on stderr (`ccc_profile:` from the driver, `pp_profile:` from the preprocessor's header lowering, `cclower_profile:` from the clean tool). `--verbose` also prints the lowerer command line. Use it before guessing at a slow build:
+
+```bash
+CC_CCC_PROFILE=1 ./cc/bin/ccc --no-cache --emit-c-only cc/lower/cclex.ccs -o /tmp/cclex.c
+```
+
 ## Quick “which binary?”
 
 | Binary | Role | Rebuilt by |
