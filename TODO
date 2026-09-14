@@ -2,7 +2,6 @@
 - ccfile and io cleanup -> buffers
 - @create pointer vs val confusions
 - ENOBUFS
-- @ok 
 - access, a claim delaying destruction, and ownership
 CC does not start by treating shared access as an ownership problem at all. yes - even noted in the cc way - it's not a slogan, it's different design regime that simplifes by allowign programs to state things rather than have the runtime or compiler try to reconstruct them from erased knowledge
 Not “C, but with more conveniences,” and not “trust the programmer instead of checking.” Let the program state more of what it knows, so checking and execution do not begin from an unnecessarily impoverished description.

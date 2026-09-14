@@ -2,9 +2,9 @@
  * wstore_table.ccs — Table index + CCTemporalIndex wheel vs wstore5 / Go.
  *
  *   - Find: Table::[CCSliceHdr, Row*] — hdr points at Row.key (no key arena)
- *   - TTL rows: per-wheel-slot gen arenas; deletes → that slot's freelist
- *     immediately; on_empty destroys the arena (reclaim RSS)
- *   - Never rows: never arena + freelist (reuse); no slot rotate
+ *   - TTL rows: per-wheel-slot gen arenas; freelist reuse; empty → destroy;
+ *     live+holes → compact when free_frac ≥ 0.5 (copy live, drop holes)
+ *   - Never rows: growable never page + freelist; destroy if page empties
  *   - Explicit delete: map+wheel drop immediately; body → freelist right away
  *   - Sweep: sweeper fiber, wave-bounded retire/scan (+ empty-slot reclaim)
  *   - Phase: optional collect — pass trailing `phase` (or WSTORE_PHASE=1).
@@ -35,11 +35,14 @@
 #define VAL_CAP    128
 #define TRIM_KEYS  1000000
 #define NEVER_POOL 20000
+#define NEVER_CAP  256
 #define RECENT     8192
 #define WAVE_HOLD_US 100.0
 #define WAVE_HOLD_SAMPLE 16
 #define HITCH_US 1000.0
 #define PHASE_EVERY 32u
+#define COMPACT_FREE_FRAC 0.50
+#define COMPACT_MIN_FREE 64
 
 /* Phase collect: argv trailing "phase", or WSTORE_PHASE=1. Off for stand M/s. */
 
@@ -52,18 +55,24 @@ enum {
 };
 
 typedef struct Row {
-    CCTemporalNode ttl;
+    CCTemporalNode ttl; /* dies_at lives here when on the wheel */
     char key[KEY_CAP];
     uint8_t key_len;
     char val[VAL_CAP];
     uint8_t val_len;
-    int64_t dies_at;
-    int8_t recs_level; /* -1 = never arena */
-    uint8_t recs_slot;
+    int8_t recs_level; /* -1 = never page */
+    uint8_t recs_slot; /* wheel slot or never page index */
 } Row;
 
 typedef Row* RowPtr;
 typedef Table::[CCSliceHdr, RowPtr] ShardTable;
+
+typedef struct NeverPage {
+    CCArena recs;
+    Row* free_head;
+    size_t live_n;
+    size_t free_n;
+} NeverPage;
 
 typedef struct Store Store;
 
@@ -71,20 +80,22 @@ typedef struct Shard {
     int idx;
     Store* store;
     CCArena owner;
-    CCArena never_recs;
+    NeverPage never_pg[NEVER_CAP];
+    int never_n;
+    uint8_t never_i;
     CCArena recs[CC_TEMPORAL_LEVELS][CC_TEMPORAL_MAX_SLOTS];
     ShardTable map;
     CCTemporalShard* ttl;
-    Row* never_free;
     Row* free_heads[CC_TEMPORAL_LEVELS][CC_TEMPORAL_MAX_SLOTS];
-    size_t free_n; /* freelist length (never + TTL holes awaiting reuse / reset) */
+    size_t free_counts[CC_TEMPORAL_LEVELS][CC_TEMPORAL_MAX_SLOTS];
+    size_t free_n;
     CCExclusiveMutex sweep_mu;
     cc_atomic_int stop;
     cc_atomic_int sweep_due;
     int sweep_on;
     size_t wave_recs;
     size_t ops, gets, get_hits;
-    size_t drains, drained_recs, dropped, reinserted, rehashes, waves, compacts;
+    size_t drains, drained_recs, dropped, reinserted, rehashes, waves, compacts, pops;
     double wave_sum_us, wave_max_us;
     double hold_t0;
     int hold_steps;
@@ -107,12 +118,14 @@ static double now_us(void) {
 }
 static int64_t now_ms(void) { return (int64_t)(now_us() / 1000.0); }
 
-static uint64_t shard_si(Store* st, CCSlice key) {
+static uint64_t shard_of(Store* st, CCSlice key, size_t* out_h) {
     size_t h = cc_map_hash_slice(key);
+    if (out_h) *out_h = h;
     return (uint64_t)(h % (size_t)st->nshards);
 }
 
 static size_t gen_l1(void) { return 64u * sizeof(Row) + 4096u; }
+static size_t never_l1(void) { return 512u * sizeof(Row) + 8192u; }
 
 static int g_phase = 0;
 
@@ -124,10 +137,6 @@ static void phase_add(Shard* s, int ph, double us) {
 
 static int phase_sample(Shard* s) {
     return g_phase && ((s->ops & (PHASE_EVERY - 1u)) == 0);
-}
-
-static CCSlice row_key(const Row* r) {
-    return cc_slice_from_buffer((char*)r->key, r->key_len);
 }
 
 static CCSliceHdr row_key_hdr(const Row* r) {
@@ -145,16 +154,80 @@ static void ttl_node_init(Row* r) {
     r->ttl.user = r;
 }
 
-static CCArena* recs_of(Shard* s, int8_t level, uint8_t slot) {
-    if (level < 0) return &s->never_recs;
-    return &s->recs[level][slot];
+static NeverPage* never_cur(Shard* s) {
+    if (s->never_n < 1) {
+        s->never_n = 1;
+        s->never_i = 0;
+    }
+    return &s->never_pg[s->never_i];
+}
+
+static void never_reclaim_page(Shard* s, int i) {
+    NeverPage* p;
+    if (i < 0 || i >= s->never_n) return;
+    p = &s->never_pg[i];
+    if (p->live_n) return;
+    if (s->free_n >= p->free_n) s->free_n -= p->free_n;
+    else s->free_n = 0;
+    p->free_head = NULL;
+    p->free_n = 0;
+    if (p->recs.valid()) {
+        p->recs.destroy();
+        memset(&p->recs, 0, sizeof(p->recs));
+        s->compacts++;
+    }
+}
+
+static void never_reclaim_empty(Shard* s) {
+    int i;
+    for (i = 0; i < s->never_n; i++)
+        if (!s->never_pg[i].live_n) never_reclaim_page(s, i);
+}
+
+static int never_page_has_room(const NeverPage* p) {
+    /* Prefer freelist; otherwise allow bump-grow on this page (do not seal
+     * on a full L1 — that burns NEVER_CAP and aborts the mix). */
+    if (p->free_head) return 1;
+    if (!p->recs.valid()) return 1;
+    return 1;
+}
+
+static int never_open_page(Shard* s) {
+    int i;
+    never_reclaim_empty(s);
+    for (i = 0; i < s->never_n; i++) {
+        if (s->never_pg[i].live_n) continue;
+        never_reclaim_page(s, i);
+        s->never_i = (uint8_t)i;
+        return 1;
+    }
+    if (s->never_n >= NEVER_CAP) return 0;
+    i = s->never_n++;
+    s->never_i = (uint8_t)i;
+    return 1;
+}
+
+static bool !>(CCError) never_prepare(Shard* s) {
+    @errhandler(CCError e) { return cc_err(e); }
+    NeverPage* p = never_cur(s);
+    if (never_page_has_room(p)) {
+        if (!p->recs.valid())
+            p->recs = s->owner.create_heap_arena(never_l1()) !>;
+        return cc_ok(true);
+    }
+    if (!never_open_page(s))
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "never pages");
+    p = never_cur(s);
+    if (!p->recs.valid())
+        p->recs = s->owner.create_heap_arena(never_l1()) !>;
+    return cc_ok(true);
 }
 
 static bool dest_slot(Shard* s, int64_t now, int64_t dies_at,
                       int8_t* level, uint8_t* slot) {
     if (dies_at == NEVER_MS) {
         *level = -1;
-        *slot = 0;
+        *slot = s->never_n ? s->never_i : 0;
         return true;
     }
     if (!s->ttl || dies_at <= now) return false;
@@ -162,32 +235,115 @@ static bool dest_slot(Shard* s, int64_t now, int64_t dies_at,
 }
 
 static int same_gen(const Row* r, int8_t level, uint8_t slot) {
-    return r->recs_level == level && (level < 0 || r->recs_slot == slot);
+    if (level < 0) return r->recs_level < 0;
+    return r->recs_level == level && r->recs_slot == slot;
 }
 
 static bool !>(CCError) recs_ensure(Shard* s, int8_t level, uint8_t slot) {
     @errhandler(CCError e) { return cc_err(e); }
-    CCArena* a = recs_of(s, level, slot);
-    if (a->valid()) return cc_ok(true);
-    *a = s->owner.create_heap_arena(gen_l1()) !>;
-    return cc_ok(true);
+    if (level < 0) return never_prepare(s);
+    {
+        CCArena* a = &s->recs[level][slot];
+        if (a->valid()) return cc_ok(true);
+        *a = s->owner.create_heap_arena(gen_l1()) !>;
+        return cc_ok(true);
+    }
 }
 
 static void recs_reclaim(void* env, int level, int slot) {
     Shard* s = (Shard*)env;
     CCArena* a;
-    Row* r;
+    size_t n;
     if (!s || level < 0 || level >= CC_TEMPORAL_LEVELS) return;
     if (slot < 0 || slot >= cc_temporal_slots[level]) return;
     a = &s->recs[level][slot];
     if (!a->valid()) return;
-    /* Freelist pointers die with the arena; drop the count. */
-    for (r = s->free_heads[level][slot]; r; r = (Row*)r->ttl.live_next)
-        if (s->free_n) s->free_n--;
+    n = s->free_counts[level][slot];
+    if (s->free_n >= n) s->free_n -= n;
+    else s->free_n = 0;
+    s->free_counts[level][slot] = 0;
     s->free_heads[level][slot] = NULL;
     a->destroy();
     memset(a, 0, sizeof(*a));
     s->compacts++;
+}
+
+/* Live-gen compact: copy wheel-live rows into a fresh arena, drop freelist holes.
+ * Thresholded so freelist reuse stays the fast path. */
+static int gen_compact(Shard* s, int level, int slot) {
+    CCTemporalBucket* b;
+    CCArena neu;
+    CCTemporalNode* e;
+    CCTemporalNode* head = NULL;
+    CCTemporalNode* tail = NULL;
+    CCArena* olda;
+    size_t live, dead, n = 0;
+    if (!s || !s->ttl || level < 0 || level >= CC_TEMPORAL_LEVELS) return 0;
+    if (slot < 0 || slot >= cc_temporal_slots[level]) return 0;
+    b = &s->ttl->wheel[level][slot];
+    if (b->scanning) return 0;
+    live = b->live_n;
+    dead = s->free_counts[level][slot];
+    if (!live) {
+        recs_reclaim(s, level, slot);
+        return 1;
+    }
+    if (dead < COMPACT_MIN_FREE) return 0;
+    if ((double)dead / (double)(live + dead) < COMPACT_FREE_FRAC) return 0;
+    {
+        size_t want = live * sizeof(Row) + 4096u;
+        size_t l1 = gen_l1();
+        @errhandler(CCError e) { (void)e; return 0; }
+        neu = s->owner.create_heap_arena(want > l1 ? want : l1) !>;
+    }
+    if (!neu.valid()) return 0;
+    e = b->live_head;
+    while (e) {
+        Row* oldr = (Row*)e->user;
+        CCTemporalNode* nxt = e->live_next;
+        Row* nr = (Row*)neu.alloc_local_grow(sizeof(Row), _Alignof(Row));
+        CCSliceHdr kh;
+        size_t h;
+        RowPtr* mp;
+        if (!nr) {
+            neu.destroy();
+            return 0;
+        }
+        memcpy(nr, oldr, sizeof(*nr));
+        nr->ttl.user = nr;
+        nr->ttl.live_next = NULL;
+        nr->ttl.live_prev = NULL;
+        nr->ttl.dead = 0;
+        nr->ttl.level = (int8_t)level;
+        nr->ttl.slot = (uint8_t)slot;
+        nr->recs_level = (int8_t)level;
+        nr->recs_slot = (uint8_t)slot;
+        kh = row_key_hdr(nr);
+        h = cc_map_hash_slice_hdr(kh);
+        mp = s->map->get_ptr_h(kh, h);
+        if (mp && *mp == oldr) *mp = nr;
+        if (!head) head = &nr->ttl;
+        else {
+            tail->live_next = &nr->ttl;
+            nr->ttl.live_prev = tail;
+        }
+        tail = &nr->ttl;
+        n++;
+        e = nxt;
+    }
+    b->live_head = head;
+    b->live_tail = tail;
+    b->scan_e = NULL;
+    b->live_n = n;
+    if (s->free_n >= dead) s->free_n -= dead;
+    else s->free_n = 0;
+    s->free_counts[level][slot] = 0;
+    s->free_heads[level][slot] = NULL;
+    olda = &s->recs[level][slot];
+    if (olda->valid()) olda->destroy();
+    *olda = neu;
+    s->compacts++;
+    return 1;
 }
 
 static void row_push_free(Shard* s, Row* r) {
@@ -198,34 +354,66 @@ static void row_push_free(Shard* s, Row* r) {
     slot = r->recs_slot;
     ttl_node_init(r);
     if (level < 0) {
-        r->ttl.live_next = (CCTemporalNode*)s->never_free;
-        s->never_free = r;
-    } else {
-        if (level >= CC_TEMPORAL_LEVELS || slot >= (uint8_t)cc_temporal_slots[level])
-            return;
-        r->ttl.live_next = (CCTemporalNode*)s->free_heads[level][slot];
-        s->free_heads[level][slot] = r;
+        NeverPage* p;
+        if (slot >= (uint8_t)s->never_n) slot = 0;
+        p = &s->never_pg[slot];
+        if (p->live_n) p->live_n--;
+        r->ttl.live_next = (CCTemporalNode*)p->free_head;
+        p->free_head = r;
+        p->free_n++;
+        s->free_n++;
+        if (!p->live_n) never_reclaim_page(s, (int)slot);
+        return;
     }
+    if (level >= CC_TEMPORAL_LEVELS || slot >= (uint8_t)cc_temporal_slots[level])
+        return;
+    r->ttl.live_next = (CCTemporalNode*)s->free_heads[level][slot];
+    s->free_heads[level][slot] = r;
+    s->free_counts[level][slot]++;
     s->free_n++;
+    if (s->ttl) {
+        CCTemporalBucket* b = &s->ttl->wheel[level][slot];
+        if (!b->live_n && !b->scanning)
+            recs_reclaim(s, level, slot);
+        else
+            (void)gen_compact(s, level, slot);
+    }
 }
 
 static Row* row_alloc(Shard* s, int8_t level, uint8_t slot) {
     Row* r = NULL;
     CCArena* a;
     if (level < 0) {
-        if (s->never_free) {
-            r = s->never_free;
-            s->never_free = (Row*)r->ttl.live_next;
+        NeverPage* p = never_cur(s);
+        slot = s->never_i;
+        if (p->free_head) {
+            r = p->free_head;
+            p->free_head = (Row*)r->ttl.live_next;
+            if (p->free_n) p->free_n--;
             if (s->free_n) s->free_n--;
+            s->pops++;
+        } else {
+            a = &p->recs;
+            r = (Row*)a->alloc_local_grow(sizeof(Row), _Alignof(Row));
+            if (!r) return NULL;
         }
-    } else if (level < CC_TEMPORAL_LEVELS && slot < (uint8_t)cc_temporal_slots[level]
-               && s->free_heads[level][slot]) {
+        memset(r, 0, sizeof(*r));
+        ttl_node_init(r);
+        r->recs_level = -1;
+        r->recs_slot = slot;
+        p->live_n++;
+        return r;
+    }
+    if (level < CC_TEMPORAL_LEVELS && slot < (uint8_t)cc_temporal_slots[level]
+        && s->free_heads[level][slot]) {
         r = s->free_heads[level][slot];
         s->free_heads[level][slot] = (Row*)r->ttl.live_next;
+        if (s->free_counts[level][slot]) s->free_counts[level][slot]--;
         if (s->free_n) s->free_n--;
+        s->pops++;
     }
     if (!r) {
-        a = recs_of(s, level, slot);
+        a = &s->recs[level][slot];
         r = (Row*)a->alloc_local_grow(sizeof(Row), _Alignof(Row));
         if (!r) return NULL;
     }
@@ -310,27 +498,27 @@ static void shard_free(Shard* s) {
     for (l = 0; l < CC_TEMPORAL_LEVELS; l++)
         for (i = 0; i < cc_temporal_slots[l]; i++)
             if (s->recs[l][i].valid()) s->recs[l][i].destroy();
-    if (s->never_recs.valid()) s->never_recs.destroy();
+    for (i = 0; i < s->never_n; i++)
+        if (s->never_pg[i].recs.valid()) s->never_pg[i].recs.destroy();
     if (s->owner.valid()) s->owner.destroy();
 }
 
 static size_t shard_keys(Shard* s) { return s->map ? s->map->len() : 0; }
 
-static Row* map_find(Shard* s, CCSlice key) {
+static Row* map_find_h(Shard* s, CCSlice key, size_t h) {
     CCSliceHdr kh = key_hdr(key);
-    size_t h = cc_map_hash_slice_hdr(kh);
     RowPtr* p = s->map->get_ptr_h(kh, h);
     return p ? *p : NULL;
 }
 
-static bool !>(CCError) shard_put(Shard* s, CCSlice key, CCSlice val, int64_t dies) {
+static bool !>(CCError) shard_put_h(Shard* s, CCSlice key, CCSlice val, int64_t dies,
+                                    size_t h) {
     @errhandler(CCError e) { return cc_err(e); }
     int64_t now = now_ms();
     int8_t level;
     uint8_t slot;
     Row* old;
     CCSliceHdr kh;
-    size_t h;
     RowPtr* mslot;
     int sample = phase_sample(s);
     double t0 = 0, t1 = 0;
@@ -338,7 +526,7 @@ static bool !>(CCError) shard_put(Shard* s, CCSlice key, CCSlice val, int64_t di
         return cc_err(CC_ERR_INVALID_ARG, "cap");
     if (dies != NEVER_MS && dies <= now) {
         if (sample) t0 = now_us();
-        old = map_find(s, key);
+        old = map_find_h(s, key, h);
         if (sample) { t1 = now_us(); phase_add(s, PH_MAP, t1 - t0); }
         if (old) {
             row_retire(s, old);
@@ -350,14 +538,12 @@ static bool !>(CCError) shard_put(Shard* s, CCSlice key, CCSlice val, int64_t di
         return cc_err(CC_ERR_INVALID_ARG, "ttl slot");
     if (sample) t0 = now_us();
     kh = key_hdr(key);
-    h = cc_map_hash_slice_hdr(kh);
     mslot = s->map->get_ptr_h(kh, h);
     old = mslot ? *mslot : NULL;
     if (sample) { t1 = now_us(); phase_add(s, PH_MAP, t1 - t0); }
     if (old && same_gen(old, level, slot)) {
         old->val_len = (uint8_t)val.len;
         if (old->val_len) memcpy(old->val, val.ptr, old->val_len);
-        old->dies_at = dies;
         if (sample) t0 = now_us();
         if (!ttl_bind(s, now, old, dies))
             return cc_err(CC_ERR_OUT_OF_MEMORY, "ttl set");
@@ -375,7 +561,6 @@ static bool !>(CCError) shard_put(Shard* s, CCSlice key, CCSlice val, int64_t di
         if (r->key_len) memcpy(r->key, key.ptr, r->key_len);
         r->val_len = (uint8_t)val.len;
         if (r->val_len) memcpy(r->val, val.ptr, r->val_len);
-        r->dies_at = dies;
         if (old) {
             if (sample) t0 = now_us();
             ttl_drop(s, old);
@@ -400,25 +585,25 @@ static bool !>(CCError) shard_put(Shard* s, CCSlice key, CCSlice val, int64_t di
     return cc_ok(true);
 }
 
-static bool shard_delete(Shard* s, CCSlice key) {
+static bool shard_delete_h(Shard* s, CCSlice key, size_t h) {
     int sample = phase_sample(s);
     double t0 = 0, t1 = 0;
     Row* r;
     if (sample) t0 = now_us();
-    r = map_find(s, key);
+    r = map_find_h(s, key, h);
     if (sample) { t1 = now_us(); phase_add(s, PH_MAP, t1 - t0); }
     if (!r) return false;
     row_retire(s, r);
     return true;
 }
 
-static int shard_get(Shard* s, CCSlice key) {
+static int shard_get_h(Shard* s, CCSlice key, size_t h) {
     int sample = phase_sample(s);
     double t0 = 0, t1 = 0;
     Row* r;
     s->gets++;
     if (sample) t0 = now_us();
-    r = map_find(s, key);
+    r = map_find_h(s, key, h);
     if (sample) { t1 = now_us(); phase_add(s, PH_MAP, t1 - t0); }
     if (!r) return 0;
     s->get_hits++;
@@ -572,8 +757,9 @@ static size_t rss_kib(void) {
 static size_t shard_commit(Shard* s) {
     size_t n = cc_arena_committed_gross_bytes(s->owner);
     int l, i;
-    if (s->never_recs.valid())
-        n += cc_arena_committed_gross_bytes(s->never_recs);
+    for (int ni = 0; ni < s->never_n; ni++)
+        if (s->never_pg[ni].recs.valid())
+            n += cc_arena_committed_gross_bytes(s->never_pg[ni].recs);
     for (l = 0; l < CC_TEMPORAL_LEVELS; l++)
         for (i = 0; i < cc_temporal_slots[l]; i++)
             if (s->recs[l][i].valid())
@@ -687,7 +873,7 @@ static void client(Client* c) {
         CCSlice kb;
         uint64_t si;
         Shard* s;
-        size_t kn;
+        size_t kn, kh = 0;
         int sample;
         double t0, t1, th0, th1;
         if (t >= c->t_end) break;
@@ -703,7 +889,7 @@ static void client(Client* c) {
             seq++;
             kb = cc_slice_from_buffer(keybuf, kn);
             if (sample) { t1 = now_us(); c->key_us += t1 - t0; c->key_n++; }
-            si = shard_si(st, kb);
+            si = shard_of(st, kb, &kh);
             s = &st->shards[si];
             if (sample) th0 = now_us();
             {
@@ -711,7 +897,7 @@ static void client(Client* c) {
                 if (sample) { th1 = now_us(); c->hold_us += th1 - th0; c->hold_n++; phase_add(s, PH_HOLD, th1 - th0); }
                 if (!hold.held()) return;
                 s->ops++;
-                shard_put(s, kb, cc_slice_from_buffer(val, 96), now + 200) !>;
+                shard_put_h(s, kb, cc_slice_from_buffer(val, 96), now + 200, kh) !>;
                 if (s->sweep_on) sweep_arm(s);
                 c->ops++;
             }
@@ -742,7 +928,7 @@ static void client(Client* c) {
             }
         }
         if (sample) { t1 = now_us(); c->key_us += t1 - t0; c->key_n++; }
-        si = shard_si(st, kb);
+        si = shard_of(st, kb, &kh);
         s = &st->shards[si];
         if (sample) th0 = now_us();
         {
@@ -751,16 +937,16 @@ static void client(Client* c) {
             if (!hold.held()) return;
             s->ops++;
             if (r >= p_del) {
-                (void)shard_get(s, kb);
+                (void)shard_get_h(s, kb, kh);
             } else if (r < p_ttl) {
                 int64_t dies = now + (int64_t)(50.0 * pow(400.0, rndf(c)));
-                shard_put(s, kb, cc_slice_from_buffer(val, 96), dies) !>;
+                shard_put_h(s, kb, cc_slice_from_buffer(val, 96), dies, kh) !>;
                 remember_key(c, kb);
                 if (s->sweep_on) sweep_arm(s);
             } else if (r < p_never) {
-                shard_put(s, kb, cc_slice_from_buffer(val, 96), NEVER_MS) !>;
+                shard_put_h(s, kb, cc_slice_from_buffer(val, 96), NEVER_MS, kh) !>;
             } else {
-                shard_delete(s, kb);
+                shard_delete_h(s, kb, kh);
             }
             c->ops++;
         }
@@ -775,11 +961,12 @@ static bool !>(CCError) preload_never(Store* st) {
     for (long id = 0; id < NEVER_POOL; id++) {
         size_t kn = put_key(keybuf, 'n', -1, id);
         CCSlice k = cc_slice_from_buffer(keybuf, kn);
-        uint64_t si = shard_si(st, k);
+        size_t kh = 0;
+        uint64_t si = shard_of(st, k, &kh);
         Shard* s = &st->shards[si];
         CCExclHold hold = st->locks.hold_one(si) @destroy;
         if (!hold.held()) return cc_err(CC_ERR_INVALID_ARG, "shard hold");
-        shard_put(s, k, cc_slice_from_buffer(val, 96), NEVER_MS) !>;
+        shard_put_h(s, k, cc_slice_from_buffer(val, 96), NEVER_MS, kh) !>;
     }
     return cc_ok(true);
 }
@@ -920,7 +1107,7 @@ int main(int argc, char** argv) {
     {
         long ops = 0;
         size_t drains = 0, drec = 0, dropped = 0, reins = 0, gets = 0, hits = 0;
-        size_t waves = 0, compacts = 0, total_free = 0, total_recs = 0;
+        size_t waves = 0, compacts = 0, pops = 0, total_free = 0, total_recs = 0;
         size_t total_live = 0, total_map = 0;
         double wsum = 0, wmax = 0;
         double ph_us[PH_N] = {0};
@@ -947,13 +1134,15 @@ int main(int argc, char** argv) {
             hits += s->get_hits;
             waves += s->waves;
             compacts += s->compacts;
+            pops += s->pops;
             total_free += s->free_n;
             wsum += s->wave_sum_us;
             if (s->wave_max_us > wmax) wmax = s->wave_max_us;
             total_live += shard_keys(s);
             total_map += shard_keys(s);
-            if (s->never_recs.valid())
-                total_recs += cc_arena_committed_gross_bytes(s->never_recs);
+            for (int ni = 0; ni < s->never_n; ni++)
+                if (s->never_pg[ni].recs.valid())
+                    total_recs += cc_arena_committed_gross_bytes(s->never_pg[ni].recs);
             for (l = 0; l < CC_TEMPORAL_LEVELS; l++)
                 for (si = 0; si < cc_temporal_slots[l]; si++)
                     if (s->recs[l][si].valid())
@@ -977,7 +1166,7 @@ int main(int argc, char** argv) {
         println(@string(`# ops=${ops} (${seconds > 0 ? ops / seconds / 1e6 : 0}M/s)  get_hits=${hits}/${gets} workers=${nworkers}`, @scratch));
         println(@string(`# expire: dropped=${dropped} drained_recs=${drec} drains=${drains} reinserted=${reins}`, @scratch));
         println(@string(`# index: rehashes=0  (map grow, not expire)`, @scratch));
-        println(@string(`# compact: compacts=${compacts} pops=0 free_frac=${total_live ? (double)total_free / (double)(total_live + total_free) : 0} slack=1 live_n=${total_live} free_n=${total_free} recs_commit_KiB=${total_recs / 1024}`, @scratch));
+        println(@string(`# compact: compacts=${compacts} pops=${pops} free_frac=${total_live ? (double)total_free / (double)(total_live + total_free) : 0} slack=1 live_n=${total_live} free_n=${total_free} recs_commit_KiB=${total_recs / 1024}`, @scratch));
         println(@string(`# waves=${waves} mean=${waves ? wsum / waves : 0} us max=${wmax} us (hold ${WAVE_HOLD_US} us / sample ${WAVE_HOLD_SAMPLE}, budget ${wave} recs)`, @scratch));
         {
             double map_ns = ph_n[PH_MAP] ? ph_us[PH_MAP] * 1000.0 / (double)ph_n[PH_MAP] : 0;
