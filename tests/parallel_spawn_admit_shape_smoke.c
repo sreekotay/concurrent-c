@@ -198,6 +198,16 @@ int main(void) {
         free(cheap_c);
         return 1;
     }
+    if (!strstr(cheap_c, "__attribute__((noinline))")) {
+        fprintf(stderr, "FAIL unmarked join missing noinline helper\n");
+        free(cheap_c);
+        return 1;
+    }
+    if (!strstr(cheap_c, "_par(")) {
+        fprintf(stderr, "FAIL unmarked join missing _par helper\n");
+        free(cheap_c);
+        return 1;
+    }
     free(cheap_c);
 
     {

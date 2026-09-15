@@ -173,12 +173,14 @@ except a 1-in-2^20 resample. A wrapped virgin arm that nested-spawns the
 same thunk commits CHURN at that inner spawn so a recursive tree cannot
 mmap a fiber stack per node before the first clean leaf sample. A denied
 wait-for site fills no environment and spells an expression arm on the caller
-(serial / raising arms still run the thunk). After the site is CHURN, `cc_parallel_churn_skip` runs those spelled
-arms with no TLS and no deny stack; nested nodes of that site are sequential.
-A gated wait-for (`@parallel (pred)`) spells that same sequential path when
-the predicate is false, in the caller, and runs spawn/join from a noinline
-helper when it is true — sequential recursive calls below a cut do not
-fetch TLS. Nothing strands. REAL work is never denied.
+(serial / raising arms still run the thunk). After the site is CHURN,
+`cc_parallel_churn_skip` runs those spelled arms with no TLS and no deny
+stack; nested nodes of that site are sequential. Spawn/join of that site
+runs from a noinline helper so those nested calls do not carry the admit
+frame. A gated wait-for (`@parallel (pred)`) spells that same sequential path
+when the predicate is false, in the caller, and runs spawn/join from a
+noinline helper when it is true — sequential recursive calls below a cut
+do not fetch TLS. Nothing strands. REAL work is never denied.
 
 `@parallel wait`, nursery, and `cc_nursery_spawn*` do not go through
 `cc_parallel_spawn`.

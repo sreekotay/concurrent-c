@@ -6,11 +6,13 @@
  *   pow2(1n+p)  = pow2(p) + pow2(p)
  *
  * Same fork family as parallel_hello.ccs: seq / `@parallel { }` /
- * `@parallel (d > CC_PAR_CUT)`. The leaf is `1`; the tree is the join.
+ * `@parallel (d > depth - cut)`. `d` counts down from the root; the
+ * predicate spawns the first `CC_PAR_CUT` levels (hello's `d < cut`
+ * with `d` counting up). The leaf is `1`; the tree is the join.
  *
  *   CC_PAR_DEPTH    default 20  (pow2(20n) in the sketch)
  *   CC_PAR_SAMPLES  default 5
- *   CC_PAR_CUT      default 8   — spawn while remaining d > cut
+ *   CC_PAR_CUT      default 8   — spawn that many levels from the root
  *   CC_PAR_BARE     default 1; 0 skips the ungated `par` row
  *   CC_PAR_ONLY=par skip seq/cut; loop par `CC_PAR_SAMPLES` times (profile)
  */
@@ -84,7 +86,7 @@ static uint32_t pow2_cut(uint32_t d) {
     uint32_t b = 0;
     if (d == 0)
         return 1;
-    @parallel (d > g_cut) {
+    @parallel (d > g_depth - g_cut) {
         a = pow2_cut(d - 1);
         b = pow2_cut(d - 1);
     } !>.wait()!>;
@@ -147,6 +149,8 @@ if (g_samples < 1)
     g_samples = 1;
 if (g_depth > 31)
     g_depth = 31;
+if (g_cut > g_depth)
+    g_cut = g_depth;
 
 int bare = (int)env_u32("CC_PAR_BARE", 1);
 uint32_t expect = 1u << g_depth;
@@ -180,5 +184,5 @@ if (bare)
     @string(` par ${expect} ${par_ms} ms vs_seq ${vs_par}x (@parallel { })`, @scratch).println();
 else
     "  par  skipped  (CC_PAR_BARE=0)".println();
-@string(` cut ${expect} ${cut_ms} ms vs_seq ${vs_cut}x (@parallel (d>${g_cut}))`, @scratch).println();
+@string(` cut ${expect} ${cut_ms} ms vs_seq ${vs_cut}x (@parallel (d>depth-${g_cut}))`, @scratch).println();
 return 0;

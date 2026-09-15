@@ -736,8 +736,12 @@ a handle is one nothing else can pause. The runtime may refuse the site
 is then spelled on the caller — the assignment as written — so deny does
 not call the thunk or take a 128-byte `CCTask`. Once the site is CHURN,
 `cc_parallel_churn_skip` takes that sequential spelling with no TLS:
-nested nodes of a classified site do not fetch the deny block. A one-arm
-wait-for has no spawned sibling, so it does not emit skip. Serial and
+nested nodes of a classified site do not fetch the deny block. Spawn/join
+runs in a noinline helper (`__cc_par_<n>_0_par`) so those nested calls do
+not carry the admit frame. The helper is only that split when every arm
+assigns an outer name — an expression arm that mutates through an address
+keeps skip in the caller. A one-arm wait-for has no spawned sibling, so it
+does not emit skip. Serial and
 raising arms still run the thunk at the join. Dest-live / `spawn` still use `CCTask`
 and `cc_parallel_spawn_admit`; a refused or failed spawn there dies rather
 than running inline. Wait-for plants a `CCParJoin` (kind + fiber) and

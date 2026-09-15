@@ -910,9 +910,10 @@ static CCSlice pl_gated_dst_name(CcLowerer* L, CCSlice name) {
     return lw_keep(L, &s);
 }
 
-/* The spawn/join of a gated wait-for, off the sequential recursive frame.
- * Locals of this helper must not live in the function that walks `!pred`:
- * that walk is the cut, and a 128-byte frame + TLS there is the tax. */
+/* The spawn/join of a wait-for, off the sequential recursive frame.
+ * Locals of this helper must not live in the function that walks skip /
+ * `!pred`: that walk is the cheap tree, and a 128-byte frame + TLS there
+ * is the tax. */
 static CcDecl* pl_gated_par_decl(PStep* st, uint32_t id, CcStmt* slow,
                                  PCapList* dests, PCapList* caps, CcSpan sp) {
     CcLowerer* L = st->L;
@@ -2601,35 +2602,11 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
         PBind* b = pl_bind_new(st, s, p, sp);
         st->binds.push(b);
     }
-    if (try_skip && slow) {
-        /* Once this site is CHURN, nested nodes skip TLS / deny_fast and
-         * run the arms as written. Virgin / REAL / a 1-in-2^20 resample
-         * take the spawn path below. */
-        bool ok = true;
-        CCSlice fs = pl_spell_arm(L, armv->get_ptr(0));
-        if (!fs.len) ok = false;
-        for (i = 0; i < inlines.len(); i++) {
-            if (!(*inlines.get_ptr(i)).len) ok = false;
-        }
-        if (ok) {
-            CcStmt* skipb = lw_block(L, sp);
-            CCSlice site = pl_name(L, id, (uint32_t)first, "_site");
-            CCSlice thunk = pl_name(L, id, (uint32_t)first, "_thunk");
-            CcExpr* cond = lw_call2(L, cstr_slice("cc_parallel_churn_skip"),
-                                    cc_expr_unary(CC_OP_ADDR, lw_ident(L, site, sp), sp, L->arena),
-                                    lw_ident(L, thunk, sp), sp);
-            lw_push(skipb, lw_expr_stmt(L, lw_ident(L, fs, sp), sp));
-            for (i = first; i < n; i++)
-                pl_run_inline(L, skipb, id, (uint32_t)i, *inlines.get_ptr(i - first), sp);
-            lw_push(blk, lw_if(L, cond, skipb, slow, sp));
-        } else {
-            pl_splice(blk, slow);
-        }
-    }
-    if (gate_fast && slow) {
+    if ((try_skip || gate_fast) && slow) {
         /* Sequential recursive calls stay in this function (tiny frame).
          * Spawn/join runs in a noinline helper so its TLS and env do not
-         * enlarge that walk. */
+         * enlarge that walk — the same split for CHURN skip and for a
+         * false gated predicate. */
         bool ok = true;
         CCSlice fs = pl_spell_arm(L, armv->get_ptr(0));
         PCapList dests = vec_new::[PCapRef](L->arena);
@@ -2680,9 +2657,11 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
                 pcaps.push(c);
             }
         }
-        if (ok) {
+        bool helper_ok = ok && dests.len() == n;
+        if (helper_ok) {
             CcStmt* skipb = lw_block(L, sp);
             CcStmt* parb = lw_block(L, sp);
+            CcExpr* cond;
             CcDecl* par = pl_gated_par_decl(st, id, slow, &dests, &pcaps, sp);
             pl_gated_par_fwd(st, id, &dests, &pcaps);
             st->made.push(par);
@@ -2690,7 +2669,30 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
             for (i = first; i < n; i++)
                 pl_run_inline(L, skipb, id, (uint32_t)i, *inlines.get_ptr(i - first), sp);
             lw_push(parb, pl_gated_par_call(L, id, &dests, &pcaps, sp));
-            lw_push(blk, lw_if(L, lw_ident(L, gname, sp), skipb, parb, sp));
+            if (try_skip) {
+                CCSlice site = pl_name(L, id, (uint32_t)first, "_site");
+                CCSlice thunk = pl_name(L, id, (uint32_t)first, "_thunk");
+                cond = lw_call2(L, cstr_slice("cc_parallel_churn_skip"),
+                                cc_expr_unary(CC_OP_ADDR, lw_ident(L, site, sp), sp, L->arena),
+                                lw_ident(L, thunk, sp), sp);
+            } else {
+                cond = lw_ident(L, gname, sp);
+            }
+            lw_push(blk, lw_if(L, cond, skipb, parb, sp));
+        } else if (try_skip && ok) {
+            /* Expression arms with no dest mutate outer names through
+             * their addresses: a by-value helper would write copies.
+             * Skip stays in this function. */
+            CcStmt* skipb = lw_block(L, sp);
+            CCSlice site = pl_name(L, id, (uint32_t)first, "_site");
+            CCSlice thunk = pl_name(L, id, (uint32_t)first, "_thunk");
+            CcExpr* cond = lw_call2(L, cstr_slice("cc_parallel_churn_skip"),
+                                    cc_expr_unary(CC_OP_ADDR, lw_ident(L, site, sp), sp, L->arena),
+                                    lw_ident(L, thunk, sp), sp);
+            lw_push(skipb, lw_expr_stmt(L, lw_ident(L, fs, sp), sp));
+            for (i = first; i < n; i++)
+                pl_run_inline(L, skipb, id, (uint32_t)i, *inlines.get_ptr(i - first), sp);
+            lw_push(blk, lw_if(L, cond, skipb, slow, sp));
         } else {
             pl_splice(blk, slow);
         }
