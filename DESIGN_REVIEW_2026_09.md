@@ -6,6 +6,20 @@ Evidence from the corpus lives in `DESIGN_REVIEW_2026_09_EVIDENCE.md`.
 
 Sections are ordered by what a reader meets first in a program.
 
+The goal is one path: tutorial, idiomatic, performant, and production
+are the same code, and it is safe. Safe is measured on five terms, not
+on soundness:
+
+| Term | Measures | Instrument |
+|------|----------|------------|
+| coverage | how much of a program runs on the checked surface | peels per thousand lines |
+| precision | how often a correct program is refused | false refusals per rule, notes before errors |
+| reach | which bug shapes are ill-formed, mitigated, or expressible | the CVE study |
+| one path | whether the tutorial form is the production form | the specimen ladder |
+| cost | what a check adds at run time | measured against the bump, the walk, the verbs |
+
+A proposal that moves none of them is dropped.
+
 ---
 
 ## 1. The local system
