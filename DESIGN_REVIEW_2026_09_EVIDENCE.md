@@ -218,7 +218,7 @@ runtime rows; the table above for the program rows.
 | `@typeview` in specimens: 19 declarations; named modes carry the write surface by concern (`Encode` on three redis variants and staticd, `Highlight`/`Layout` on `RtxDoc`, `Match` on stylo's `Engine`, `Measure` in the recipe); `r: *` on `CCSlice`, deny lists on `CCBox_*` and `CCString` | grep; `cc_slice.cch:96`, tutorial §2 | design |
 | A default `r: *` refuses a field store at an ordinary site; a named mode refuses a store outside its `rw:` inside a body of that mode | `studies/typeview_boundaries/` | design, works |
 | Trust is by first-parameter shape and extends to embedded types: an `Outer*`-first body stores through `o->in.done` where `Inner` is `r: *` | `studies/typeview_boundaries/nested_trust.ccs` | design (boundary) |
-| A taken address bypasses the allow-list (`&x.done`) | `studies/typeview_boundaries/addr_peel.ccs` | design (the Gap) |
+| A taken address bypasses the allow-list (`&x.done`); the walk already refuses `&v` on a binder (`lower_forin.cch:530`); counting unary `&` on a member as a store in the allow-list check (`lower_ufcs.cch:2340-2375`, `uf_is_store`) closes it | `studies/typeview_boundaries/addr_peel.ccs` | unimplemented (one condition) |
 | cctext: 71 `RtxDoc*`-first bodies in `core/`, 3 in `frontend/`; 7 stores to `find.*` state fields outside `core/find.ccs` | grep | observation |
 
 | Observation | Where | Tag |
