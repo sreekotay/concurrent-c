@@ -275,9 +275,6 @@ hosted by an arena minted for it, and a parallel handle by a calloc.
 
 Open items with a cost:
 
-- The debug read-check costs one registry lookup and one compare per
-  `at`, `set`, and walk entry, in debug builds only. The registry holds
-  one entry per live epoch block.
 - Promotion versus spill: promotion mallocs a host when scratch outgrows
   a slab under a mark; spill would malloc per pre-mark regrow instead.
   Which is rarer depends on the workload. Neither is on the fast path.
@@ -288,12 +285,37 @@ Open items with a cost:
 - Pinning a mark instead of the arena, last-use liveness, and the kept
   attribute are compile-time only.
 
+**Principle.** A build mode changes speed and diagnostics, never layout
+and never which checks run. One ABI, one meaning. The spec passages that
+promise a debug-only trap resolve to always or never.
+
+**Baked in.** A runtime check is admitted where it rides on work already
+paid at that site:
+
+| Paid operation | Already reads | Also decides, at no new access |
+|----------------|---------------|--------------------------------|
+| point store | bounds, grower generation | nothing new; the model |
+| point load | bounds | the same generation bit |
+| walk entry | `.len` and pointer, once | the generation bit, once per loop |
+| release, realloc | the slab chain, to find the owner | the epoch of the bytes at that pointer; a stale or aliased release refuses |
+| every alloc | the current slab, tested for NULL | a stale handle, once freed hosts are not unmapped |
+| arena-last verbs taking a view and an arena | both operands | a stale self-view: the view's epoch against the arena's current one |
+
+The bump and the walk body stay untouched. Hosts come from a pool by a
+bump instead of sharing the region's malloc, reused oldest-first, so
+every existing liveness test detects a stale handle and ABA is deferred
+without a generation.
+
+**Not admitted.** A view finding its host with nothing else in hand
+needs a registry lookup per check. By the principle it would be
+always-on; most of what it catches is already caught where an arena is
+in hand. It is dropped. A runtime kept-parameter check needs the same
+lookup; that fact belongs to the compiler.
+
 ### 2.4 Open
 
 - The kept-parameter spelling, and whether an undeclared keep is an
   error or a warning during transition.
-- A debug read-check through the view verbs; hosts draw epochs in
-  256-aligned blocks, so a block-to-host registry is the lookup.
 - Last-use liveness within a block, so a reset after the last use of a
   view is not refused.
 - Pinning a mark instead of the whole arena when a task holds a view
