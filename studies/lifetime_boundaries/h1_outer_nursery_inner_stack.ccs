@@ -1,0 +1,13 @@
+#include <ccc/std/prelude.cch>
+static void use(char[:] s) { (void)s; }
+
+int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
+    CCNursery n = cc_nursery_create() !> @destroy;
+    {
+        char buf[16] = {0};
+        char[:] s = cc_slice_from_buffer(buf, 16);
+        n.spawn(() => [s] { use(s); }) !>;
+    }
+    return 0;
+}

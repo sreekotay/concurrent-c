@@ -1,0 +1,11 @@
+#include <ccc/std/prelude.cch>
+static void use(char[:] s) { (void)s; }
+
+static char[:] g_keep;
+static void keep(char[:] v) { g_keep = v; }
+int main(void) {
+    CCString tmp = @string(`abc`, @scratch);
+    keep(tmp.as_slice());
+    use(g_keep);
+    return 0;
+}
