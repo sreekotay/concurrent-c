@@ -548,13 +548,15 @@ reconstructs the job beside it.
 | `n.spawn(() => …)`, `n.leave(ctx, finish)` | a child of this owner; the owner is gone, run this at EMPTY | the nursery | never denied; leftover on the LEFT path |
 | `@with_deadline(...) as dl` | the clock these arms share | the name | spawned arms see no caller clock unless named |
 
-Two constructs share one scheduler. The nursery is the older bag:
-closures, a handle in an arena or self-owned, `leave`, never denied.
-`@parallel` is the join: arms by reference, adaptive denial, and, once a
-dest is bound, the same bag again with dest bodies that follow the
-closure rules. Arena-as-lifetime came after both. The difference that
-remains between them is not a fact about the program; it is which one
-was written first.
+The nursery is the join set underneath `@parallel`: a wait-for's `h.n`
+is one, a dest's bodies are its children, EMPTY is its event. It is
+also still a teaching surface. The cc way and the README do not name
+it; getting started and the cheatsheet teach it beside `@parallel`, and
+three of fourteen recipes use it. The specimens that keep it (pigz,
+random access, redis, curl) use a spawn with a capture list, an
+EMPTY-close, a leave with a leftover, and `@destroy` as the join. The
+dest has each of those but the capture list. `create_child` has no
+user. Two spellings of one bag is the older one not yet withdrawn.
 
 The handle states its own lifetime and not the work's. `h.live()` is
 planted-and-not-joined; right after a kick the wave can be finished and
@@ -625,11 +627,19 @@ wait whose partner is outside the program says so on the object, once.
    being the idiom for a queue.
 6. **Drift, not design.** Delete the in-stage pause polls; read
    `h.paused()` not the field.
+7. **The nursery is implementation.** The taught join set is
+   `@parallel` and its dest; `CCNursery` is the runtime's type under
+   it. What the dest absorbs: the arena-hosted handle, `h@(a)` on the
+   `create_*(owner, …)` form of section 2, so the arena is the join
+   set's parent and the walk joins it; and the spec line that sends a
+   named task lifetime or tile size to `n.spawn`, which becomes a dest
+   attach. Cancel reach is `adopt`; the clock is named. Getting
+   started, the cheatsheet, and the three recipes move over.
 
 Reconstructions counted: ten today, six in the runtime and four in the
 program. Items 1 to 4 close the four in the program. Item 5 moves one
 exemption from scope to object; it is a precision change, not a new
-statement. Five remain in the runtime and are the floor by the rule in
+statement. Item 7 changes no count: it withdraws a spelling. Five remain in the runtime and are the floor by the rule in
 the preamble: the gate, the deny stack, the detector, growth, and
 wake-skip each recover a fact no party holds before the run. The deny
 stack's helper case is the one of those a party could state, and it is
@@ -645,6 +655,7 @@ an open item, not a proposal.
 | 4 persistent marks | none | none | the flags exist; the bind stops clearing them |
 | 5 host-fed object | one flag read on the park path | one bit | the park path already reads the object's state |
 | 6 delete polls | removes a yield loop per stage | none | |
+| 7 nursery under the dest | none | none | `h.n` is already the nursery; an arena-hosted dest is the handle the nursery already places |
 
 Pause is a yield loop at every seam: a paused dest with k tickets at
 seams spends k yields per scheduler pass until resume. A parked honor
@@ -671,11 +682,12 @@ detector.
   through. The burden is on every such signature, and a missed one is
   the runtime abort again. Whether the fact is worth its spelling is
   not settled.
-- **One bag or two.** Dest bodies and nursery children follow the same
-  capture rules; `create_child` and arena hosting are what the nursery
-  still has. A dest in an arena with cancel and deadline inheritance
-  would leave the nursery as a name. That is a spelling change, not a
-  fact change, and the chronology is the only argument for two.
+- **The capture list.** `n.spawn(() => [&x] { … })` states the mode
+  of each capture in one token. A dest body states it by type: a value
+  copies, a pointer copies the pointer, an owner moves, and `&x` inside
+  the body is refused in favor of a frame-side pointer. Both are stated
+  facts; one is a list and one is the type. Whether the list said
+  anything the type does not is the one question item 7 leaves.
 - **Adopt is half a tree.** `adopt` is a cancel edge and not a join
   edge; `h1.wait()` does not wait `h2`. A tree that cancels down but
   does not join down states one direction of the relation.
@@ -694,6 +706,7 @@ detector.
 - `live()`, named for the handle, read as the work, with the latch
   beside it as proof.
 - `h.paused` the field and `h.paused()` the load, both readable.
+- Two spellings of the join set, taught side by side.
 
 ## 4. Tagged data
 
