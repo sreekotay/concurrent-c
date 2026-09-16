@@ -1,0 +1,11 @@
+#include "pp_prologue_nested_ifndef.cch"
+#include <stdio.h>
+
+int main(void) {
+    if (pp_prologue_batch() != 8) {
+        printf("pp_prologue_nested_ifndef_smoke: FAIL batch\n");
+        return 1;
+    }
+    printf("pp_prologue_nested_ifndef_smoke: PASS\n");
+    return 0;
+}

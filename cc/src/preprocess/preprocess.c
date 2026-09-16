@@ -19797,9 +19797,11 @@ char* cc_splice_module_members(const char* src, size_t input_len,
  * headers. The lowerer hoists its Result specs and generic instances
  * ahead of every include, so with `faces_first` the faces that define
  * their types go first as well. An include under a conditional other than a
- * guard (`#ifndef NAME` then `#define NAME`) stays where it is. The
- * members are already spliced into `src`, so a quoted `.cch` left in it
- * is a face. Repeated where the unit wrote them, the includes are inert. */
+ * file-level include guard (`#ifndef NAME` then `#define NAME` at depth 0)
+ * stays where it is. Nested `#ifndef`/`#define` defaults inside a real `#if`
+ * are conditionals, not guards. The members are already spliced into `src`,
+ * so a quoted `.cch` left in it is a face. Repeated where the unit wrote
+ * them, the includes are inert. */
 static void cc__unit_prologue_includes(const char* src, size_t n, int faces_first,
                                        char** out, size_t* len, size_t* cap) {
     char* copy;
@@ -19849,23 +19851,33 @@ static void cc__unit_prologue_includes(const char* src, size_t n, int faces_firs
                     }
                 }
             } else if (w - p == 6 && memcmp(copy + p, "ifndef", 6) == 0) {
-                /* A guard: `#ifndef NAME` with `#define NAME` on the next line. */
+                /* File-level include guard only: `#ifndef NAME` then
+                 * `#define NAME` at depth 0. Nested `#ifndef`/`#define`
+                 * (e.g. defaulting a batch size inside `#if BACKEND`) is a
+                 * real conditional — treating it as a guard would let its
+                 * `#endif` pop the outer `#if`, and angle includes in the
+                 * following `#elif`/`#else` would hoist into the prologue
+                 * (Darwin then sees `<sys/epoll.h>` from a Linux branch). */
                 size_t ns = w, ne, q;
                 int guard = 0;
                 while (ns < line_end && (copy[ns] == ' ' || copy[ns] == '\t')) ns++;
                 ne = ns;
                 while (ne < line_end && cc_is_ident_char(copy[ne])) ne++;
-                q = (line_end < n) ? line_end + 1 : line_end;
-                while (q < n && (copy[q] == ' ' || copy[q] == '\t')) q++;
-                if (ne > ns && q < n && copy[q] == '#') {
-                    q++;
+                if (depth == 0) {
+                    q = (line_end < n) ? line_end + 1 : line_end;
                     while (q < n && (copy[q] == ' ' || copy[q] == '\t')) q++;
-                    if (q + 6 <= n && memcmp(copy + q, "define", 6) == 0) {
-                        q += 6;
+                    if (ne > ns && q < n && copy[q] == '#') {
+                        q++;
                         while (q < n && (copy[q] == ' ' || copy[q] == '\t')) q++;
-                        if (q + (ne - ns) <= n && memcmp(copy + q, copy + ns, ne - ns) == 0 &&
-                            (q + (ne - ns) >= n || !cc_is_ident_char(copy[q + (ne - ns)])))
-                            guard = 1;
+                        if (q + 6 <= n && memcmp(copy + q, "define", 6) == 0) {
+                            q += 6;
+                            while (q < n && (copy[q] == ' ' || copy[q] == '\t')) q++;
+                            if (q + (ne - ns) <= n &&
+                                memcmp(copy + q, copy + ns, ne - ns) == 0 &&
+                                (q + (ne - ns) >= n ||
+                                 !cc_is_ident_char(copy[q + (ne - ns)])))
+                                guard = 1;
+                        }
                     }
                 }
                 if (!guard) depth++;
