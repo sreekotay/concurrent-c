@@ -756,13 +756,133 @@ makes once.
 - `h.paused` the field and `h.paused()` the load, both readable.
 - Two spellings of the join set, taught side by side.
 
-## 4. Tagged data
+## 4. Co-facts
 
-`@variant` is the spine of the compiler and the construct with the most
-lowering holes. Exhaustiveness is forfeited wherever `default:` is forced
-by a hole. There are three tagged-data dialects: variants, hand `{kind, u}`
-structs, and grammar-generated unions. One projection protocol should
-serve all three, and comptime should be able to name arms.
+A co-fact is one fact stored in more than one place: two fields, a
+field and a runtime object, a value and something computed from it.
+Everything between the two stores is reconstruction done by the
+reader, every time. The language's best constructs are each a co-fact
+made one value: the slice (pointer, extent, lifetime), the Result (tag,
+payload), the variant (arm, data), the id (bytes, generation), the
+ledger (obligation, exit). The rule they share is single storage, and
+this section applies it to the program's own data.
+
+### 4.1 Status
+
+The specimens keep co-facts by hand in four shapes.
+
+| Shape | Instances | Kept by |
+|-------|-----------|---------|
+| a count shadowing a set | staticd `nworkers` beside the dest's admits; curl `live` beside the nursery's children | CAS to reserve, decrement on two exit paths, decrement again on a failed spawn |
+| a record whose fields move together | the find's `scan_off`, `scan_bytes`, `done`, `truncated`; the dest latches of section 3 | interleaved stores in one stage block; the UI can read one field fresh and another stale |
+| a derivation with a source | cctext `edit_gen` bumped on every content change, `safe_gen` "last flushed edit_gen", dirty is their inequality; stylo `inv_stamp` and `bloom_stamp` against per-node `inv_gen` and `bloom_gen`; staticd's poll `gen`, `hit_epoch`, `wake_epoch` | a hand-rolled version on the source and a stamp on the derived value, compared on read |
+| a tag beside a payload | `disk_valid` beside `disk_mtime`, `disk_sz`, `disk_ino`; `mark_valid` beside `mark_line`, `mark_off`; `seek_valid` beside `seek_rel` | a validity int the reader must test first |
+
+Twenty-two fields across the corpus are named `valid`, `dirty`,
+`stale`, `gen`, `epoch`, or `version`. Three specimens invented the
+version-and-stamp pattern independently. No comment anywhere says
+"keep in sync"; the sync is in the reader's head.
+
+`@variant` is the spine of the compiler and the construct with the
+most lowering holes. Exhaustiveness is forfeited wherever `default:`
+is forced by a hole. There are three tagged-data dialects: variants,
+hand `{kind, u}` structs, and grammar-generated unions.
+
+`@typeview` confines writes. A default `r: *` refuses a field store at
+an ordinary site; a named mode refuses a store outside its `rw:` list
+inside a body of that mode; trust is by first-parameter shape. Nineteen
+declarations in the specimens, most of them named modes that carry a
+write surface by concern. Trust extends through embedding, and a taken
+address is the exit.
+
+### 4.2 Proposal
+
+One storage, the rest derived. A co-fact set has one primary, which is
+stored, and any number of derivations, which are reads. The set is
+constructed by the derivation naming its sources; the primary knows
+nothing, holds no subscriber list, and pushes nothing.
+
+1. **A count is a read of its set.** The set already knows its
+   occupancy and serializes its admits, so the condition and the admit
+   are one operation on it: `@parallel(h, below: n) { … }` admits or
+   says no under the set's own lock, and a worker leaves with
+   `n.leave_above(min)`. The count field, the CAS helpers, the
+   decrements, and the rollbacks go.
+2. **A record is its primary.** The scan record stores the position
+   scanned and the hits appended; `done`, `truncated`, `scan_off`, and
+   `scan_bytes` are one-line reads against the file length. One word
+   stored cannot tear.
+3. **A cheap derivation is a read hook.** The precedent is `.len` on a
+   walk subject: readable at ordinary sites as a field, not storable. A
+   named read hook on a type lowers `d->find.done` to a call and refuses
+   the store. Call sites do not change.
+4. **An expensive derivation is a cache with a stamp.** A primary that
+   has caches carries a version; a store to it bumps the version; the
+   cache stores its sources' versions beside its value and a read
+   compares. This is `edit_gen` and `safe_gen` with the language holding
+   the pattern. Auto-tracking, recovering the sources by watching the
+   derivation run, is reconstruction; the derivation names them.
+5. **A tag beside a payload is a variant.** `disk_valid` and its three
+   fields are one arm.
+6. **Validation is at the seams.** Where a primary enters from outside,
+   the wire and construction, a check on the store is right, per store,
+   because at a seam there is no intermediate state to allow. Serdes
+   assigns fields, so wire validation falls out with an error naming
+   the field. Construction stays open today, so an unvalidated value can
+   be made by designated init; a validated type is sealed to its create
+   hook.
+7. **The residue is a hold.** A move between two containers is two
+   primaries that must agree, because in an intrusive list membership
+   is the storage. That is a verb on the pair under a hold, which the
+   code already writes. A transaction construct adds nothing the hold
+   and the ledger do not say.
+8. **A taken address of a non-writable field is refused**, as the walk
+   already refuses `&v` on a binder. One condition in the allow-list
+   check.
+
+The lifetime order of section 2 applies unchanged: a cached derivation
+holds views of its sources, so a source outlives every derivation of
+it, and the primary has the set's longest lifetime. That is why the
+per-wave dest of section 3 grew a second `done` beside it, and why the
+job-lifetime dest is the fix.
+
+Not proposed: a transaction scope, since single storage removes the
+intermediate states it would allow and the hold covers the residue; a
+per-instance validator, since a fact stated per construction is
+invisible at the type; a subscriber graph.
+
+### 4.3 Cost
+
+| Item | Run-time cost | Memory |
+|------|---------------|--------|
+| 1 count as a read | removes a CAS and two atomics per spawn | one field fewer |
+| 2, 3 read hooks | the derivation's compares on each read; nothing stored | fields removed |
+| 4 versioned primary | one increment per store; one compare per cached read | one version per primary, one stamp per source per cache |
+| 5 variant | none | often less: one tag replaces several ints |
+| 6 seam validation | one call per annotated store at a seam; nothing elsewhere | none |
+| 8 address refusal | none | none |
+
+A versioned primary read across fibers is a seqlock, version then value
+then version, or a hold, unless value and version pack into one word as
+the id does. The language says so rather than hiding it. ABA on a
+per-primary counter is the grower-epoch trade of 2.4: one global
+counter and a width question, or per-primary counters and rare reuse.
+
+### 4.4 Open
+
+- Whether the version is per primary or drawn from one counter.
+- The projection protocol for the three tagged-data dialects, and
+  comptime naming arms, so exhaustiveness is not forfeited to a hole.
+- Whether trust through embedding should stop at the field.
+- Sealed construction's spelling, and whether serdes-filled types are
+  sealed by default.
+
+### 4.5 Surface that does no work
+
+- A `valid` int beside the fields it guards.
+- A version and a stamp with no name for the pattern, in three
+  specimens.
+- A count kept beside a set that already counts.
 
 ## 5. Instance placement
 
