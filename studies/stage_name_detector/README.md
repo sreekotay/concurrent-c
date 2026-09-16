@@ -12,8 +12,20 @@ passes 8). Nobody passes 5. Run with `CC_DEADLOCK_PERSIST_MS=300`.
 
 Also found: a stage argument that names a body local (`int name = …;
 @stage (ts, 0, name)`) fails in the host compiler with `'name'
-undeclared`, because the exit's discharge (`fail`/`pass`) is emitted
-outside the body scope. The lowerer should refuse it with its own
-diagnostic or hoist the expression.
+undeclared`. The stage's arguments are spelled four times
+(`lower_parallel.cch:3308-3345`): at the wait, at the pass, and twice
+more at the runner's one exit, where every stage the body has not
+passed is discharged so a parked successor wakes. That exit is outside
+the body's scope, and it also discharges stages the body never reached
+(a `break` or an error before the stage), whose arguments were never
+evaluated. So a name that depends on a body local is not lowerable in
+general: the exit could not compute it for an unreached stage. The fix
+is a lowerer diagnostic, not a hoist: a stage name may read the loop
+variable, the `worker` binder, and captured names of the enclosing
+frame, and nothing declared in the body. A second, smaller defect rides
+along: the arguments are evaluated more than once, so an expression
+with a side effect (`next++`) names two different cells at wait and
+pass. Evaluate-once temporaries at the stage fix that for reached
+stages; the diagnostic covers the rest.
 
 Toolchain: seed `0.4.0-404`, built in this tree.
