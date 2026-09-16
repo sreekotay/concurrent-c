@@ -116,6 +116,18 @@ peels into a local `const char*` then a C loop, and comparisons.
 | Scanner loops peel where `index_of`, `trim_set`, `starts_with`, `last_index_of` already exist | doc, and a cursor verb set |
 | `cc_parse(G, s.ptr, s.len, …)` and `sock->write(s.ptr + off, …)` take pointer plus length | unimplemented; slice twins |
 
+Result-returning allocation, measured (`-O`, 20M allocs of 16 bytes,
+best of 5, shared container so absolute numbers are slow; relative is the
+point):
+
+| Path | raw pointer | Result pointer | raw slice | Result slice |
+|------|------------:|---------------:|----------:|-------------:|
+| shared bump (CAS) | 13.1 ns | 13.2 ns | 13.2 ns | 13.1 ns |
+| local bump (no CAS) | 3.45 ns | 3.44 ns | 3.37 ns | 3.45 ns |
+
+The wrappers inline; the Result tag test is the NULL test the caller
+already wrote. No cost either way.
+
 Implementation, from `cc/include/ccc/cc_arena.cch` and `cc_slice.cch`:
 
 | Observation | Where | Tag |

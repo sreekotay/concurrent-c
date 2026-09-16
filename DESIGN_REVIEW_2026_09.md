@@ -368,7 +368,8 @@ less. What forces it today, in order of weight:
 
 1. A null check on a slice, because allocation returns an empty slice on
    failure. Failure must not look like an empty success; allocation is a
-   Result.
+   Result, for the slice form and the pointer form. The C twins stay
+   pointer-returning. Measured: no cost on the shared or the local bump.
 2. Scanning with an index: skip, find, look back, look ahead. Most of it
    is a verb that exists and was not reached for. The rest is a cursor:
    peek, take-while, skip-while, rest, as a view that advances.
