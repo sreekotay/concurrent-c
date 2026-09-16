@@ -295,7 +295,12 @@ Lifetimes are ordered by containment. One rule: **a view may be held by
 The checker refuses shapes; it does not prove absence. Aliasing through
 a pointer, an array of views, a copied aggregate, or a pointer parameter
 is outside it. Every refusal is a real bug. What it misses, the token
-catches where an owner acts. The order is total within a frame and
+catches where an owner acts. What it trades in proof it earns back in
+clarity: a refusal names a view, the arena it came from, and the line
+that ended the arena, all inside the function the reader is in, with no
+inference chain and no annotation on a path that only passes a view
+through. The checker has the locality of the handlers, for the same
+reason. The order is total within a frame and
 across join sets; a view stored into shared state and read by another
 fiber after a reset is a temporal question it does not see, and rests on
 the token and the hold discipline.
@@ -355,8 +360,12 @@ The rule reaches the holders the step does not see, with these facts:
    chain, gives turnstile, parallel, exclusive, and a document created
    into a workspace a holder with no call on the page, without
    conjoining creation, placement, and ending.
-9. **The own step runs after UFCS, or composes names by the universal
-   rule.** Restore, try_restore, and detach join the epoch-ending table.
+9. **The own step learns the taught spelling.** It keeps reading the
+   program as written, so its messages quote what the user wrote, and it
+   recognizes a method on a receiver the index types as an arena as the
+   same fact as the C name: `reset`, `alloc_slice_bytes`, `restore`,
+   `detach`. Restore, try_restore, and detach join the epoch-ending
+   table. This costs no clarity; it is a vocabulary hole, not a trade.
 
 10. **An arena-last parameter is the `Alloc` face by default.** A callee
     may add bytes to the caller's lifetime and may not reset, restore,
