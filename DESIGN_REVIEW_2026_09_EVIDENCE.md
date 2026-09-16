@@ -110,6 +110,11 @@ null or OOM check on a slice 17%; pointer arithmetic 7%; casts 7%;
 peels into a local `const char*` then a C loop, and comparisons.
 `cc_parse` and socket write are the stdlib signatures that force a peel.
 
+Re-cut by what removes each site: 176 (32%) are a `.ptr` passed to a
+user helper declared with pointer plus length; 116 (21%) index scans;
+96 (17%) null or OOM checks; 27 (5%) `mem*` into raw buffers; 28 (5%)
+identity comparisons; 27 (5%) C-library calls. Removable: about 90%.
+
 | Observation | Tag |
 |-------------|-----|
 | `cc_arena_alloc_slice_bytes` returns an empty slice on failure; 17% of peels are the null check this forces; the walk recipe's `if (buf.len != 8)` is the same check | design; contradicts the-cc-way |
