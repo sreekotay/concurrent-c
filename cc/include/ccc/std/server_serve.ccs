@@ -971,14 +971,21 @@ static int cc_step_steal_until_fair(CCStepHub* hub, CCStepLane* self) {
 }
 
 /* The engine's own water level. A worker whose waits keep returning with
- * work is saturated; a worker that has not moved for a while with steps
- * queued is stalled in a step. A poked idle peer takes queued steps at
- * once; when no peer is idle, a worker is added, up to the cap. */
+ * work is busy under load, not necessarily saturated: grow on saturation
+ * only when the previous batch was slow (a step over CC_SERVER_STALL_NS)
+ * and no peer is idle. A worker that has not moved for a while with steps
+ * queued is stalled; a poked idle peer takes those steps, and when no
+ * peer is idle a worker is added, up to the cap, rate-limited so steal
+ * feedback cannot climb the cap. */
 #ifndef CC_SERVER_BUSY_WAKES
 #define CC_SERVER_BUSY_WAKES 32
 #endif
 #ifndef CC_SERVER_STALL_NS
 #define CC_SERVER_STALL_NS (200 * 1000)
+#endif
+/* Min spacing between saturation/stall grows (mono ns). */
+#ifndef CC_SERVER_GROW_COOLDOWN_NS
+#define CC_SERVER_GROW_COOLDOWN_NS (10ull * 1000 * 1000)
 #endif
 
 static uint64_t cc_now_ns(void) {
@@ -1155,11 +1162,22 @@ static void cc_server_worker_bail(ServeCtx* ctx) {
     cc_server_maybe_respawn(ctx);
 }
 
-/* Add a worker now, up to the cap: the signal was saturation or a stall. */
+/* Add a worker now, up to the cap: the signal was saturation or a stall.
+ * Same live floor as try_grow: another worker needs sessions to share, else
+ * a fast small session set (redis P=16) climbs to the CPU cap via stall
+ * steals. Cooldown stops a steal/stall loop from adding every wake. */
 static int cc_server_try_grow_now(CCServer* srv) {
+    static _Atomic uint64_t last_grow_ns;
     int n = cc_atomic_load_acquire(&srv->nworkers);
+    int live = cc_atomic_load_acquire(&srv->live);
+    uint64_t now, last;
     if (n < 1 || n >= srv->workers_max) return 0;
+    if (live < (n + 1) * WORKER_GROW_EVERY) return 0;
+    now = cc_now_ns();
+    last = cc_atomic_load_acquire(&last_grow_ns);
+    if (last && now - last < (uint64_t)CC_SERVER_GROW_COOLDOWN_NS) return 0;
     if (!cc_atomic_cas(&srv->nworkers, &n, n + 1)) return 0;
+    cc_atomic_store_release(&last_grow_ns, now);
     cc_server_note_workers(srv, n + 1);
     return 1;
 }
@@ -1375,11 +1393,12 @@ static void cc_server_worker(ServeCtx* ctx) {
                     if (rc > 0) died = 1;
                 }
             }
-            /* Saturation: wakes that keep bringing work, with no idle peer. */
+            /* Saturation: busy wakes alone are the load. Grow only when the
+             * previous batch was slow and no idle peer can take the backlog. */
             if (queued > 0) {
                 if (++busy_streak >= CC_SERVER_BUSY_WAKES) {
                     busy_streak = 0;
-                    if (!cc_step_hub_any_idle(ctx->hub, &lane))
+                    if (lane.slow && !cc_step_hub_any_idle(ctx->hub, &lane))
                         cc_server_grow_on(ctx, "saturation");
                 }
             } else {

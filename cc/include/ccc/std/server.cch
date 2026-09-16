@@ -36,10 +36,11 @@
  *
  * Workers. The engine finds its own level: init(0) caps at the processor
  * count; every worker accepts and a heavier one leaves the listen socket
- * to a lighter peer; a saturated worker (waits that keep returning with
- * work, no idle peer) or a stalled one (a step over 200 us with steps
- * queued behind it) adds a worker up to the cap; steps behind a stalled
- * worker are taken by an idle peer its lane woke. A page sets nothing.
+ * to a lighter peer. Busy wakes under load are not saturation — a worker
+ * grows only when a prior batch was slow (a step over 200 us) with no idle
+ * peer, or when a peer is stalled with steps queued behind it; grows are
+ * spaced so steal feedback cannot climb the cap. A poked idle peer takes
+ * steps behind a stalled worker. A page sets nothing.
  *
  * `serve` lives in server_serve.ccs, a member of this module: workers,
  * wait, grow, and the step. Tape interest is server_poll.cch / .ccs.
