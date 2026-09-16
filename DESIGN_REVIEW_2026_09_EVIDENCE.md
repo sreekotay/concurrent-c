@@ -220,6 +220,11 @@ runtime rows; the table above for the program rows.
 | Trust is by first-parameter shape and extends to embedded types: an `Outer*`-first body stores through `o->in.done` where `Inner` is `r: *` | `studies/typeview_boundaries/nested_trust.ccs` | design (boundary) |
 | A taken address bypasses the allow-list (`&x.done`); the walk already refuses `&v` on a binder (`lower_forin.cch:530`); counting unary `&` on a member as a store in the allow-list check (`lower_ufcs.cch:2340-2375`, `uf_is_store`) closes it | `studies/typeview_boundaries/addr_peel.ccs` | unimplemented (one condition) |
 | cctext: 71 `RtxDoc*`-first bodies in `core/`, 3 in `frontend/`; 7 stores to `find.*` state fields outside `core/find.ccs` | grep | observation |
+| Hand-rolled versions and validity: 22 fields named `valid`/`dirty`/`stale`/`gen`/`epoch`/`version` across specimens. Version-and-stamp in three: cctext `edit_gen` (bumped `document.ccs:5201,5556,5590`) with `safe_gen` "last flushed edit_gen" and dirty as inequality (`workspace.ccs:160,187`); stylo `inv_stamp`/`inv_gen`, `bloom_stamp`/`bloom_gen` per node (`stylebench_cc.ccs:2139-2164,3261-3263`); staticd poll `gen`, `hit_epoch`, `wake_epoch` (`CCServerPoll.cch:61-90`) | grep | design (pattern unnamed) |
+| Tag beside payload: `disk_valid` + `disk_mtime/sz/ino` (`document.cch:224-227`), `mark_valid` + `mark_line/off` (`safe.cch:50-52`), `seek_valid` + `seek_rel` | cctext | design (variant) |
+| Count beside set: `nworkers` CAS in two helpers, decremented on two exit paths (`CCServer.ccs:269-287,875,946`); curl `live` CAS with two rollbacks (`thrdqueue.ccs:450-465`) and conditional idle exit (`:423`) | staticd, curl | design |
+| Record moved by interleaved stores: find `scan_off/scan_bytes/done/truncated` in the stage block (`find.ccs:359-378`); the UI reads them on another fiber | cctext | design (tearing) |
+| No comment in the corpus says "keep in sync", "must match", or "mirror" | grep | observation |
 
 | Observation | Where | Tag |
 |-------------|-------|-----|
