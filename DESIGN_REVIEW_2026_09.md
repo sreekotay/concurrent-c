@@ -203,6 +203,14 @@ object, a closure's holder, a task's join set, a channel (unbounded).
 Lifetimes are ordered by containment. One rule: **a view may be held by
 `H` only if the view's lifetime is greater than or equal to `H`'s.**
 
+The checker refuses shapes; it does not prove absence. Aliasing through
+a pointer, an array of views, a copied aggregate, or a pointer parameter
+is outside it. Every refusal is a real bug. What it misses, the token
+catches where an owner acts. The order is total within a frame and
+across join sets; a view stored into shared state and read by another
+fiber after a reset is a temporal question it does not see, and rests on
+the token and the hold discipline.
+
 Each existing check is an instance:
 
 | Existing rule | Instance |
@@ -219,32 +227,51 @@ Each existing check is an instance:
 
 The rule reaches the holders the step does not see, with these facts:
 
-1. **Arena-last is inferred.** A call whose last argument is an arena
-   returns a view of that arena. Over-approximation can only miss,
-   never refuse wrongly.
-2. **Field paths are names.** `d.store` is a lifetime while `d` is; a
-   view stored into `d.body` is held by `d`.
+1. **Arena-last is inferred, as a minimum.** A call whose last argument
+   is an arena returns a view that lives no longer than that arena or
+   any view argument. Ending any of them while the result is live is
+   refused. This is conservative: a callee that did not use the arena
+   for its result still pins it. The convention makes that rare.
+2. **Field paths of local values are names.** `d.store` is a lifetime
+   while `d` is; a view stored into `d.body` is held by `d`. Handles are
+   copyable, so names alias: `CCArena b = a` and `m.arena = b` join one
+   alias set, and an epoch end through any member counts for all. Paths
+   through a pointer parameter stay the caller's to state.
 3. **A kept parameter is declared.** One attribute on a parameter or a
-   field: this view is kept for the receiver's or object's lifetime. The
+   field: this view is kept, by default for the receiver's or object's
+   lifetime, else for the named parameter's or for static. The
    comparison moves to the call site, where both lifetimes are locals.
-   The receiver is the only lifetime variable needed, because arena-last
-   and receiver-first already fix which lifetime is meant.
+   Lifetime targets are parameter names; there are no lifetime
+   parameters, no generics over them, no variance, and nothing on paths
+   that only pass a view through.
 4. **A dest is a join set.** Late admit pins like spawn.
 5. **Scoped spawn compares scopes.** The join set's scope must lie
    inside the captured lifetime's scope; `leave` is an escape.
 6. **Send of an aggregate with an arena moves the binding.** The
    sender's name is dead afterward, as after adopt or detach.
 7. **Copying an owner handle without a move is refusable** (compile
-   time), and a stale copy refuses at run time (see 2.3 for the two ways
-   to pay for that).
+   time), and a stale copy refuses at run time (2.3). A storage-bound
+   child's host is carved from its parent's slab and dies with it; a
+   stale handle to one is outside the runtime half.
 8. **Runtime handles are born into an owner.** Turnstile, parallel, and
    exclusive get `create_*` constructors like nursery and pool, per the
    storage classes the lifetime-parents design already defines.
 9. **The own step runs after UFCS, or composes names by the universal
    rule.** Restore, try_restore, and detach join the epoch-ending table.
 
+10. **An arena-last parameter is the `Alloc` face by default.** A callee
+    may add bytes to the caller's lifetime and may not reset, restore,
+    detach, or destroy it. Faces are erased; the cost is zero. This
+    makes the failure path structural and the inference in item 1 safe
+    against the callee ending the lifetime it was handed.
+
 Diagnostics name both ends: the view's lifetime, the holder's, and which
 ends first.
+
+Each new refusal lands first as a note that does not fail the build,
+runs across the specimens and the compiler's own sources, and becomes an
+error when its false-refusal count is known. A wrong refusal costs more
+than a missing one; this is the procedure that honors it.
 
 Not covered by any lifetime rule: untracked heap, foreign memory,
 bounds, arithmetic.
@@ -262,12 +289,13 @@ time is not, and there are two ways to pay:
 | Option | Runtime | Memory | ABI |
 |--------|---------|--------|-----|
 | hosts never unmapped, no generation | none on alloc; a stale copy reads a dead host and `is_live` is false | freed hosts are retained and reused, like owner headers; a heap arena's host must be allocated apart from its region, one more malloc per heap arena | none; ABA remains: a stale copy can see a reborn host |
-| generation in the handle | one mask on every host peel; one compare in `is_live` | same retention | the handle stays 8 bytes (tag above the 48-bit pointer on 64-bit; 32-bit pointer plus 32-bit generation on ILP32) but host C that peels `.a` / `.p` directly no longer holds a raw pointer |
+| generation as a tag above the 48-bit pointer | one mask per host peel; one compare in `is_live` | same retention | 8 bytes, but fragile: 57-bit addressing, ARM top-byte-ignore, and pointer authentication all use those bits |
+| generation with an index handle: 32-bit index into a host table plus 32-bit generation | one dependent load per host peel on the alloc path | same retention plus the table | 8 bytes on both widths; no pointer in the handle; host C that peels `.a` / `.p` breaks |
 
-The second closes ABA. Both cost one allocation per heap arena, which
-is on the per-request path. The static half alone covers every copy the
-checker can see; the runtime half covers copies that reach a field or a
-parameter.
+Oldest-first reuse of hosts defers ABA to many arenas later without a
+generation. Take that now; the index handle is the upgrade if ABA is
+ever observed. The static half alone covers every copy the checker can
+see; the runtime half covers copies that reach a field or a parameter.
 
 Item 8 is cheaper than today. The handle is a bump from the owner plus
 one attach record, and it dies in the owner's walk. Today a turnstile is
