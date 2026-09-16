@@ -89,6 +89,33 @@ Boundary probes, run on seed 0.4.0-404 (`studies/lifetime_boundaries/`):
 | Handle copy, destroy through the copy, use of the original: compiles and segfaults | design and runtime |
 | Reset after last use is refused by scope, not liveness | design; false refusal |
 
+Peel census, `.ptr` sites in `.ccs` / `.cch` (grep, approximate):
+
+| Specimen | Peels | Lines | Per kloc |
+|----------|------:|------:|---------:|
+| stylo-cc engine | 119 | 6346 | 18.7 |
+| staticd | 101 | 6144 | 16.4 |
+| lowerer | 635 | 47853 | 13.2 |
+| pigz | 45 | 4362 | 10.3 |
+| cctext core | 249 | 26906 | 9.2 |
+| cctext frontend | 69 | 9220 | 7.4 |
+| redis | 43 | 5982 | 7.1 |
+| levenshtein | 4 | 713 | 5.6 |
+| parallel_storm | 2 | 1098 | 1.8 |
+| raytracer, random_access, curl port | 0 | | 0 |
+
+Of 553 peels in the eight text-heavy specimens: index `.ptr[i]` 20%;
+null or OOM check on a slice 17%; pointer arithmetic 7%; casts 7%;
+`mem*` calls 4%; C or CC API taking pointer plus length 3%; the rest are
+peels into a local `const char*` then a C loop, and comparisons.
+`cc_parse` and socket write are the stdlib signatures that force a peel.
+
+| Observation | Tag |
+|-------------|-----|
+| `cc_arena_alloc_slice_bytes` returns an empty slice on failure; 17% of peels are the null check this forces; the walk recipe's `if (buf.len != 8)` is the same check | design; contradicts the-cc-way |
+| Scanner loops peel where `index_of`, `trim_set`, `starts_with`, `last_index_of` already exist | doc, and a cursor verb set |
+| `cc_parse(G, s.ptr, s.len, …)` and `sock->write(s.ptr + off, …)` take pointer plus length | unimplemented; slice twins |
+
 Implementation, from `cc/include/ccc/cc_arena.cch` and `cc_slice.cch`:
 
 | Observation | Where | Tag |

@@ -352,7 +352,37 @@ lookup; that fact belongs to the compiler.
   overflow with the root epoch instead of promoting.
 - The 32-bit grower epoch drawn from one global counter.
 
-### 2.5 Surface that does no work
+### 2.5 The Gap
+
+Safety is three layers, each with one job:
+
+| Layer | Checks | Where |
+|-------|--------|-------|
+| verbs | bounds, extent snapshot, generation | every access that is not a peel |
+| token | a stale handle cannot grow, release, or destroy | every owner operation |
+| order | a view is not kept past its lifetime | before the program runs |
+
+`.ptr` is the one exit from the first layer. It is legal C, it is
+visible, and it is counted. The lever on the first layer is needing it
+less. What forces it today, in order of weight:
+
+1. A null check on a slice, because allocation returns an empty slice on
+   failure. Failure must not look like an empty success; allocation is a
+   Result.
+2. Scanning with an index: skip, find, look back, look ahead. Most of it
+   is a verb that exists and was not reached for. The rest is a cursor:
+   peek, take-while, skip-while, rest, as a view that advances.
+3. Copying into a raw buffer held in a struct. The buffer is a slice
+   window; dest-bulk applies.
+4. Reinterpreting bytes as a record, or decoding them by hand. A checked
+   typed view over bytes, or the grammar.
+5. Stdlib signatures that take pointer plus length. Slice-taking twins.
+
+Numeric and handle code peels nowhere. Text processing peels most. The
+Gap is a text-processing gap, and the largest part of it is the arena
+API contradicting the rule that failure is never an empty success.
+
+### 2.6 Surface that does no work
 
 - Three constructors taught as three ideas; they are one lifetime and
   three storage policies.
