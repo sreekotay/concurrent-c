@@ -140,6 +140,14 @@ Ownership by scope versus by object (grep, `.ccs` / `.cch`):
 | cctext frontend | 3 | 0 | 43 | 0 |
 | stylo engine | 3 | 1 | 3 | 0 |
 
+cctext `RtxDoc_destroy` (`core/document.ccs`) destroys the tree first
+and stops the find scan near the end; the field order declares find last,
+so the destroy chain would stop the scan first and free the tree last. A
+live scan at close reads a destroyed tree unless callers always stop it
+first. **check; the chain's order is the dependency order.** The two
+steps the chain cannot do are a history clear (no hook) and a vec unbind
+that the chain already orders correctly.
+
 Refcounts: `CCArc`, `cc_arc_*`, and hand `->ref` / `refcnt` appear 0 times
 in `real_projects/`, cctext, stylo-cc, rlsw-cc, and `examples/`; 45 in
 `cc/include`, 15 in `tests/`, 8 in `cc/lower` (the diagnostic that
