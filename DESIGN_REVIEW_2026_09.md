@@ -568,9 +568,10 @@ the head of each chain is name zero, since nothing passes zero unless
 the program passes the head's predecessor by hand; and serial elision
 requires the name order to agree with the ticket order, because on the
 sequential schedule every pass must precede its wait in program order
-or the one fiber parks on its own turn. On the parallel schedule a
-wait on a later ticket is an ordinary dependency, satisfied while a
-runner is free, and the detector is its floor.
+or the one fiber parks on its own turn. On either schedule a wrong
+name is a park the detector names, with its reason and its fiber: loud
+dead, never silent. The name order is the program's fact and the
+detector is its floor, by the preamble's rule.
 
 The nursery is the join set underneath `@parallel`: a wait-for's `h.n`
 is one, a dest's bodies are its children, EMPTY is its event. It is
@@ -722,14 +723,9 @@ detector.
 - **The host queue.** Retract, detach, poll-empty, grow and shrink are
   four faces or a statement that this ABI is the bag. Nothing here
   decides which.
-- **The name predicate.** A stage name may be any expression. The one
-  condition on it is elision's: on the sequential schedule the name
-  order must agree with the ticket order. A monotone name satisfies it
-  and is what every specimen writes. Whether the construct should
-  refuse a name it cannot see is monotone, require the predecessor to
-  be spelled, or leave the sequential park to the detector is open. A
-  related edge: `@stage` is ill-formed outside a wait-for body, so a
-  graph of dest bodies joined by names has the cell but no spelling.
+- **Stages outside the loop.** `@stage` is ill-formed outside a
+  wait-for body, so a graph of dest bodies joined by names has the
+  cell but no spelling.
 - **Two touchers.** A cell is one pass and one wait. Fan-in is several
   stages in sequence; fan-out is several passes. A cell with many
   waiters is a different object, and the exclusive layer's broadcast
