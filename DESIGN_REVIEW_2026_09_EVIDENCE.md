@@ -192,6 +192,8 @@ Implementation, from `cc/include/ccc/cc_arena.cch` and `cc_slice.cch`:
 | Construct census across specimens: brace join 27, `spawn` 20, dest attach 13, `@parallel for` 27, wait-for 12, `@stage` 29, `seq` 3, `n.spawn` 25, `adopt` 2, `fail` 5, `leave` 1 (curl), user `cc_parallel_honor` 0 | grep over `real_projects/`, `examples/`, cctext, rlsw-cc, stylo-cc | observation |
 | Host-queue faces not on the bag: retract, detach with leftover, poll-empty, grow/shrink after plant | `docs/plans/tickets_and_nursery_gaps.md` §1 | unimplemented |
 | Adopt is cancel-only; `h1.wait()` does not wait `h2` | spec §8.11.1; tickets plan §5 | design |
+| Nursery as teaching surface: README 0, the cc way 0, getting started 7, cheatsheet 10 mentions; recipes 3 of 14 files; a wait-for's `h.n` is a nursery (spec §8.11.6) | `docs/`, `examples/`, spec | doc |
+| Specimen nursery faces: spawn with capture list (pigz `pigz_parallel.ccs:190`, `ra_dist.ccs:219`, `redis_owner.ccs:1199`), `close(tx)` (`redis_owner.ccs:1195`), `leave(ctx, finish)` (`thrdqueue.ccs:635`), `@destroy` as join (all); `create_child` 0 users, `create_nursery` 0 users | `real_projects/` | design |
 | Loud-noop plant, then signal arm, workers, growth, respawn admitted onto one dest | `real_projects/staticd/CCServer.ccs:290-308,884-897` | design, works |
 | Same stop-and-accept block verbatim | redis idiomatic and sketch | design |
 | The compiler uses no concurrency construct; the parallel step is its largest | `cc/lower/lower_parallel.cch` | observation |
