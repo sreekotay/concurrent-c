@@ -7,8 +7,19 @@ Evidence from the corpus lives in `DESIGN_REVIEW_2026_09_EVIDENCE.md`.
 Sections are ordered by what a reader meets first in a program.
 
 The goal is one path: tutorial, idiomatic, performant, and production
-are the same code, and it is safe. Safe is measured on five terms, not
-on soundness:
+are the same code, and it is safe.
+
+Memory safety is a consequence of a program stating its facts, not a
+proof layer beside them. A lifetime parameter, a reference-counted
+cell, a lock wrapper, an unsafe block: each is text that carries no
+program logic, and text that carries no logic is where logic hides.
+Memory is one of the facts a program states, with outcome, authority,
+and join set; ownership is one of three seams a bug crosses, with wire
+truth and data model. A stated fact is checked strictly and refused
+loudly. An unstated fact is never inferred. The failure mode is the
+unstated fact, so safety widens by widening what can be stated.
+
+Safe is measured on five terms, not on soundness:
 
 | Term | Measures | Instrument |
 |------|----------|------------|
