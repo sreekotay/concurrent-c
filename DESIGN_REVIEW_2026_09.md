@@ -459,6 +459,10 @@ lookup; that fact belongs to the compiler.
 - Whether pre-mark regrow under a checkpoint should spill to per-object
   overflow with the root epoch instead of promoting.
 - The 32-bit grower epoch drawn from one global counter.
+- A germ: a peel that is returned. `.ptr` as a scoped claim with a
+  stated end, so an epoch cannot end while a peel is out and a peel that
+  outlives its block is the refusable shape. Lexical only; a counted
+  peel would be a refcount on views.
 
 ### 2.5 The Gap
 
