@@ -149,164 +149,133 @@ policy; privileging it is a library bias.
 
 ## 2. Arena as lifetime
 
-An arena names a lifetime. Everything else in this section is a
-consequence of taking that literally: what each construct encodes about
-lifetime, where the language currently encodes it twice, where it does
-not encode it at all, and the one relation that would let every existing
-check be an instance of a single rule.
+### 2.1 Status
 
-### 2.1 What the constructs encode
+An arena names a lifetime. Storage policy is a constructor argument. A
+slice carries the lifetime its bytes belong to. Arenas form a tree
+through lifetime parents. A function never chooses a lifetime for a
+product: it borrows scratch for the call, or writes into the arena the
+caller passed last.
 
-| Construct | Fact | Where it is stated | Who acts on it |
-|-----------|------|--------------------|----------------|
+| Construct | Fact | Stated at | Enforced by |
+|-----------|------|-----------|-------------|
 | `CCArena a = … @destroy` | a lifetime exists and ends here | the declaration | the ledger |
-| `cc_arena_stack` / `heap` / `buf` / `malloc` | how storage for that lifetime is obtained | the constructor | the runtime; never the checker |
-| `T[:]` with `id` | which lifetime these bytes belong to, and whether the view is unique, a sub-view, a grower, a C string | minted by the allocator | owners at run time; the own step at compile time, by name |
-| arena-last parameter | the product lives on the caller's named lifetime | the signature and the call | the reader; `clone_into` |
+| `cc_arena_heap` / `stack` / `buf` / `malloc` | how storage is obtained | the constructor | the runtime only |
+| `T[:]` with `id` | which lifetime these bytes belong to; unique, sub-view, grower, C-string | the allocator | owners at run time; the own step at compile time |
+| arena-last parameter | the product lives on the caller's lifetime | the signature | convention |
+| `@scratch` | one stack arena per function; a bound product lives to the frame, an unbound one is reclaimed after its statement | whether the product has a name | escape refused; tip restore after the statement |
 | `@detach` | the owner outlives this scope | the declaration | the caller's ledger |
-| `create_*(owner, …)` | this object is a part of `owner` and dies with it | the constructor name | the owner's teardown walk |
-| `adopt` / `attach` | a part moves into, or is registered with, a whole | the call | the walk; the cycle refusal |
-| checkpoint / restore | a child lifetime, materialized lazily: a mark until it needs a host of its own | the binding | the runtime; views above the mark go stale |
-| `T[:!]`, `recv`, `send_take` | exactly one name for these bytes | the type or the verb | the own step: copy, return, and use-after-move refused |
-| `send_into` | the payload is built in the receiver's lifetime | the verb | the reader; materialization at the boundary |
-| `@scratch` | one stack arena per function; a bound product lives to the frame, an unbound one is reclaimed after its statement | the operand, and whether the product has a name | the own step: escape refused; the lowering: a tip restore after a statement that bound nothing |
-| capture into a spawn | a task holds this lifetime until join | the closure | the pin: epoch-ending operations refused while live |
+| `create_*(owner, …)` / `adopt` / `attach` | a part of a whole; dies with it | the constructor or call | the teardown walk; cycle refusal |
+| checkpoint / restore | a child lifetime, materialized lazily: a mark until it needs a host | the binding | the runtime; views above the mark go stale |
+| `T[:!]`, `recv`, `send_take` | one name for these bytes | the type or verb | copy, return, use-after-move refused |
+| `send_into` | the payload is built in the receiver's lifetime | the verb | convention |
+| capture into a spawn | a task holds this lifetime until join | the closure | epoch-ending ops refused while pinned |
 
-Two things are true of this table. Every fact is stated at the position
-the instruction guide asks for: the narrowest place it becomes known.
-And the enforcement column is split between a static step that reads
-names and a runtime token that owners check.
+Lifetimes below the caller's named one: an unbound scratch product ends
+after its statement; a bound one at the frame; a frame arena at scope
+exit. Registration order is release order, so error defers on a bump
+arena unwind exactly; the failure path needs no mechanism.
 
-### 2.2 One fact, two encodings
+Parthood inherits one consequence: a whole destroys its parts, newest
+first, before releasing its own storage. Nothing else crosses the
+relation. The `Region` face lets a part stand in for its whole for
+allocation and no other authority.
 
-The slice id carries the arena's epoch and generation plus flag bits.
-Owners compare tokens: a stale handle cannot grow or destroy, and a reset
-advances the epoch so a view minted before it no longer matches. That is
-the dynamic encoding, and it is loud only where an owner is asked to act.
-A plain view read through a stale pointer is not checked.
+The lifetime fact is encoded twice. The slice id carries the arena's
+epoch and generation; owners compare tokens, and a stale handle cannot
+grow or destroy. The own step records which named arena a local borrows
+from and refuses by name. Neither checks a plain read through a view.
 
-The own step is the static encoding. It reads a declaration's type and
-initializer, records which named arena a local borrows from, and refuses
-a free of a borrow, an epoch end under a pin, a reset with a borrow in
-scope, a send of a non-stable view, a copy of a unique, an escape of
-scratch. It tracks locals only. Parameters, field paths, index
-expressions, and call results pass, by the rule that a wrong refusal
-costs more than a missing one.
+The own step tracks locals only. It reads C spellings and runs before
+UFCS resolution, so `a.reset()` is unchecked and `cc_arena_reset(a)` is
+checked. Restore and detach are not in its table. Views through a field,
+a call result, an unwrap, a kept parameter, a dest late-admit, or an
+arena held in a field are unchecked. A stack buffer captured into a
+nursery from an outer scope, or followed by `leave`, is unchecked. A
+send of an aggregate carrying an arena does not consume the sender's
+binding. A copied handle survives the host's free and dereferences it.
+Reset after last use is refused by scope, not liveness.
 
-So the fact "these bytes belong to lifetime L" is encoded twice, and the
-gap between the encodings is exactly the set of programs where a view
-outlives its lifetime without an owner ever being asked to act on it.
-That gap is where the remaining use-after-free lives.
+### 2.2 Proposal
 
-### 2.3 The order
+Every holder of a view has a lifetime: a local's frame, a field's
+object, a closure's holder, a task's join set, a channel (unbounded).
+Lifetimes are ordered by containment. One rule: **a view may be held by
+`H` only if the view's lifetime is greater than or equal to `H`'s.**
 
-Every holder of a view has a lifetime of its own. A local's holder is its
-frame. A field's holder is the object. A closure environment's holder is
-whatever holds the closure. A channel's holder is unbounded. A task's
-holder is the join set it belongs to.
+Each existing check is an instance:
 
-Lifetimes form a partial order by containment: the frame is inside the
-scope that declared its arenas; a child arena is inside its parent; a
-task is inside the join set that waits for it; a channel is inside
-nothing. Write `L1 <= L2` when `L1` ends no later than `L2`.
-
-One rule: **a view may be held by `H` only if the view's lifetime is
-greater than or equal to `H`'s.**
-
-Every existing check is an instance:
-
-| Existing rule | Instance of the order |
-|---------------|-----------------------|
-| stack slice cannot escape into a closure that outlives the frame | frame < closure's holder |
-| arena epoch pinned under spawn; reset refused while pinned | task <= join set, so the arena must be >= the join set until join |
-| reset refused with a borrow in scope | the borrow's frame <= the arena's current epoch |
-| channel send of a non-unique view refused | channel is unbounded; only a lifetime that moves with the payload qualifies: unique, static, or an arena riding in the message |
-| aggregate send checked field-wise | each field is a view with its own holder |
-| pointer-alias capture mutation refused | the alias's frame < the task |
-| `@scratch` cannot be returned or captured | the frame < any holder outside it; an unbound product's extent is one statement |
+| Existing rule | Instance |
+|---------------|----------|
+| stack slice cannot escape a closure that outlives the frame | frame < closure's holder |
+| epoch pinned under spawn; reset refused | task ≤ join set ≤ arena |
+| reset refused with a borrow in scope | borrow's frame ≤ epoch |
+| channel send of a non-unique view refused | channel is unbounded; only unique, static, or an arena riding with the message qualifies |
+| aggregate send checked per field | each field is a view with its holder |
+| pointer-alias capture mutation refused | alias's frame < task |
+| scratch cannot be returned or captured | frame < any outside holder |
 | child-free ban | a borrow's holder may not end its lifetime |
-| teardown order of parts, newest first | parts registered later are <= parts registered earlier; a waiter attached before its resource inverts the order and is refusable |
+| teardown newest first | later parts ≤ earlier parts; a waiter attached before its resource is refusable |
 
-The last row is the check the lifetime-parents design leaves to
-convention. Under the order it is a comparison, not a walk.
+The rule reaches the holders the step does not see, with these facts:
 
-The rule also unifies what the CVE study scores separately. A stack work
-struct captured by reference into a nursery declared in an outer scope is
-frame < join set. A bare pointer on a channel whose pointee is arena or
-frame memory is arena < unbounded. What the order cannot decide is what
-no lifetime rule can: untracked heap, foreign memory, bounds, arithmetic.
+1. **Arena-last is inferred.** A call whose last argument is an arena
+   returns a view of that arena. Over-approximation can only miss,
+   never refuse wrongly.
+2. **Field paths are names.** `d.store` is a lifetime while `d` is; a
+   view stored into `d.body` is held by `d`.
+3. **A kept parameter is declared.** One attribute on a parameter or a
+   field: this view is kept for the receiver's or object's lifetime. The
+   comparison moves to the call site, where both lifetimes are locals.
+   The receiver is the only lifetime variable needed, because arena-last
+   and receiver-first already fix which lifetime is meant.
+4. **A dest is a join set.** Late admit pins like spawn.
+5. **Scoped spawn compares scopes.** The join set's scope must lie
+   inside the captured lifetime's scope; `leave` is an escape.
+6. **Send of an aggregate with an arena moves the binding.** The
+   sender's name is dead afterward, as after adopt or detach.
+7. **Copying an owner handle without a move is refusable**, and the
+   handle carries a generation so a stale copy refuses at run time. On
+   64-bit the generation fits above the 48-bit pointer; on ILP32 a
+   32-bit pointer and a 32-bit generation are the same 8 bytes.
+8. **Runtime handles are born into an owner.** Turnstile, parallel, and
+   exclusive get `create_*` constructors like nursery and pool, per the
+   storage classes the lifetime-parents design already defines.
+9. **The own step runs after UFCS, or composes names by the universal
+   rule.** Restore, try_restore, and detach join the epoch-ending table.
 
-### 2.4 What the order needs that is not on the page
+Diagnostics name both ends: the view's lifetime, the holder's, and which
+ends first.
 
-Three holders have no lifetime story today.
+Not covered by any lifetime rule: untracked heap, foreign memory,
+bounds, arithmetic.
 
-**Parameter views.** A callee that receives `char[:] src` knows only that
-the bytes outlive the call. Storing that view into the receiver, a field,
-or an arena-held object is the one place the checker is silent and the
-instruction guide answers with a convention: materialize at the boundary,
-clone into the arena the caller named last. The convention is right and
-it is not checkable, because the callee cannot compare a lifetime it
-does not know.
+### 2.3 Open
 
-The fact that is missing is the callee's: this parameter is kept. The
-narrowest place it becomes known is the signature. Stated there, the
-comparison moves to the call site, where both lifetimes are locals and
-the order decides. That is one attribute on a parameter, no lifetime
-variables, no inference. A callee that keeps a view without saying so is
-then the refusable shape.
+- The kept-parameter spelling, and whether an undeclared keep is an
+  error or a warning during transition.
+- A debug read-check through the view verbs, once a view can find its
+  host: hosts draw epochs in 256-aligned blocks, so a block-to-host
+  registry maintained at draw time is the lookup.
+- Last-use liveness within a block, so a reset after the last use of a
+  view is not refused.
+- Pinning a mark instead of the whole arena when a task holds a view
+  minted above a checkpoint.
+- Whether pre-mark regrow under a checkpoint should spill to per-object
+  overflow with the root epoch instead of promoting; promotion is on the
+  scratch hot path, so a replacement must be as cheap.
+- Grower view ids carry a 32-bit epoch from one global counter; the
+  generation should live elsewhere or growers need a wider id.
 
-**Closure environments.** A closure's environment has the lifetime of
-whatever holds the closure. The closure step already computes this in
-the negative: a closure escapes the frame if returned, assigned to a
-member, or passed to a call that is not a scoped spawn. Under the order
-the environment is a holder like any other, its lifetime is that of its
-own holder, and the capture table is derived rather than enumerated.
-Channels, nurseries, and closures predate arena-as-lifetime; this is the
-re-derivation that makes them one model.
+### 2.4 Surface that does no work
 
-**Runtime handles.** A turnstile, a parallel handle, an exclusive, a pool
-are objects with interior pointers and a dead state. The lifetime-parents
-design already says what such objects are: parts born into a whole by a
-`create_*` constructor, never moved by copy. Today only nurseries and
-pools have that constructor; the rest are declared by value and the
-program mints an arena, or a heap allocation, to host them. Extending
-`create_*` to every hooked runtime type is not a new idea. It is the
-existing storage-class rule applied to the types that were built before
-it.
-
-### 2.5 The mereology, stated once
-
-Parthood is the relation the tree encodes, and it inherits exactly one
-consequence: a whole destroys its parts, newest first, before releasing
-its own storage. Nothing else is inherited. A part is not cancelled
-because its whole is; a view is not owned because its holder is; a
-container is not a parent because it embeds an arena unless it exposes
-that arena as a face. The cycle refusal in `adopt` is the statement that
-parthood is proper. The `Region` face on a nursery is the statement that
-a part may stand in for its whole for one authority, allocation, and no
-other.
-
-That discipline is the instruction guide's "relations do not inherit
-consequences" applied to the one relation that must inherit one.
-
-### 2.6 Surface that does no work, and what is open
-
-- Three arena constructors that share one engine and differ only in
-  where L1 lives are taught as three ideas. They are one lifetime and
-  three storage policies; the pages should say so in that order.
-- "Provenance" is used for the runtime token and for the static fact.
-  They are the same fact and should share a name, or the pages should say
-  which one each rule reads.
-
-Open:
-
-- The kept-parameter attribute: its spelling, and whether a keep of a
-  parameter without it is an error or a warning during the transition.
-- Whether the runtime token should also guard view reads in debug builds,
-  so the dynamic encoding covers the gap until the static one does.
-- Whether a checkpoint's stale views, which the token already detects,
-  should be a compile-time refusal when the view and the mark are both
-  locals. That is the same order applied to a mark instead of an arena.
+- Three constructors taught as three ideas; they are one lifetime and
+  three storage policies.
+- "Provenance" used for both the runtime token and the static fact.
+- `@scratch(N)` taught as a size; it is the root, and larger products
+  spill and are still reclaimed.
+- The spec's capture example shows a stack slice into a same-frame
+  nursery as an error; the closure step accepts it, correctly.
 
 ## 3. Join and job
 
