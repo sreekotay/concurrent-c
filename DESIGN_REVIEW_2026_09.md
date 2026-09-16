@@ -259,9 +259,11 @@ walks them last-declared first, transitively, with dead-state no-ops,
 the same order as the arena walk. Declaration order is the dependency
 order. What a struct is not, is a part of the tree: its own owner does
 not tear it down without a call. That half exists only for arenas,
-through attach and `create_*`, and the primitive that would give it to
-any hooked type, an attach record whose function is the type's chain,
-is already in the runtime without a typed constructor over it.
+through attach and `create_*`. Creation, placement, and ending are
+separate annotations; `name@(args)` says nothing about ending and must be
+followed by `@destroy` or `@detach`. The attach primitive already exists;
+the spelling that hands a hooked value's obligation to a named owner
+does not.
 
 Parthood inherits one consequence: a whole destroys its parts, newest
 first, before releasing its own storage. Nothing else crosses the
@@ -343,12 +345,16 @@ The rule reaches the holders the step does not see, with these facts:
    time), and a stale copy refuses at run time (2.3). A storage-bound
    child's host is carved from its parent's slab and dies with it; a
    stale handle to one is outside the runtime half.
-8. **Any hooked type is born into an owner.** A typed constructor
-   allocates the object in the owner and attaches a record whose function
-   is the type's destroy chain. Turnstile, parallel, and exclusive get it
-   first, per the storage classes the lifetime-parents design defines;
-   a document created into a workspace dies in the workspace's walk with
-   no call on the page.
+8. **The obligation may go to a named owner.** Three facts stay
+   separate: how a value comes to be (`name@(args)` or any expression),
+   where it is placed (a scope value, an owner's storage, its own heap),
+   and who ends it (`@destroy` this scope, `@detach` the caller). The
+   third has no spelling for "a named owner" except the arena-only
+   `create_*` family, which also fixes placement. One annotation for any
+   hooked value, attaching a record whose function is the type's destroy
+   chain, gives turnstile, parallel, exclusive, and a document created
+   into a workspace a holder with no call on the page, without
+   conjoining creation, placement, and ending.
 9. **The own step runs after UFCS, or composes names by the universal
    rule.** Restore, try_restore, and detach join the epoch-ending table.
 
