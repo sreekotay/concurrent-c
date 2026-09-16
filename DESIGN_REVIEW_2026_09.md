@@ -478,18 +478,27 @@ Safety is three layers, each with one job:
 visible, and it is counted. The lever on the first layer is needing it
 less. What forces it today, in order of weight:
 
-1. A null check on a slice, because allocation returns an empty slice on
-   failure. Failure must not look like an empty success; allocation is a
-   Result, for the slice form and the pointer form. The C twins stay
-   pointer-returning. Measured: no cost on the shared or the local bump.
+1. A helper declared with a pointer and a length, called with a peel
+   at every site. The signature becomes a slice; a note on any
+   pointer-and-length parameter pair where a slice would do makes the
+   rewrite mechanical. This is the largest share and it is user code,
+   not the stdlib.
 2. Scanning with an index: skip, find, look back, look ahead. Most of it
    is a verb that exists and was not reached for. The rest is a cursor:
    peek, take-while, skip-while, rest, as a view that advances.
-3. Copying into a raw buffer held in a struct. The buffer is a slice
+3. A null check on a slice, because allocation returns an empty slice on
+   failure. Failure must not look like an empty success; allocation is a
+   Result, for the slice form and the pointer form. The C twins stay
+   pointer-returning. Measured: no cost on the shared or the local bump.
+4. Copying into a raw buffer held in a struct. The buffer is a slice
    window; dest-bulk applies.
-4. Reinterpreting bytes as a record, or decoding them by hand. A checked
+5. Reinterpreting bytes as a record, or decoding them by hand. A checked
    typed view over bytes, or the grammar.
-5. Stdlib signatures that take pointer plus length. Slice-taking twins.
+6. Stdlib signatures that take pointer plus length. Slice-taking twins.
+
+Together these remove about nine in ten peels. What remains is identity
+comparison and calls into C libraries, which is the returned peel's
+territory.
 
 Numeric and handle code peels nowhere. Text processing peels most. The
 Gap is a text-processing gap, and the largest part of it is the arena
