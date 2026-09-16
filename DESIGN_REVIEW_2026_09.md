@@ -245,6 +245,12 @@ and was chosen from problems that already have an owner; a shared-graph
 problem with churn has not been run. Token refusal covers writers today
 and readers only once the verbs check.
 
+Scope carries most ownership in pipeline- and request-shaped programs,
+about half in a server, and almost none in a long-lived object model,
+where teardown is a hand-written destroy function. The skeleton is
+scopes plus arenas: a struct that owns things is outside the tree unless
+it embeds an arena and exposes it as a face. Most owners are structs.
+
 Parthood inherits one consequence: a whole destroys its parts, newest
 first, before releasing its own storage. Nothing else crosses the
 relation. The `Region` face lets a part stand in for its whole for
@@ -316,8 +322,11 @@ The rule reaches the holders the step does not see, with these facts:
 4. **A dest is a join set.** Late admit pins like spawn.
 5. **Scoped spawn compares scopes.** The join set's scope must lie
    inside the captured lifetime's scope; `leave` is an escape.
-6. **Send of an aggregate with an arena moves the binding.** The
-   sender's name is dead afterward, as after adopt or detach.
+6. **Crossing into the flow is a move.** A send that carries an owner
+   detaches it from the sender's tree; the sender's name is dead
+   afterward, and a receive adopts or takes it. Provenance keeps views
+   on the graph safe; this keeps parthood from being claimed by two
+   trees.
 7. **Copying an owner handle without a move is refusable** (compile
    time), and a stale copy refuses at run time (2.3). A storage-bound
    child's host is carved from its parent's slab and dies with it; a
