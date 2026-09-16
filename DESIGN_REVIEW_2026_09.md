@@ -538,7 +538,7 @@ reconstructs the job beside it.
 | `@parallel { a = f(); b = g(); }` | these arms are independent and all done here | the brace | the join; racing arms undefined |
 | `@parallel (pred)` / `seq (cond)` / `#pragma(@parallel) off` | the schedule below this cut is sequential | the predicate or the directive | one body, two lowerings |
 | `@parallel for (i in lo..hi)` | iterations are independent | the range | bisection; `break` as a shared stop |
-| `@parallel wait (ts) for` + `@stage` | tickets enter in order; this state hops from `i` to `i+1` | the gate and the block | the turnstile; a failed stage wakes its successor `err` |
+| `@parallel wait (ts) for` + `@stage (gate, name…)` | at most `cap` tickets in flight; this block runs after the name it waits on is passed and before it passes its own | the cap, the gate, the name | a named one-shot cell, two touchers; a failed pass wakes the waiter `err` |
 | `cache (name)` | this local is per-ticket scratch | the clause | one instance per runner slot |
 | `CCParallel h = @parallel {…}`, `@parallel(h) {…}` | this work belongs to that join set; it may outlive the frame | the bind, the admit | closure capture rules; admit after join aborts |
 | `h.close(tx)` / `n.close(tx)` | this stream ends when this join set is empty | the registration | EMPTY, on both paths |
@@ -547,6 +547,25 @@ reconstructs the job beside it.
 | `h.cancel()`, `h.pause()` | stop or hold at the next seam | the call | honor at thunk start, half, leaf, enter, ticket, stage |
 | `n.spawn(() => …)`, `n.leave(ctx, finish)` | a child of this owner; the owner is gone, run this at EMPTY | the nursery | never denied; leftover on the LEFT path |
 | `@with_deadline(...) as dl` | the clock these arms share | the name | spawned arms see no caller clock unless named |
+
+The stage is a name, not an index. Underneath the turnstile is one
+exclusive map of gate cells keyed by a 64-bit name: whichever of `wait`
+or `pass` touches a name first creates the cell, the second completes
+it and frees it, so live cells stay at the in-flight count and the
+program never holds a graph. The turnstile is a depth channel plus one
+name base per gate, and its only rule is that `pass(n)` touches `n+1`.
+`@stage (gate, k, expr)` feeds the same expressions to the wait and the
+pass, so the program chooses which name each ticket sits at and which
+gate `k` it sits in; the successor is the next name in that gate. Every
+stage in the corpus names its ticket by the loop index. That is the
+shape of a block chain and a tile scan, not of the construct: a ticket
+may sit in several gates, a gate is a chain, and the order stated is
+the union of the chains. What the construct does not state is the
+condition that makes the sequential path and the cap safe: a name's
+predecessor must be an earlier ticket in loop order and within `cap`
+of it, and each gate's chain starts at name zero because nothing
+passes zero. Those are the program's facts today and nothing reads
+them.
 
 The nursery is the join set underneath `@parallel`: a wait-for's `h.n`
 is one, a dest's bodies are its children, EMPTY is its event. It is
@@ -698,6 +717,18 @@ detector.
 - **The host queue.** Retract, detach, poll-empty, grow and shrink are
   four faces or a statement that this ABI is the bag. Nothing here
   decides which.
+- **The name predicate.** A stage name may be any expression, and the
+  three conditions on it (an earlier ticket, within `cap`, chains from
+  zero) are unstated. A monotone name in loop order satisfies all
+  three and is what every specimen writes. Whether the construct should
+  refuse a non-monotone name, require the program to spell the
+  predecessor, or leave the fact to the detector is open. A related
+  edge: `@stage` is ill-formed outside a wait-for body, so a graph of
+  dest bodies joined by names has the cell but no spelling.
+- **Two touchers.** A cell is one pass and one wait. Fan-in is several
+  stages in sequence; fan-out is several passes. A cell with many
+  waiters is a different object, and the exclusive layer's broadcast
+  is not reachable through the stage.
 
 ### 3.5 Surface that does no work
 
