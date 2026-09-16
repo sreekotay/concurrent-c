@@ -568,10 +568,16 @@ the head of each chain is name zero, since nothing passes zero unless
 the program passes the head's predecessor by hand; and serial elision
 requires the name order to agree with the ticket order, because on the
 sequential schedule every pass must precede its wait in program order
-or the one fiber parks on its own turn. On either schedule a wrong
-name is a park the detector names, with its reason and its fiber: loud
-dead, never silent. The name order is the program's fact and the
-detector is its floor, by the preamble's rule.
+or the one fiber parks on its own turn. The name order is the
+program's fact and the detector is its floor, by the preamble's rule.
+Today the floor holds on one schedule and not the other. On the
+parallel schedule a wrong name fires the detector, and the report says
+two fibers parked in `exclusive_when`, with no gate, no name, no
+ticket, and no line, under a causes list that names channels and
+joins. On the sequential schedule the caller parks on the host-thread
+path, which the detector does not scan, and the program hangs with
+nothing printed. The floor is a floor only where the park is a
+fiber's, and it is loud only if it names what the program named.
 
 The nursery is the join set underneath `@parallel`: a wait-for's `h.n`
 is one, a dest's bodies are its children, EMPTY is its event. It is
@@ -698,6 +704,16 @@ which is loud.
 Not admitted: reading `h.n` or `h.nt` as finished; a runtime that
 guesses a partner set for a park; a debug build with a different
 detector.
+
+The detector's report is part of its cost account, since a floor that
+does not name the program's own words is paid for twice, once in the
+hang and once in the reading. What it can say for free: the park
+reason as the construct (`@stage wait`), the gate, the stage, the
+name, and the ticket, which the wait already holds; the file and line,
+which the park macro already passes and the V2 path discards; and a
+host-thread park on a runtime object counted as an internal wait, so
+the sequential schedule is not silent. Each is a store the park path
+makes once.
 
 ### 3.4 Open
 

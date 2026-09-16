@@ -1,0 +1,17 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+#include <stdlib.h>
+int main(int argc, char** argv) {
+    int n = 8;
+    int use_par = argc > 1 ? atoi(argv[1]) : 1;
+    @errhandler(CCError e) { eprintln("err"); return 2; }
+    cc_arena_stack(a, kilobytes(64));
+    CCTurnstile ts@(2, 1, a) !> @destroy;
+    /* ticket i sits at name (i*5)%n: 0,5,2,7,4,1,6,3 -- not monotone */
+    bool fin = @parallel seq (use_par) wait (ts) for (i in 0..n) {
+        @stage (ts, 0, (i * 5) % n) { eprintln(@string(`ticket ${i}`, @scratch)); }
+    } !>;
+    (void)fin;
+    println("done");
+    return 0;
+}
