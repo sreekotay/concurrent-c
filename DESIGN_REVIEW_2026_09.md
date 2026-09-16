@@ -851,6 +851,22 @@ intermediate states it would allow and the hold covers the residue; a
 per-instance validator, since a fact stated per construction is
 invisible at the type; a subscriber graph.
 
+The graph is not needed, and the signal libraries say why. In Preact's
+core a computed with no watcher never subscribes to its sources: it
+pulls, checks a global version for the quiet case in constant time,
+walks its sources' versions only when the global one moved, and
+re-stamps itself when they are unchanged. The graph exists to serve
+effects, code that must run on a change without being read, and to mark
+subtrees dirty so a read can skip the walk. Here an effect is a fiber
+parked on a channel or a signal and woken by the writer's own
+statement, and the quiet-case skip is the global counter. Each cache
+is a versioned primary to its own readers, so a recompute that yields
+the same value bumps nothing and cut-off is free. Pull with versions
+is also glitch-free by construction, where push needs batching to
+avoid running an effect on a half-updated diamond. What a graph would
+cost on the store path, a traversal of subscribers per write, is what
+keeps it out: the store is the hot path and it stays one increment.
+
 ### 4.3 Cost
 
 | Item | Run-time cost | Memory |
