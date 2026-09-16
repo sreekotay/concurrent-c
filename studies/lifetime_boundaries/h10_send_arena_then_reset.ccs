@@ -1,0 +1,17 @@
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/prelude.cch>
+typedef struct { CCArena arena; char[:] view; } Msg;
+int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
+    Msg[~4 >] tx;
+    Msg[~4 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
+    (void)ch; (void)rx;
+    CCArena b = cc_arena_heap(256);
+    Msg m;
+    m.arena = b;
+    m.view = cc_arena_alloc_slice_bytes(b, 4);
+    tx.send(m) !>;
+    cc_arena_reset(b);
+    return 0;
+}

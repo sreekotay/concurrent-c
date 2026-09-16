@@ -1,0 +1,11 @@
+#include <ccc/std/prelude.cch>
+static void use(char[:] s) { (void)s; }
+
+static char[:] mk(int n, CCArena a) { return cc_arena_alloc_slice_bytes(a, (size_t)n); }
+int main(void) {
+    CCArena a = cc_arena_heap(1024) @destroy;
+    char[:] s = mk(8, a);
+    cc_arena_reset(a);
+    use(s);
+    return 0;
+}

@@ -1,0 +1,16 @@
+#include <ccc/std/prelude.cch>
+static void use(char[:] s) { (void)s; }
+
+int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
+    CCArena store = cc_arena_heap(4096) @destroy;
+    Map::[char[:], int] m = map_new::[char[:], int](store);
+    {
+        cc_arena_stack(req, 256);
+        char[:] k = cc_arena_alloc_slice_bytes(req, 4);
+        (void)m->insert(k, 1);
+    }
+    int* v = m->get_ptr(cc_slice_empty());
+    (void)v;
+    return 0;
+}

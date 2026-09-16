@@ -1,0 +1,13 @@
+#include <ccc/std/prelude.cch>
+static void use(char[:] s) { (void)s; }
+
+typedef struct { CCArena store; int n; } Doc;
+int main(void) {
+    Doc d = {0};
+    d.store = cc_arena_heap(256);
+    char[:] s = cc_arena_alloc_slice_bytes(d.store, 8);
+    cc_arena_reset(d.store);
+    use(s);
+    cc_arena_destroy(&d.store);
+    return 0;
+}

@@ -76,6 +76,19 @@ Work:
 | Callee vocabulary for send / reset / spawn is a string table in the step; mutation safety keyed on "atomic" in a callee name | `cc/lower/lower_own.cch`, `lower_closures.cch` | design, contradicts ADR-S2 |
 | Three constructors, one engine, differing in where L1 lives | spec §5.0 | doc |
 
+Boundary probes, run on seed 0.4.0-404 (`studies/lifetime_boundaries/`):
+
+| Observation | Tag |
+|-------------|-----|
+| Every ownership check is keyed to the C spelling; the taught UFCS spelling of reset and alloc is unchecked because the own step runs before UFCS | unimplemented |
+| restore, try_restore, detach are spec epoch-ending ops and absent from the step's table | unimplemented |
+| A stack slice captured into a same-frame nursery spawn is correctly accepted; the spec's capture example calls this an error | doc |
+| Outer nursery plus inner-block stack buffer compiles; `leave` after a stack capture compiles | design; frame < join set |
+| Views through a field, a call result, an unwrap, a kept parameter, a dest late-admit, and an arena held in a field are all unchecked | design; the holders in §2.4 |
+| Aggregate-with-arena send does not move the arena binding; sender may reset | design |
+| Handle copy, destroy through the copy, use of the original: compiles and segfaults | design and runtime |
+| Reset after last use is refused by scope, not liveness | design; false refusal |
+
 Implementation, from `cc/include/ccc/cc_arena.cch` and `cc_slice.cch`:
 
 | Observation | Where | Tag |

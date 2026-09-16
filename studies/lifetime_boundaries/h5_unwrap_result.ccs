@@ -1,0 +1,16 @@
+#include <ccc/std/prelude.cch>
+static void use(char[:] s) { (void)s; }
+
+static char[:] !>(CCError) mk(int n, CCArena a) {
+    char[:] s = cc_arena_alloc_slice_bytes(a, (size_t)n);
+    if (!s.ptr) return cc_err(CC_ERR_OUT_OF_MEMORY, "mk");
+    return cc_ok(s);
+}
+int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
+    CCArena a = cc_arena_heap(1024) @destroy;
+    char[:] s = mk(8, a) !>;
+    cc_arena_reset(a);
+    use(s);
+    return 0;
+}

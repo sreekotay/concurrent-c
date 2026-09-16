@@ -1,0 +1,12 @@
+#include <ccc/std/prelude.cch>
+static void use(char[:] s) { (void)s; }
+
+typedef struct { char[:] body; int n; } Doc;
+int main(void) {
+    CCArena a = cc_arena_heap(1024) @destroy;
+    Doc d = {0};
+    d.body = cc_arena_alloc_slice_bytes(a, 8);
+    cc_arena_reset(a);
+    use(d.body);
+    return 0;
+}
