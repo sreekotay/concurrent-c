@@ -104,12 +104,10 @@ int main(void) {
 
     @parallel spawn {
         @serial {
-            @errhandler(CCError e) cc_error_exit(e);
             cc_sleep_ms(10);
             io.println("Hello from task A!");
         }
         @serial {
-            @errhandler(CCError e) cc_error_exit(e);
             io.println("Hello from task B!");
         }
     } !>.wait()!>;
