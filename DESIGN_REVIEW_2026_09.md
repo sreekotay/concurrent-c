@@ -24,6 +24,24 @@ truth and data model. A stated fact is checked strictly and refused
 loudly. An unstated fact is never inferred. The failure mode is the
 unstated fact, so safety widens by widening what can be stated.
 
+The anti-pattern is reconstruction: a language gives a fact no place to
+be stated, then adds machinery to recover an approximation of it.
+
+| Reconstruction | Recovers | Stated in CC by |
+|----------------|----------|-----------------|
+| tracing GC | when this dies | the arena binding; reset or destroy is the program's own event |
+| reference counting | the last holder | one owner and views; the tree destroys parts |
+| lifetime inference | which storage a reference points into | the named arena, arena-last, the kept attribute |
+| escape analysis | whether a value outlives the call | scratch or the caller's lifetime; the closure step checks the statement |
+| handler search, unwinding | who handles this failure | the lexical handler, keyed by type |
+| RTTI, reflection | what this value is now | the variant arm, the face |
+| vtable dispatch | which function this name means | static resolution; one declared dynamic sink |
+| deadlock detection, wake heuristics | who waits on whom | spawn, stage, EMPTY-close, deadline; the detector covers the rest |
+
+Every reconstruction remaining in the runtime or the checker is a
+proposal waiting to be written, scored on the terms below. The last row
+is unfinished and is section 3's subject.
+
 Safe is measured on five terms, not on soundness:
 
 | Term | Measures | Instrument |
