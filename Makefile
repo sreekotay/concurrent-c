@@ -246,11 +246,13 @@ perf-regress-oracle: cc tools
 # ---- Dependencies -----------------------------------------------------------
 #
 # Dependencies are opt-in. Only build/link what you need:
-#   make bearssl   - TLS support (for <std/tls.cch>)
+#   make bearssl   - TLS support (for <std/tls.cch> and <std/server.cch>):
+#                    the next `make -C cc` builds the runtime against it and
+#                    the driver links the archive by itself; without it TLS
+#                    calls answer "runtime built without TLS"
 #   make curl      - HTTP client (for <std/http.cch>)
 #
 # In your build.cc, add the libraries you need:
-#   CC_TARGET_LIBS myapp third_party/bearssl/build/libbearssl.a
 #   CC_TARGET_LIBS myapp third_party/curl/build/lib/libcurl.a
 
 # Build BearSSL static library (for TLS). Fresh clones have only the gitlink;

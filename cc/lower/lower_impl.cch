@@ -763,6 +763,25 @@ void CcLowerer_includes(CcLowerer* L) {
                     break;
                 }
             }
+            {
+                /* a stdlib face that is a module: its `.h` is extracted
+                 * from the unit the driver staged, as a quoted one is */
+                CCString sys_searched = cc_string_new();
+                CCSlice sys = cc__resolve_include(ix, L->unit->tape.path, r, &sys_searched);
+                if (sys.len) {
+                    CCSlice canon = cc__canonical_path(ix, sys);
+                    Vec::[CCSlice]* mf = &L->opts.module_faces;
+                    size_t mi;
+                    size_t mn = mf->len();
+                    for (mi = 0; mi < mn; mi++) {
+                        if (slice_eq(*mf->get_ptr(mi), canon)) {
+                            Vec::[CCSlice]* hs = &L->headers;
+                            hs->push(canon);
+                            break;
+                        }
+                    }
+                }
+            }
             continue;
         }
         found = cc__resolve_include(ix, L->unit->tape.path, r, &searched);

@@ -14,6 +14,7 @@ import hashlib
 import os
 import random
 import resource
+import shutil
 import socket
 import struct
 import subprocess
@@ -1092,6 +1093,228 @@ def mode_uri_decode_refuse(ctx: Ctx) -> Result:
     return Result("uri_decode_refuse", True, f"n={len(cases)}")
 
 
+def _cold_file(ctx: Ctx, size: int) -> Path:
+    """A file the page cache does not hold: written, synced, evicted."""
+    path = ctx.root / "cold.bin"
+    chunk = os.urandom(1 << 20)
+    with open(path, "wb") as f:
+        for _ in range(size >> 20):
+            f.write(chunk)
+        f.flush()
+        os.fsync(f.fileno())
+    return path
+
+
+def _evict(path: Path) -> None:
+    fd = os.open(str(path), os.O_RDONLY)
+    try:
+        os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+    finally:
+        os.close(fd)
+
+
+def _warm(path: Path) -> None:
+    with open(path, "rb") as f:
+        while f.read(1 << 20):
+            pass
+
+
+_RANGE_LUA = r"""
+math.randomseed(%d)
+local size = %d
+local span = %d
+local blocks = math.floor((size - span) / 65536)
+request = function()
+  local off = math.random(0, blocks) * 65536
+  wrk.headers["Range"] = "bytes=" .. off .. "-" .. (off + span - 1)
+  return wrk.format("GET", "/cold.bin")
+end
+"""
+
+
+def _wrk_readers(ctx: Ctx, size: int, span: int, readers: int, secs: float,
+                 seed: int) -> tuple[float, float, float, float]:
+    """`readers` keep-alive connections pulling random `span` ranges of
+    cold.bin for `secs` through wrk: (p50 ms, p99 ms, req/s, MB/s). Scattered
+    small ranges defeat readahead, so each request is one block fill; wrk
+    keeps the client out of the measurement."""
+    if not shutil.which("wrk"):
+        raise Fail("need wrk")
+    lua = Path(tempfile.mkdtemp(prefix="staticd-adv-lua-")) / "range.lua"
+    lua.write_text(_RANGE_LUA % (seed, size, span))
+    threads = min(2, readers)
+    out = subprocess.run(["wrk", "-t", str(threads), "-c", str(readers), "-d", f"{int(round(secs))}s",
+                          "--timeout", "10s", "--latency", "-s", str(lua),
+                          f"http://{ctx.host}:{ctx.port}/cold.bin"],
+                         capture_output=True, text=True, timeout=secs + 30)
+    if out.returncode != 0:
+        raise Fail(f"wrk rc={out.returncode}: {out.stderr.strip()[-200:]} | {out.stdout.strip()[-300:]}")
+    p50 = p99 = rps = mbs = 0.0
+
+    def ms(v: str) -> float:
+        if v.endswith("us"):
+            return float(v[:-2]) / 1000.0
+        if v.endswith("ms"):
+            return float(v[:-2])
+        if v.endswith("s"):
+            return float(v[:-1]) * 1000.0
+        return float(v)
+
+    for line in out.stdout.splitlines():
+        f = line.split()
+        if len(f) >= 2 and f[0] == "50%":
+            p50 = ms(f[1])
+        elif len(f) >= 2 and f[0] == "99%":
+            p99 = ms(f[1])
+        elif len(f) >= 2 and f[0] == "Requests/sec:":
+            rps = float(f[1])
+        elif len(f) >= 2 and f[0] == "Transfer/sec:":
+            v = f[1]
+            mbs = float(v[:-2]) * (1024.0 if v.endswith("GB") else 1.0) if v.endswith(("MB", "GB")) \
+                else float(v[:-2]) / 1024.0 if v.endswith("KB") else 0.0
+    if rps <= 0:
+        raise Fail(f"wrk produced no rate: {out.stdout[-300:]}")
+    return p50, p99, rps, mbs
+
+
+def _evictor(path: Path, stop: threading.Event) -> None:
+    """Keep the file out of the page cache while readers pull it back in."""
+    while not stop.is_set():
+        _evict(path)
+        time.sleep(0.02)
+
+
+def _disk_us(path: Path, size: int, rng: random.Random, n: int = 32) -> float:
+    """Median microseconds for a 64 KB pread at random offsets, right now:
+    says whether the file is actually cold while the readers run."""
+    fd = os.open(str(path), os.O_RDONLY)
+    try:
+        t: list[float] = []
+        for _ in range(n):
+            off = rng.randrange(0, max(1, size - 65536), 65536)
+            t0 = time.perf_counter()
+            os.pread(fd, 65536, off)
+            t.append((time.perf_counter() - t0) * 1e6)
+        t.sort()
+        return t[len(t) // 2]
+    finally:
+        os.close(fd)
+
+
+_PROBE_SRC = r"""
+import socket, sys, time
+host, port, path, secs = sys.argv[1], int(sys.argv[2]), sys.argv[3], float(sys.argv[4])
+lat = []
+t_end = time.time() + secs
+req = ("GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n" % (path, host)).encode()
+while time.time() < t_end:
+    t0 = time.perf_counter()
+    s = socket.create_connection((host, port), 5.0)
+    s.settimeout(5.0)
+    s.sendall(req)
+    buf = b""
+    while True:
+        c = s.recv(65536)
+        if not c:
+            break
+        buf += c
+    s.close()
+    lat.append((time.perf_counter() - t0) * 1000.0)
+    head, _, body = buf.partition(b"\r\n\r\n")
+    if not head.startswith(b"HTTP/1.1 200") or len(body) != 4096:
+        print("BAD", head[:40]); sys.exit(2)
+lat.sort()
+print(lat[len(lat)//2], lat[min(len(lat)-1, int(len(lat)*0.99))], len(lat))
+"""
+
+
+def _probe_latency(ctx: Ctx, secs: float) -> tuple[float, float, int]:
+    """/4kb.html round trips for `secs` from a separate process, so the
+    readers' threads cannot hold the probe's interpreter lock: (p50 ms,
+    p99 ms, n)."""
+    out = subprocess.run([sys.executable, "-c", _PROBE_SRC, ctx.host, str(ctx.port),
+                          "/4kb.html", str(secs)],
+                         capture_output=True, text=True, timeout=secs + 30)
+    if out.returncode != 0:
+        raise Fail(f"probe: {out.stdout.strip()} {out.stderr.strip()[-200:]}")
+    p50, p99, n = out.stdout.split()
+    return float(p50), float(p99), int(n)
+
+
+def mode_cold_fill_hol(ctx: Ctx) -> Result:
+    """Head-of-line behind cold block fills.
+
+    wrk readers pull scattered 64 KB ranges of a file an evictor keeps out
+    of the page cache, so every chunk step blocks in pread; a probe in its
+    own process measures /4kb.html latency behind them. The same readers
+    against the warm file separate the disk stall from the load: `load` is
+    warm over alone (saturation), `stall` is cold over warm (the worker
+    blocked in the step). The readers' own latency is reported too: the
+    probe recovers on a second tape, sessions pinned to the stalled tape do
+    not. The stall is the known hole (checkout_block blocks the tape):
+    BREAK when it reaches 3x. Nothing in the measurement runs under a
+    Python interpreter lock shared with load."""
+    size = {"quick": 128 << 20, "full": 1 << 30, "soak": 2 << 30}[ctx.scale]
+    span = 64 << 10
+    readers = {"quick": 16, "full": 32, "soak": 64}[ctx.scale]
+    secs = {"quick": 3.0, "full": 6.0, "soak": ctx.soak_secs}[ctx.scale]
+    path = _cold_file(ctx, size)
+    try:
+        base_p50, base_p99, _ = _probe_latency(ctx, 1.0)
+
+        def run(cold: bool) -> tuple[float, float, float, float, float, float]:
+            stop = threading.Event()
+            got: dict[str, tuple[float, float, float, float]] = {}
+            if cold:
+                _evict(path)
+                ev = threading.Thread(target=_evictor, args=(path, stop), daemon=True)
+                ev.start()
+            else:
+                _warm(path)
+
+            def readers_run() -> None:
+                try:
+                    got["r"] = _wrk_readers(ctx, size, span, readers, secs + 1.0,
+                                            ctx.rng.randrange(1 << 30))
+                except Exception as e:  # surfaced by the caller
+                    got["err"] = (0.0, 0.0, 0.0, 0.0)
+                    got["msg"] = f"{type(e).__name__}: {e}"
+
+            rt = threading.Thread(target=readers_run, daemon=True)
+            rt.start()
+            time.sleep(0.3)
+            p50, p99, _ = _probe_latency(ctx, secs / 2)
+            disk = _disk_us(path, size, ctx.rng)
+            p50b, p99b, _ = _probe_latency(ctx, secs / 2)
+            rt.join(timeout=secs + 40)
+            stop.set()
+            r = got.get("r")
+            if not r:
+                raise Fail(f"readers did not report: {got.get('msg', 'no output')}")
+            return max(p50, p50b), max(p99, p99b), disk, r[0], r[1], r[3]
+
+        warm_p50, warm_p99, warm_disk, warm_r50, warm_r99, warm_mb = run(cold=False)
+        cold_p50, cold_p99, cold_disk, cold_r50, cold_r99, cold_mb = run(cold=True)
+        still_serves(ctx)
+        load = warm_p99 / max(base_p99, 0.05)
+        stall = cold_p99 / max(warm_p99, 0.05)
+        detail = (f"probe p50/p99 ms: alone {base_p50:.2f}/{base_p99:.2f} "
+                  f"warm {warm_p50:.2f}/{warm_p99:.2f} cold {cold_p50:.2f}/{cold_p99:.2f} "
+                  f"load={load:.1f}x stall={stall:.1f}x readers={readers} "
+                  f"reader p50/p99 ms: warm {warm_r50:.2f}/{warm_r99:.2f} "
+                  f"cold {cold_r50:.2f}/{cold_r99:.2f} "
+                  f"warm={warm_mb:.0f}MB/s cold={cold_mb:.0f}MB/s "
+                  f"disk64k warm={warm_disk:.0f}us cold={cold_disk:.0f}us")
+        if stall >= 3.0:
+            return Result("cold_fill_hol", False, detail, known_break=True)
+        return Result("cold_fill_hol", True, detail)
+    finally:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
 MODES: dict[str, Callable[[Ctx], Result]] = {
     "conn_storm": mode_conn_storm,
     "accept_burst_survive": mode_accept_burst_survive,
@@ -1121,6 +1344,7 @@ MODES: dict[str, Callable[[Ctx], Result]] = {
     "pages_throw_storm": mode_pages_throw_storm,
     "listing_href_abuse": mode_listing_href_abuse,
     "uri_decode_refuse": mode_uri_decode_refuse,
+    "cold_fill_hol": mode_cold_fill_hol,
 }
 
 QUICK_ORDER = [
@@ -1152,6 +1376,7 @@ QUICK_ORDER = [
     "uri_decode_refuse",
     "conn_churn_rss",
     "ws_churn_rss",
+    "cold_fill_hol",
 ]
 
 
@@ -1218,8 +1443,10 @@ def spawn_staticd(bin_path: str, port: int, root: Path, pages: Optional[Path],
                   nofile: int = SERVER_NOFILE) -> tuple[subprocess.Popen, Path, int]:
     logdir = Path(tempfile.mkdtemp(prefix="staticd-adv-"))
     log = open(logdir / "staticd.log", "w")
+    # One worker keeps every specimen on one tape (the sharpest HOL);
+    # STATICD_STRESS_WORKERS=0 spawns at the engine's own level.
     cmd = [bin_path, "--listen", f"127.0.0.1:{port}", "--root", str(root),
-           "--workers", "1"]
+           "--workers", os.environ.get("STATICD_STRESS_WORKERS", "1")]
     if list_dir:
         cmd.append("--list")
     if pages:

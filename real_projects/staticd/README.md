@@ -1,7 +1,8 @@
 # staticd — Concurrent-C static HTTP/1.1 + WebSocket
 
 HTTP/1.1 file server. Sessions are rows; dests are workers. The dest
-waiter (`CCServerPoll.ccs`) is kqueue, epoll, or `poll` (host `#ifdef`).
+is `<ccc/std/server.cch>`; its waiter (`server_poll.ccs`) is kqueue, epoll,
+or `poll` (host `#ifdef`).
 A ready fd steps that row. The worker is the only writer.
 
 Dest-per-connection accept is in
@@ -24,13 +25,13 @@ and redis.
 | Query | `?…` split off the path; ignored for files; passed to pages |
 | Extra headers | `--header 'Name: value'` (repeatable; no CR/LF) |
 | Workers | Start 2, grow every 64 live conns, cap ncpu/2 (`--workers 0`). `--workers N` is the cap. `--workers 1` stays one dest |
-| Accept | Soft-fail on `EMFILE` / `ENFILE` / `ENOMEM` / `ENOBUFS`. Spare fd is per-dest on the tape; `CCServer` holds only listen + atomics (backoff deadline). Listen interest backoff ~100 ms. Worker death decrements live and respawns to the floor |
-| Waiter | `CCServerPoll.ccs`: kqueue / epoll / poll via host `#ifdef` (`-DCC_SERVER_WAIT_POLL=1` forces poll). Serve loop sees `CCReady` |
+| Accept | Soft-fail on `EMFILE` / `ENFILE` / `ENOMEM` / `ENOBUFS`. Spare fd is per-dest on the tape; `CCServer` (from `<ccc/std/server.cch>`) holds only listen + atomics (backoff deadline). Listen interest backoff ~100 ms. Worker death decrements live and respawns to the floor |
+| Waiter | `<ccc/std/server.cch>` (`server_poll.ccs`): kqueue / epoll / poll via host `#ifdef` (`-DCC_SERVER_WAIT_POLL=1` forces poll). Serve loop sees `CCReady` |
 | Deadlines | Absolute `io->deadline` (dest reaps). TLS HS; header gap ∩ hard total; keepalive idle; write stall (refresh only on `try_write` progress); WS idle. Defaults 10 / 5∩15 / 30 / 30 / 120 s; env `TLS_HS`, `HEADER_GAP`, `HEADER_TOTAL`, `KEEPALIVE`, `WRITE_STALL`, `WS_IDLE` (or `STATICD_*`) |
 | Output | App socket I/O is `try_write` only. `out_*` cursor for protocol bytes (HTTP headers, WS frames); body cursor for file / mem. `flush_conn` / `write_ws` queue; short / `BUSY` → `.wait_out` |
 | Body | Named-block ring (`--block-ring N`, default **256** × 64KB slabs on a growing `CCArenaPool`; max 4096). Key `(dev, ino, block)`, FNV probe only, reuse in place, idle cull → freelist. Pool `pread` on miss / unaligned Range / busy fill / ring pressure. 8-slot fd cache; pathname revalidate ≤1s (absolute); hold dups the fd. One 64KB chunk per step |
 | Pages | `--pages DIR` (off). Load `hello.js` (QuickJS) or `hello.py` (CPython) as a view: `GET(request)` → `Response`. Same ABI; both faces at one path → 500. Never executes `--root` `*.js` |
-| TLS | `--tls-cert PEM` + `--tls-key PEM` (off). BearSSL; process-wide load at startup. Handshake steps from poll readiness (`tls_hs`) before `on_app`. Build with `CC_ENABLE_TLS=1` (Makefile default) |
+| TLS | `--tls-cert PEM` + `--tls-key PEM` (off). BearSSL; process-wide load at startup. Handshake steps from poll readiness (`tls_hs`) before `on_app`. Available when the toolchain was built with BearSSL present (`make tls`); otherwise `load_tls` reports the runtime has no TLS |
 | WebSocket | Narrow echo subset: `Upgrade` + `Connection: upgrade` + `Sec-WebSocket-Version: 13` + base64-16 `Sec-WebSocket-Key` → `101`, then echo (text / binary), pong for ping, close for close. No fragments; payload capped to the row window |
 
 **Not in scope:** gzip, HTTP/2, multipart ranges, sendfile, directory
@@ -40,21 +41,22 @@ listing on by default, CGI, Node `require`, Django ORM, async block fill
 ## Build
 
 From this directory. `ccc` prefers `../../cc/bin/ccc`, else
-`../../out/cc/bin/ccc` (repo `make cc`). TLS needs BearSSL
-(`make -C ../../cc bearssl`) and a runtime built with `CC_ENABLE_TLS=1`
-— `make staticd` does both by default.
+`../../out/cc/bin/ccc` (repo `make cc`). TLS needs BearSSL built
+before the toolchain: `make tls` runs `make -C ../.. bearssl`, rebuilds
+`cc`, and then builds staticd. The driver links BearSSL automatically
+when the runtime carries TLS.
 
 ```bash
 cd real_projects/staticd
 ./setup.sh                  # fixtures + darkhttpd sources; brew nginx/wrk if missing
-make staticd                # ./out/staticd (TLS-capable)
+make staticd                # ./out/staticd (TLS if the toolchain has it)
+make tls                    # build BearSSL + toolchain, then staticd
 make darkhttpd              # optional peer
 ./gen_fixtures.sh           # 1kb / 4kb / 64kb / 1mb / 10mb + index.html
 ```
 
 `make` / `make all` builds staticd only. `make setup` is `./setup.sh`.
-`make clean` removes `out/`. `CC_ENABLE_TLS=0 make staticd` skips BearSSL
-(link will fail if the binary still references TLS symbols).
+`make clean` removes `out/`.
 
 ## Run
 
@@ -90,8 +92,11 @@ Waiters park (OS worker free). Attach QuickJS with `CC_QUICKJS_SRC` (or
 `./quickjs`); Python needs a discoverable libpython.
 
 `pages/slow.js` is a specimen for exclusive occupancy vs static MISS; see
-`bench_steal_mix.sh`. Ready-app step steal is opt-in (`CC_SERVER_STEP_STEAL=1`),
-default off — not a substitute for the exclusive.
+`bench_steal_mix.sh`. Steps move only off a stalled worker (the engine's
+default; `CC_SERVER_STEP_STEAL=0` serializes). On four cores the 1:4 mix
+measured 244 rps with all sessions on one tape, 727 once accept spreads
+them, and 1681 with steps moving off the tape blocked in `/slow`; the
+exclusive still bounds the slow requests themselves.
 
 `pages/hello.js`:
 
@@ -218,23 +223,26 @@ except nginx `10mb.bin` @ c=100 (empty — Darwin `sendfile` wedge).
 
 ```
 main → open cfg → srv.listen / load_tls → serve
-  srv.serve(stop, cfg, (s, enc) => [cfg] { session_app })
+  srv.serve(stop, (io) => [cfg] { session_app(io->app) ; io->apply(a) })
   worker × 2..cap               // grow every 64 conns; cap ncpu/2
-    wait.poll → step rows → accept → reap
-    session_step: fill | send chunk
-    session_app: handle_http | WS frame
+    wait.poll → fill → step → drain queue → arm → accept → reap
+    session_app: send chunk | handle_http | WS frame
     handle_http: pages arm (MISS→static) | file | upgrade
 ```
 
 Keep-alive and WebSocket keep the row in the table. Workers share the
-listen fd. The table is `Vec` of `Session*` on a worker arena; slots are
-a pool on that arena. The waiter tape holds interest; readiness is
-`CCReady`. Session embeds `CCIoSess`; TLS wraps at `bind_conn`. `CCIoAct`
-is `wait` / `wait_out` / `close`; `dead` is the reap mark. Handshake drops
-increment `srv.tls_fail`. `CCServer.cch` is a local face (not std);
-`CCServer.ccs` owns `serve`. The page is HTTP/WS + `main`.
+listen fd; one above its share of live sessions leaves it to a lighter
+one. Each session slot carries the engine row, the read window, and
+`Session` (`srv.row_size`), zeroed at accept and cleared by `session_drop`
+at the end. The waiter tape holds interest; readiness is `CCReady`. TLS
+wraps at `bind_conn`. `CCIoAct` is `wait` / `wait_out` / `close`; a step
+that does not answer is a counted fault. Handshake drops increment
+`srv.tls_fail`. The dest is the stdlib's `<ccc/std/server.cch>`; its
+member `server_serve.ccs` owns `serve`. The page is HTTP/WS + `main`.
 
-Encode queues onto `out_*`; the jail walks each path component with
+Headers and WS frames go to the session queue (`io->write`); bodies go
+`try_write` from a file hold or a mem slab after `io->flush()` has drained
+the queue. The jail walks each path component with
 `openat(O_NOFOLLOW)`. The fd cache re-resolves the name at most once a
 second (absolute); a hold dups the fd so a `rename` can close the slot
 while in-flight holds finish. The ring reuses `(dev, ino, block)`; idle
@@ -245,9 +253,9 @@ while in-flight holds finish. The ring reuses `(dev, ino, block)`; idle
 | Name | What it is |
 |------|------------|
 | **Worker dest** | `srv.serve` plants dests (start 2, or 1 if cap is 1) and grows with live. Each worker owns the poll tape, accept spare fd, and live table. One app closure is borrow-invoked per ready window. |
-| **Socket session** | `CCIoSess`: sock / TLS / window / `deadline` / dead. Tape sees `io` only. |
-| **HTTP/WS row** | `Session*`: embeds `CCIoSess`; `out_*` protocol cursor; body cursor (file hold or mem slab / off / left / `send_close`). |
-| **Send** | Drain `out_*` then body. `POLLOUT` while left. `send_close` after drains when the response closes. |
+| **Socket session** | `CCIoSess`: sock / TLS / window / output queue / `deadline`. Tape sees `io` only. |
+| **HTTP/WS row** | `Session` behind `io->app`: body cursor (file hold or mem slab / off / left / `send_close`), header deadline, phase. |
+| **Send** | Queue drains first (`flush`), then body chunks by `try_write`. `wait_out` while left. `close` after the queue drains when the response closes. |
 
 Ring and fd cache share one `CCExclusive` (`cli_a.create_exclusive(4)`),
 names `SYNC_BLOCK` and `SYNC_FC`. Hold is metadata only: drop the lock
@@ -271,10 +279,7 @@ chunks (default 256, max 4096); idle cull returns slabs to the freelist.
 | Path | Purpose |
 |------|---------|
 | `staticd.ccs` | HTTP / WS / encode / deadlines / `main` |
-| `CCServer.cch` | Dest zip + `CCIoSess` — not std |
-| `CCServer.ccs` | Owner: `srv.serve` — workers / wait / grow / accept / TLS step |
-| `CCServerPoll.cch` | Waiter types + `cc_tape_*` prototypes |
-| `CCServerPoll.ccs` | Waiter bodies (kqueue / epoll / poll via host `#ifdef`) |
+| `<ccc/std/server.cch>` | Dest zip + `CCIoSess` (stdlib module: `server_serve.ccs` owns `srv.serve`; `server_poll.cch` / `.ccs` are the waiter) |
 | `staticd_ws.cch` | SHA-1 / base64 / WS frame tape |
 | `staticd_http.cch` | Date / Range / header-CI / URI encode·decode |
 | `staticd_block.cch` | `BlockCache` named-block ring (`checkout_block` / `block_cache_fill`) |

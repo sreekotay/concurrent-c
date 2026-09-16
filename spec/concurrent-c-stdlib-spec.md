@@ -1700,6 +1700,114 @@ h.wait() !>;
 `CCSignal` is the fiber-side complement for programs whose stop path is
 "stop admission, drain", not "cancel".
 
+## Server
+
+`<ccc/std/server.cch>` is a socket server: it listens, accepts, waits on
+its sessions with the host's kqueue, epoll or `poll`, and hands each ready
+session to one closure, one step at a time. It carries no protocol. The
+face is a module (`#pragma(@module) "server"`); its members
+`server_serve.ccs`, `server_poll.cch` and `server_poll.ccs` lower with it,
+and a program that includes the face links the module's C without naming
+it.
+
+```c
+@variant CCIoAct { wait: void; wait_out: void; close: void; };
+
+typedef struct CCIoSess {
+    CCSocket sock;
+    CCTlsConn tls;
+    int tls_on;
+    time_t deadline;      /* absolute; 0 = none */
+    void *app;            /* the page row: row_size bytes, zeroed at accept */
+    /* … window, interest, output queue, and TLS handshake state */
+} CCIoSess;
+
+typedef struct CCServer {
+    CCListener ln;
+    int tls;
+    int workers_max;
+    int workers_start;    /* workers at serve; 0 = 2 */
+    size_t row_size;      /* page row bytes per session; 0 = none */
+    void (*row_drop)(void *row); /* runs once per session at its end */
+    int sec_tls_hs;       /* first-byte budget during the TLS handshake, seconds */
+    int sec_first_byte;   /* first-byte budget after accept or handshake, seconds */
+    CCParallel app;
+    /* … atomics the workers share */
+} CCServer;
+
+void                cc_server_init(CCServer *srv, int workers_max);
+void !>(CCError)    cc_server_listen(CCServer *srv, CCSlice addr);
+void !>(CCError)    cc_server_load_tls(CCServer *srv, const char *cert, const char *key);
+void !>(CCError)    cc_server_serve(CCServer *srv, CCSignal *stop, CCClosure1 on_step);
+void                cc_server_shutdown(CCServer *srv);
+void                cc_server_close(CCServer *srv);
+int                 cc_server_start_n(CCServer *srv);
+int                 cc_server_tls_fails(CCServer *srv);
+int                 cc_server_step_steals(CCServer *srv);
+int                 cc_server_step_faults(CCServer *srv);
+int                 cc_server_workers_peak(CCServer *srv);
+
+char[:]             cc_io_sess_window(CCIoSess *io);
+void                cc_io_sess_consume(CCIoSess *io, size_t n);
+int                 cc_io_sess_full(CCIoSess *io);
+void !>(CCIoError)  cc_io_sess_write(CCIoSess *io, char[:] data);
+int                 cc_io_sess_flush(CCIoSess *io);
+size_t !>(CCIoError) cc_io_sess_try_write(CCIoSess *io, char[:] data);
+int                 cc_io_sess_pending_out(CCIoSess *io);
+void                cc_io_sess_apply(CCIoSess *io, CCIoAct a);
+void                cc_io_sess_touch(CCIoSess *io, time_t now, int secs);
+```
+
+`serve` starts `start_n` workers on `app` (`workers_start`, or 2 when it is
+0) and returns when the server is shut down and every session is gone.
+`stop` may be null; when it is a `CCSignal`, its delivery shuts the server
+down. `init(0)` caps the workers at the host's processor count.
+
+The workers find their own level; a page sets nothing. Every worker
+accepts, and a worker holding more sessions than a peer leaves the listen
+socket to the peer. A worker whose waits keep returning with work while
+no peer is idle is saturated, and a worker that has not finished a step
+for 200 microseconds while steps are queued behind it is stalled; either
+adds a worker, up to the cap. Steps queued behind a stalled worker are
+taken by an idle peer, which the stalled worker's lane wakes when its
+steps have been slow; a lane of quick steps is never disturbed. A stolen
+step runs the page on the peer's thread with the session alone; the row
+and its interest stay with the owner, who re-arms it on its next wake.
+`step_steals` and `workers_peak` report what happened.
+
+The step. `on_step` is borrowed for the whole run and invoked with the
+`CCIoSess*` whenever the session's window holds bytes the page has not
+consumed, or the page asked to be woken when the socket is writable. The
+page reads the window, queues its reply with `write`, consumes what it
+handled, and answers with `apply`: `wait` for more input, `wait_out` when
+it streams bytes of its own with `try_write` and was told BUSY, `close` to
+end the session once everything queued has drained. A step that returns
+without `apply` is a page fault: the engine closes that session and counts
+it in `step_faults`; it never carries the previous answer forward.
+
+The row. `row_size` bytes of page state travel with every session, zeroed
+at accept and reachable as `app`. `row_drop` runs once when the session
+ends, on a row the page may never have stepped, so it must tolerate the
+zeroed state. The page allocates nothing per connection and is not told
+when a session dies.
+
+Output. `write` appends to the session's queue; the engine drains the
+queue after the step and on every writable wake, and does not step the
+page again while it holds bytes. `try_write` sends once without parking
+and may write short; a page streaming a body from its own cursor uses it
+and answers `wait_out` on BUSY. `flush` drains the queue now and reports
+1 empty, 0 busy, -1 socket gone, so a body sent with `try_write` follows
+headers sent with `write`. `pending_out` is 1 while the engine still holds
+bytes for the socket, queued or TLS ciphertext.
+
+`load_tls` loads the process-wide certificate chain and key; sessions
+accepted after it are wrapped, and the handshake steps from readiness
+before the page first sees the session. On a runtime built without TLS,
+`load_tls` fails at that call with the error naming the fact; every other
+entry point is the same either way. UFCS: `srv.init(n)`, `srv.listen(addr)`,
+`srv.serve(&stop, closure)`, `io->window()`, `io->write(v)`,
+`io->apply(a)`.
+
 ## HTTP
 
 `<ccc/std/http.cch>` provides a synchronous libcurl-backed client and requires
@@ -1791,8 +1899,20 @@ The component slices point into the supplied URL buffer.
 
 ## TLS
 
-`<ccc/std/tls.cch>` provides TLS client and server operations when the runtime
-is built with BearSSL support.
+`<ccc/std/tls.cch>` provides TLS client and server operations. The runtime
+always carries the face's definitions; BearSSL stands behind them when the
+runtime was built with it, which `make -C cc` does by itself whenever
+`third_party/bearssl/build/libbearssl.a` exists (`make bearssl` at the
+repository root builds it), and the driver links the archive into every
+program of such a runtime. Without BearSSL every connection call fails with
+a TLS error and the server materials do not load; `cc_tls_available` reports
+which runtime this is.
+
+```c
+int cc_tls_available(void);
+int cc_tls_server_load(const char *cert_path, const char *key_path);
+void cc_tls_server_unload(void);
+```
 
 ```c
 typedef struct CCTlsClientConfig {

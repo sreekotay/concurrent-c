@@ -1,0 +1,85 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/std/server.cch>
+#include <stdio.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+
+/* The stdlib server as an echo server: one worker, one session, the bytes
+ * the client sends come back, and `shutdown` ends `serve`. The module's C
+ * is linked from the face's marker: nothing here names it. */
+
+static int bound_port(CCServer* srv) {
+    struct sockaddr_in sa;
+    socklen_t sl = sizeof(sa);
+    memset(&sa, 0, sizeof(sa));
+    if (getsockname(srv->ln.fd, (struct sockaddr*)&sa, &sl) != 0) return 0;
+    return ntohs(sa.sin_port);
+}
+
+static int g_echoed = 0;
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    CCServer srv;
+    int port;
+    srv.init(1);
+    @defer srv.close();
+    /* the suite runs rows in parallel: take the first free port of a run */
+    {
+        int try_port;
+        int bound = 0;
+        for (try_port = 18700; try_port < 18760 && !bound; try_port++) {
+            cc_arena_stack(la, 256);
+            CCString addr = @string(`127.0.0.1:${try_port}`, la);
+            char[:] addr_v = addr.as_slice();
+            srv.listen(addr_v) !>(e) { (void)e; continue; };
+            bound = 1;
+        }
+        if (!bound) { printf("no free port\n"); return 1; }
+    }
+    port = bound_port(&srv);
+    if (port <= 0) { printf("no bound port\n"); return 1; }
+
+    CCServer* srvp = &srv;
+    CCNursery clients = @create() !> @destroy;
+    clients.spawn(() => [srvp, port] {
+        @errhandler(CCError e) { cc_error_log(e); srvp->shutdown(); return NULL; }
+        cc_arena_stack(a, 4096);
+        CCString addr = @string(`127.0.0.1:${port}`, a);
+        const char* addr_c = addr.cstr(a) !>;
+        CCSocket sock = cc_tcp_connect(addr_c, strlen(addr_c)) !>(e) {
+            (void)e;
+            printf("connect failed\n");
+            srvp->shutdown();
+            return NULL;
+        };
+        @defer sock.close();
+        static const char msg[] = "ping over the std server\n";
+        size_t nw = sock.write(msg, sizeof(msg) - 1) !>;
+        if (nw != sizeof(msg) - 1) { srvp->shutdown(); return NULL; }
+        {
+            char buf[128];
+            size_t got = 0;
+            size_t n = 0;
+            while (got < sizeof(msg) - 1) {
+                bool !>(CCIoError) more = sock.read_into(buf + got, sizeof(buf) - got, &n);
+                if (!cc_io_avail(more) || n == 0) break;
+                got += n;
+            }
+            if (got == sizeof(msg) - 1 && memcmp(buf, msg, got) == 0) g_echoed = 1;
+        }
+        srvp->shutdown();
+        return NULL;
+    }) !>;
+
+    srv.serve(NULL, (CCIoSess* io) => [] {
+        char[:] in = io->window();
+        io->write(in) !>(e) { (void)e; io->apply((CCIoAct){ .close = {} }); return; };
+        io->consume(in.len);
+        io->apply((CCIoAct){ .wait = {} });
+    }) !>;
+    clients.wait() !>;
+    printf("std_server_echo_smoke: %s\n", g_echoed ? "PASS" : "FAIL");
+    return g_echoed ? 0 : 1;
+}

@@ -3,50 +3,32 @@ OUT_DIR = out
 DARKHTTPD_DIR = vendor/darkhttpd
 DARKHTTPD_BIN = $(OUT_DIR)/darkhttpd
 
-# TLS (BearSSL). ccc --release skips the stock prebuilt runtime and compiles a
-# per-flag host runtime; CFLAGS must carry -DCC_ENABLE_TLS so that object
-# includes tls.c. staticd.ccs @link()s the archive (path, not -l).
-CC_ENABLE_TLS ?= 1
-BEARSSL_DIR ?= ../../third_party/bearssl
-BEARSSL_LIB = $(BEARSSL_DIR)/build/libbearssl.a
-BEARSSL_INC = $(abspath $(BEARSSL_DIR)/inc)
+# TLS comes with the toolchain: `make bearssl` at the repository root builds
+# BearSSL, and the next `make -C cc` compiles the runtime against it; the
+# driver links the archive by itself. Without it staticd builds and runs,
+# and `--tls-cert` reports that the runtime has no TLS.
 REPO_CC = ../../cc
 REPO_ROOT = ../..
 
-.PHONY: all staticd darkhttpd fixtures clean setup smoke bench ws stress string_tpl \
-	ensure-tls-runtime ensure-bearssl
+.PHONY: all staticd darkhttpd fixtures clean setup smoke bench ws stress string_tpl tls
 
 all: staticd
 
 $(OUT_DIR):
 	mkdir -p $(OUT_DIR)
 
-ensure-bearssl:
-	@test -f $(BEARSSL_LIB) || $(MAKE) -C $(REPO_ROOT) bearssl
-
-# Sync cc/runtime → out/runtime when headers change; ensure concurrent_c.o
-# was built with TLS (ccc --release still compiles its own host runtime via
-# CFLAGS below — this keeps the stock object consistent too).
-ensure-tls-runtime: ensure-bearssl
-ifeq ($(CC_ENABLE_TLS),1)
-	$(MAKE) -C $(REPO_CC) CC_ENABLE_TLS=1 lower-headers
-	@if ! nm $(REPO_ROOT)/out/cc/obj/runtime/concurrent_c.o 2>/dev/null | grep -q 'cc_tls_try_write'; then \
-		rm -f $(REPO_ROOT)/out/cc/obj/runtime/concurrent_c.o; \
-		$(MAKE) -C $(REPO_CC) CC_ENABLE_TLS=1 ../out/cc/obj/runtime/concurrent_c.o; \
-	fi
-endif
+# Build BearSSL and a TLS runtime, then staticd.
+tls:
+	$(MAKE) -C $(REPO_ROOT) bearssl
+	$(MAKE) -C $(REPO_CC)
+	$(MAKE) staticd
 
 $(OUT_DIR)/staticd: staticd.ccs staticd_ws.cch \
 		staticd_http.cch staticd_block.cch staticd_fs.cch staticd_script.cch \
-		CCServer.cch CCServer.ccs CCServerPoll.cch CCServerPoll.ccs \
-		| $(OUT_DIR) ensure-tls-runtime
-ifeq ($(CC_ENABLE_TLS),1)
-	CFLAGS="-DCC_ENABLE_TLS -I$(BEARSSL_INC) $(EXTRA_CFLAGS) $${CFLAGS:-}" \
-		$(CCC) -O -o $@ staticd.ccs --release
-else
-	CFLAGS="$(EXTRA_CFLAGS) $${CFLAGS:-}" \
-		$(CCC) -O -o $@ staticd.ccs --release
-endif
+		$(REPO_CC)/include/ccc/std/server.cch $(REPO_CC)/include/ccc/std/server_serve.ccs \
+		$(REPO_CC)/include/ccc/std/server_poll.cch $(REPO_CC)/include/ccc/std/server_poll.ccs \
+		| $(OUT_DIR)
+	CFLAGS="$(EXTRA_CFLAGS) $${CFLAGS:-}" $(CCC) -O -o $@ staticd.ccs --release
 
 staticd: $(OUT_DIR)/staticd
 

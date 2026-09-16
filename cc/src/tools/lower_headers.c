@@ -22,6 +22,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+int cc_cch_is_module_unit(const char* path);
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -226,7 +228,14 @@ static int process_dir(const char* input_dir, const char* output_dir, const char
             err = process_dir(input_dir, output_dir, new_subdir);
             if (err) break;
         } else if (S_ISREG(st.st_mode) && is_cch_file(entry->d_name)) {
-            char* h_path = cch_to_h_path(input_dir, output_dir, entry_path);
+            char* h_path;
+            if (cc_cch_is_module_unit(entry_path)) {
+                /* a module face or member: the program that includes it
+                 * lowers its unit, with the link marker its C needs */
+                printf("  module: %s (lowered by its includer)\n", entry_path);
+                continue;
+            }
+            h_path = cch_to_h_path(input_dir, output_dir, entry_path);
             if (!h_path) {
                 err = ENOMEM;
                 break;

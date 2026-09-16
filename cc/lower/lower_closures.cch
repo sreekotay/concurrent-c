@@ -677,13 +677,15 @@ static void kl_task_result(CcLowerer* L, CcStmt* body, CcExpr* value, CcSpan sp)
     lw_push(body, cc_stmt_return(lw_ident(L, cstr_slice("__cc_st_r"), sp), sp, L->arena));
 }
 
-/* A `return E;` written in the body of a `send_task` closure: the value goes
- * into the task's result slot, as the closure's trailing expression does.
- * The receiver reads the slot; a raw `return` would hand it the value
- * itself, and for a pointer payload that is the pointee, not the pointer.
- * Nested closures keep their own returns. */
+/* Returns written in a closure body. The entry returns `void*`, so a bare
+ * `return;` becomes `return NULL;`. In a `send_task` closure a `return E;`
+ * puts its value into the task's result slot, as the closure's trailing
+ * expression does: the receiver reads the slot, and a raw `return` would
+ * hand it the value itself, which for a pointer payload is the pointee,
+ * not the pointer. Nested closures keep their own returns. */
 typedef struct KBox {
     CcLowerer* L;
+    bool task_result;
 } KBox;
 
 static bool kl_box_expr(CcExpr* e, void* env) {
@@ -698,7 +700,12 @@ static bool kl_box_stmt(CcStmt* s, void* env) {
         case .return_(r): value = r.value; break;
         default: return true;
     }
-    if (!value) return true;
+    if (!value) {
+        CcStmt* r = cc_stmt_return(lw_text(b->L, @string(`NULL`, b->L->arena), s->span), s->span, b->L->arena);
+        s->k = r->k;
+        return false;
+    }
+    if (!b->task_result) return true;
     {
         CcStmt* blk = lw_block(b->L, s->span);
         kl_task_result(b->L, blk, value, s->span);
@@ -707,10 +714,11 @@ static bool kl_box_stmt(CcStmt* s, void* env) {
     return false;
 }
 
-static void kl_box_returns(CcLowerer* L, CcStmt* body) {
+static void kl_box_returns(CcLowerer* L, CcStmt* body, bool task_result) {
     CcVisitor v;
     KBox b;
     b.L = L;
+    b.task_result = task_result;
     memset(&v, 0, sizeof(v));
     v.expr = kl_box_expr;
     v.stmt = kl_box_stmt;
@@ -793,11 +801,11 @@ static CcDecl* kl_entry_decl(KStep* st, uint32_t id, KCapList* caps, CcClosure c
         if (inner) {
             for (k = 0; k < keep; k++) {
                 CcStmt* bs = *inner->get_ptr(k);
-                if (task_result) kl_box_returns(L, bs);
+                kl_box_returns(L, bs, task_result);
                 lw_push(body, bs);
             }
         } else if (cl.body && !value) {
-            if (task_result) kl_box_returns(L, cl.body);
+            kl_box_returns(L, cl.body, task_result);
             lw_push(body, cl.body);
         }
         if (value) {

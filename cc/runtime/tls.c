@@ -366,6 +366,8 @@ static void cc__tls_mats_clear(CC__TlsServerMats *m) {
 }
 
 /* Load cert+key paths into process mats. Returns 0 on success. */
+int cc_tls_available(void) { return 1; }
+
 int cc_tls_server_load(const char *cert_path, const char *key_path) {
     unsigned char *cbuf = NULL, *kbuf = NULL;
     size_t clen = 0, klen = 0;
@@ -509,6 +511,19 @@ static int cc__tls_handshake(CCTlsConn *conn) {
         }
     }
 }
+
+#else /* !CC_HAS_BEARSSL */
+
+int cc_tls_available(void) { return 0; }
+
+/* No BearSSL behind the runtime: the materials cannot load, and say so. */
+int cc_tls_server_load(const char *cert_path, const char *key_path) {
+    (void)cert_path;
+    (void)key_path;
+    return -1;
+}
+
+void cc_tls_server_unload(void) {}
 
 #endif /* CC_HAS_BEARSSL */
 

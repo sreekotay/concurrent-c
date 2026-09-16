@@ -1,0 +1,119 @@
+/*
+ * A stage argument is evaluated once per ticket: the wait, the pass, and
+ * the discharge at the ticket's exit name that one value. `tick` counts how
+ * often the argument ran for each ticket, on the parallel schedule, on the
+ * denied one, under `#pragma(@parallel) off`, and on a run a ticket error
+ * cuts short.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+#define N 16
+#define CAP 4
+
+static int g_evals[N];
+static int g_order[N];
+static int g_norder;
+
+static int tick(int i) {
+    g_evals[i]++;
+    return i;
+}
+
+static void !>(CCError) boom(int i) {
+    if (i == 5)
+        return cc_err(CC_ERR_IO, "boom");
+    return cc_ok();
+}
+
+static void reset(void) {
+    memset(g_evals, 0, sizeof(g_evals));
+    memset(g_order, 0, sizeof(g_order));
+    g_norder = 0;
+}
+
+static int once_in_order(const char* what) {
+    int i;
+    for (i = 0; i < N; i++) {
+        if (g_evals[i] != 1) {
+            fprintf(stderr, "FAIL %s evals[%d]=%d\n", what, i, g_evals[i]);
+            return 1;
+        }
+        if (g_order[i] != i) {
+            fprintf(stderr, "FAIL %s order[%d]=%d\n", what, i, g_order[i]);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int at_most_once(const char* what) {
+    int i;
+    for (i = 0; i < N; i++) {
+        if (g_evals[i] > 1) {
+            fprintf(stderr, "FAIL %s evals[%d]=%d\n", what, i, g_evals[i]);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int run(CCTurnstile* ts, int use_par) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    int i;
+    reset();
+    @parallel seq (use_par) wait (ts) for (i in 0..N) {
+        @stage (ts, 0, tick(i)) {
+            g_order[g_norder++] = i;
+        }
+    } !>.wait()!>;
+    return once_in_order(use_par ? "par" : "seq");
+}
+
+static int run_err(CCTurnstile* ts) {
+    @errhandler(CCError e) {
+        (void)e;
+        return at_most_once("err");
+    }
+    int i;
+    reset();
+    @parallel wait (ts) for (i in 0..N) {
+        boom(i) !>;
+        @stage (ts, 0, tick(i)) {
+            (void)i;
+        }
+    } !>.wait()!>;
+    fprintf(stderr, "FAIL error not raised\n");
+    return 1;
+}
+
+#pragma(@parallel) off
+
+static int run_off(CCTurnstile* ts) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    int i;
+    reset();
+    @parallel wait (ts) for (i in 0..N) {
+        @stage (ts, 0, tick(i)) {
+            g_order[g_norder++] = i;
+        }
+    } !>.wait()!>;
+    return once_in_order("off");
+}
+
+#pragma(@parallel) on
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+    CCTurnstile ts_seq@(CAP, 1, arena) !> @destroy;
+    CCTurnstile ts_par@(CAP, 1, arena) !> @destroy;
+    CCTurnstile ts_off@(CAP, 1, arena) !> @destroy;
+    CCTurnstile ts_err@(CAP, 1, arena) !> @destroy;
+    if (run(&ts_seq, 0) != 0 || run(&ts_par, 1) != 0 || run_off(&ts_off) != 0 ||
+        run_err(&ts_err) != 0)
+        return 1;
+    printf("parallel_stage_arg_once_smoke: OK\n");
+    return 0;
+}

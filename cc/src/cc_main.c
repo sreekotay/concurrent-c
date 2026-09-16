@@ -89,6 +89,8 @@ static void cc__prof_span_arg(const char* name, const char* arg, long long t0) {
 static int cc__take_unit_flag(int argc, char** argv, int* i,
                               CCUnitKind* as_kind, char* pin, size_t pin_cap);
 
+
+
 // `--emit-c-inspect[=PATH]`: dump the merged translation unit for inspection.
 // On a clean build it is the full pre-parse merged TU; on a build that fails in
 // a generic factory it is the reconstructed TU up to the first blocking error.
@@ -3072,6 +3074,63 @@ static void cc__merge_target_link_flags(const CCBuildTargetDecl* t, char* ld_fla
 }
 
 // Helper to add a library to ld_flags, avoiding duplicates
+static void cc__add_lib_to_flags(const char* lib, char* ld_flags, size_t ld_cap);
+
+/* How the runtime was built, from the header `make -C cc` writes beside the
+ * lowered faces: whether TLS has BearSSL behind it, and where BearSSL is. A
+ * runtime with BearSSL behind it references it from `tls.c`, so every link
+ * of such a runtime carries the archive, and a runtime the driver compiles
+ * itself for a flag set is compiled the same way. */
+typedef struct CCBuildConfig {
+    int read;
+    int tls;
+    char bearssl_inc[PATH_MAX];
+    char bearssl_lib[PATH_MAX];
+} CCBuildConfig;
+static CCBuildConfig g_build_config;
+
+static void cc__build_config_take(const char* line, const char* key, char* out, size_t cap) {
+    const char* p = strstr(line, key);
+    const char* q;
+    size_t n;
+    if (!p) return;
+    p = strchr(p + strlen(key), '"');
+    if (!p) return;
+    p++;
+    q = strchr(p, '"');
+    if (!q) return;
+    n = (size_t)(q - p);
+    if (n >= cap) return;
+    memcpy(out, p, n);
+    out[n] = 0;
+}
+
+static const CCBuildConfig* cc__build_config(void) {
+    char path[PATH_MAX];
+    FILE* f;
+    char line[PATH_MAX + 64];
+    if (g_build_config.read) return &g_build_config;
+    g_build_config.read = 1;
+    if (!g_cc_lowered_include[0]) return &g_build_config;
+    if ((size_t)snprintf(path, sizeof(path), "%s/ccc/cc_build_config.h", g_cc_lowered_include) >= sizeof(path))
+        return &g_build_config;
+    f = fopen(path, "r");
+    if (!f) return &g_build_config;
+    while (fgets(line, sizeof(line), f)) {
+        if (strstr(line, "#define CC_RUNTIME_TLS 1")) g_build_config.tls = 1;
+        cc__build_config_take(line, "CC_BEARSSL_INC", g_build_config.bearssl_inc, sizeof(g_build_config.bearssl_inc));
+        cc__build_config_take(line, "CC_BEARSSL_LIB", g_build_config.bearssl_lib, sizeof(g_build_config.bearssl_lib));
+    }
+    fclose(f);
+    return &g_build_config;
+}
+
+/* The archive a TLS runtime needs on its link line, when it has one. */
+static void cc__add_runtime_tls_lib(char* ld_flags, size_t ld_cap) {
+    const CCBuildConfig* bc = cc__build_config();
+    if (bc->tls && bc->bearssl_lib[0]) cc__add_lib_to_flags(bc->bearssl_lib, ld_flags, ld_cap);
+}
+
 static void cc__add_lib_to_flags(const char* lib, char* ld_flags, size_t ld_cap) {
     if (!lib || !lib[0] || !ld_flags) return;
     
@@ -3172,7 +3231,8 @@ static void cc__extract_link_directives(const char* c_file_path, const char* inc
     // Run preprocessor to expand includes and scan that too
     char cmd[2048];
     const char* inc = include_flags ? include_flags : "";
-    snprintf(cmd, sizeof(cmd), "cc -E %s \"%s\" 2>/dev/null", inc, c_file_path);
+    /* -C keeps the marker comments a lowered header carries */
+    snprintf(cmd, sizeof(cmd), "cc -E -C %s \"%s\" 2>/dev/null", inc, c_file_path);
     
     FILE* pp = popen(cmd, "r");
     if (!pp) return;
@@ -3245,6 +3305,7 @@ static void cc__collect_multi_link_flags(const char* extra_ld,
     }
 #ifndef _WIN32
     cc__add_lib_to_flags("m", out, cap);
+    cc__add_runtime_tls_lib(out, cap);
 #endif
 }
 
@@ -4791,8 +4852,7 @@ static int cc__collect_link_markers_text(const char* text, size_t n, const char*
                     int r;
                     while (p < line_end && text[p] != close) p++;
                     if (p < line_end && p > s && p - s < sizeof(rel) &&
-                        p - s > 2 && memcmp(text + p - 2, ".h", 2) == 0 &&
-                        strncmp(text + s, "ccc/", 4) != 0) {
+                        p - s > 2 && memcmp(text + p - 2, ".h", 2) == 0) {
                         memcpy(rel, text + s, p - s);
                         rel[p - s] = 0;
                         if (open == '"') {
@@ -6436,6 +6496,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
      * no trace. @link remains the idiom for everything outside ISO C. */
     cc__add_lib_to_flags("m", extracted_ld, sizeof(extracted_ld));
 #endif
+    cc__add_runtime_tls_lib(extracted_ld, sizeof(extracted_ld));
     const char* final_ld_flags = extracted_ld[0] ? extracted_ld : opt->ld_flags;
 
     // Link to binary (with incremental cache)
@@ -7001,6 +7062,13 @@ static void cc__runtime_build_cmds(const CCBuildOptions* opt, const char* cc_bin
              obj);
     if (host_prof->ok ? host_prof->no_liblfds : is_tcc) {
         strncat(out->compile, " -DCC_NO_LIBLFDS", sizeof(out->compile) - strlen(out->compile) - 1);
+    }
+    {
+        const CCBuildConfig* bc = cc__build_config();
+        if (bc->tls && bc->bearssl_inc[0]) {
+            strncat(out->compile, " -DCC_ENABLE_TLS -I", sizeof(out->compile) - strlen(out->compile) - 1);
+            strncat(out->compile, bc->bearssl_inc, sizeof(out->compile) - strlen(out->compile) - 1);
+        }
     }
     cc__append_host_cc_flags(out->compile, sizeof(out->compile), cc_bin);
     if (opt->cc_flags && *opt->cc_flags) {

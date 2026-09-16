@@ -1,18 +1,18 @@
 /*
  * Dest waiter face, a member of module CCServer (spec 1.7). Bodies:
- * CCServerPoll.ccs (kqueue / epoll / poll), a member as well. Both splice
- * into the module unit that CCServer.cch roots.
+ * server_poll.ccs (kqueue / epoll / poll), a member as well. Both splice
+ * into the module unit that server.cch roots.
  *
  * Connections live in Table::[int, CCConnRow] keyed by WaitId (≥1).
  * Kernel udata / wake hits name WaitId — never dense pack index.
  * `id_di` is WaitId → dense index for O(1) row(). `cc_tape_close` requires
  * an empty table (abort otherwise); worker exit is `worker_tape_exit` only.
  */
-#pragma(@module) "CCServer"
-#ifndef CC_SERVER_POLL_CCH
-#define CC_SERVER_POLL_CCH
+#pragma(@module) "server"
+#ifndef CC_STD_SERVER_POLL_CCH
+#define CC_STD_SERVER_POLL_CCH
 
-#include "CCServer.cch"
+#include "server.cch"
 
 #ifndef CC_SERVER_POLL_MS
 #define CC_SERVER_POLL_MS 50
@@ -64,7 +64,7 @@ typedef struct CCConnRow {
     int step_busy; /* app step claimed (home or stealer); not armed until done */
 } CCConnRow;
 
-/* Incomplete: concrete Table::[int, CCConnRow]* lives in CCServerPoll.ccs. */
+/* Incomplete: concrete Table::[int, CCConnRow]* lives in server_poll.ccs. */
 struct CCTapeConns;
 
 /*
@@ -94,7 +94,14 @@ typedef struct CCTape {
     int listen_want;
     int listen_ready;
     int backend_fd;
+    int slot;         /* index in srv->tape_conns; -1 = none */
+    int wake_rd;      /* a peer pokes the tape through this pipe */
+    int wake_wr;
+    int poked;        /* the last wait was ended by a poke */
 } CCTape;
+
+/* Kernel tag for the wake pipe; listen is 0, rows pack id and gen. */
+#define CC_WAIT_UD_WAKE ((uint64_t)-1)
 
 /* One wake: hits + listen bit. hits aliases tape storage until the
  * next wait(); do not keep an epoch across waits. */
@@ -103,7 +110,11 @@ typedef struct CCWaitEpoch {
     Vec::[CCWaitHit] hits;
     int n_events; /* <0 fail; 0 idle; >0 kernel events this wake */
     int listen_ready;
+    int poked;    /* a peer asked this tape to look at the hub */
 } CCWaitEpoch;
+
+/* Wake a tape from any thread: its wait returns with poked set. */
+void cc_tape_wake(CCTape* w);
 
 uint64_t cc_mono_ms(void);
 void cc_server_publish_accept_backoff(CCServer* srv);
@@ -135,4 +146,4 @@ CCConnRow* cc_tape_row(CCTape* w, int id);
 /* Dense pack walk (reap / deadline). id out via *out_id. */
 CCConnRow* cc_tape_dense_at(CCTape* w, size_t di, int* out_id);
 
-#endif /* CC_SERVER_POLL_CCH */
+#endif /* CC_STD_SERVER_POLL_CCH */

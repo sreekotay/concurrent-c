@@ -115,6 +115,10 @@ flags are present, debug wins. The driver honors `CC`, `CFLAGS`, `CPPFLAGS`, `LD
 
 The bundled runtime is linked unless `--no-runtime` is present. The driver may reuse a compatible runtime object or build one under the output directory.
 
+## Link directives
+
+`@link("NAME")` at file scope names a library the program links. A name without a slash or a library suffix is a system library (`curl` links as `-lcurl`). A path names a file: an absolute path is passed as written, and a relative path resolves against the directory of the file that carries the directive, as a quoted include does. The directive is honored wherever it is written: in the program, in a quoted face, and in a stdlib face, so a face that needs a library states it once and every program that includes the face links it. The driver does not check that a named file exists; a missing library is the linker's error, reported with the path the driver resolved.
+
 ## Incremental cache
 
 Cache metadata lives under `<out-dir>/.cc-build/`. Emit metas (`.meta`) are

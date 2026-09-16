@@ -1,0 +1,302 @@
+#pragma(@module) "server"
+/*
+ * <ccc/std/server.cch> — a socket server: listen, accept, poll, and hand
+ * each ready session to one closure, one step at a time. No protocol.
+ *
+ *   CCIoSess  — a session: socket, optional TLS, read window, output
+ *               queue, and the page's row behind `app`
+ *   CCServer  — listen, tls mats, dest, stop, live / worker ratchet
+ *   CCIoAct   — wait | wait_out | close: what the step wants next
+ *
+ * The step. `serve` calls the closure with a session whose window holds
+ * bytes the page has not consumed. The page parses what it can, queues
+ * its reply with `write`, consumes what it used, and answers with
+ * `apply`: `wait` for more input, `wait_out` when it streams its own
+ * bytes with `try_write` and was told BUSY, `close` to end the session
+ * once everything queued has drained. A step that returns without
+ * answering is a page fault: the engine closes the session and counts
+ * it (`step_faults`), never carries the previous answer forward.
+ *
+ * The row. `row_size` bytes of page state travel with every session,
+ * zeroed at accept and reachable as `app`; `row_drop` runs once when the
+ * session ends, on a row that may never have been stepped. The page
+ * allocates nothing per connection and never sees a dead session.
+ *
+ * Output. `write` queues; the engine drains the queue after the step and
+ * on every writable wake, and does not step the page again until it is
+ * empty. `try_write` sends now and may be short: for a page that streams
+ * a body from its own cursor. `flush` drains the queue now, so a body
+ * sent with `try_write` follows headers sent with `write`.
+ *
+ * Two independent facts on the row (do not collapse them):
+ *   - want_out      — the page's own cursor still has bytes (wait_out)
+ *   - pending_out   — the engine still has bytes: queue or TLS ciphertext
+ * Interest is want_out || pending_out. `.wait` clears only the page bit;
+ * `.close` becomes `closing` until pending_out drains, then dead.
+ *
+ * Workers. The engine finds its own level: init(0) caps at the processor
+ * count; every worker accepts and a heavier one leaves the listen socket
+ * to a lighter peer; a saturated worker (waits that keep returning with
+ * work, no idle peer) or a stalled one (a step over 200 us with steps
+ * queued behind it) adds a worker up to the cap; steps behind a stalled
+ * worker are taken by an idle peer its lane woke. A page sets nothing.
+ *
+ * `serve` lives in server_serve.ccs, a member of this module: workers,
+ * wait, grow, and the step. Tape interest is server_poll.cch / .ccs.
+ *
+ * TLS: bind starts the engine (`tls_hs`); handshake steps from waiter
+ * readiness (WANT_READ / WANT_WRITE) before on_app sees the row.
+ *
+ * Deadlines: absolute `time_t` on the session (`deadline`); 0 = none.
+ * Dest reaps expired rows on the 50ms wait wake.
+ *
+ * Certs are process mats (`cc_tls_server_load`) before dest wraps TLS.
+ */
+#ifndef CC_STD_SERVER_CCH
+#define CC_STD_SERVER_CCH
+
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_atomic.cch>
+#include <ccc/std/net.cch>
+#include <ccc/std/tls.cch>
+#include <ccc/std/signal.cch>
+#include <fcntl.h>
+#include <unistd.h>
+#include <stdint.h>
+#include <time.h>
+#include <errno.h>
+#include <ccc/cc_closure.cch>
+
+@variant CCIoAct {
+    wait: void;
+    wait_out: void;
+    close: void;
+};
+
+/* Socket-level session. read_ptr views a dest-owned buffer. */
+typedef struct CCIoSess {
+    CCSocket sock;
+    CCTlsConn tls;
+    void* tls_iobuf;
+    int tls_on;
+    int tls_hs;       /* 1 = handshake in progress (poll-stepped) */
+    char* read_ptr;
+    size_t rlen;
+    size_t rcap;
+    int dead;
+    int closing;      /* app asked close; delay until TLS SENDREC drains */
+    int want_in;      /* POLLIN; TLS HS may clear */
+    int want_out;     /* POLLOUT (app cursor and/or TLS record pending) */
+    time_t deadline;  /* 0 = none; absolute time() */
+    int sec_after_hs; /* first HTTP byte budget after TLS (set at bind) */
+    void* app;        /* the page row: row_size bytes, zeroed at accept */
+    CCArena out_a;    /* output queue, created on the first write */
+    CCString out;
+    size_t out_off;   /* bytes of out already on the wire */
+    int answered;     /* the step called apply */
+    int act;          /* the answer: 0 wait, 1 wait_out, 2 close */
+} CCIoSess;
+
+/* Dest bag. Owns the listen fd and (optional) TLS mats.
+ * Shared worker-visible state is listen + atomics only — no worker-mutable
+ * fds. EMFILE spare recovery lives on CCTape (per dest). */
+typedef struct CCServer {
+    CCListener ln;
+    int tls;
+    int tls_owned;
+    int workers_max;      /* init(0): the host's processor count */
+    int workers_start;    /* workers at serve; 0 = 2, grown by connection count */
+    size_t row_size;      /* page row bytes per session; 0 = none */
+    void (*row_drop)(void* row); /* runs once per session at its end; may see a zeroed row */
+    int sec_tls_hs;       /* first-byte budget during TLS HS (default 10) */
+    int sec_first_byte;   /* first HTTP byte after bind/HS (default 15) */
+    cc_atomic_u64 accept_backoff_until_ms; /* listen interest off until mono ms */
+    cc_atomic_int stop;
+    cc_atomic_int live;
+    cc_atomic_int nworkers; /* running workers */
+    cc_atomic_int tls_fail;
+    cc_atomic_int accept_soft; /* EMFILE/ENFILE soft-fail count */
+    cc_atomic_int step_steal;  /* ready-app steps stolen across dests */
+    cc_atomic_int step_faults; /* steps that returned without an answer */
+    cc_atomic_int workers_peak; /* most workers alive at once */
+    /* Each tape publishes its session count here at every wait (-1 =
+     * no tape); accept goes to the tape with the fewest. */
+    cc_atomic_int tape_conns[64];
+    cc_atomic_int tape_slots;
+    CCParallel app;
+} CCServer;
+
+int cc_fd_nonblock(int fd);
+int cc_server_stopped(CCServer* srv);
+int cc_server_lightest_other(CCServer* srv, int self_slot);
+int cc_server_tape_may_accept(CCServer* srv, int self_slot, size_t nconns);
+
+/* Defined in server_serve.ccs — send() / cc_tls_try_write, never parks. */
+size_t !>(CCIoError) cc_io_sess_try_write(CCIoSess* io, char[:] data);
+
+/* Queue bytes for the engine to send after the step. */
+void !>(CCIoError) cc_io_sess_write(CCIoSess* io, char[:] data);
+
+/* Drain the queue now: 1 = empty, 0 = the socket is busy (wait_out),
+ * -1 = the socket is gone. */
+int cc_io_sess_flush(CCIoSess* io);
+
+/* 1 while the engine still has bytes for the socket: the queue, or TLS
+ * ciphertext. Not the page's own cursor. */
+int cc_io_sess_pending_out(CCIoSess* io);
+
+/* Body in server_serve.ccs — keeps TLS pending_out out of the published face. */
+void cc_io_sess_apply(CCIoSess* io, CCIoAct a);
+
+/* The waiter, a member (spec 1.7), ahead of every body in the unit: its
+ * table alias is defined before any prototype the lowering hoists could
+ * name it. */
+#include "server_poll.ccs"
+
+int cc_fd_nonblock(int fd) {
+    int fl = fcntl(fd, F_GETFL, 0);
+    if (fl < 0) return -1;
+    return fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+}
+
+void cc_io_sess_consume(CCIoSess* io, size_t n) {
+    if (!io->read_ptr) return;
+    if (n > io->rlen) n = io->rlen;
+    if (n && n < io->rlen) {
+        size_t keep = io->rlen - n;
+        char[:] buf = cc_slice_from_buffer(io->read_ptr, io->rlen);
+        char[:] dst = buf.sub(0, keep);
+        dst.copy_overlap(buf.sub(n, io->rlen)) !>(e) { (void)e; return; };
+    }
+    io->rlen -= n;
+}
+
+char[:] cc_io_sess_window(CCIoSess* io) {
+    if (!io || !io->read_ptr) return cc_slice_empty();
+    return cc_slice_from_buffer(io->read_ptr, io->rlen);
+}
+
+int cc_io_sess_full(CCIoSess* io) {
+    return io && io->rcap && io->rlen >= io->rcap;
+}
+
+void cc_io_sess_touch(CCIoSess* io, time_t now, int secs) {
+    if (!io) return;
+    if (secs <= 0) {
+        io->deadline = 0;
+        return;
+    }
+    io->deadline = now + (time_t)secs;
+}
+
+/* workers_max 0: as many workers as the host has processors. */
+void cc_server_init(CCServer* srv, int workers_max) {
+    if (workers_max <= 0) {
+        long n = sysconf(_SC_NPROCESSORS_ONLN);
+        workers_max = n < 1 ? 1 : (n > 256 ? 256 : (int)n);
+    }
+    *srv = (CCServer){
+        .ln = { .fd = -1 },
+        .workers_max = workers_max,
+        .sec_tls_hs = 10,
+        .sec_first_byte = 15,
+    };
+    {
+        int i;
+        for (i = 0; i < 64; i++) cc_atomic_store_release(&srv->tape_conns[i], -1);
+    }
+}
+
+/* The fewest sessions any other live tape holds; -1 when there is none. */
+int cc_server_lightest_other(CCServer* srv, int self_slot) {
+    int i, best = -1;
+    if (!srv) return -1;
+    for (i = 0; i < 64; i++) {
+        int n;
+        if (i == self_slot) continue;
+        n = cc_atomic_load_acquire(&srv->tape_conns[i]);
+        if (n < 0) continue;
+        if (best < 0 || n < best) best = n;
+    }
+    return best;
+}
+
+/* A tape takes the listen socket only while no live peer holds fewer
+ * sessions than it, within one: the burst spreads, the idle tape wins. */
+int cc_server_tape_may_accept(CCServer* srv, int self_slot, size_t nconns) {
+    int other = cc_server_lightest_other(srv, self_slot);
+    if (other < 0) return 1;
+    return nconns <= (size_t)other + 1;
+}
+
+int cc_server_start_n(CCServer* srv) {
+    int n = srv->workers_max;
+    int start = srv->workers_start > 0 ? srv->workers_start : 2;
+    if (n < 1) return 1;
+    return n < start ? n : start;
+}
+
+void !>(CCError) cc_server_listen(CCServer* srv, CCSlice addr) {
+    @errhandler(CCError e) { return cc_err(e); }
+    srv->ln = cc_tcp_listen(addr) !>(e) {
+        return cc_err(cc_net_to_io_error(e).base);
+    };
+    (void)cc_fd_nonblock(srv->ln.fd);
+    return cc_ok();
+}
+
+/* Load the process-wide certificate chain and key; sessions this dest
+ * accepts from here on are wrapped. A runtime built without BearSSL says
+ * so here, at the call that asked, rather than at every handshake. */
+void !>(CCError) cc_server_load_tls(CCServer* srv, const char* cert, const char* key) {
+    if (!srv || !cert || !key)
+        return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "cc_server_load_tls: a certificate and a key are required"));
+    if (!cc_tls_available())
+        return cc_err(CC_ERROR(CC_ERR_NOT_FOUND,
+                               "this runtime was built without TLS: build BearSSL (make bearssl) and rebuild the toolchain (make -C cc)"));
+    if (cc_tls_server_load(cert, key) != 0)
+        return cc_err(CC_ERROR(CC_ERR_IO, "cc_server_load_tls: cannot load the certificate chain or the key (PEM)"));
+    srv->tls = 1;
+    srv->tls_owned = 1;
+    return cc_ok();
+}
+
+void cc_server_shutdown(CCServer* srv) {
+    cc_atomic_store_release(&srv->stop, 1);
+}
+
+int cc_server_tls_fails(CCServer* srv) {
+    return cc_atomic_load_acquire(&srv->tls_fail);
+}
+
+int cc_server_step_steals(CCServer* srv) {
+    return srv ? cc_atomic_load_acquire(&srv->step_steal) : 0;
+}
+
+int cc_server_step_faults(CCServer* srv) {
+    return srv ? cc_atomic_load_acquire(&srv->step_faults) : 0;
+}
+
+int cc_server_workers_peak(CCServer* srv) {
+    return srv ? cc_atomic_load_acquire(&srv->workers_peak) : 0;
+}
+
+void cc_server_close(CCServer* srv) {
+    if (!srv) return;
+    cc_server_shutdown(srv);
+    srv->ln.close();
+    if (srv->tls_owned) {
+        cc_tls_server_unload();
+        srv->tls_owned = 0;
+        srv->tls = 0;
+    }
+}
+
+/* Borrow-invoke on_app(io) per ready window; drop once after join. */
+void !>(CCError) cc_server_serve(CCServer* srv, CCSignal* stop,
+                                 CCClosure1 on_app);
+
+/* The other member: serve, after the bodies it calls. */
+#include "server_serve.ccs"
+
+#endif /* CC_STD_SERVER_CCH */

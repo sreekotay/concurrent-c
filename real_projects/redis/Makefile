@@ -37,6 +37,11 @@ upstream: $(REDIS_SRC_DIR)/src/redis-server $(REDIS_SRC_DIR)/src/redis-cli $(RED
 $(OUT_DIR)/redis_idiomatic: redis_idiomatic.ccs redis_cc/redis_cc.cch redis_db.cch redis_reply.cch redis_mem.cch redis_glob.cch redis_resp.cch | $(OUT_DIR)
 	$(CCC) -O -o $@ redis_idiomatic.ccs --release --cc-flags "$(REDIS_IDIOMATIC_DEFS)"
 
+# The same command surface on <ccc/std/server.cch> (poll workers, no dest per conn).
+STD_SERVER = ../../cc/include/ccc/std/server.cch ../../cc/include/ccc/std/server_serve.ccs ../../cc/include/ccc/std/server_poll.cch ../../cc/include/ccc/std/server_poll.ccs
+$(OUT_DIR)/redis_std: redis_std.ccs redis_cc/redis_cc.cch redis_db.cch redis_reply.cch redis_mem.cch redis_glob.cch redis_resp.cch $(STD_SERVER) | $(OUT_DIR)
+	$(CCC) -O -o $@ redis_std.ccs --release --cc-flags "$(REDIS_IDIOMATIC_DEFS)"
+
 # Channel/owner-fiber variant (historical N:1 request path).
 $(OUT_DIR)/redis_owner: redis_owner.ccs redis_cc/redis_cc.cch redis_db.cch redis_mem.cch redis_glob.cch redis_resp.cch | $(OUT_DIR)
 	$(CCC) -O -o $@ redis_owner.ccs --release --cc-flags "$(REDIS_IDIOMATIC_DEFS)"
@@ -74,6 +79,7 @@ $(OUT_DIR)/redis_parallel: redis_parallel.ccs | $(OUT_DIR)
 	$(CCC) -O -o $@ redis_parallel.ccs --release
 
 redis_idiomatic: $(OUT_DIR)/redis_idiomatic
+redis_std: $(OUT_DIR)/redis_std
 redis_owner: $(OUT_DIR)/redis_owner
 redis_lock: $(OUT_DIR)/redis_lock
 redis_idiomatic_gen: $(OUT_DIR)/redis_idiomatic_gen

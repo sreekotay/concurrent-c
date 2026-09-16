@@ -30,6 +30,8 @@ typedef struct CcLowerOpts {
                                  * the family then its type spellings */
     CCSlice factories;          /* families a `@comptime { cc_generic_register(...) }` bound: one line each,
                                  * the family, its handler, then `extend` for one that appends */
+    CcNameList module_faces;    /* faces the driver staged as modules, canonical: an angle include that
+                                 * names one is lowered here, as a quoted include is */
 } CcLowerOpts;
 
 typedef struct CcLowerer {

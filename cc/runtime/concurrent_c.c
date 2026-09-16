@@ -62,10 +62,14 @@
 #include "async_backend_poll.c"
 #endif
 
+/* TLS is always part of the runtime; what varies is whether BearSSL is
+ * behind it. Without it every connection call answers "no TLS" and the
+ * server materials refuse to load, so a program that never asks for TLS
+ * links and runs the same either way, and one that asks is told. */
 #ifdef CC_ENABLE_TLS
 #define CC_HAS_BEARSSL 1
-#include "tls.c"
 #endif
+#include "tls.c"
 
 /* HTTP support is header-only - included from http.cch when user code needs it.
  * User must add @link("curl") to their source file to link libcurl. */

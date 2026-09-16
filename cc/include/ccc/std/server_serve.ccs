@@ -1,16 +1,17 @@
 #!ccc ccs
-#pragma(@module) "CCServer"
+#pragma(@module) "server"
 /*
- * Member of module CCServer (spec 1.7): CCServer.cch includes this unit
+ * Member of module CCServer (spec 1.7): server.cch includes this unit
  * and the module lowers once; a page includes the face and links its
  * object.
  *
- * `srv.serve(stop, (io) => [cfg, sessions] { … })` plants dests, waits,
- * accepts, fills, borrow-invokes `on_app` with `CCIoSess*` (many fibers,
- * one env), then drops the closure at join. Dest does not see Cfg / Enc /
- * Session. The page row lives in a pool the closure captured.
+ * `srv.serve(stop, (io) => [cfg] { … })` plants dests, waits, accepts,
+ * fills, borrow-invokes the step with `CCIoSess*` (many fibers, one env),
+ * drains what the step queued, then drops the closure at join. The page
+ * row (`srv.row_size`) sits in the session slot behind `io->app`; the
+ * dest never reads it and runs `srv.row_drop` on it at the end.
  *
- * Waiter bodies: CCServerPoll.ccs (kqueue / epoll / poll via host #ifdef).
+ * Waiter bodies: server_poll.ccs (kqueue / epoll / poll via host #ifdef).
  */
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_atomic.cch>
@@ -19,14 +20,15 @@
 #include <ccc/std/signal.cch>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <unistd.h>
 #include <stdint.h>
 #include <time.h>
 #include <sys/socket.h>
-#include "CCServer.cch"
-#include "CCServerPoll.cch"
+#include "server.cch"
+#include "server_poll.cch"
 #include <pthread.h>
 
 #ifndef K_IO_READ_BUF
@@ -37,7 +39,7 @@
 #define WORKER_GROW_EVERY 64
 #endif
 
-int !>(CCIoError) io_sess_fill(CCIoSess* io) {
+int !>(CCIoError) cc_io_sess_fill(CCIoSess* io) {
     size_t n = 0;
     size_t room;
     bool got;
@@ -68,7 +70,7 @@ int !>(CCIoError) io_sess_fill(CCIoSess* io) {
     return cc_ok(1);
 }
 
-size_t !>(CCIoError) io_sess_try_write(CCIoSess* io, char[:] data) {
+size_t !>(CCIoError) cc_io_sess_try_write(CCIoSess* io, char[:] data) {
     if (!data.len)
         return cc_ok(0);
     if (io->tls_on) {
@@ -97,7 +99,7 @@ size_t !>(CCIoError) io_sess_try_write(CCIoSess* io, char[:] data) {
     }
 }
 
-void io_sess_init(CCIoSess* io, CCSocket sock, char* buf, size_t cap) {
+void cc_io_sess_init(CCIoSess* io, CCSocket sock, char* buf, size_t cap) {
     *io = (CCIoSess){
         .sock = sock,
         .read_ptr = buf,
@@ -108,7 +110,7 @@ void io_sess_init(CCIoSess* io, CCSocket sock, char* buf, size_t cap) {
 }
 
 /* Begin TLS; handshake completes via cc_io_ready steps. */
-int io_sess_wrap_tls(CCIoSess* io) {
+int cc_io_sess_wrap_tls(CCIoSess* io) {
     void* iobuf;
     CCTlsServerConfig tcfg = {0};
     CCNetError ne = CC_NET_OK;
@@ -148,35 +150,71 @@ int io_sess_wrap_tls(CCIoSess* io) {
     return 0;
 }
 
-int io_sess_pending_out(CCIoSess* io) {
-    return io && io->tls_on && !io->tls_hs && cc_tls_pending_out(&io->tls);
+static int cc_io_sess_queue_pending(CCIoSess* io) {
+    return io && io->out_off < io->out.as_slice().len;
 }
 
-void io_sess_apply(CCIoSess* io, CCIoAct a) {
-    int pend = io_sess_pending_out(io);
+int cc_io_sess_pending_out(CCIoSess* io) {
+    if (!io) return 0;
+    if (cc_io_sess_queue_pending(io)) return 1;
+    return io->tls_on && !io->tls_hs && cc_tls_pending_out(&io->tls);
+}
+
+enum { K_IO_OUT_ARENA = 8 * 1024 };
+
+void !>(CCIoError) cc_io_sess_write(CCIoSess* io, char[:] data) {
+    if (!io || !data.len) return cc_ok();
+    if (!cc_arena_is_live(io->out_a)) {
+        io->out_a = cc_arena_heap(K_IO_OUT_ARENA);
+        if (!cc_arena_is_live(io->out_a))
+            return cc_err(cc_io_error(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "session output queue")));
+        io->out = cc_string_new();
+        io->out_off = 0;
+    }
+    if (!io->out.append(data, io->out_a) || io->out.failed())
+        return cc_err(cc_io_error(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "session output queue")));
+    return cc_ok();
+}
+
+/* Drain the queue with try_write: 1 = empty (and reset), 0 = busy, -1 = gone. */
+int cc_io_sess_flush(CCIoSess* io) {
+    char[:] data;
+    if (!io) return -1;
+    data = io->out.as_slice();
+    while (io->out_off < data.len) {
+        char[:] rest = data.sub(io->out_off, data.len);
+        size_t n = io->try_write(rest) !>(e) {
+            if (e.kind == CC_IO_BUSY) return 0;
+            return -1;
+        };
+        io->out_off += n;
+    }
+    if (data.len) {
+        io->out.release(io->out_a);
+        io->out_a.reset();
+        io->out_off = 0;
+    }
+    return 1;
+}
+
+/* Record the answer; the engine resolves interest after the step, once
+ * it knows what is left in the queue. */
+void cc_io_sess_apply(CCIoSess* io, CCIoAct a) {
+    io->answered = 1;
     @switch (a) {
     case .close:
-        if (pend) {
-            /* App cursor done; keep the row until ciphertext drains. */
-            io->closing = 1;
-            io->want_out = 1;
-            io->dead = 0;
-        } else {
-            io->closing = 0;
-            io->dead = 1;
-            io->want_out = 0;
-        }
+        io->act = 2;
         break;
     case .wait:
-        io->want_out = pend ? 1 : 0;
+        io->act = 0;
         break;
     case .wait_out:
-        io->want_out = 1;
+        io->act = 1;
         break;
     }
 }
 
-void io_sess_drop(CCIoSess* io) {
+void cc_io_sess_drop(CCIoSess* io) {
     if (!io) return;
     if (io->tls_on) {
         cc_tls_close(&io->tls);
@@ -196,6 +234,14 @@ void io_sess_drop(CCIoSess* io) {
     io->want_out = 0;
     io->deadline = 0;
     io->app = NULL;
+    if (cc_arena_is_live(io->out_a)) {
+        io->out.release(io->out_a);
+        io->out_a.destroy();
+    }
+    io->out_off = 0;
+    io->answered = 0;
+    io->act = 0;
+    io->closing = 0;
 }
 
 int cc_server_stopped(CCServer* srv) {
@@ -214,7 +260,7 @@ int cc_server_bind_conn(CCServer* srv, CCIoSess* io, int fd,
                                char* buf, size_t cap) {
     int first = (srv && srv->sec_first_byte > 0) ? srv->sec_first_byte : 15;
     int tls_hs = (srv && srv->sec_tls_hs > 0) ? srv->sec_tls_hs : 10;
-    io_sess_init(io, (CCSocket){ .fd = fd }, buf, cap);
+    cc_io_sess_init(io, (CCSocket){ .fd = fd }, buf, cap);
     io->sec_after_hs = first;
     if (srv && srv->tls) {
         if (io->wrap_tls() != 0) {
@@ -223,11 +269,11 @@ int cc_server_bind_conn(CCServer* srv, CCIoSess* io, int fd,
             return 0;
         }
         if (io->tls_hs)
-            io_sess_touch(io, time(NULL), tls_hs);
+            cc_io_sess_touch(io, time(NULL), tls_hs);
         else
-            io_sess_touch(io, time(NULL), first);
+            cc_io_sess_touch(io, time(NULL), first);
     } else {
-        io_sess_touch(io, time(NULL), first);
+        cc_io_sess_touch(io, time(NULL), first);
     }
     return 1;
 }
@@ -265,6 +311,11 @@ CCAccept cc_tape_accept(CCTape* w) {
     return (CCAccept){ .ready = fd };
 }
 
+static void cc_server_note_workers(CCServer* srv, int n) {
+    int peak = cc_atomic_load_acquire(&srv->workers_peak);
+    while (n > peak && !cc_atomic_cas(&srv->workers_peak, &peak, n)) {}
+}
+
 int cc_server_try_grow(CCServer* srv, int every) {
     int n = cc_atomic_load_acquire(&srv->nworkers);
     int live = cc_atomic_load_acquire(&srv->live);
@@ -272,7 +323,9 @@ int cc_server_try_grow(CCServer* srv, int every) {
     if (n < 1 || n >= srv->workers_max) return 0;
     if (every < 1 || live < (n + 1) * every) return 0;
     next = n + 1;
-    return cc_atomic_cas(&srv->nworkers, &n, next) ? 1 : 0;
+    if (!cc_atomic_cas(&srv->nworkers, &n, next)) return 0;
+    cc_server_note_workers(srv, next);
+    return 1;
 }
 
 /* Claim a replacement slot when a worker exited below the start floor. */
@@ -294,6 +347,7 @@ void cc_server_start(CCServer* srv, CCSignal* stop) {
     CCServer* srvp = srv;
     CCSignal* stopp = stop;
     cc_atomic_store_release(&srv->nworkers, cc_server_start_n(srv));
+    cc_server_note_workers(srv, cc_server_start_n(srv));
     cc_server_kick(srv);
     if (!stopp) return;
     @parallel(srv->app) {
@@ -311,8 +365,18 @@ void !>(CCError) cc_server_join(CCServer* srv) {
 
 typedef struct CCIoRow {
     CCIoSess io;
+    CCServer* srv;
     char read_buf[K_IO_READ_BUF];
 } CCIoRow;
+
+/* The page row follows the engine row in the same slot, 16-aligned. */
+#define CC_IO_ROW_PAGE_OFF ((sizeof(CCIoRow) + 15u) & ~(size_t)15u)
+
+static size_t cc_io_row_bytes(CCServer* srv) {
+    size_t n = CC_IO_ROW_PAGE_OFF;
+    if (srv && srv->row_size) n += (srv->row_size + 15u) & ~(size_t)15u;
+    return n;
+}
 
 typedef CCIoSess* CCIoSessP;
 
@@ -338,11 +402,18 @@ typedef struct CCStepLane {
     _Atomic int live;
     _Atomic int qlen;
     _Atomic int inflight; /* run_queued in flight (owner or thief) */
+    _Atomic int idle;     /* 1 in wait, 2 poked, 0 working */
+    _Atomic uint64_t progress; /* mono ns: last wake or completed step */
+    int slow;             /* the last batch had a step over CC_SERVER_STALL_NS */
     pthread_mutex_t mx;
     int q[CC_STEP_Q_CAP];
+    CCIoSess* qio[CC_STEP_Q_CAP]; /* the session behind q[i]: a thief steps it without the table */
     int head;
     int tail;
     int n;
+    /* Ids a thief stepped; the owner re-arms them and clears busy. */
+    int rearm[CC_STEP_Q_CAP];
+    int rn;
     CCTape* tape;
     ServeCtx* ctx;
 } CCStepLane;
@@ -353,26 +424,50 @@ struct CCStepHub {
 };
 
 static void cc_server_worker(ServeCtx* ctx);
+static void cc_serve_invoke(ServeCtx* ctx, CCIoSess* io);
 
-/* CC_SERVER_STEP_STEAL (opt-in; default off):
- *   unset / 0 — serial serve (no deque)
- *   1 — ready-app deque + cross-dest steal
- *   2 — deque only (no try_steal); isolates queue path vs steal
+/* CC_SERVER_STEP_STEAL:
+ *   unset / 1 — ready-app deque + steal off a stalled peer (the default)
+ *   0 — serial serve (no deque)
+ *   2 — deque only (no steal); isolates the queue path
  *
- * Steal helps when ready-app HOL is independently runnable work. It is not
- * a substitute for a parking exclusive around shared mutable state, and it
- * does not fix exclusive occupancy. Keep off until a non-exclusive mix
- * shows a clear win (see docs/the-cc-way.md: smallest fact, narrowest place).
+ * Steps move only off a stalled peer: one whose current step has run past
+ * CC_SERVER_STALL_NS with steps queued behind it. That is independently
+ * runnable work the owner cannot reach. Steal is not a substitute for a
+ * parking exclusive around shared state and does not fix exclusive
+ * occupancy; a lane of quick steps never pokes and is never stolen from.
  */
 static int cc_step_mode(void) {
     static int cached = -1;
     const char* e;
     if (cached >= 0) return cached;
     e = getenv("CC_SERVER_STEP_STEAL");
-    if (!e || !e[0] || e[0] == '0') cached = 0;
+    if (!e || !e[0]) cached = 1;          /* queue + steal, with peer wake */
+    else if (e[0] == '0') cached = 0;
     else if (e[0] == '2') cached = 2;
     else cached = 1;
     return cached;
+}
+
+/* CC_SERVER_TRACE=1: accept, grow and worker exit on stderr, per worker. */
+static int cc_server_trace(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* e = getenv("CC_SERVER_TRACE");
+        cached = (e && e[0] && e[0] != '0') ? 1 : 0;
+    }
+    return cached;
+}
+
+/* A tape heavier than a peer leaves the rest of a burst to the peer; the
+ * same rule cc_tape_wait applies to listen interest. */
+static int cc_tape_above_share(CCTape* tape) {
+    size_t n;
+    if (!tape || !tape->srv) return 0;
+    n = tape->nconns();
+    if (tape->slot >= 0)
+        cc_atomic_store_release(&tape->srv->tape_conns[tape->slot], (int)n);
+    return !cc_server_tape_may_accept(tape->srv, tape->slot, n);
 }
 
 static int cc_step_lane_wanted(void) {
@@ -424,7 +519,7 @@ static void cc_step_hub_detach(CCStepHub* hub, CCStepLane* lane) {
     pthread_mutex_unlock(&hub->mx);
 }
 
-static int cc_step_lane_push(CCStepLane* L, int id) {
+static int cc_step_lane_push(CCStepLane* L, int id, CCIoSess* io) {
     if (!L || id <= 0) return 0;
     pthread_mutex_lock(&L->mx);
     if (L->n >= CC_STEP_Q_CAP) {
@@ -432,6 +527,7 @@ static int cc_step_lane_push(CCStepLane* L, int id) {
         return 0;
     }
     L->q[L->tail] = id;
+    L->qio[L->tail] = io;
     L->tail = (L->tail + 1) % CC_STEP_Q_CAP;
     L->n++;
     cc_atomic_store_release(&L->qlen, L->n);
@@ -455,7 +551,7 @@ static int cc_step_lane_pop_owner(CCStepLane* L) {
     return id;
 }
 
-static int cc_step_lane_pop_thief(CCStepLane* L) {
+static int cc_step_lane_pop_thief(CCStepLane* L, CCIoSess** io_out) {
     int id;
     if (!L) return 0;
     pthread_mutex_lock(&L->mx);
@@ -464,11 +560,43 @@ static int cc_step_lane_pop_thief(CCStepLane* L) {
         return 0;
     }
     id = L->q[L->head];
+    if (io_out) *io_out = L->qio[L->head];
     L->head = (L->head + 1) % CC_STEP_Q_CAP;
     L->n--;
     cc_atomic_store_release(&L->qlen, L->n);
     pthread_mutex_unlock(&L->mx);
     return id;
+}
+
+/* A thief hands a stepped id back; the owner arms it on its next wake. */
+static void cc_step_lane_rearm_push(CCStepLane* L, int id) {
+    pthread_mutex_lock(&L->mx);
+    if (L->rn < CC_STEP_Q_CAP) L->rearm[L->rn++] = id;
+    pthread_mutex_unlock(&L->mx);
+    if (cc_atomic_load_acquire(&L->idle) != 0 && L->tape) cc_tape_wake(L->tape);
+}
+
+static int cc_step_lane_rearm_take(CCStepLane* L, int* ids, int cap) {
+    int n;
+    pthread_mutex_lock(&L->mx);
+    n = L->rn < cap ? L->rn : cap;
+    if (n > 0) memcpy(ids, L->rearm, (size_t)n * sizeof(int));
+    if (n < L->rn) memmove(L->rearm, L->rearm + n, (size_t)(L->rn - n) * sizeof(int));
+    L->rn -= n;
+    pthread_mutex_unlock(&L->mx);
+    return n;
+}
+
+/* A stolen step: the page runs on the thief's thread with the session
+ * alone; the row, its table and its arm belong to the owner, who gets
+ * the id back through the rearm list. Reap skips busy rows, so the
+ * session outlives the step. */
+static void cc_serve_run_stolen(CCStepLane* V, int id, CCIoSess* io) {
+    if (!V || id <= 0) return;
+    cc_atomic_fetch_add(&V->inflight, 1);
+    if (io && !io->dead) cc_serve_invoke(V->ctx, io);
+    cc_step_lane_rearm_push(V, id);
+    cc_atomic_fetch_sub(&V->inflight, 1);
 }
 
 static int cc_step_unfair(int mine, int victim) {
@@ -498,18 +626,54 @@ static CCStepLane* cc_step_pick_victim(CCStepHub* hub, CCStepLane* self,
     return best;
 }
 
+/* One step: the page answers with apply; the engine then drains what it
+ * queued. A step that did not answer is a fault: closed and counted. */
 static void cc_serve_invoke(ServeCtx* ctx, CCIoSess* io) {
-    if (ctx && ctx->on_app.fn)
-        (void)(ctx->on_app.fn)(ctx->on_app.env, (intptr_t)io);
+    if (!ctx || !ctx->on_app.fn) return;
+    io->answered = 0;
+    (void)(ctx->on_app.fn)(ctx->on_app.env, (intptr_t)io);
+    if (!io->answered && !io->dead) {
+        static int said;
+        int n = cc_atomic_fetch_add(&ctx->srv->step_faults, 1);
+        if (!said && n == 0) {
+            said = 1;
+            fprintf(stderr, "cc_server: a step returned without apply; the session is closed (counted in step_faults)\n");
+        }
+        io->dead = 1;
+        return;
+    }
+    if (io->dead) return;
+    if (cc_io_sess_queue_pending(io)) {
+        int fl = cc_io_sess_flush(io);
+        if (fl < 0) { io->dead = 1; return; }
+    }
+    {
+        int pend = cc_io_sess_pending_out(io);
+        if (io->act == 2) {
+            if (pend) {
+                io->closing = 1;
+                io->want_out = 1;
+            } else {
+                io->closing = 0;
+                io->dead = 1;
+                io->want_out = 0;
+            }
+        } else {
+            io->closing = 0;
+            io->want_out = (io->act == 1 || pend) ? 1 : 0;
+        }
+    }
 }
 
 static void cc_io_row_drop(ServeCtx* ctx, CCIoSess* io, CCArenaPool* slots) {
     CCIoRow* row;
+    (void)ctx;
     if (!io) return;
     io->dead = 1;
-    if (io->app) cc_serve_invoke(ctx, io);
-    io->drop();
     row = (CCIoRow*)io;
+    if (io->app && row->srv && row->srv->row_drop)
+        row->srv->row_drop(io->app);
+    io->drop();
     if (slots) slots->free(row);
 }
 
@@ -520,9 +684,15 @@ static CCIoSess* cc_io_row_new(CCServer* srv, int fd, CCArenaPool* pool) {
         return NULL;
     }
     *row = (CCIoRow){0};
+    row->srv = srv;
     if (srv->bind_conn(&row->io, fd, row->read_buf, sizeof(row->read_buf)) != 1) {
         pool->free(row);
         return NULL;
+    }
+    if (srv->row_size) {
+        char* page = (char*)row + CC_IO_ROW_PAGE_OFF;
+        memset(page, 0, srv->row_size);
+        row->io.app = page;
     }
     return &row->io;
 }
@@ -588,7 +758,7 @@ static int !>(CCError) cc_io_ready(CCIoSess* io, CCTape* tape, int id,
             io->tls_hs = 0;
             io->want_in = 1;
             io->want_out = 0;
-            io_sess_touch(io, time(NULL),
+            cc_io_sess_touch(io, time(NULL),
                           io->sec_after_hs > 0 ? io->sec_after_hs : 15);
             {
                 int ar = cc_io_arm(io, tape, id, arm_mx) !>;
@@ -606,9 +776,38 @@ static int !>(CCError) cc_io_ready(CCIoSess* io, CCTape* tape, int id,
             return cc_ok(0);
         }
     }
+    /* The engine's queue drains before the page runs again. */
+    if (cc_io_sess_queue_pending(io) && cc_ready_out(r)) {
+        int fl = cc_io_sess_flush(io);
+        if (fl < 0) {
+            io->dead = 1;
+            return cc_ok(-1);
+        }
+    }
+    if (cc_io_sess_queue_pending(io)) {
+        int ar;
+        if (cc_ready_in(r)) {
+            int got = cc_io_fill_while_out(io) !>(e) {
+                (void)e;
+                io->dead = 1;
+                return cc_ok(-1);
+            };
+            (void)got;
+        }
+        io->want_out = 1;
+        ar = cc_io_arm(io, tape, id, arm_mx) !>;
+        if (ar < 0) return cc_ok(-1);
+        return cc_ok(0);
+    }
+    if (io->closing && !cc_io_sess_pending_out(io)) {
+        io->closing = 0;
+        io->dead = 1;
+        io->want_out = 0;
+        return cc_ok(-1);
+    }
     /* Record-layer drain is independent of the app send cursor. */
     if (io->tls_on && !io->tls_hs) {
-        if (io_sess_pending_out(io) && cc_ready_out(r)) {
+        if (cc_io_sess_pending_out(io) && cc_ready_out(r)) {
             CCNetError ne = CC_NET_OK;
             int p = cc_tls_flush_step(&io->tls, &ne);
             if (p < 0) {
@@ -616,10 +815,10 @@ static int !>(CCError) cc_io_ready(CCIoSess* io, CCTape* tape, int id,
                 return cc_ok(-1);
             }
         }
-        if (io_sess_pending_out(io))
+        if (cc_io_sess_pending_out(io))
             io->want_out = 1;
         if (io->closing) {
-            if (io_sess_pending_out(io)) {
+            if (cc_io_sess_pending_out(io)) {
                 int ar = cc_io_arm(io, tape, id, arm_mx) !>;
                 if (ar < 0) return cc_ok(-1);
                 return cc_ok(0);
@@ -750,11 +949,14 @@ static int cc_step_try_steal_one(CCStepHub* hub, CCStepLane* self) {
     V = cc_step_pick_victim(hub, self, mine);
     if (!V) return 0;
     if (!cc_atomic_load_acquire(&V->live)) return 0;
-    id = cc_step_lane_pop_thief(V);
-    if (id <= 0) return 0;
-    if (self->ctx && self->ctx->srv)
-        cc_atomic_fetch_add(&self->ctx->srv->step_steal, 1);
-    (void)cc_serve_run_queued(V, id, 0);
+    {
+        CCIoSess* io = NULL;
+        id = cc_step_lane_pop_thief(V, &io);
+        if (id <= 0) return 0;
+        if (self->ctx && self->ctx->srv)
+            cc_atomic_fetch_add(&self->ctx->srv->step_steal, 1);
+        cc_serve_run_stolen(V, id, io);
+    }
     return 1;
 }
 
@@ -764,10 +966,82 @@ static int cc_step_try_steal_one(CCStepHub* hub, CCStepLane* self) {
 #define CC_STEP_STEAL_FAIR_MAX 64
 #endif
 static int cc_step_steal_until_fair(CCStepHub* hub, CCStepLane* self) {
-    int n = 0;
-    while (n < CC_STEP_STEAL_FAIR_MAX && cc_step_try_steal_one(hub, self))
-        n++;
-    return n;
+    (void)hub; (void)self;
+    return 0;   /* steps move only off a stalled peer: cc_step_steal_stalled */
+}
+
+/* The engine's own water level. A worker whose waits keep returning with
+ * work is saturated; a worker that has not moved for a while with steps
+ * queued is stalled in a step. A poked idle peer takes queued steps at
+ * once; when no peer is idle, a worker is added, up to the cap. */
+#ifndef CC_SERVER_BUSY_WAKES
+#define CC_SERVER_BUSY_WAKES 32
+#endif
+#ifndef CC_SERVER_STALL_NS
+#define CC_SERVER_STALL_NS (200 * 1000)
+#endif
+
+static uint64_t cc_now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static int cc_step_hub_any_idle(CCStepHub* hub, CCStepLane* self) {
+    int i;
+    if (!hub) return 0;
+    for (i = 0; i < CC_STEP_LANES_MAX; i++) {
+        CCStepLane* L = hub->lanes[i];
+        if (!L || L == self || !cc_atomic_load_acquire(&L->live)) continue;
+        if (cc_atomic_load_acquire(&L->idle) != 0) return 1;
+    }
+    return 0;
+}
+
+/* Wake one idle peer so it steals while this worker works its batch. */
+static int cc_step_hub_poke_idle(CCStepHub* hub, CCStepLane* self) {
+    int i;
+    if (!hub) return 0;
+    for (i = 0; i < CC_STEP_LANES_MAX; i++) {
+        CCStepLane* L = hub->lanes[i];
+        int one = 1;
+        if (!L || L == self || !cc_atomic_load_acquire(&L->live)) continue;
+        if (cc_atomic_cas(&L->idle, &one, 2)) {
+            if (L->tape) cc_tape_wake(L->tape);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Steps queued on a peer that has not moved for CC_SERVER_STALL_NS: take
+ * them regardless of fairness, the peer cannot run them. 1 if a stalled
+ * peer was seen. */
+static int cc_step_steal_stalled(CCStepHub* hub, CCStepLane* self) {
+    int i, seen = 0;
+    uint64_t now;
+    if (!hub || !self || !cc_step_steal_wanted()) return 0;
+    now = cc_now_ns();
+    for (i = 0; i < CC_STEP_LANES_MAX; i++) {
+        CCStepLane* V = hub->lanes[i];
+        uint64_t last;
+        int id, n;
+        if (!V || V == self || !cc_atomic_load_acquire(&V->live)) continue;
+        if (cc_atomic_load_acquire(&V->idle) != 0) continue;
+        if (cc_atomic_load_acquire(&V->qlen) <= 0) continue;
+        last = cc_atomic_load_acquire(&V->progress);
+        if (now - last < (uint64_t)CC_SERVER_STALL_NS) continue;
+        seen = 1;
+        for (n = 0; n < CC_STEP_STEAL_FAIR_MAX; n++) {
+            CCIoSess* io = NULL;
+            id = cc_step_lane_pop_thief(V, &io);
+            if (id <= 0) break;
+            if (self->ctx && self->ctx->srv)
+                cc_atomic_fetch_add(&self->ctx->srv->step_steal, 1);
+            cc_serve_run_stolen(V, id, io);
+        }
+    }
+    return seen;
 }
 
 /* Accept until EAGAIN / batch cap. Returns accepted count, or -1 on
@@ -812,6 +1086,11 @@ static int cc_tape_try_accept(CCTape* tape, CCArenaPool* slots) {
             };
             srv->note_open();
             n++;
+            if (cc_server_trace())
+                fprintf(stderr, "cc_server: tape %p accepted fd %d, %zu sessions, %d live\n",
+                        (void*)tape, fd, tape->nconns(),
+                        cc_atomic_load_acquire(&srv->live));
+            if (cc_tape_above_share(tape)) return n;
             break;
         }
         }
@@ -876,11 +1155,37 @@ static void cc_server_worker_bail(ServeCtx* ctx) {
     cc_server_maybe_respawn(ctx);
 }
 
+/* Add a worker now, up to the cap: the signal was saturation or a stall. */
+static int cc_server_try_grow_now(CCServer* srv) {
+    int n = cc_atomic_load_acquire(&srv->nworkers);
+    if (n < 1 || n >= srv->workers_max) return 0;
+    if (!cc_atomic_cas(&srv->nworkers, &n, n + 1)) return 0;
+    cc_server_note_workers(srv, n + 1);
+    return 1;
+}
+
+static void cc_server_grow_on(ServeCtx* ctx, const char* why) {
+    ServeCtx* ctxp = ctx;
+    CCServer* srv = ctx->srv;
+    if (!cc_server_try_grow_now(srv)) return;
+    if (cc_server_trace())
+        fprintf(stderr, "cc_server: grow to %d workers on %s (%d live)\n",
+                cc_atomic_load_acquire(&srv->nworkers), why,
+                cc_atomic_load_acquire(&srv->live));
+    @parallel(srv->app) {
+        cc_server_worker(ctxp);
+    }
+}
+
 static void cc_server_maybe_grow(ServeCtx* ctx) {
     ServeCtx* ctxp = ctx;
     CCServer* srv;
     if (!ctx || !ctx->srv->try_grow(WORKER_GROW_EVERY)) return;
     srv = ctx->srv;
+    if (cc_server_trace())
+        fprintf(stderr, "cc_server: grow to %d workers (%d live)\n",
+                cc_atomic_load_acquire(&srv->nworkers),
+                cc_atomic_load_acquire(&srv->live));
     @parallel(srv->app) {
         cc_server_worker(ctxp);
     }
@@ -896,6 +1201,33 @@ static void cc_server_maybe_respawn(ServeCtx* ctx) {
     }
 }
 
+/* Rows a thief stepped: the owner arms them on its own tape and clears
+ * busy. Runs before every wait and after it, so a stolen row waits for
+ * at most one batch, never for a timeout. 1 if any row died. */
+static int cc_serve_rearm_stolen(CCStepLane* lane, CCTape* tape) {
+    int ids[CC_STEP_Q_CAP];
+    int nr = cc_step_lane_rearm_take(lane, ids, CC_STEP_Q_CAP);
+    int k, died = 0;
+    for (k = 0; k < nr; k++) {
+        CCConnRow* row = tape->row(ids[k]);
+        CCIoSess* io = row ? row->io : NULL;
+        if (!row) continue;
+        row->step_busy = 0;
+        if (!io) continue;
+        if (io->dead) { died = 1; continue; }
+        {
+            int ar = cc_io_arm(io, tape, ids[k], NULL) !>(e) {
+                (void)e;
+                io->dead = 1;
+                died = 1;
+                continue;
+            };
+            (void)ar;
+        }
+    }
+    return died;
+}
+
 static void cc_server_worker(ServeCtx* ctx) {
     CCServer* srv = ctx->srv;
     cc_arena_stack(wa, kilobytes(8));
@@ -904,11 +1236,12 @@ static void cc_server_worker(ServeCtx* ctx) {
     time_t deadline_sec = 0;
     CCStepLane lane;
     int lane_on = 0;
+    int busy_streak = 0;
     if (!cc_arena_is_live(wa)) {
         cc_server_worker_bail(ctx);
         return;
     }
-    slots = wa.create_pool(sizeof(CCIoRow)) !>(e) {
+    slots = wa.create_pool(cc_io_row_bytes(srv)) !>(e) {
         (void)e;
         cc_server_worker_bail(ctx);
         return;
@@ -949,12 +1282,25 @@ static void cc_server_worker(ServeCtx* ctx) {
     };
 
     while (!srv->stopped() || tape.nconns() > 0) {
-        CCWaitEpoch ep = tape.wait();
+        CCWaitEpoch ep;
         int died = 0;
         int deadline_reap = 0;
         time_t now;
+        if (lane_on) {
+            /* idle first, then drain: a thief that pushes after the flag
+             * wakes the wait; one that pushed before is drained here. */
+            cc_atomic_store_release(&lane.idle, 1);
+            if (cc_serve_rearm_stolen(&lane, &tape) && tape.reap(slots, ctx) < 0) return;
+        }
+        ep = tape.wait();
+        if (lane_on) {
+            cc_atomic_store_release(&lane.idle, 0);
+            cc_atomic_store_release(&lane.progress, cc_now_ns());
+        }
         if (ep.failed()) return;
         now = time(NULL);
+        if (lane_on && cc_serve_rearm_stolen(&lane, &tape)) died = 1;
+        if (lane_on && ep.idle()) busy_streak = 0;
 
         /* Deadlines: full walk ≤1/s, and on idle wake. On a busy wake,
          * mark dead but reap after step so ready WaitIds stay valid
@@ -973,7 +1319,7 @@ static void cc_server_worker(ServeCtx* ctx) {
             }
             if (ep.idle()) {
                 if (lane_on)
-                    (void)cc_step_steal_until_fair(ctx->hub, &lane);
+                    (void)cc_step_steal_stalled(ctx->hub, &lane);
                 if (deadline_reap && tape.reap(slots, ctx) < 0) return;
                 cc_yield();
                 continue;
@@ -1000,6 +1346,7 @@ static void cc_server_worker(ServeCtx* ctx) {
                 if (io->dead) died = 1;
             }
         } else {
+            int queued = 0;
             @for (hit in ep.hits) {
                 int id = hit.id;
                 CCReady r = hit.ready;
@@ -1021,21 +1368,53 @@ static void cc_server_worker(ServeCtx* ctx) {
                 }
                 if (st == 0) continue;
                 row->step_busy = 1;
-                if (!cc_step_lane_push(&lane, id)) {
+                queued++;
+                if (!cc_step_lane_push(&lane, id, io)) {
                     int rc = cc_serve_run_queued(&lane, id, 1);
                     if (rc < 0) return;
                     if (rc > 0) died = 1;
                 }
             }
+            /* Saturation: wakes that keep bringing work, with no idle peer. */
+            if (queued > 0) {
+                if (++busy_streak >= CC_SERVER_BUSY_WAKES) {
+                    busy_streak = 0;
+                    if (!cc_step_hub_any_idle(ctx->hub, &lane))
+                        cc_server_grow_on(ctx, "saturation");
+                }
+            } else {
+                busy_streak = 0;
+            }
+            /* A lane whose steps have been slow invites an idle peer to
+             * watch this batch; a lane of quick steps is left alone. */
+            if (lane.slow && cc_atomic_load_acquire(&lane.qlen) >= 2 && cc_step_steal_wanted())
+                (void)cc_step_hub_poke_idle(ctx->hub, &lane);
             {
                 int id;
+                int slow_steps = 0;
                 while ((id = cc_step_lane_pop_owner(&lane)) > 0) {
+                    uint64_t t0 = cc_now_ns();
+                    uint64_t t1;
                     int rc = cc_serve_run_queued(&lane, id, 1);
+                    t1 = cc_now_ns();
+                    cc_atomic_store_release(&lane.progress, t1);
+                    if (t1 - t0 >= (uint64_t)CC_SERVER_STALL_NS) slow_steps++;
                     if (rc < 0) return;
                     if (rc > 0) died = 1;
                 }
+                if (queued > 0) lane.slow = slow_steps > 0;
             }
-            (void)cc_step_steal_until_fair(ctx->hub, &lane);
+            {
+                /* Poked: the peer that asked is mid-batch; look a few times. */
+                int stalled = cc_step_steal_stalled(ctx->hub, &lane);
+                int k;
+                for (k = 0; ep.poked && !stalled && k < 4; k++) {
+                    usleep(50);
+                    stalled = cc_step_steal_stalled(ctx->hub, &lane);
+                }
+                if (stalled && !cc_step_hub_any_idle(ctx->hub, &lane))
+                    cc_server_grow_on(ctx, "stall");
+            }
         }
 
         {

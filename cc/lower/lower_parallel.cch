@@ -3215,10 +3215,18 @@ static int pl_pw_gate_form(Walker* w, CcExpr* g);
 static int pl_stage_gate_form(Walker* w, CcExpr* g);
 static bool pl_stage_is_face(int gform);
 
-/* The flag a stage sets once it has passed. The exit reads it, so a ticket
- * that left the body early still hands the phase on to its successor. */
+/* How far a ticket got with a stage: 0 never reached, 1 reached (its
+ * arguments are evaluated), 2 passed. The exit reads it, so a ticket that
+ * left the body early still hands the phase on to its successor. */
 static CCSlice pl_pw_stg_name(CcLowerer* L, uint32_t id, uint32_t k) {
     CCString s = @string(`__cc_pw_${id}_stg_${k}`, L->arena);
+    return lw_keep(L, &s);
+}
+
+/* The cell that holds argument `j` of stage `k`, evaluated once per ticket:
+ * the wait, the pass and the discharge at the exit all name the cell. */
+static CCSlice pl_pw_stg_cell(CcLowerer* L, uint32_t id, uint32_t k, uint32_t j) {
+    CCString s = @string(`__cc_pw_${id}_stg_${k}_a${j}`, L->arena);
     return lw_keep(L, &s);
 }
 
@@ -3278,25 +3286,37 @@ static CcStmt* pl_unwrap_stmt(CcLowerer* L, CcExpr* call, CcSpan sp) {
 }
 
 /* `@stage (gate, phase, ticket) { body }` in the body of a walk, as the
- * ordered section it is: wait for this ticket's turn, run the block unless
- * the pool has been cancelled behind it, then pass the turn on. The flag is
- * what the exit reads to tell a stage that retired from one that did not.
+ * ordered section it is: evaluate the arguments into this ticket's cells,
+ * wait for this ticket's turn, run the block unless the pool has been
+ * cancelled behind it, then pass the turn on. The flag is what the exit
+ * reads to tell a stage that retired from one that did not, and one the
+ * ticket reached from one it never did.
+ *
+ * The arguments are evaluated once, here: the wait, the pass and the
+ * discharge at the exit name the cells, so an argument with a side effect
+ * names one ticket at every call. The cells are the runner's own, declared
+ * before the body, which is where the exit can read them.
  *
  * `cc_parallel_honor` sits between the wait and the block because a pause
  * does not complete the wait: the ticket holds its turn while it parks.
  *
- * The `fail`/`pass` the exit discharges with are built here and handed back,
- * not emitted here: they share this stage's gate and arguments, so the
- * capture rewrite that runs after this reaches them, and the exit spells
- * them once the names they read are the ones the body sees. */
+ * The `fail`/`pass` the exit discharges with, and the evaluation it runs
+ * first for a stage the body never reached, are built here and handed
+ * back, not emitted here: the evaluation shares this stage's argument
+ * nodes and the calls its gate, so the capture rewrite that runs after
+ * this reaches them, and the exit spells the calls once the names they
+ * read are the ones the body sees. */
 static void pl_pw_stage_lower(PStep* st, uint32_t id, uint32_t k, CcStmt* s,
-                              CcExprList* dis_fail, CcExprList* dis_pass) {
+                              CcExprList* dis_fail, CcExprList* dis_pass,
+                              CcStmtList* dis_eval) {
     CcLowerer* L = st->L;
     CcSpan sp = s->span;
     CcExpr* gate = NULL;
     CcExprList args;
     CcStmtList stmts;
     CcStmt* blk;
+    CcStmt* ev;
+    CcExprList cells = vec_new::[CcExprRef](L->arena);
     CCSlice flag = pl_pw_stg_name(L, id, k);
     int gform;
     bool face;
@@ -3304,9 +3324,25 @@ static void pl_pw_stage_lower(PStep* st, uint32_t id, uint32_t k, CcStmt* s,
     gform = pl_stage_gate_form(st->w, gate);
     face = pl_stage_is_face(gform);
     blk = lw_block(L, sp);
+    ev = lw_block(L, sp);
+    {
+        uint32_t na = (uint32_t)args.len();
+        uint32_t j;
+        for (j = 0; j < na; j++) {
+            CcExpr* a = *args.get_ptr(j);
+            CCSlice cell = pl_pw_stg_cell(L, id, k, j);
+            lw_push(blk, lw_expr_stmt(L, lw_assign(L, lw_ident(L, cell, sp), a, sp), sp));
+            lw_push(ev, lw_expr_stmt(L, lw_assign(L, lw_ident(L, cell, sp), a, sp), sp));
+            cells.push(lw_ident(L, cell, sp));
+        }
+    }
+    {
+        CCString t = @string(`${flag} = 1`, L->arena);
+        pl_pw_text(L, blk, t, sp);
+    }
     {
         CcExpr* ga = pl_stage_addr(L, gform, gate, sp);
-        CcExpr* c = pl_stage_call(L, face ? "cc_turnstile_stage_wait" : "cc_turnstile_wait", ga, &args, sp);
+        CcExpr* c = pl_stage_call(L, face ? "cc_turnstile_stage_wait" : "cc_turnstile_wait", ga, &cells, sp);
         lw_push(blk, pl_unwrap_stmt(L, c, sp));
     }
     {
@@ -3327,22 +3363,26 @@ static void pl_pw_stage_lower(PStep* st, uint32_t id, uint32_t k, CcStmt* s,
     }
     {
         CcExpr* ga = pl_stage_addr(L, gform, gate, sp);
-        CcExpr* c = pl_stage_call(L, face ? "cc_turnstile_stage_pass" : "cc_turnstile_pass", ga, &args, sp);
+        CcExpr* c = pl_stage_call(L, face ? "cc_turnstile_stage_pass" : "cc_turnstile_pass", ga, &cells, sp);
         lw_push(blk, pl_unwrap_stmt(L, c, sp));
     }
     {
-        CCString t = @string(`${flag} = 1`, L->arena);
+        CCString t = @string(`${flag} = 2`, L->arena);
         pl_pw_text(L, blk, t, sp);
     }
     {
         CcExpr* ga = pl_stage_addr(L, gform, gate, sp);
-        CcExpr* c = pl_stage_call(L, face ? "cc_turnstile_stage_fail" : "cc_turnstile_fail", ga, &args, sp);
+        CcExpr* c = pl_stage_call(L, face ? "cc_turnstile_stage_fail" : "cc_turnstile_fail", ga, &cells, sp);
         dis_fail->push(c);
     }
     {
         CcExpr* ga = pl_stage_addr(L, gform, gate, sp);
-        CcExpr* c = pl_stage_call(L, face ? "cc_turnstile_stage_pass" : "cc_turnstile_pass", ga, &args, sp);
+        CcExpr* c = pl_stage_call(L, face ? "cc_turnstile_stage_pass" : "cc_turnstile_pass", ga, &cells, sp);
         dis_pass->push(c);
+    }
+    {
+        CCString c = @string(`!${flag}`, L->arena);
+        dis_eval->push(lw_if(L, lw_text(L, c, sp), ev, NULL, sp));
     }
     s->k = blk->k;
 }
@@ -3365,6 +3405,7 @@ static void pl_stage_inert(PStep* st, CcStmt* s) {
     CcStmt* blk;
     CcStmt* inner;
     CcStmtList* into;
+    CcExprList cells = vec_new::[CcExprRef](L->arena);
     int gform;
     bool face;
     size_t i;
@@ -3374,8 +3415,21 @@ static void pl_stage_inert(PStep* st, CcStmt* s) {
     face = pl_stage_is_face(gform);
     blk = lw_block(L, sp);
     {
+        /* the arguments, once: the wait and the pass name the same cells */
+        CcType* intt = cc_type_named(cstr_slice("int"), sp, L->arena);
+        uint32_t na = (uint32_t)args.len();
+        uint32_t j;
+        for (j = 0; j < na; j++) {
+            CcExpr* a = *args.get_ptr(j);
+            CCString cn = @string(`__cc_stg_a${j}`, L->arena);
+            CCSlice cell = lw_keep(L, &cn);
+            lw_push(blk, lw_decl_stmt(L, intt, cell, a, sp));
+            cells.push(lw_ident(L, cell, sp));
+        }
+    }
+    {
         CcExpr* ga = pl_stage_addr(L, gform, gate, sp);
-        CcExpr* c = pl_stage_call(L, face ? "cc_turnstile_stage_wait" : "cc_turnstile_wait", ga, &args, sp);
+        CcExpr* c = pl_stage_call(L, face ? "cc_turnstile_stage_wait" : "cc_turnstile_wait", ga, &cells, sp);
         lw_push(blk, pl_unwrap_stmt(L, c, sp));
     }
     inner = lw_block(L, sp);
@@ -3388,7 +3442,7 @@ static void pl_stage_inert(PStep* st, CcStmt* s) {
     lw_push(blk, inner);
     {
         CcExpr* ga = pl_stage_addr(L, gform, gate, sp);
-        CcExpr* c = pl_stage_call(L, face ? "cc_turnstile_stage_pass" : "cc_turnstile_pass", ga, &args, sp);
+        CcExpr* c = pl_stage_call(L, face ? "cc_turnstile_stage_pass" : "cc_turnstile_pass", ga, &cells, sp);
         lw_push(blk, pl_unwrap_stmt(L, c, sp));
     }
     s->k = blk->k;
@@ -3447,11 +3501,80 @@ static void pl_for_inert(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
     st->any = true;
 }
 
+/* A name a top-level statement of the body declares: a local of the body,
+ * in scope where a `@stage` of that body spells its gate and arguments. A
+ * name declared in a nested block is out of scope there, so a stage that
+ * spells it reads the enclosing frame's. */
+static bool pl_body_declares(CcStmt* body, CCSlice nm) {
+    CcStmtList* bs = lw_block_stmts(body);
+    size_t n;
+    size_t i;
+    if (!bs || !nm.len) return false;
+    n = bs->len();
+    for (i = 0; i < n; i++) {
+        CcStmt* q = *bs->get_ptr(i);
+        CcDecl* d = NULL;
+        CCSlice got = cc_slice_empty();
+        @switch (q->k) {
+            case .decl(ds): d = ds.d; break;
+            case .parallel(pa): got = pa.bind; break;
+            case .parallel_for(pw): got = pw.bind; break;
+            default: break;
+        }
+        if (d) {
+            @switch (d->k) {
+                case .var(v): got = v.name; break;
+                default: break;
+            }
+        }
+        if (got.len && slice_eq(got, nm)) return true;
+    }
+    return false;
+}
+
+/* The first name a stage's gate or arguments read that the body declares. */
+typedef struct PTicketQ { CcStmt* body; CCSlice hit; } PTicketQ;
+
+static bool pl_ticket_fact_visit(CcExpr* e, void* env) {
+    PTicketQ* q = (PTicketQ*)env;
+    CCSlice nm = cc_slice_empty();
+    if (q->hit.len) return false;
+    @switch (e->k) {
+        case .ident(x): nm = x; break;
+        default: break;
+    }
+    if (nm.len && pl_body_declares(q->body, nm)) q->hit = nm;
+    return !q->hit.len;
+}
+
+static CCSlice pl_stage_body_name(CcStmt* body, CcExpr* gate, CcExprList* args) {
+    PTicketQ q;
+    CcVisitor v;
+    size_t n = args->len();
+    size_t i;
+    q.body = body;
+    q.hit = cc_slice_empty();
+    memset(&v, 0, sizeof(v));
+    v.expr = pl_ticket_fact_visit;
+    v.env = &q;
+    if (gate) CcExpr_walk(gate, v);
+    for (i = 0; i < n && !q.hit.len; i++) {
+        CcExpr* a = *args->get_ptr(i);
+        CcExpr_walk(a, v);
+    }
+    return q.hit;
+}
+
 /* What a `@stage` of a walked body may name. The gate is the turnstile the
  * tickets are ordered on, and its `wait`/`pass`/`fail` take a phase and a
  * ticket; a gate of another shape orders something this walk does not run,
  * and reading it as a turnstile would be a C type error at a line about the
- * walk. Checked where the gate still spells the caller's names. */
+ * walk. Checked where the gate still spells the caller's names.
+ *
+ * The gate and the arguments are ticket facts: the exit discharges a stage
+ * the body never reached, so they must exist before the body runs. The loop
+ * variable, the `worker` binder and the enclosing frame's names do; a name
+ * the body declares does not, and a successor parked on it would hang. */
 static bool pl_pw_stages_ok(PStep* st, CcStmt* body) {
     CcLowerer* L = st->L;
     CcStmtList* bs = lw_block_stmts(body);
@@ -3488,6 +3611,14 @@ static bool pl_pw_stages_ok(PStep* st, CcStmt* body) {
             }
             ok = false;
         }
+        {
+            CCSlice nm = pl_stage_body_name(body, gate, &args);
+            if (nm.len) {
+                CCString m = @string(`'${"@"}stage' names '${nm}', which the body declares: a stage name is a ticket fact that must exist before the body runs; it may read the loop variable, the 'worker' binder, and names of the enclosing frame`, L->arena);
+                lw_error(L, q->span, m);
+                ok = false;
+            }
+        }
     }
     return ok;
 }
@@ -3516,6 +3647,7 @@ static CcDecl* pl_pw_run_decl(PStep* st, uint32_t id, PCapList* caps, CcForIn lo
     CCSlice bind = loop.bind;
     CcExprList dis_fail = vec_new::[CcExprRef](L->arena);
     CcExprList dis_pass = vec_new::[CcExprRef](L->arena);
+    CcStmtList dis_eval = vec_new::[CcStmtRef](L->arena);
     uint32_t nstg = 0;
     {
         CcType* pt = cc_type_pointer(cc_type_named(env, sp, L->arena), sp, L->arena);
@@ -3560,7 +3692,18 @@ static CcDecl* pl_pw_run_decl(PStep* st, uint32_t id, PCapList* caps, CcForIn lo
                     CCString t = @string(`int ${flag} = 0`, L->arena);
                     pl_pw_text(L, fnbody, t, sp);
                 }
-                pl_pw_stage_lower(st, id, nstg, q, &dis_fail, &dis_pass);
+                {
+                    /* the argument cells, the runner's own: the exit reads
+                     * them for a stage the body reached and left unpassed */
+                    uint32_t na = (uint32_t)qa.len();
+                    uint32_t j;
+                    for (j = 0; j < na; j++) {
+                        CCSlice cell = pl_pw_stg_cell(L, id, nstg, j);
+                        CCString t = @string(`int ${cell} = 0`, L->arena);
+                        pl_pw_text(L, fnbody, t, sp);
+                    }
+                }
+                pl_pw_stage_lower(st, id, nstg, q, &dis_fail, &dis_pass, &dis_eval);
                 nstg++;
             }
         }
@@ -3633,18 +3776,22 @@ static CcDecl* pl_pw_run_decl(PStep* st, uint32_t id, PCapList* caps, CcForIn lo
             /* a stage the body left before passing is discharged here, so a
              * successor parked in its `wait` wakes either way: with the error
              * when this ticket failed, and with its turn when it merely
-             * skipped ahead. Spelled now, because the calls read the captures
-             * the way the body does. */
+             * skipped ahead. A stage the body never reached has its
+             * arguments evaluated first, the once they get; a reached one
+             * keeps the cells the stage filled. Spelled now, because the
+             * calls read the captures the way the body does. */
             uint32_t sk;
             for (sk = 0; sk < nstg; sk++) {
                 CCSlice flag = pl_pw_stg_name(L, id, sk);
                 CcExpr* fe = *dis_fail.get_ptr(sk);
                 CcExpr* pe = *dis_pass.get_ptr(sk);
+                CcStmt* ev = *dis_eval.get_ptr(sk);
                 CCString fs = lw_spell_expr(L, fe);
                 CCString ps = lw_spell_expr(L, pe);
                 CCSlice fc = lw_keep(L, &fs);
                 CCSlice pc = lw_keep(L, &ps);
-                CCString t = @string(`if (!${flag}) { if (__cc_pw_sl->failed) { __typeof__(${fc}) __cc_pw_dr = ${fc}; (void)__cc_pw_dr; } else { __typeof__(${pc}) __cc_pw_dr = ${pc}; if (!__cc_pw_dr.ok) { __cc_pw_sl->err = __cc_pw_dr.u.error; __cc_pw_sl->failed = 1; __cc_pw_sl->i = __cc_pw_i; cc_nursery_cancel_host(__cc_pw_sh->nur); } } }`, L->arena);
+                CCString t = @string(`if (${flag} != 2) { if (__cc_pw_sl->failed) { __typeof__(${fc}) __cc_pw_dr = ${fc}; (void)__cc_pw_dr; } else { __typeof__(${pc}) __cc_pw_dr = ${pc}; if (!__cc_pw_dr.ok) { __cc_pw_sl->err = __cc_pw_dr.u.error; __cc_pw_sl->failed = 1; __cc_pw_sl->i = __cc_pw_i; cc_nursery_cancel_host(__cc_pw_sh->nur); } } }`, L->arena);
+                lw_push(lv, ev);
                 pl_pw_text(L, lv, t, sp);
             }
         }

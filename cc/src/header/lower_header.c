@@ -11,6 +11,8 @@
 #include "util/text_scan.h"
 #include "preprocess/template_scan.h"
 
+char* cc__rewrite_link_directives_at(const char* src, size_t n, const char* base_path);
+
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
@@ -1171,6 +1173,17 @@ int cc_lower_header(const char* cch_path, const char* h_path) {
     
     /* Lower the content */
     char* output = cc_lower_header_string(input, read_len, cch_path);
+    /* A `@link` in a face is the face's to state: the marker the link phase
+     * reads goes into the `.h`, with a relative path resolved beside the face. */
+    {
+        const char* text = output ? output : input;
+        size_t text_len = output ? strlen(output) : read_len;
+        char* linked = cc__rewrite_link_directives_at(text, text_len, cch_path);
+        if (linked) {
+            free(output);
+            output = linked;
+        }
+    }
     
     /* If no changes, copy input directly */
     const char* to_write = output ? output : input;

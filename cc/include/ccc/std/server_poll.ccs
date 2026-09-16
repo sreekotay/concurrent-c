@@ -1,5 +1,5 @@
 #!ccc ccs
-#pragma(@module) "CCServer"
+#pragma(@module) "server"
 /*
  * Dest waiter bodies, a member of module CCServer (spec 1.7). Host #ifdef
  * picks backend.
@@ -25,8 +25,8 @@
 #include <unistd.h>
 #include <time.h>
 #include <sys/socket.h>
-#include "CCServer.cch"
-#include "CCServerPoll.cch"
+#include "server.cch"
+#include "server_poll.cch"
 
 /* The table is spelled at each use, not through a file-scope alias: a
  * typedef of a Table instance in a member would be extracted into the
@@ -145,7 +145,7 @@ int cc_tape_interest(CCIoSess* io, int want_out_extra, int* want_in,
     int wi = 0, wo = 0;
     if (!io || io->want_in) wi = 1;
     if (want_out_extra || (io && io->want_out)) wo = 1;
-    if (io_sess_pending_out(io)) wo = 1;
+    if (cc_io_sess_pending_out(io)) wo = 1;
     if (!wi && !wo) wi = 1;
     if (want_in) *want_in = wi;
     if (want_out) *want_out = wo;
@@ -369,6 +369,10 @@ static int cc_epoll_arm_id(CCTape* w, int id, int wi, int wo) {
     struct epoll_event ev;
     int op;
     if (!w || !(r = cc_tape_row(w, id))) return -1;
+    /* Level-triggered interest stays registered: a step that asks for
+     * what the row already has is no syscall. */
+    if ((r->want_in || r->want_out) && r->want_in == wi && r->want_out == wo)
+        return 0;
     ev.events = cc_epoll_events(wi, wo);
     ev.data.u64 = cc_wait_pack(id, r->gen);
     if (!r->want_in && !r->want_out)
@@ -453,7 +457,40 @@ int cc_tape_open(CCTape* w, CCServer* srv, CCArena a) {
         .listen_want = 0,
         .listen_ready = 0,
         .backend_fd = backend,
+        .slot = -1,
+        .wake_rd = -1,
+        .wake_wr = -1,
+        .poked = 0,
     };
+    {
+        int slot = cc_atomic_fetch_add(&srv->tape_slots, 1);
+        if (slot >= 0 && slot < 64) {
+            w->slot = slot;
+            cc_atomic_store_release(&srv->tape_conns[slot], 0);
+        }
+    }
+    {
+        int p[2];
+        if (pipe(p) == 0) {
+            (void)cc_fd_nonblock(p[0]);
+            (void)cc_fd_nonblock(p[1]);
+            (void)fcntl(p[0], F_SETFD, FD_CLOEXEC);
+            (void)fcntl(p[1], F_SETFD, FD_CLOEXEC);
+            w->wake_rd = p[0];
+            w->wake_wr = p[1];
+#if CC_WAIT_USE_KQUEUE
+            (void)cc_kq_set(backend, p[0], EVFILT_READ, EV_ADD | EV_ENABLE,
+                            (void*)(uintptr_t)CC_WAIT_UD_WAKE);
+#elif CC_WAIT_USE_EPOLL
+            {
+                struct epoll_event ev;
+                ev.events = EPOLLIN;
+                ev.data.u64 = CC_WAIT_UD_WAKE;
+                (void)epoll_ctl(backend, EPOLL_CTL_ADD, p[0], &ev);
+            }
+#endif
+        }
+    }
 #if CC_WAIT_USE_KQUEUE
     if (cc_kq_listen_arm(w, 1) != 0) {
         close(backend);
@@ -476,6 +513,12 @@ int cc_tape_open(CCTape* w, CCServer* srv, CCArena a) {
 
 void cc_tape_close(CCTape* w) {
     if (!w) return;
+    if (w->slot >= 0 && w->srv) {
+        cc_atomic_store_release(&w->srv->tape_conns[w->slot], -1);
+        w->slot = -1;
+    }
+    if (w->wake_rd >= 0) { close(w->wake_rd); w->wake_rd = -1; }
+    if (w->wake_wr >= 0) { close(w->wake_wr); w->wake_wr = -1; }
     /* Rows own sockets / Sessions. Closing a non-empty tape loses them
      * (the abnormal-exit bug). Only worker_tape_exit may reach here. */
     if (cc_tape_nconns(w) != 0) {
@@ -509,7 +552,22 @@ static CCWaitEpoch cc_tape_epoch(CCTape* w, int n_events) {
     ep.hits = w->hits;
     ep.n_events = n_events;
     ep.listen_ready = (w->listening && w->listen_ready) ? 1 : 0;
+    ep.poked = w->poked;
+    w->poked = 0;
     return ep;
+}
+
+static void cc_tape_drain_wake(CCTape* w) {
+    unsigned char buf[64];
+    if (!w || w->wake_rd < 0) return;
+    while (read(w->wake_rd, buf, sizeof(buf)) > 0) {}
+    w->poked = 1;
+}
+
+void cc_tape_wake(CCTape* w) {
+    unsigned char b = 1;
+    if (!w || w->wake_wr < 0) return;
+    (void)!write(w->wake_wr, &b, 1);
 }
 
 int cc_wait_epoch_failed(CCWaitEpoch* ep) { return ep && ep->n_events < 0; }
@@ -530,6 +588,14 @@ CCWaitEpoch cc_tape_wait(CCTape* w) {
         uint64_t now = cc_mono_ms();
         uint64_t until = cc_atomic_load(&w->srv->accept_backoff_until_ms);
         int on = !(until && now < until);
+        /* Every tape arms the listen fd, so the tape already awake would
+         * take a whole burst. A tape holding more sessions than a peer
+         * leaves the fd to the peer; readiness is level-triggered, so
+         * nothing is lost. */
+        if (w->slot >= 0)
+            cc_atomic_store_release(&w->srv->tape_conns[w->slot], (int)cc_tape_nconns(w));
+        if (on && !cc_server_tape_may_accept(w->srv, w->slot, cc_tape_nconns(w)))
+            on = 0;
 #if CC_WAIT_USE_KQUEUE
         (void)cc_kq_listen_arm(w, on);
 #elif CC_WAIT_USE_EPOLL
@@ -555,6 +621,10 @@ CCWaitEpoch cc_tape_wait(CCTape* w) {
             if (ud == 0) {
                 if (evs[i].filter == EVFILT_READ)
                     w->listen_ready = 1;
+                continue;
+            }
+            if (ud == CC_WAIT_UD_WAKE) {
+                cc_tape_drain_wake(w);
                 continue;
             }
             {
@@ -583,6 +653,10 @@ CCWaitEpoch cc_tape_wait(CCTape* w) {
                     w->listen_ready = 1;
                 continue;
             }
+            if (ud == CC_WAIT_UD_WAKE) {
+                cc_tape_drain_wake(w);
+                continue;
+            }
             in = (e & EPOLLIN) ? 1 : 0;
             out = (e & EPOLLOUT) ? 1 : 0;
             err = (e & EPOLLERR) ? 1 : 0;
@@ -599,7 +673,9 @@ CCWaitEpoch cc_tape_wait(CCTape* w) {
         size_t nfds = (w->listening && w->listen_want) ? n + 1 : n;
         size_t i, base = 0;
         int pr;
+        int wake_at = -1;
         struct pollfd* raw;
+        if (w->wake_rd >= 0) nfds++;
         if (nfds == 0)
             return cc_tape_epoch(w, 0);
         raw = (struct pollfd*)malloc(nfds * sizeof(struct pollfd));
@@ -609,6 +685,13 @@ CCWaitEpoch cc_tape_wait(CCTape* w) {
             raw[0].events = POLLIN;
             raw[0].revents = 0;
             base = 1;
+        }
+        if (w->wake_rd >= 0) {
+            wake_at = (int)base;
+            raw[base].fd = w->wake_rd;
+            raw[base].events = POLLIN;
+            raw[base].revents = 0;
+            base++;
         }
         for (i = 0; i < n; i++) {
             int id = 0;
@@ -631,8 +714,10 @@ CCWaitEpoch cc_tape_wait(CCTape* w) {
             free(raw);
             return cc_tape_epoch(w, (e == EINTR) ? 0 : -1);
         }
-        if (base && (raw[0].revents & POLLIN))
+        if (w->listening && w->listen_want && (raw[0].revents & POLLIN))
             w->listen_ready = 1;
+        if (wake_at >= 0 && (raw[wake_at].revents & POLLIN))
+            cc_tape_drain_wake(w);
         for (i = 0; i < n; i++) {
             short rev = raw[base + i].revents;
             int id = 0;

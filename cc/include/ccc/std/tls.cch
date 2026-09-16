@@ -173,6 +173,11 @@ const CCTlsInfo* cc_tls_info(const CCTlsConn* conn);
 int cc_tls_server_load(const char *cert_path, const char *key_path);
 void cc_tls_server_unload(void);
 
+/* 1 when the runtime was built with BearSSL behind it. Without it every
+ * connection call answers with a TLS error and the server materials do
+ * not load: `make bearssl` at the repository root, then `make -C cc`. */
+int cc_tls_available(void);
+
 /* Load certificate chain from PEM file.
  * Returns opaque handle for use in config. */
 typedef struct CCTlsCertChain CCTlsCertChain;
