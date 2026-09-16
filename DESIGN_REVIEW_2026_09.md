@@ -252,9 +252,16 @@ and readers only once the verbs check.
 
 Scope carries most ownership in pipeline- and request-shaped programs,
 about half in a server, and almost none in a long-lived object model,
-where teardown is a hand-written destroy function. The skeleton is
-scopes plus arenas: a struct that owns things is outside the tree unless
-it embeds an arena and exposes it as a face. Most owners are structs.
+where teardown is a hand-written destroy function.
+
+A struct is already a parent of its value fields: the destroy chain
+walks them last-declared first, transitively, with dead-state no-ops,
+the same order as the arena walk. Declaration order is the dependency
+order. What a struct is not, is a part of the tree: its own owner does
+not tear it down without a call. That half exists only for arenas,
+through attach and `create_*`, and the primitive that would give it to
+any hooked type, an attach record whose function is the type's chain,
+is already in the runtime without a typed constructor over it.
 
 Parthood inherits one consequence: a whole destroys its parts, newest
 first, before releasing its own storage. Nothing else crosses the
@@ -336,9 +343,12 @@ The rule reaches the holders the step does not see, with these facts:
    time), and a stale copy refuses at run time (2.3). A storage-bound
    child's host is carved from its parent's slab and dies with it; a
    stale handle to one is outside the runtime half.
-8. **Runtime handles are born into an owner.** Turnstile, parallel, and
-   exclusive get `create_*` constructors like nursery and pool, per the
-   storage classes the lifetime-parents design already defines.
+8. **Any hooked type is born into an owner.** A typed constructor
+   allocates the object in the owner and attaches a record whose function
+   is the type's destroy chain. Turnstile, parallel, and exclusive get it
+   first, per the storage classes the lifetime-parents design defines;
+   a document created into a workspace dies in the workspace's walk with
+   no call on the page.
 9. **The own step runs after UFCS, or composes names by the universal
    rule.** Restore, try_restore, and detach join the epoch-ending table.
 
