@@ -143,7 +143,7 @@ Ownership by scope versus by object (grep, `.ccs` / `.cch`):
 Refcounts: `CCArc`, `cc_arc_*`, and hand `->ref` / `refcnt` appear 0 times
 in `real_projects/`, cctext, stylo-cc, rlsw-cc, and `examples/`; 45 in
 `cc/include`, 15 in `tests/`, 8 in `cc/lower` (the diagnostic that
-recommends it). **design; unearned.**
+recommends it). **design; the case that earns it has not been run.**
 
 Implementation, from `cc/include/ccc/cc_arena.cch` and `cc_slice.cch`:
 
