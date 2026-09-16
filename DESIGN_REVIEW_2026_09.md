@@ -851,21 +851,54 @@ intermediate states it would allow and the hold covers the residue; a
 per-instance validator, since a fact stated per construction is
 invisible at the type; a subscriber graph.
 
-The graph is not needed, and the signal libraries say why. In Preact's
-core a computed with no watcher never subscribes to its sources: it
-pulls, checks a global version for the quiet case in constant time,
-walks its sources' versions only when the global one moved, and
-re-stamps itself when they are unchanged. The graph exists to serve
-effects, code that must run on a change without being read, and to mark
-subtrees dirty so a read can skip the walk. Here an effect is a fiber
-parked on a channel or a signal and woken by the writer's own
-statement, and the quiet-case skip is the global counter. Each cache
-is a versioned primary to its own readers, so a recompute that yields
-the same value bumps nothing and cut-off is free. Pull with versions
-is also glitch-free by construction, where push needs batching to
-avoid running an effect on a half-updated diamond. What a graph would
-cost on the store path, a traversal of subscribers per write, is what
-keeps it out: the store is the hot path and it stays one increment.
+There are three places to do the work of a derivation, and the signal
+libraries have tried all three.
+
+| Model | Writer pays | Reader pays | Needs |
+|-------|-------------|-------------|-------|
+| update on write | every derivation, every store | nothing | the writer must know its derivations: a graph, or the hand-kept co-fact |
+| update on read | one increment | a staleness check, then the recompute if stale | versions on sources, stamps on caches |
+| mark on write, update on read | a walk of the reachable subscribers, stopping at ones already marked | a walk of the marked path only | a graph in both directions, with a link per edge |
+
+The corpus today is the first row done by hand: the stage block writes
+`done`, `scan_off`, and `scan_bytes` beside the position, which is
+update on write with the reader keeping the graph. Preact's core is the
+second row: a computed that nobody watches never subscribes, checks a
+global version for the quiet case, and walks its sources' versions
+only when that moved. alien-signals, which Vue 3.6 adopted, is the
+third: a store marks its transitive subscribers pending and touches no
+values; a read walks only pending sources, recomputes those that are
+dirty, and an unchanged result stops the walk. Its graph is a doubly
+linked list in both directions with one link per edge, reused in order
+across recomputes so a recompute does not churn allocation. It pays the
+write path to make reads precise, and wins when many unrelated sources
+change between reads, because a global version spoils the quiet-case
+skip on every unrelated write and a per-source walk on a deep chain is
+the whole tree.
+
+What decides the row is the depth of the derivation graph. Every
+derivation in the specimens is depth one: a stamp against its source,
+a dirty bit against an edit generation, a node's generation against
+the engine's. At depth one a per-source compare is constant, the
+writer pays one increment, and no graph is needed. The third row earns
+its graph at depth, in an incremental compiler or a UI tree, and that
+is a library of a few hundred lines with ports in Rust and Go already,
+whose links are churned per recompute and belong in a scratch or a
+pool. The language's part is the vocabulary both rows share: a
+versioned primary, a stamped derivation, a named source.
+
+Update on write keeps one legitimate case: a derived scalar published
+to another fiber. The writer computes it and stores one word, so the
+reader loads one word instead of taking a seqlock over the sources.
+That is the section 3 `settled` flag, and it is right exactly when the
+derivation is cheap and the reader is elsewhere.
+
+Effects are the same in all three rows and are not the graph's job
+here: an effect is a fiber parked on a channel or a signal, woken by
+the writer's own statement. Pull with versions is glitch-free by
+construction; the push rows need a flush at the end of the write to
+avoid running an effect on a half-updated diamond, and both libraries
+have one.
 
 ### 4.3 Cost
 
