@@ -166,7 +166,7 @@ check be an instance of a single rule.
 | `@detach` | the owner outlives this scope | the declaration | the caller's ledger |
 | `create_*(owner, …)` | this object is a part of `owner` and dies with it | the constructor name | the owner's teardown walk |
 | `adopt` / `attach` | a part moves into, or is registered with, a whole | the call | the walk; the cycle refusal |
-| checkpoint / restore | a mark on a lifetime; a child that restore frees | the binding | the runtime; views above the mark go stale |
+| checkpoint / restore | a child lifetime, materialized lazily: a mark until it needs a host of its own | the binding | the runtime; views above the mark go stale |
 | `T[:!]`, `recv`, `send_take` | exactly one name for these bytes | the type or the verb | the own step: copy, return, and use-after-move refused |
 | `send_into` | the payload is built in the receiver's lifetime | the verb | the reader; materialization at the boundary |
 | `@scratch` | one stack arena per function; a bound product lives to the frame, an unbound one is reclaimed after its statement | the operand, and whether the product has a name | the own step: escape refused; the lowering: a tip restore after a statement that bound nothing |
