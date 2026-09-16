@@ -184,10 +184,23 @@ Implementation, from `cc/include/ccc/cc_arena.cch` and `cc_slice.cch`:
 
 | Observation | Where | Tag |
 |-------------|-------|-----|
-| Noop first arm, atomics for done and cancel beside the handle, pause polled inside every stage, internal cancel called from user code, written three times | cctext `core/find.ccs`, `piece_tree.ccs`, `browse.ccs`, `FRICTION.md` | design |
-| Loud-noop plant, then signal arm, workers, growth, respawn admitted onto one dest | `real_projects/staticd/CCServer.ccs` | design, works |
+| Job facts kept beside the handle: `done` latch in four structs (`RtxFind`, `RtxPieceTree.isle_*`, browse walk, `CCServer.nworkers`); a second `cancel` flag beside `h.cancelled` in three (`find.cancel`, `isle_cancel`, browse `cancel`) | cctext `core/document.cch:209`, `piece_tree.cch:156`, `browse.ccs:88`; staticd `CCServer.cch:93` | design |
+| Kick guarded by `h.live()`; 27 `.live()` guards, 19 in the three cctext job files | cctext `find.ccs`, `piece_tree.ccs`, `browse.ccs`; curl `thrdqueue.ccs` | design |
+| `while (h.paused && !cancel) cc_yield();` at the top of the `@stage` block in all three job files; the lowerer emits `cc_parallel_honor` between the stage `wait` and the block (`lower_parallel.cch:3285`); cctext's last commit predates the seam's last change | cctext ×3 | drift |
+| Empty join set spelled as a no-op arm `@parallel spawn { @serial { (void)0; } } !>`: 7 sites, 3 in `recipe_parallel_forms.ccs`; under `spawn` the arm is spawned (§8.11.1: a one-arm `@serial` dest is the worker) | cctext ×3, staticd, recipe | design |
+| Detector exemptions in user code: 3 sites; `cc_deadlock_suppress_enter` wraps curl's whole worker loop (`thrdqueue.ccs:412`) and one exclusive wait (`:319`); `cc_external_wait_enter` wraps a `pread` (cctext `page_store.ccs:258`). The detector counts both buckets the same way (`sched_v2.c:2715`) | curl, cctext | design |
+| Construct census across specimens: brace join 27, `spawn` 20, dest attach 13, `@parallel for` 27, wait-for 12, `@stage` 29, `seq` 3, `n.spawn` 25, `adopt` 2, `fail` 5, `leave` 1 (curl), user `cc_parallel_honor` 0 | grep over `real_projects/`, `examples/`, cctext, rlsw-cc, stylo-cc | observation |
+| Host-queue faces not on the bag: retract, detach with leftover, poll-empty, grow/shrink after plant | `docs/plans/tickets_and_nursery_gaps.md` §1 | unimplemented |
+| Adopt is cancel-only; `h1.wait()` does not wait `h2` | spec §8.11.1; tickets plan §5 | design |
+| Loud-noop plant, then signal arm, workers, growth, respawn admitted onto one dest | `real_projects/staticd/CCServer.ccs:290-308,884-897` | design, works |
 | Same stop-and-accept block verbatim | redis idiomatic and sketch | design |
 | The compiler uses no concurrency construct; the parallel step is its largest | `cc/lower/lower_parallel.cch` | observation |
+
+Reconstruction count behind §3.2: runtime six (spawn gate, deny stack,
+detector, pool growth, wake-skip, sysmon banner as the detector's
+output), program four (done latch, second cancel, in-stage pause poll,
+no-op plant). Spec §8.11.7 and `spec/concurrent-c-scheduler.md` for the
+runtime rows; the table above for the program rows.
 
 ## 4. Tagged data
 
