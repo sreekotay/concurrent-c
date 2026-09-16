@@ -9,6 +9,11 @@ Sections are ordered by what a reader meets first in a program.
 The goal is one path: tutorial, idiomatic, performant, and production
 are the same code, and it is safe.
 
+This review is the discovery of a doctrine and its measurements, not
+their defense. The position below was found by the counts in the
+evidence file; the terms after it are what those counts turned out to
+measure.
+
 Memory safety is a consequence of a program stating its facts, not a
 proof layer beside them. A lifetime parameter, a reference-counted
 cell, a lock wrapper, an unsafe block: each is text that carries no
@@ -29,7 +34,9 @@ Safe is measured on five terms, not on soundness:
 | one path | whether the tutorial form is the production form | the specimen ladder |
 | cost | what a check adds at run time | measured against the bump, the walk, the verbs |
 
-A proposal that moves none of them is dropped.
+A proposal that moves none of them is dropped. The terms are provisional
+in the same way the doctrine is: a later section may add one or retire
+one.
 
 ---
 
