@@ -1,0 +1,132 @@
+# Design review, 2026-09: evidence
+
+Companion to `DESIGN_REVIEW_2026_09.md`. That file is concepts; this one
+is where each claim came from. Counts are grep counts and approximate.
+
+Sources: the specimens under `real_projects/`; cctext, rlsw-cc, and
+stylo-cc out of tree; `studies/cve_locality/`; the lowerer read as a
+program written in CC (`cc/lower/`); the bootstrap chain.
+
+Every finding carries one tag. Only **design** rows are arguments about
+the language; the rest are work.
+
+| Tag | Meaning |
+|-----|---------|
+| **design** | The model would produce this in fresh code by someone who knows the idiom. |
+| **drift** | The code predates the concept it now contradicts. |
+| **unimplemented** | Spec or a draft says what should happen; the lowerer does not do it yet. |
+| **defect** | The lowerer does something wrong and the specimen worked around it. |
+| **doc** | A page names a product as a primitive, or describes what the code no longer does. |
+
+The friction files inside specimens mix these. Tagging them would let the
+earned-syntax rule read only the design rows.
+
+---
+
+## 1. The local system
+
+| Observation | Where | Tag | Reading |
+|-------------|-------|-----|---------|
+| Two `!>` on the two calls that touch the world; the Python twin has zero | `examples/serdes/json/tools/minify.shcc`, `minify.py` | design | the cost of visibility is two tokens |
+| 151 common-error handlers and 67 index-fault handlers; functions bind both with different policies | cctext `frontend/*.ccs` | design | required handling by type, in production |
+| Index-fault type has no face, on purpose | cctext `core/piece_tree.cch`, `DESIGN.md` Surfaces | design | the face criterion, stated by the author |
+| Nearly every index handler discards `e` and returns; the fault is latched on the object | cctext frontends | design | the convention that keeps required handling cheap |
+| Seven stdlib error types carry a face onto the common error | `cc/include/ccc/cc_io_error.cch`, `script/py.cch`, `script/js.cch`, `script/quickjs.cch`, `cc_slice.cch` | design | all satisfy the criterion; scripts depend on them |
+| 22 handlers, 6 distinct policies | `real_projects/pigz/pigz_cc/pigz_cc.ccs` | design | policy varies by scope; not restatement |
+| 18 handlers, 1 policy (propagate) | `real_projects/redis/redis_db.cch` | design | the uniform pipe, stated locally |
+| 17 handlers, 2 policies | `real_projects/staticd/staticd.ccs` | design | works |
+| `.base` projected in every binder between IO and command errors | `real_projects/redis/redis_idiomatic.ccs` | unimplemented | arg-position autocast through faces (`spec/draft_as.md`); partly drift |
+| Decompress uses a global atomic as the error channel | `real_projects/pigz/pigz_cc/pigz_cc.ccs` | drift | predates `h.fail`; with no local option the error became ambient state |
+| A read error inside a wait-for body is swallowed into a cancel flag | cctext `core/find.ccs` | design | a `return` in a ticket body is a ticket return; no spelling for "this ticket failed" |
+| The error reporter needs its own handler to print | `real_projects/pigz/pigz_cc/pigz_cc.ccs` | design | correct refusal of same-E re-entry; costs a scope for the commonest helper |
+| `.failed()` polled on templates at 12 sites | `real_projects/staticd/staticd.ccs` | doc | growth failure poisons and never truncates; pin that the poison trips the next consumer |
+| 0 handlers, `?> NULL` x12, walks return bool with out-params | `cc/lower/*.cch` | domain | diagnostics are record-and-continue; expressible as a template handler with `@ok` and a site position |
+| `@noblock` / `@nonblocking` on helpers outside any `@async` | `real_projects/redis/redis_idiomatic.ccs` | theater | no-op per spec §8.2.1; vestigial from the owner variant |
+
+Work:
+
+- **unimplemented:** arg-position autocast through `as:` faces
+  (`spec/draft_as.md`); `@defer(ok|err)` at block scope
+  (`cc/lower/lower_cleanup.cch`); `'!> @destroy'` in the clean lowerer
+  (`cc/lower/lower_results.cch`, reported twice).
+- **test:** re-entry through a face, not only the exact type; one handler
+  inlined at three sites with `int`, pointer, and struct destinations once
+  `@ok` is admitted; a handler reached from a nested block whose ledger
+  entries armed after the handler line.
+- **doc:** the-cc-way should state that handlers resume and resume means
+  the next statement; that a discarding handler belongs on a narrow type;
+  the face criterion; one form and one sugar; "on the declaration" in
+  place of "on successful construction" (getting-started, cheatsheet,
+  language-concepts).
+
+## 2. Arena as lifetime
+
+| Observation | Where | Tag |
+|-------------|-------|-----|
+| Stack-slice escape, arena-epoch pin, pointer-alias capture are three passes | `cc/lower/lower_own.cch`, `lower_closures.cch` | design |
+| The order flips CVE-2023-54235 to prevented and shrinks SHAPE-T7 | `studies/cve_locality/` verdicts | design |
+| Teardown order is convention, unenforced | `spec/draft_lifetime_parents.md` §8 | design |
+| Heap arena per block, detached out of its own `@destroy`, shipped in the payload | `real_projects/pigz/pigz_channel.ccs` and siblings | drift |
+| 64 KiB arena minted to host one turnstile; two arenas to host one exclusive and two vecs on a calloc'd object; parallel handle calloc'd because it cannot live in a bump arena | pigz, curl `thrdqueue.ccs`, cctext `core/browse.ccs` | design |
+| Parameters untracked; the callee vocabulary for send / reset / spawn is a string table in the step; mutation safety keyed on "atomic" in a callee name | `cc/lower/lower_own.cch`, `lower_closures.cch` | design, contradicts ADR-S2 |
+
+## 3. Join and job
+
+| Observation | Where | Tag |
+|-------------|-------|-----|
+| Noop first arm, atomics for done and cancel beside the handle, pause polled inside every stage, internal cancel called from user code, written three times | cctext `core/find.ccs`, `piece_tree.ccs`, `browse.ccs`, `FRICTION.md` | design |
+| Loud-noop plant, then signal arm, workers, growth, respawn admitted onto one dest | `real_projects/staticd/CCServer.ccs` | design, works |
+| Same stop-and-accept block verbatim | redis idiomatic and sketch | design |
+| The compiler uses no concurrency construct; the parallel step is its largest | `cc/lower/lower_parallel.cch` | observation |
+
+## 4. Tagged data
+
+| Observation | Where | Tag |
+|-------------|-------|-----|
+| 503 of 510 switches carry `default:` | `cc/lower/*.cch` | defect |
+| Causes: a generic instance in a case body, `::` in a switch body, an `@` word in a literal in a switch | `stress/break/` | defect |
+| Packed variant for values, hand `{kind, u}` for replies, grammar unions tested with `kind ==` | `real_projects/redis/` | design |
+| Comptime cannot name arms; MIME ints kept in sync by comment | `real_projects/staticd/staticd.ccs` | design |
+
+## 5. Instance placement
+
+| Observation | Where | Tag |
+|-------------|-------|-----|
+| Opaque struct plus cast at every use because a member cannot typedef a Table instance; the face includes its own members to pin order | `real_projects/staticd/CCServerPoll.ccs`, `CCServer.cch` | design or unimplemented |
+| Vec of pointers needs a typedef; vec of a struct hoists above the prelude; no instance in a prototype | `cc/lower/ast.cch` | same |
+
+## 6. Comptime
+
+| Observation | Where | Tag |
+|-------------|-------|-----|
+| Packed-variant niche proofs read the driver's own pointer width | `cc/src/preprocess/variant_lower.c` | design |
+| Handlers that compute names from argument types are opaque to the index | `cc/lower/INDEX_GAPS.md` | design |
+| No specimen uses a computed-name hook | all five specimen reads | observation |
+| Three specimens stamp kernels from a range with string templates | levenshtein, rlsw-cc, stylo-cc | design, earned |
+| Emit fixed up by a regex pass; generator is `snprintf` into a static megabyte | rlsw-cc `tools/gen.sh`, stylo `engine/sty_emit.cch` | design |
+
+## 7. The runtime as guest
+
+| Observation | Where | Tag |
+|-------------|-------|-----|
+| Parks wrapped in deadlock-suppress because libcurl's loop is the progress source | `real_projects/curl_dns_port/thrdqueue.ccs` | design |
+| One worker inside Ladybird; sequential twin beside every parallel site | stylo-cc `engine/stylebench_cc.ccs` | design |
+| Sequential twin beside the stripe loop | rlsw-cc `src/fill/bin_par.ccs` | design |
+| `@async` in one file, `@await` in none, with async-specific workarounds | `real_projects/redis/redis_owner.ccs` | design, unearned |
+
+## 8. Receipts
+
+The ladder is the freeze veto. Its rungs:
+
+- Redis wins at pipeline depth 16 with two to four OS threads; not at
+  depth 1; slower at one client. `real_projects/redis/benchmarks/`.
+- Pigz is parity; the product went bimodal after a runtime change two
+  days before the latest receipt; two variants emit zero bytes and remain
+  in `make test`. `real_projects/pigz/benchmarks/`.
+- The levenshtein headline ratio comes from the upstream number doubling
+  between two receipts. `real_projects/levenshtein/benchmarks/`.
+- Staticd leads nginx on small files and trails on large.
+- rlsw-cc's phase log attributes most of its win to sequential work.
+- Curl is a same-band regression check by its own README.
+
+None of it changes a concept. All of it weakens the veto.
