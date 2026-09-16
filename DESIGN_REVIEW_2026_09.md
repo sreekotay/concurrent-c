@@ -30,7 +30,7 @@ be stated, then adds machinery to recover an approximation of it.
 | Reconstruction | Recovers | Stated in CC by |
 |----------------|----------|-----------------|
 | tracing GC | when this dies | the arena binding; reset or destroy is the program's own event |
-| reference counting | the last holder | one owner and views; the tree destroys parts |
+| reference counting | who may destroy this, recovered by counting claimants | one named owner; claims with stated ends; the tree destroys parts |
 | lifetime inference | which storage a reference points into | the named arena, arena-last, the kept attribute |
 | escape analysis | whether a value outlives the call | scratch or the caller's lifetime; the closure step checks the statement |
 | handler search, unwinding | who handles this failure | the lexical handler, keyed by type |
@@ -225,6 +225,14 @@ Lifetimes below the caller's named one: an unbound scratch product ends
 after its statement; a bound one at the frame; a frame arena at scope
 exit. Registration order is release order, so error defers on a bump
 arena unwind exactly; the failure path needs no mechanism.
+
+Ownership is the ability to destroy, and exactly one thing has it. A
+claim delays that end and always states when the delay stops: a pin
+until join, a hold until release, a checkpoint until restore. Access
+neither owns nor claims. A refcount is an anonymous owner plus counted
+claims; here the owner is named and the owner waits, so nothing is
+counted. Where a claimant may lose the race, the token refuses instead
+of delaying. The corpus uses no refcount.
 
 Parthood inherits one consequence: a whole destroys its parts, newest
 first, before releasing its own storage. Nothing else crosses the
@@ -442,6 +450,9 @@ API contradicting the rule that failure is never an empty success.
   spill and are still reclaimed.
 - The spec's capture example shows a stack slice into a same-frame
   nursery as an error; the closure step accepts it, correctly.
+- `CCArc`, and the own step's diagnostic recommending it for a hand-rolled
+  last-drop. No specimen uses a refcount. The honest diagnostic is "name
+  the owner": the parent tree, or `acquire_when` when the owner must wait.
 
 ## 3. Join and job
 

@@ -128,6 +128,11 @@ point):
 The wrappers inline; the Result tag test is the NULL test the caller
 already wrote. No cost either way.
 
+Refcounts: `CCArc`, `cc_arc_*`, and hand `->ref` / `refcnt` appear 0 times
+in `real_projects/`, cctext, stylo-cc, rlsw-cc, and `examples/`; 45 in
+`cc/include`, 15 in `tests/`, 8 in `cc/lower` (the diagnostic that
+recommends it). **design; unearned.**
+
 Implementation, from `cc/include/ccc/cc_arena.cch` and `cc_slice.cch`:
 
 | Observation | Where | Tag |
