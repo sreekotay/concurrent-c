@@ -76,6 +76,28 @@ Work:
 | Callee vocabulary for send / reset / spawn is a string table in the step; mutation safety keyed on "atomic" in a callee name | `cc/lower/lower_own.cch`, `lower_closures.cch` | design, contradicts ADR-S2 |
 | Three constructors, one engine, differing in where L1 lives | spec §5.0 | doc |
 
+Implementation, from `cc/include/ccc/cc_arena.cch` and `cc_slice.cch`:
+
+| Observation | Where | Tag |
+|-------------|-------|-----|
+| A copied heap-arena handle dereferences the freed host in `cc_arena_is_live`; destroy nulls only the binding passed; owner headers already solve this shape with a generation and a never-unmapped list | `CCArena`, `cc_arena_destroy`, `cc_arena_free`, `CCArenaOwner` | design |
+| `cc_arena_pool_init` sets the arena to unbounded growth, or strips overflow when fixed; a relation inheriting a consequence | `cc_arena_pool_init` | design |
+| `cc_arena_slice` stamps the root provenance unlocked; `alloc_slice` stamps `epoch_cur` under lock; a view minted over scratch does not go stale at restore | `cc_arena_slice`, `cc__arena_epoch_of` | defect |
+| Typed-slice factory emits an unchecked, non-Result `at`; byte slices have the checked one in `std/slice.cch` | `CC_DECL_SLICE_SPEC`, `CC_GENERIC_FACTORY(CCSlice, 1)` | design |
+| `cc_slice_from_static` sets the cstr bit unconditionally | `cc_slice_from_static` | defect |
+| Comment on `cc_arena_attach` says restore refuses while records are linked; restore runs records attached since the mark | `cc_arena_attach`, `cc__arena_restore_slow` | doc |
+| A view cannot find its host; every epoch check takes the arena; hosts draw epochs in 256-aligned blocks so a block-to-host registry would close it | `cc_slice_is_from_arena_epoch`, `cc__arena_epoch_fresh` | design |
+| Point store checks stale grower generation; point load, typed `at`, and the walk check nothing | `cc_slice_store_at` | design |
+| Grower view ids carry a 32-bit epoch drawn from one global counter per birth, reset, and checkpoint; plain view ids carry 60 bits | `CC_SLICE_ID_EPOCH_MASK`, `cc_slice_make_grower_id` | design |
+| Owner generations are a 27-bit global namespace | `cc_slice_gen_birth`, `CC_SLICE_ID_GEN_MAX` | design |
+| Pool freelist packs pointers into 48 bits; the header's own comment asks for an init check that is absent | `CC__POOL_PTR_MASK` | defect |
+| A checkpoint is a lazily materialized child: marks until promotion, a real host after; the doc describes marks and children as two things | `cc__arena_promote_locked`, `cc_arena_checkpoint` | doc |
+| Promotion exists for pre-mark regrow, parent-side records, and mark depth beyond three; per-object overflow already stamps a root epoch and could carry the regrow case | `cc__arena_alloc_parent_epoch`, `cc__arena_alloc_ovf_object` | design, a trade to decide |
+| The universal UFCS hook is a snake-case rule plus an exception list for channels, vectors, maps, results; it lives here for include order | `cc_ufcs_generic_cc_prefix_lower_c`, `@typehooks on *` | design; declarative candidate |
+| The header is seeded as host C: no Results, handlers, or the-cc-way idioms in the runtime core | header comment "Seeded as host C" | observation |
+| `cc_arena_set_heap_overflow` and pool init mutate `_flags` and `block_max` unlocked while alloc paths RMW under the lock | `cc_arena_set_heap_overflow`, `cc_arena_pool_init` | defect, minor |
+| The factory body duplicates `CC_DECL_SLICE_SPEC` verbatim as a string template kept in sync by hand | `cc_slice.cch` | design; typed emit |
+
 ## 3. Join and job
 
 | Observation | Where | Tag |
