@@ -215,6 +215,14 @@ runtime rows; the table above for the program rows.
 
 | Observation | Where | Tag |
 |-------------|-------|-----|
+| `@typeview` in specimens: 19 declarations; named modes carry the write surface by concern (`Encode` on three redis variants and staticd, `Highlight`/`Layout` on `RtxDoc`, `Match` on stylo's `Engine`, `Measure` in the recipe); `r: *` on `CCSlice`, deny lists on `CCBox_*` and `CCString` | grep; `cc_slice.cch:96`, tutorial §2 | design |
+| A default `r: *` refuses a field store at an ordinary site; a named mode refuses a store outside its `rw:` inside a body of that mode | `studies/typeview_boundaries/` | design, works |
+| Trust is by first-parameter shape and extends to embedded types: an `Outer*`-first body stores through `o->in.done` where `Inner` is `r: *` | `studies/typeview_boundaries/nested_trust.ccs` | design (boundary) |
+| A taken address bypasses the allow-list (`&x.done`) | `studies/typeview_boundaries/addr_peel.ccs` | design (the Gap) |
+| cctext: 71 `RtxDoc*`-first bodies in `core/`, 3 in `frontend/`; 7 stores to `find.*` state fields outside `core/find.ccs` | grep | observation |
+
+| Observation | Where | Tag |
+|-------------|-------|-----|
 | 503 of 510 switches carry `default:` | `cc/lower/*.cch` | defect |
 | Causes: a generic instance in a case body, `::` in a switch body, an `@` word in a literal in a switch | `stress/break/` | defect |
 | Packed variant for values, hand `{kind, u}` for replies, grammar unions tested with `kind ==` | `real_projects/redis/` | design |

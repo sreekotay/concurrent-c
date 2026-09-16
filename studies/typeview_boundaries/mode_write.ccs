@@ -1,0 +1,7 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+typedef struct { int scan_off; int scan_bytes; int done; int offs_len; } Find;
+@typeview on Find { r: *; };
+@typeview Scan on Find { rw: scan_off, scan_bytes, done; };
+static void advance(@typeview(Scan) Find* f) { f->scan_off = 10; f->done = 1; f->offs_len = 3; }
+int main(void) { Find f = {0}; advance(&f); printf("%d\n", f.done); return 0; }

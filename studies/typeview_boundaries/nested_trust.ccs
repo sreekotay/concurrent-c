@@ -1,0 +1,8 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+typedef struct { int done; int live; } Inner;
+@typeview on Inner { r: *; };
+typedef struct { Inner in; int tag; } Outer;
+/* Outer-first body: trusted for Outer. Is it trusted for Inner's fields? */
+static void outer_step(Outer* o) { o->in.done = 1; o->tag = 2; }
+int main(void) { Outer o = {0}; outer_step(&o); printf("%d\n", o.in.done); return 0; }

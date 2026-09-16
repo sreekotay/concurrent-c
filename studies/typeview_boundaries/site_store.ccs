@@ -1,0 +1,5 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+typedef struct { int done; int live; } Inner;
+@typeview on Inner { r: *; };
+int main(void) { Inner x = {0}; x.done = 1; printf("%d\n", x.done); return 0; }
