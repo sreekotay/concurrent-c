@@ -522,10 +522,178 @@ API contradicting the rule that failure is never an empty success.
 
 ## 3. Join and job
 
-`@parallel` is lexical fork-join and has also become the server pool and
-the background scan. Those want done distinct from live, pause honored at
-a stage, a placeable handle, and a public cancel. The axis is one job
-each: join, range, stream, bag. The surface has not split along it.
+A join set is a lifetime for work, the way an arena is a lifetime for
+bytes. The fact it states is who waits on whom: which fibers this
+statement will not pass until they are done, in what order they hand
+state to each other, and what closes when the last one dies. Two things
+have grown on the same construct: a wave, which is a join that ends at
+its statement, and a job, which spans many waves and ends with the
+object that owns it. The surface spells the wave and the program
+reconstructs the job beside it.
+
+### 3.1 Status
+
+| Construct | Fact | Stated at | Enforced by |
+|-----------|------|-----------|-------------|
+| `@parallel { a = f(); b = g(); }` | these arms are independent and all done here | the brace | the join; racing arms undefined |
+| `@parallel (pred)` / `seq (cond)` / `#pragma(@parallel) off` | the schedule below this cut is sequential | the predicate or the directive | one body, two lowerings |
+| `@parallel for (i in lo..hi)` | iterations are independent | the range | bisection; `break` as a shared stop |
+| `@parallel wait (ts) for` + `@stage` | tickets enter in order; this state hops from `i` to `i+1` | the gate and the block | the turnstile; a failed stage wakes its successor `err` |
+| `cache (name)` | this local is per-ticket scratch | the clause | one instance per runner slot |
+| `CCParallel h = @parallel {…}`, `@parallel(h) {…}` | this work belongs to that join set; it may outlive the frame | the bind, the admit | closure capture rules; admit after join aborts |
+| `h.close(tx)` / `n.close(tx)` | this stream ends when this join set is empty | the registration | EMPTY, on both paths |
+| `h.adopt(h2)` | cancel reaches down here | the call | the cancel walk; not a join |
+| `h.fail(e)` | this join set's outcome | the body | first error wins; `wait` returns it |
+| `h.cancel()`, `h.pause()` | stop or hold at the next seam | the call | honor at thunk start, half, leaf, enter, ticket, stage |
+| `n.spawn(() => …)`, `n.leave(ctx, finish)` | a child of this owner; the owner is gone, run this at EMPTY | the nursery | never denied; leftover on the LEFT path |
+| `@with_deadline(...) as dl` | the clock these arms share | the name | spawned arms see no caller clock unless named |
+
+Two constructs share one scheduler. The nursery is the older bag:
+closures, a handle in an arena or self-owned, `leave`, never denied.
+`@parallel` is the join: arms by reference, adaptive denial, and, once a
+dest is bound, the same bag again with dest bodies that follow the
+closure rules. Arena-as-lifetime came after both. The difference that
+remains between them is not a fact about the program; it is which one
+was written first.
+
+The handle states its own lifetime and not the work's. `h.live()` is
+planted-and-not-joined; right after a kick the wave can be finished and
+`live()` is still true, and the spec says not to read `h.n` or `h.nt`.
+So every program that kicks waves keeps a second cell: a `done` latch
+beside the handle in four structs, a second `cancel` flag beside
+`h.cancelled` in three of them, because the program's cancel must be
+readable before the plant and after the join, when there is no handle.
+The find in cctext is the specimen: one job (a query), many waves (a
+kick per idle frame), and the job's facts live in the struct while the
+wave's live in the dest. The same three files poll `h.paused` inside
+each `@stage` block; the construct already honors pause between the
+stage's `wait` and its block, so those loops are drift.
+
+A join set with no work has no spelling. The idiom is a plant with a
+no-op arm, `@parallel spawn { @serial { (void)0; } } !>`, in seven
+places, three of them in the teaching recipe. Under `spawn` that arm is
+a fiber: an empty join set costs one spawn and one join of nothing.
+
+What the runtime reconstructs, and from what:
+
+| Mechanism | Recovers | From | Could a party state it |
+|-----------|----------|------|------------------------|
+| adaptive spawn gate | whether this arm is worth a fiber on this machine | measured leaf time per site; 1-in-2^20 resample | no: the cost is the machine's. The cutoff predicate states the shape when the caller knows it |
+| deny stack | that a denied join needed concurrency | a park inside a denied arm | the direct case is ill-formed already; through a helper, nothing says the helper parks |
+| deadlock detector | who waits on whom | park reasons, a 1000 ms latch | the join and stage edges are stated; the exemptions are stated as dynamic scopes; a park's partner set is not |
+| pool growth, wake-skip, sysmon | whether capacity is short | queue depth, idle count | no |
+
+The exemptions are statements at the wrong layer. `cc_deadlock_suppress`
+and `cc_external_wait` both mean "this park's progress source is
+outside the graph" and the detector treats them identically; a program
+picks one. Both are scopes: curl's worker wraps its whole loop in one,
+so every park inside it is exempt, including the internal hold on
+`done` that the program did not mean to exempt. The fact is a property
+of the queue the host fills, stated once at its creation; it is spelled
+today as a property of whoever waits, stated at each wait.
+
+The bag is missing four faces that a host queue needs and a join set
+does not: retract a queued item, detach without joining in-flight work,
+poll for empty, and grow or shrink the runner set after the plant. Curl
+stays on a nursery and an exclusive for those.
+
+### 3.2 Proposal
+
+Every wait names its partner set. A join set is the partner of its
+wait; a stream's partner is the join set registered to close it; a
+wait whose partner is outside the program says so on the object, once.
+
+1. **A join set is a declaration.** `CCParallel h@();` plants a live,
+   empty dest: no arm, no fiber. `h.wait()` or `h.leave()` ends it as
+   today. The no-op arm goes.
+2. **The job is the dest; the wave is a drain.** `h.drain()` joins
+   everything admitted so far and leaves the handle live, marks intact;
+   `h.wait()` stays the terminal join. A job is then planted once,
+   admitted per kick, drained per frame, and waited at close: the find
+   in cctext with no struct-side latch and no second flag.
+3. **Finished is a read.** `h.settled()` is true when nothing is running
+   and nothing is admitted, from the occupancy the growing form already
+   keeps. It is not `live()`. A settled dest may receive an admit on the
+   next line, and the admitter is the same program; that is its fact to
+   sequence.
+4. **Marks belong to the job.** `cancelled` and `paused` persist across
+   drains. A cancelled job refuses its next admit (`CC_ERR_CANCELLED`),
+   which is what the struct-side flag was guarding by hand.
+5. **External progress is the object's fact.** A channel or exclusive
+   created as host-fed marks every park on it external. The scope forms
+   remain for the dynamic case, a `pread` on a caller thread, and stop
+   being the idiom for a queue.
+6. **Drift, not design.** Delete the in-stage pause polls; read
+   `h.paused()` not the field.
+
+Reconstructions counted: ten today, six in the runtime and four in the
+program. Items 1 to 4 close the four in the program. Item 5 moves one
+exemption from scope to object; it is a precision change, not a new
+statement. Five remain in the runtime and are the floor by the rule in
+the preamble: the gate, the deny stack, the detector, growth, and
+wake-skip each recover a fact no party holds before the run. The deny
+stack's helper case is the one of those a party could state, and it is
+an open item, not a proposal.
+
+### 3.3 Cost
+
+| Item | Run-time cost | Memory | Notes |
+|------|---------------|--------|-------|
+| 1 declaration plant | removes one spawn and one join per plant | none | today's plant is a real fiber under `spawn` |
+| 2 drain | the same park as `wait` without the terminal store | none | the dest keeps the occupancy already |
+| 3 settled | one acquire load | none | replaces a program-side latch that was one store and one load |
+| 4 persistent marks | none | none | the flags exist; the bind stops clearing them |
+| 5 host-fed object | one flag read on the park path | one bit | the park path already reads the object's state |
+| 6 delete polls | removes a yield loop per stage | none | |
+
+Pause is a yield loop at every seam: a paused dest with k tickets at
+seams spends k yields per scheduler pass until resume. A parked honor
+would need a wake list per dest and would make `resume()` a wake, which
+today it is not. That is a cost the current design chose; it is not
+free, and it is not charged to the proposals above.
+
+Two schedules for one body is the one place the language lowers the
+same text two ways. It holds to one build, one meaning because the
+schedule is in the text: the predicate, the `seq`, the directive. The
+adaptive gate is the runtime's choice and changes only timing, never
+which arms run or what they see, except through the deny stack abort,
+which is loud.
+
+Not admitted: reading `h.n` or `h.nt` as finished; a runtime that
+guesses a partner set for a park; a debug build with a different
+detector.
+
+### 3.4 Open
+
+- **A parking helper.** The brace-join rule refuses a direct channel
+  operation in a denied join and cannot see one through a call. A
+  signature fact, a function that may park, would let the rule reach
+  through. The burden is on every such signature, and a missed one is
+  the runtime abort again. Whether the fact is worth its spelling is
+  not settled.
+- **One bag or two.** Dest bodies and nursery children follow the same
+  capture rules; `create_child` and arena hosting are what the nursery
+  still has. A dest in an arena with cancel and deadline inheritance
+  would leave the nursery as a name. That is a spelling change, not a
+  fact change, and the chronology is the only argument for two.
+- **Adopt is half a tree.** `adopt` is a cancel edge and not a join
+  edge; `h1.wait()` does not wait `h2`. A tree that cancels down but
+  does not join down states one direction of the relation.
+- **Two clocks in one body.** The first arm sees the caller's deadline
+  and spawned arms do not. A construct could refuse a body that reads
+  the current deadline in an arm that will not see it, so that naming
+  the clock is required rather than remembered.
+- **The host queue.** Retract, detach, poll-empty, grow and shrink are
+  four faces or a statement that this ABI is the bag. Nothing here
+  decides which.
+
+### 3.5 Surface that does no work
+
+- The no-op arm as a plant.
+- Two exemption spellings the detector does not distinguish.
+- `live()`, named for the handle, read as the work, with the latch
+  beside it as proof.
+- `h.paused` the field and `h.paused()` the load, both readable.
 
 ## 4. Tagged data
 
