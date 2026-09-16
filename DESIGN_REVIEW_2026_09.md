@@ -840,6 +840,44 @@ nothing, holds no subscriber list, and pushes nothing.
    already refuses `&v` on a binder. One condition in the allow-list
    check.
 
+**Authoring.** Three groups in the type's unnamed view, and ordinary
+functions for the rest. The view already holds two kinds of group:
+faces, which change how a use lowers, and allow-lists, which decide
+what a site may do. Bindings are a third kind, of the first sort: they
+say what a use of a field means, everywhere, including trusted bodies,
+as a face does. The trusted-body exemption is an admission rule and
+does not touch them. Named modes narrow admission and may list derived
+names; they do not bind, so a version is one fact per type. The view
+adds no bytes: the author declares the counter and stamp fields, and
+the binding finds them by name.
+
+```c
+typedef struct {
+    size_t pos;      uint32_t pos_v;      /* the primary and its version */
+    size_t len;      uint32_t len_v;
+    size_t *offs;
+    RtxLineIndex idx; uint32_t idx_v;     /* a cache and its stamp */
+} RtxFind;
+
+@typeview on RtxFind {
+    r: *;                            /* stores only in RtxFind* bodies */
+    v: pos, len;                     /* a store also stamps pos_v from the counter */
+    d: done, truncated, scan_off;    /* read like a field; resolve as UFCS; store refused */
+    c: idx from pos, len;            /* read compares idx_v to the sources; rtx_find_idx rebuilds */
+};
+```
+
+Use sites do not change. `d->find.done` reads, `d->find.done = 1` is
+refused, `d->find.pos = v` stamps, `d->find.idx` checks and rebuilds.
+A derived name is a function of the object alone; one that needs an
+argument is a method. A cache whose builder is `!>(E)` makes its read
+a Result site, and that is the one place a use site changes. Derived
+of derived is a call; cache of cache is a check chain; several sources
+are several stamps; an aggregate store re-stamps every versioned field;
+zero-init is stale, so designated init and serdes carry no versions; a
+cache's storage is a part of the object and dies in its walk.
+Hooks stay what they are, lifecycle and library naming.
+
 The lifetime order of section 2 applies unchanged: a cached derivation
 holds views of its sources, so a source outlives every derivation of
 it, and the primary has the set's longest lifetime. That is why the
