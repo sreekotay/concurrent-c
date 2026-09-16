@@ -128,6 +128,18 @@ point):
 The wrappers inline; the Result tag test is the NULL test the caller
 already wrote. No cost either way.
 
+Ownership by scope versus by object (grep, `.ccs` / `.cch`):
+
+| Specimen | `@destroy` | `@defer` | explicit destroy / free / close | `create_*` / adopt / attach |
+|----------|-----------:|---------:|--------------------------------:|----------------------------:|
+| pigz | 69 | 17 | 50 | 21 |
+| redis | 32 | 33 | 35 | 0 |
+| staticd | 11 | 8 | 22 | 2 |
+| curl port | 0 | 14 | 15 | 1 |
+| cctext core | 16 | 4 | 157 | 0 |
+| cctext frontend | 3 | 0 | 43 | 0 |
+| stylo engine | 3 | 1 | 3 | 0 |
+
 Refcounts: `CCArc`, `cc_arc_*`, and hand `->ref` / `refcnt` appear 0 times
 in `real_projects/`, cctext, stylo-cc, rlsw-cc, and `examples/`; 45 in
 `cc/include`, 15 in `tests/`, 8 in `cc/lower` (the diagnostic that
