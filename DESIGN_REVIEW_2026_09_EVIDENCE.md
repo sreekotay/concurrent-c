@@ -63,12 +63,18 @@ Work:
 
 | Observation | Where | Tag |
 |-------------|-------|-----|
+| Slice id: bits 0..31 epoch, 32..58 generation, flags GROWER / CSTR / TRANSFERABLE / SUBSLICE / UNIQUE; owners compare tokens; views are not checked on read | `cc/include/ccc/cc_slice.cch` | design |
+| Own step tracks locals only; parameters, field paths, index expressions, call results pass | `cc/lower/lower_own.cch` header | design, by choice |
 | Stack-slice escape, arena-epoch pin, pointer-alias capture are three passes | `cc/lower/lower_own.cch`, `lower_closures.cch` | design |
-| The order flips CVE-2023-54235 to prevented and shrinks SHAPE-T7 | `studies/cve_locality/` verdicts | design |
+| Closure escape computed as: returned, assigned to member, passed to any call that is not a scoped spawn | `cc/lower/lower_closures.cch` | design; the negative of the order |
+| The order flips CVE-2023-54235 to prevented and shrinks SHAPE-T7; four other mitigations are bounds, arithmetic, representation | `studies/cve_locality/` verdicts | design |
 | Teardown order is convention, unenforced | `spec/draft_lifetime_parents.md` §8 | design |
+| Non-arena hooked types "enter a parent at birth via `create_*` constructors and never move"; only nursery and pool have one | `spec/draft_lifetime_parents.md` §5, `cc_arena.cch` | unimplemented for turnstile, parallel, exclusive |
+| A tree keeps a caller's slice from `from_buffer`, guarded by a runtime untracked-id check; the callee cannot compare lifetimes it does not know | cctext `core/piece_tree.ccs` | design; the kept-parameter case |
 | Heap arena per block, detached out of its own `@destroy`, shipped in the payload | `real_projects/pigz/pigz_channel.ccs` and siblings | drift |
 | 64 KiB arena minted to host one turnstile; two arenas to host one exclusive and two vecs on a calloc'd object; parallel handle calloc'd because it cannot live in a bump arena | pigz, curl `thrdqueue.ccs`, cctext `core/browse.ccs` | design |
-| Parameters untracked; the callee vocabulary for send / reset / spawn is a string table in the step; mutation safety keyed on "atomic" in a callee name | `cc/lower/lower_own.cch`, `lower_closures.cch` | design, contradicts ADR-S2 |
+| Callee vocabulary for send / reset / spawn is a string table in the step; mutation safety keyed on "atomic" in a callee name | `cc/lower/lower_own.cch`, `lower_closures.cch` | design, contradicts ADR-S2 |
+| Three constructors, one engine, differing in where L1 lives | spec §5.0 | doc |
 
 ## 3. Join and job
 
