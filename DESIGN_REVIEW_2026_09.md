@@ -232,7 +232,18 @@ until join, a hold until release, a checkpoint until restore. Access
 neither owns nor claims. A refcount is an anonymous owner plus counted
 claims; here the owner is named and the owner waits, so nothing is
 counted. Where a claimant may lose the race, the token refuses instead
-of delaying. The corpus uses no refcount.
+of delaying.
+
+The boundary of that rule: claims with stated ends cost either retention
+until the epoch ends or head-of-line blocking on the owner, and a claim
+with no bound hangs the owner rather than leaking. A refcount pays
+neither and charges an anonymous destroyer. Where an owner must make
+progress independently of a dynamic set of long readers, the tools here
+are a copy per reader, an epoch per generation with the owner parked
+until quiescence, or blocking; none is free. The corpus uses no refcount
+and was chosen from problems that already have an owner; a shared-graph
+problem with churn has not been run. Token refusal covers writers today
+and readers only once the verbs check.
 
 Parthood inherits one consequence: a whole destroys its parts, newest
 first, before releasing its own storage. Nothing else crosses the
