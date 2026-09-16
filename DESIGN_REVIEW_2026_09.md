@@ -560,12 +560,17 @@ gate `k` it sits in; the successor is the next name in that gate. Every
 stage in the corpus names its ticket by the loop index. That is the
 shape of a block chain and a tile scan, not of the construct: a ticket
 may sit in several gates, a gate is a chain, and the order stated is
-the union of the chains. What the construct does not state is the
-condition that makes the sequential path and the cap safe: a name's
-predecessor must be an earlier ticket in loop order and within `cap`
-of it, and each gate's chain starts at name zero because nothing
-passes zero. Those are the program's facts today and nothing reads
-them.
+the union of the chains. The cap is a separate tier: `enter` ignores
+the ticket and takes a token, `cap` runners take tickets in the order
+the caller sent them, and a runner parked in a stage holds its slot.
+The gate knows nothing of it. Two facts the gate tier does not state:
+the head of each chain is name zero, since nothing passes zero unless
+the program passes the head's predecessor by hand; and serial elision
+requires the name order to agree with the ticket order, because on the
+sequential schedule every pass must precede its wait in program order
+or the one fiber parks on its own turn. On the parallel schedule a
+wait on a later ticket is an ordinary dependency, satisfied while a
+runner is free, and the detector is its floor.
 
 The nursery is the join set underneath `@parallel`: a wait-for's `h.n`
 is one, a dest's bodies are its children, EMPTY is its event. It is
@@ -717,14 +722,14 @@ detector.
 - **The host queue.** Retract, detach, poll-empty, grow and shrink are
   four faces or a statement that this ABI is the bag. Nothing here
   decides which.
-- **The name predicate.** A stage name may be any expression, and the
-  three conditions on it (an earlier ticket, within `cap`, chains from
-  zero) are unstated. A monotone name in loop order satisfies all
-  three and is what every specimen writes. Whether the construct should
-  refuse a non-monotone name, require the program to spell the
-  predecessor, or leave the fact to the detector is open. A related
-  edge: `@stage` is ill-formed outside a wait-for body, so a graph of
-  dest bodies joined by names has the cell but no spelling.
+- **The name predicate.** A stage name may be any expression. The one
+  condition on it is elision's: on the sequential schedule the name
+  order must agree with the ticket order. A monotone name satisfies it
+  and is what every specimen writes. Whether the construct should
+  refuse a name it cannot see is monotone, require the predecessor to
+  be spelled, or leave the sequential park to the detector is open. A
+  related edge: `@stage` is ill-formed outside a wait-for body, so a
+  graph of dest bodies joined by names has the cell but no spelling.
 - **Two touchers.** A cell is one pass and one wait. Fan-in is several
   stages in sequence; fan-out is several passes. A cell with many
   waiters is a different object, and the exclusive layer's broadcast
