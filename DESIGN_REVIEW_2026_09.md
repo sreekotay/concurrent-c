@@ -30,7 +30,7 @@ be stated, then adds machinery to recover an approximation of it.
 | Reconstruction | Recovers | Stated in CC by |
 |----------------|----------|-----------------|
 | tracing GC | when this dies | the arena binding; reset or destroy is the program's own event |
-| reference counting | who may destroy this, recovered by counting claimants | one named owner; claims with stated ends; the tree destroys parts |
+| reference counting, as ownership | who may destroy this, recovered by counting claimants | one named owner; claims with stated ends; the tree destroys parts. As a claim counter it is legitimate: each claim is a scope-bound guard, only their order is counted |
 | lifetime inference | which storage a reference points into | the named arena, arena-last, the kept attribute |
 | escape analysis | whether a value outlives the call | scratch or the caller's lifetime; the closure step checks the statement |
 | handler search, unwinding | who handles this failure | the lexical handler, keyed by type |
@@ -38,8 +38,11 @@ be stated, then adds machinery to recover an approximation of it.
 | vtable dispatch | which function this name means | static resolution; one declared dynamic sink |
 | deadlock detection, wake heuristics | who waits on whom | spawn, stage, EMPTY-close, deadline; the detector covers the rest |
 
-Every reconstruction remaining in the runtime or the checker is a
-proposal waiting to be written, scored on the terms below. The last row
+Reconstruction is legitimate exactly when no party can state the fact:
+which of several concurrent claimants finishes last is one such fact,
+and counting is the honest way to learn it. Every other reconstruction
+remaining in the runtime or the checker is a proposal waiting to be
+written, scored on the terms below. The last row
 is unfinished and is section 3's subject.
 
 Safe is measured on five terms, not on soundness:
@@ -229,10 +232,12 @@ arena unwind exactly; the failure path needs no mechanism.
 Ownership is the ability to destroy, and exactly one thing has it. A
 claim delays that end and always states when the delay stops: a pin
 until join, a hold until release, a checkpoint until restore. Access
-neither owns nor claims. A refcount is an anonymous owner plus counted
-claims; here the owner is named and the owner waits, so nothing is
-counted. Where a claimant may lose the race, the token refuses instead
-of delaying.
+neither owns nor claims. A refcount as ownership is an anonymous owner
+plus counted claims; as a claim counter it is the right tool when
+claimants are concurrent, must finish, and must not block the owner, and
+then each claim is still stated and only their order is counted.
+Otherwise the owner is named and the owner waits. Where a claimant may
+lose the race, the token refuses instead of delaying.
 
 The boundary of that rule: claims with stated ends cost either retention
 until the epoch ends or head-of-line blocking on the owner, and a claim
@@ -470,9 +475,12 @@ API contradicting the rule that failure is never an empty success.
   spill and are still reclaimed.
 - The spec's capture example shows a stack slice into a same-frame
   nursery as an error; the closure step accepts it, correctly.
-- `CCArc`, and the own step's diagnostic recommending it for a hand-rolled
-  last-drop. No specimen uses a refcount. The honest diagnostic is "name
-  the owner": the parent tree, or `acquire_when` when the owner must wait.
+- `CCArc` taught as shared ownership. It is a claim counter: the owner is
+  the count's home, each claim a scope-bound guard, the last guard out
+  runs the teardown. Its trigger is claimants that are concurrent, must
+  finish, and must not block the owner. No specimen has that shape yet.
+  The own step's diagnostic for a hand-rolled last-drop should name that
+  trigger, and name the parent tree or `acquire_when` otherwise.
 
 ## 3. Join and job
 
