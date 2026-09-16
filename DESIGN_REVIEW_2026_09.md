@@ -169,7 +169,7 @@ check be an instance of a single rule.
 | checkpoint / restore | a mark on a lifetime; a child that restore frees | the binding | the runtime; views above the mark go stale |
 | `T[:!]`, `recv`, `send_take` | exactly one name for these bytes | the type or the verb | the own step: copy, return, and use-after-move refused |
 | `send_into` | the payload is built in the receiver's lifetime | the verb | the reader; materialization at the boundary |
-| `@scratch` | these bytes die with the call statement | the operand | the own step: escape refused |
+| `@scratch` | one stack arena per function; a bound product lives to the frame, an unbound one is reclaimed after its statement | the operand, and whether the product has a name | the own step: escape refused; the lowering: a tip restore after a statement that bound nothing |
 | capture into a spawn | a task holds this lifetime until join | the closure | the pin: epoch-ending operations refused while live |
 
 Two things are true of this table. Every fact is stated at the position
@@ -223,7 +223,7 @@ Every existing check is an instance:
 | channel send of a non-unique view refused | channel is unbounded; only a lifetime that moves with the payload qualifies: unique, static, or an arena riding in the message |
 | aggregate send checked field-wise | each field is a view with its own holder |
 | pointer-alias capture mutation refused | the alias's frame < the task |
-| `@scratch` cannot be returned or captured | the call statement < the frame |
+| `@scratch` cannot be returned or captured | the frame < any holder outside it; an unbound product's extent is one statement |
 | child-free ban | a borrow's holder may not end its lifetime |
 | teardown order of parts, newest first | parts registered later are <= parts registered earlier; a waiter attached before its resource inverts the order and is refusable |
 
