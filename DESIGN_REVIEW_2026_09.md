@@ -234,10 +234,9 @@ The rule reaches the holders the step does not see, with these facts:
    inside the captured lifetime's scope; `leave` is an escape.
 6. **Send of an aggregate with an arena moves the binding.** The
    sender's name is dead afterward, as after adopt or detach.
-7. **Copying an owner handle without a move is refusable**, and the
-   handle carries a generation so a stale copy refuses at run time. On
-   64-bit the generation fits above the 48-bit pointer; on ILP32 a
-   32-bit pointer and a 32-bit generation are the same 8 bytes.
+7. **Copying an owner handle without a move is refusable** (compile
+   time), and a stale copy refuses at run time (see 2.3 for the two ways
+   to pay for that).
 8. **Runtime handles are born into an owner.** Turnstile, parallel, and
    exclusive get `create_*` constructors like nursery and pool, per the
    storage classes the lifetime-parents design already defines.
@@ -250,24 +249,60 @@ ends first.
 Not covered by any lifetime rule: untracked heap, foreign memory,
 bounds, arithmetic.
 
-### 2.3 Open
+### 2.3 Cost
+
+Items 1 to 6 and 9 are compile-time only. They change what the own and
+closure steps refuse. The emitted C, the runtime, and the ABI are
+unchanged, and the steps stay linear in names and statements.
+
+Item 7 has a free half and a paid half. Refusing a copy of an owner
+handle without a move is compile-time. Making a stale copy refuse at run
+time is not, and there are two ways to pay:
+
+| Option | Runtime | Memory | ABI |
+|--------|---------|--------|-----|
+| hosts never unmapped, no generation | none on alloc; a stale copy reads a dead host and `is_live` is false | freed hosts are retained and reused, like owner headers; a heap arena's host must be allocated apart from its region, one more malloc per heap arena | none; ABA remains: a stale copy can see a reborn host |
+| generation in the handle | one mask on every host peel; one compare in `is_live` | same retention | the handle stays 8 bytes (tag above the 48-bit pointer on 64-bit; 32-bit pointer plus 32-bit generation on ILP32) but host C that peels `.a` / `.p` directly no longer holds a raw pointer |
+
+The second closes ABA. Both cost one allocation per heap arena, which
+is on the per-request path. The static half alone covers every copy the
+checker can see; the runtime half covers copies that reach a field or a
+parameter.
+
+Item 8 is cheaper than today. The handle is a bump from the owner plus
+one attach record, and it dies in the owner's walk. Today a turnstile is
+hosted by an arena minted for it, and a parallel handle by a calloc.
+
+Open items with a cost:
+
+- The debug read-check costs one registry lookup and one compare per
+  `at`, `set`, and walk entry, in debug builds only. The registry holds
+  one entry per live epoch block.
+- Promotion versus spill: promotion mallocs a host when scratch outgrows
+  a slab under a mark; spill would malloc per pre-mark regrow instead.
+  Which is rarer depends on the workload. Neither is on the fast path.
+- The 32-bit grower epoch has no free fix. Widening the id makes every
+  slice 32 bytes instead of 24. Moving the generation out of the id
+  loses stale-owner detection on grower views. Drawing epochs less often
+  weakens restore staleness. This is a trade to choose, not a repair.
+- Pinning a mark instead of the arena, last-use liveness, and the kept
+  attribute are compile-time only.
+
+### 2.4 Open
 
 - The kept-parameter spelling, and whether an undeclared keep is an
   error or a warning during transition.
-- A debug read-check through the view verbs, once a view can find its
-  host: hosts draw epochs in 256-aligned blocks, so a block-to-host
-  registry maintained at draw time is the lookup.
+- A debug read-check through the view verbs; hosts draw epochs in
+  256-aligned blocks, so a block-to-host registry is the lookup.
 - Last-use liveness within a block, so a reset after the last use of a
   view is not refused.
 - Pinning a mark instead of the whole arena when a task holds a view
   minted above a checkpoint.
 - Whether pre-mark regrow under a checkpoint should spill to per-object
-  overflow with the root epoch instead of promoting; promotion is on the
-  scratch hot path, so a replacement must be as cheap.
-- Grower view ids carry a 32-bit epoch from one global counter; the
-  generation should live elsewhere or growers need a wider id.
+  overflow with the root epoch instead of promoting.
+- The 32-bit grower epoch drawn from one global counter.
 
-### 2.4 Surface that does no work
+### 2.5 Surface that does no work
 
 - Three constructors taught as three ideas; they are one lifetime and
   three storage policies.
