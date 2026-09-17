@@ -726,6 +726,27 @@ Not admitted: reading `h.n` or `h.nt` as finished; a runtime that
 guesses a partner set for a park; a debug build with a different
 detector.
 
+Measured, on Bend's `pow2` tree at depth 24 with a cut of 8 (255
+spawns), Linux, four cores, seed 414, three repetitions:
+
+| Form | vs sequential C |
+|------|----------------|
+| `@parallel (0)` at every node, the false path | 1.15x, faster than the C |
+| `#pragma(@parallel) off` | 1.07x |
+| `@parallel spawn` above the cut | 3.4x, every run |
+| `@parallel (pred)` above the cut, C below | 0.90x, every run but two |
+| `@parallel (pred)` at every node | 0.75x; 0.20x with four eager workers |
+
+The same 255 arms, the same work. The statement delivers the machine
+and the deniable form does not, on this platform; the author's ten-core
+Darwin receipt has the deniable form at 3.3x. The gate is not the
+cause (the site reads `real`, and turning the gate off does not help),
+nor is wake-skip. Where the deniable join loses its time is a runtime
+question; what the measurement settles is that its denial, its
+inline-on-deny, and its grow-on-demand are reconstructions with a cost
+that varies by platform, while `spawn` is a fact with a cost that does
+not. Study: `studies/parallel_pow2/`.
+
 The detector's report is part of its cost account, since a floor that
 does not name the program's own words is paid for twice, once in the
 hang and once in the reading. What it can say for free: the park

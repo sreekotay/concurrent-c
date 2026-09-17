@@ -1,0 +1,42 @@
+## default run 1
+ seq 8.233857999905013 ms
+ cut 10.635326000046916 ms vs_seq 0.7741989291036956x (@parallel (d>depth-8))
+ spawn 2.420759000000544 ms vs_seq 3.401353872856886x (@parallel spawn above the cut)
+ cut_seqbelow 8.96365299995523 ms vs_seq 0.918582859013634x (gated join above the cut, C below)
+ gate0 7.249019000097178 ms vs_seq 1.1358582450666266x (@parallel (0) at every node)
+ off 7.516124999965541 ms vs_seq 1.0954924246127842x (#pragma(@parallel) off)
+## default run 2
+ seq 8.202473999932408 ms
+ cut 11.222357999999076 ms vs_seq 0.7309046815235339x (@parallel (d>depth-8))
+ spawn 2.4292460000142455 ms vs_seq 3.3765514072614744x (@parallel spawn above the cut)
+ cut_seqbelow 9.172061000019312 ms vs_seq 0.8942890807109916x (gated join above the cut, C below)
+ gate0 7.362178000039421 ms vs_seq 1.1141368763276964x (@parallel (0) at every node)
+ off 7.970306999981403 ms vs_seq 1.0291289908847359x (#pragma(@parallel) off)
+## default run 3
+ seq 14.820929999928921 ms
+ cut 10.656763999955729 ms vs_seq 1.390753328120102x (@parallel (d>depth-8))
+ spawn 2.4515599999576807 ms vs_seq 6.045509797918371x (@parallel spawn above the cut)
+ cut_seqbelow 9.368286000099033 ms vs_seq 1.5820321881475703x (gated join above the cut, C below)
+ gate0 7.117805000045337 ms vs_seq 2.0822332165371935x (@parallel (0) at every node)
+ off 7.721444999915548 ms vs_seq 1.9194503101545142x (#pragma(@parallel) off)
+## CC_V2_EAGER_THREADS=4 run 1
+ seq 8.23494200001005 ms
+ cut 41.99106699996628 ms vs_seq 0.19611175872279368x (@parallel (d>depth-8))
+ spawn 3.2866099999519065 ms vs_seq 2.505603646350055x (@parallel spawn above the cut)
+ cut_seqbelow 9.036155999987386 ms vs_seq 0.911332429411527x (gated join above the cut, C below)
+ gate0 7.098645999911241 ms vs_seq 1.160072216604831x (@parallel (0) at every node)
+ off 7.523441000026651 ms vs_seq 1.0945712207992166x (#pragma(@parallel) off)
+## CC_V2_EAGER_THREADS=4 run 2
+ seq 8.308055000030436 ms
+ cut 41.467952999984846 ms vs_seq 0.20034880911612568x (@parallel (d>depth-8))
+ spawn 2.4902020000154153 ms vs_seq 3.3362976176145573x (@parallel spawn above the cut)
+ cut_seqbelow 9.265384000027552 ms vs_seq 0.8966768133955085x (gated join above the cut, C below)
+ gate0 7.167733000009321 ms vs_seq 1.1590910264123444x (@parallel (0) at every node)
+ off 7.8097869999473915 ms vs_seq 1.0638004596138666x (#pragma(@parallel) off)
+## CC_V2_EAGER_THREADS=4 run 3
+ seq 8.35673899995163 ms
+ cut 41.78852399997413 ms vs_seq 0.19997688839062142x (@parallel (d>depth-8))
+ spawn 2.543959000031464 ms vs_seq 3.2849346234936467x (@parallel spawn above the cut)
+ cut_seqbelow 9.066387000028044 ms vs_seq 0.9217275856331505x (gated join above the cut, C below)
+ gate0 7.126641999930143 ms vs_seq 1.1726054150094174x (@parallel (0) at every node)
+ off 7.625128000043333 ms vs_seq 1.0959473729364466x (#pragma(@parallel) off)
