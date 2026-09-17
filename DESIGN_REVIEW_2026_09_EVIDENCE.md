@@ -68,6 +68,8 @@ Work:
 | A handler nothing in its scope raises is refused: "handles an error nothing in its scope raises"; a shadowed handler warns | `tests/errhandler_unraised_fail.*`, `errhandler_stack_deep_smoke.build_stderr` | design (decided) |
 | An unwrap through a macro with no declared `E` dispatches to the innermost `CCError` handler; a macro whose arms answer with different types dispatches per arriving type | `tests/errhandler_untyped_unwrap_ambient_smoke.ccs`, `errhandler_macro_mixed_dispatch_smoke.ccs` | design |
 
+| Dead-handler rule vs join rule: a `CCError` handler over a join whose arms raise nothing is refused as dead, while the join's own unwraps fall to `cc_error_exit` without one; `perf/parallel_pow2.shcc` on main fails to compile on 414 | `studies/join_dead_handler/` | defect (two rules disagree) |
+
 ## 2. Arena as lifetime
 
 | Observation | Where | Tag |

@@ -1,0 +1,10 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+static uint32_t leaf(void) { return 1; }
+static uint32_t two(void) {
+    @errhandler(CCError e) cc_error_exit(e);
+    uint32_t a = 0, b = 0;
+    @parallel { a = leaf(); b = leaf(); } !>.wait()!>;
+    return a + b;
+}
+int main(void) { println(two() == 2 ? "ok" : "bad"); return 0; }
