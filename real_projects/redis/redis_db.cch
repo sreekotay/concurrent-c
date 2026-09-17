@@ -895,10 +895,10 @@ static RedisReply db_flush(RedisDb* db) {
     return reply_simple("OK");
 }
 
-/* KEYS → WIRE array in reply_arena.  Measure pass (exact size), then encode;
- * write each bulk immediately so inline CCSlicePacked key bytes are copied
- * before the next dense-row step (staging RespGReply items for a later
- * batched write mis-encodes under --release). */
+/* KEYS → WIRE array in reply_arena.  Measure pass (exact size), then encode
+ * (clock->now() freezes across both); write each bulk immediately so inline
+ * CCSlicePacked key bytes are copied before the next dense-row step (staging
+ * RespGReply items for a later batched write mis-encodes under --release). */
 static RedisReply !>(CCError) db_keys(RedisDb* db,
                                       char[:] pattern,
                                       CCArena reply_arena,

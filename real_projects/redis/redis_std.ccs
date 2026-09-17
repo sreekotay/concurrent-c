@@ -471,10 +471,7 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
  * as the specimen for when a parking helper can check it. */
 @noblock static bool !>(CCIoError) exec(RedisDb* db, RedisCmd* cmd,
                                         RedisConnEnc enc, RedisCommand op) {
-    /* Command/db CCError → -ERR (Ok). Encode CCIoError must not fall
-     * through this face into enc_fail — use !>(e) { return cc_err(e); }
-     * on array_len/bulk (a top-level CCIoError handler makes
-     * `return enc->…()` lower to brk on Ok). */
+    /* CCError → -ERR. CCIoError has no handler here and must be bound explicitly. */
     @errhandler(CCError e) { return enc_fail(enc, e); }
     char[:]* keys = cmd->args + 1;
     size_t nkeys = cmd->argc > 0 ? cmd->argc - 1 : 0;
@@ -647,8 +644,8 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
     case .keys: {
         /* Key slices borrow the shard key arena. Valid only while
          * execute's hold_all is held — exec cannot see that; do not
-         * stash them past this arm. Two walks (count, then encode):
-         * no hit list, no growable arena vector. */
+         * stash them past this arm. Two walks (count, then encode;
+         * clock.now() freezes): no hit list, no growable arena vector. */
         enum { k_keys_pattern_max = 512 };
         char[:] pattern;
         const char* pat;
@@ -813,7 +810,6 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
     }
 }
 
-/* !> binders on CCIoError results project the as: CCError face into `e`. */
 static void redis_client_drop_log(const char* phase, CCError e) {
     fprintf(stderr, "redis_std: client drop: %s: %s\n",
             phase ? phase : "?",
