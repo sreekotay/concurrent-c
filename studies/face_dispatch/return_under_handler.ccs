@@ -1,0 +1,20 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+/* Does `return g();` (a Result expression) under an exact-type handler
+ * lower correctly on the Ok path? redis_std's comment says it lowers to
+ * brk on Ok. */
+static bool !>(CCIoError) g(int ok) {
+    if (ok) return cc_ok(true);
+    return cc_err(cc_io_error(CC_ERROR(CC_ERR_IO, "io")));
+}
+static bool !>(CCIoError) f(int ok) {
+    @errhandler(CCIoError e) { return cc_err(e); }
+    return g(ok);
+}
+int main(void) {
+    bool a = f(1) !>(e) { eprintln("f(1): err"); return 1; };
+    eprintln(a ? "f(1): ok(true)" : "f(1): ok(false)");
+    bool b = f(0) !>(e) { eprintln("f(0): err (expected)"); return 0; };
+    eprintln(b ? "f(0): ok(true)?!" : "f(0): ok(false)?!");
+    return 0;
+}

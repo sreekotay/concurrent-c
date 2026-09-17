@@ -1,0 +1,43 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+/* Closer to redis_std exec: two handlers (CCError -> -ERR as Ok,
+ * CCIoError -> re-raise), @switch on a variant, `return enc->m()` through
+ * a typeview pointer. Does the Ok path survive? */
+typedef struct Conn { int fails; int wrote; } Conn;
+typedef @typeview Encode on Conn { r: ok, bulk, err; } *ConnEnc;
+@variant Op { ping; echo; }
+static bool !>(CCIoError) conn_ok(Conn* c) {
+    if (c->fails) return cc_err(cc_io_error(CC_ERROR(CC_ERR_IO, "socket")));
+    c->wrote++; return cc_ok(true);
+}
+static bool !>(CCIoError) conn_bulk(Conn* c, char[:] b) { CCString h = @string(`$${b.len}\r\n`, @scratch); (void)h; return c->ok(); }
+static bool !>(CCIoError) conn_err(Conn* c, const char* m) { (void)m; return c->ok(); }
+static bool !>(CCError) arity(int n) {
+    if (n < 0) return cc_err(CC_ERR_INVALID_ARG, "wrong number of arguments");
+    return cc_ok(true);
+}
+static bool !>(CCIoError) exec(ConnEnc enc, Op op, int n) {
+    @errhandler(CCIoError e) { return cc_err(e); }
+    @errhandler(CCError e) { return enc->err(e.message); }
+    @switch (op) {
+    case .ping:
+        arity(n) !>;
+        return enc->ok();
+    case .echo: {
+        arity(n) !>;
+        CCString t = @string(`${n}`, @scratch);   /* @scratch inside a case, as exec's .num arms do */
+        return enc->bulk(t.as_slice());
+    }
+    }
+}
+int main(void) {
+    Conn c = {0};
+    bool a = exec(&c, (Op){ .ping = {} }, 1) !>(e) { eprintln("ping: err?!"); return 1; };
+    eprintln(a ? "ping: ok(true)" : "ping: ok(false)?!");
+    bool b = exec(&c, (Op){ .echo = {} }, -1) !>(e) { eprintln("echo(-1): err?!"); return 1; };
+    eprintln(b ? "echo(-1): -ERR written, ok(true)" : "echo(-1): ok(false)?!");
+    c.fails = 1;
+    bool d = exec(&c, (Op){ .echo = {} }, 1) !>(e) { eprintln("echo(fail): io err (expected)"); return 0; };
+    eprintln(d ? "echo(fail): ok?!" : "echo(fail): ok(false)?!");
+    return 0;
+}
