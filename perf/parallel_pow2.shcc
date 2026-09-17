@@ -68,7 +68,6 @@ static uint32_t pow2_seq(uint32_t d) {
 }
 
 static uint32_t pow2_par(uint32_t d) {
-    @errhandler(CCError e) cc_error_exit(e);
     uint32_t a = 0;
     uint32_t b = 0;
     if (d == 0)
@@ -81,7 +80,6 @@ static uint32_t pow2_par(uint32_t d) {
 }
 
 static uint32_t pow2_cut(uint32_t d) {
-    @errhandler(CCError e) cc_error_exit(e);
     uint32_t a = 0;
     uint32_t b = 0;
     if (d == 0)
