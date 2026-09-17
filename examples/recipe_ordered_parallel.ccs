@@ -25,7 +25,6 @@
 /* Simulate variable-time work: odd ids take longer.
  * Temp prints use @scratch (shared fn/closure stack arena). */
 static int process_item(int id) {
-    @errhandler(CCError e) cc_error_exit(e);
     int delay_us = (id % 2 == 1) ? 50000 : 10000;
     usleep(delay_us);
     int result = id * id;
@@ -48,7 +47,6 @@ int main(void) {
     cc_atomic_int failed = 0;
     @parallel spawn {
         @serial {
-            @errhandler(CCError e) cc_error_exit(e);
             int i;
             for (i = 1; i <= NUM_ITEMS; i++) {
                 int id = i;
@@ -60,7 +58,6 @@ int main(void) {
             results_tx.close();
         }
         @serial {
-            @errhandler(CCError e) cc_error_exit(e);
             println("\n[consumer] receiving results in order:");
             int result = 0;
             int expect = 1;

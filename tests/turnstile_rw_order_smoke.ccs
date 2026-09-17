@@ -14,6 +14,7 @@ static int g_fail;
 
 static void worker(CCTurnstileRW* ts, int i) {
     @errhandler(CCError e) cc_error_exit(e);
+    @errhandler(CCIoError e) cc_error_exit(e.base);
     ts->read.wait(i) !>;
     if (g_read_next != i)
         g_fail = 1;
@@ -31,6 +32,7 @@ static void worker(CCTurnstileRW* ts, int i) {
 
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
+    @errhandler(CCIoError e) { cc_error_log(e.base); return 1; }
 
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
     CCTurnstileRW ts@(CAP, arena) !> @destroy;
@@ -44,7 +46,6 @@ int main(void) {
         for (i = 0; i < N; i++) {
             ts.enter(i) !>;
             nur.spawn(() => [i, tsp] {
-                @errhandler(CCError e) cc_error_exit(e);
                 worker(tsp, i);
             }) !>;
         }

@@ -81,14 +81,12 @@ static double now_sec(void) {
 }
 
 int fail(const char *msg) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     eprintln(@string(`FAIL: ${msg}`, @scratch));
     return 1;
 }
 
 /* Sequential tip realloc on a large root — should stay in-place (no moves). */
 static int bench_tip_growth(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     CCArena a = cc_arena_heap(megabytes(4)) @destroy;
     unsigned char *p = NULL;
     size_t sz = 0;
@@ -127,7 +125,6 @@ static int bench_tip_growth(void) {
  * grow A again — must move. Proves tip-fast-path is tip-only, not magical.
  */
 static int bench_tip_stranding(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     CCArena a = cc_arena_heap(megabytes(1)) @destroy;
     unsigned char *alive = NULL;
     size_t alive_sz = 0;
@@ -158,7 +155,6 @@ static int bench_tip_stranding(void) {
 
 /* Hammer past the 4-slab budget into overflow; measure mix + reset reclaim. */
 static int bench_budget_overflow_reset(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     CCArena a = cc_arena_heap(4 * 1024); /* small root → hit budget fast */
     size_t live = 0;
     size_t i;
@@ -216,7 +212,6 @@ static int bench_budget_overflow_reset(void) {
 
 /* Fill → overflow → reset, many times; residual must stay bounded. */
 static int bench_reset_pingpong(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     CCArena a = cc_arena_heap(8 * 1024);
     size_t r, i;
     size_t peak_gross = 0;
@@ -259,7 +254,6 @@ static int bench_reset_pingpong(void) {
 
 /* Mix alignments + power-of-two sizes to thrash padding / ovf paths. */
 static int bench_mixed_align_storm(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     static const size_t aligns[] = {1, 2, 4, 8, 16, 32, 64};
     CCArena a = cc_arena_heap(16 * 1024);
     size_t i;
@@ -290,7 +284,6 @@ static int bench_mixed_align_storm(void) {
 
 /* Many short-lived arenas: create / fill / destroy churn. */
 static int bench_arena_churn(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     size_t i, j;
     double t0, t1;
     MemSample rss0 = sample_rss();
@@ -326,7 +319,6 @@ static int bench_arena_churn(void) {
 
 /* Stack scratch: fill past stack slab into heap extents / overflow. */
 static int bench_stack_spill(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     cc_arena_stack(s, 2048);
     size_t i;
     size_t live = 0;
@@ -402,7 +394,6 @@ static int bench_concurrent_nursery_arenas(void) {
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     MemSample rss_start = sample_rss();
     {
         size_t start_rss = rss_start.ok ? rss_start.rss_bytes : 0;

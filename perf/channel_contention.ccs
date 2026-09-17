@@ -75,7 +75,6 @@ static int work_share(int total, int idx, int workers) {
 }
 
 static void trace_worker_state_ensure(int roles) {
-    @errhandler(CCError e) cc_error_exit(e);
     if (roles <= g_trace_role_capacity) return;
     g_role_last_worker = (int*)realloc(g_role_last_worker, sizeof(int) * roles);
     g_role_switches = (int*)realloc(g_role_switches, sizeof(int) * roles);
@@ -153,7 +152,6 @@ static inline void trace_worker_sample(int role, int iter) {
 }
 
 static void trace_worker_summary(const char* phase, int trial, int producers, int consumers) {
-    @errhandler(CCError e) cc_error_exit(e);
     if (!trace_contention_workers_enabled()) return;
     int roles = producers + consumers;
     int max_workers = (int)cc_sched_get_num_workers();
@@ -181,7 +179,6 @@ static void trace_worker_summary(const char* phase, int trial, int producers, in
 }
 
 static void trace_trial_marker(const char* phase, int trial, const char* event, double elapsed_ms) {
-    @errhandler(CCError e) cc_error_exit(e);
     if (!trace_contention_trials_enabled()) return;
     if (elapsed_ms >= 0.0) {
         eprintln(@string(`CC_TRACE_TRIAL phase=${phase} trial=${trial} event=${event} elapsed_ms=${elapsed_ms}`, @scratch));
@@ -258,7 +255,6 @@ static double run_shared_case(const char* phase, int trial, int producers, int c
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     setvbuf(stdout, NULL, _IONBF, 0);
     trace_contention_workers_init();
     int messages = bench_messages();

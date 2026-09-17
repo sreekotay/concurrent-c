@@ -43,7 +43,6 @@ static uint32_t lcg(uint32_t *s) {
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     size_t n = env_zu("MIX_LIFE_N", 200000);
     /* Equal-budget default: total root bytes split across scratch+keep.
      * Harness sets MIX_LIFE_TOTAL_ROOT; each half is one lifetime annotation. */

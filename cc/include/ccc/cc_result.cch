@@ -24,6 +24,18 @@
 
 #include <ccc/cc_compat.cch>
 
+/* The `_Generic` a `!>` reads its error through names every error type
+ * that reaches the handler it chose. An error type none of the arms name
+ * lands on this call: gcc and clang refuse to emit it, naming the site;
+ * a host without the attribute (tcc) leaves it undefined, and the link
+ * names it instead. */
+#if defined(__GNUC__) && !defined(__TINYC__)
+void* cc__result_error_type_has_no_errhandler_in_scope(void)
+    __attribute__((error("no '@errhandler' in scope for this Result's error type")));
+#else
+void* cc__result_error_type_has_no_errhandler_in_scope(void);
+#endif
+
 /* Common error type - a simple tagged enum with message. */
 typedef enum {
     CC_ERR_NONE = 0,
@@ -545,10 +557,11 @@ const char* cc_error_site(void);
 #define CCResPtr_ok(T, E, v) cc_ok_CCResult_##T##ptr_##E(v)
 #define CCResPtr_err(T, E, e) cc_err_CCResult_##T##ptr_##E(e)
 
-/* Errhandler as-face `_Generic` always names CCIoError (Io → CCError
- * `.base`). Every Result TU must see that type — not only TUs that
- * include io/channel. Include-guard cycle: this file is already open.
- * Do not include cc_print_error here: it needs a complete CCIoError. */
+/* The `@parallel` join stores a `CCIoError` an arm raises through its
+ * `base`, so the handlers it emits name that type. Every Result TU must see
+ * it — not only TUs that include io/channel. Include-guard cycle: this
+ * file is already open. Do not include cc_print_error here: it needs a
+ * complete CCIoError. */
 #include <ccc/cc_io_error.cch>
 
 #endif /* CC_RESULT_H */

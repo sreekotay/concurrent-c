@@ -5,10 +5,6 @@
 #include <stdio.h>
 
 int main(void) {
-    @errhandler(CCError e) {
-        fprintf(stderr, "fatal: %s\n", e.message);
-        return 1;
-    }
     @errhandler(CCPyError e) {
         fprintf(stderr, "py: %s\n", e.base.message ? e.base.message : "?");
         return 1;

@@ -77,7 +77,6 @@ static double now_sec(void) {
 }
 
 int fail(const char *msg) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     eprintln(@string(`FAIL: ${msg}`, @scratch));
     return 1;
 }
@@ -130,7 +129,6 @@ static void kill_slot(CCArena a, Slot *s) {
 
 /* Deterministic chaos: alloc / release / tip-grow / bury / verify interleaved. */
 static int bench_mixed_lifetime_chaos(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     CCArena a = cc_arena_heap(ROOT_CHAOS);
     Slot *slots;
     uint32_t rng = 0xC0FFEEu;
@@ -349,7 +347,6 @@ static int bench_mixed_lifetime_chaos(void) {
 
 /* Alloc many → scramble-release half → grow survivors → reset; track RSS. */
 static int bench_release_scramble(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     CCArena a = cc_arena_heap(ROOT_CHAOS);
     unsigned char **ptrs;
     uint32_t *tags;
@@ -627,7 +624,6 @@ static int bench_shared_concurrent_mixed(void) {
 
 /* Fat-root tip stays in place while unrelated short-lived allocs churn via release. */
 static int bench_tip_vs_churn_release(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     CCArena a = cc_arena_heap(ROOT_FAT);
     unsigned char *tip = NULL;
     size_t tip_sz = 0, moves = 0;
@@ -682,7 +678,6 @@ static int bench_tip_vs_churn_release(void) {
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     StressMemSample rss0 = stress_mem_sample();
     {
         size_t start_rss = rss0.ok ? rss0.current : 0;

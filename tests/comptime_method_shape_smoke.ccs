@@ -8,7 +8,6 @@ static int !>(CCError) risky(Box* self) {
     return cc_ok(self->v * 2);
 }
 int main(void) {
-    @errhandler(CCError e) { printf("H:%s\n", e.message); return 1; }
     Box b = { .v = 21 };
     @comptime for (m in type_of(Box).methods) {
         printf("%s fallible=%d err=[%s]\n", m.name, m.fallible, "E");

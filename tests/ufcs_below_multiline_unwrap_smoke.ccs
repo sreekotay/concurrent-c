@@ -42,7 +42,6 @@ static int !>(CCError) might_fail(int v) {
 /* MULTI-LINE handler inside an @async body: lowered to a generated
  * handler whose `{` is followed by '\n' in the late reparse input. */
 @async int work(void) {
-    @errhandler(CCError e) { (void)e; return 99; }
     int v = might_fail(5) !> {
         return 98;
     };
@@ -50,7 +49,6 @@ static int !>(CCError) might_fail(int v) {
 }
 
 static int use_gadget(Gadget* g) {
-    @errhandler(CCError e) { (void)e; return -1; }
     int v = might_fail(1) !> {
         return -1;
     };

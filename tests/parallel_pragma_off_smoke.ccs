@@ -23,6 +23,7 @@ static int pred_true(void) {
 
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
+    @errhandler(CCIoError e) { cc_error_log(e.base); return 1; }
 
     /* Join arms in order: b reads the a the first arm just wrote. */
     int a = 0;

@@ -30,7 +30,6 @@ static double time_now_ms(void) {
 
 /* Benchmark trivial async task creation + execution */
 static void bench_trivial_async(void) {
-    @errhandler(CCError e) cc_error_exit(e);
     double start = time_now_ms();
     
     long sum = 0;
@@ -46,7 +45,6 @@ static void bench_trivial_async(void) {
 
 /* Benchmark async with computation */
 static void bench_compute_async(void) {
-    @errhandler(CCError e) cc_error_exit(e);
     double start = time_now_ms();
     
     long sum = 0;
@@ -62,7 +60,6 @@ static void bench_compute_async(void) {
 
 /* Benchmark cc_block_all overhead */
 static void bench_block_all(void) {
-    @errhandler(CCError e) cc_error_exit(e);
     int batch_size = 10;
     int batches = ITERATIONS / batch_size;
     
@@ -115,7 +112,6 @@ static void bench_spawn_overhead(void) {
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     println("perf_async_overhead: measuring async task performance");
     
     bench_trivial_async();

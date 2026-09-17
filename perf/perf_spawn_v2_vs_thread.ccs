@@ -92,7 +92,6 @@ static double run_v2_once(int tasks, uintptr_t* checksum_out) {
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     int tasks = env_int_or("CC_SUBSTRATE_TASKS", DEFAULT_TASKS);
     int runs = env_int_or("CC_SUBSTRATE_RUNS", DEFAULT_RUNS);
     if (tasks <= 0 || runs <= 0) return 2;

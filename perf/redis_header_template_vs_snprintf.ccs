@@ -115,7 +115,6 @@ static double run_snprintf_loop(const size_t* values, int value_count, int itera
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     int iterations = bench_iterations();
     int trials = bench_trials();
     int value_count = bench_value_count();

@@ -7,7 +7,6 @@
  * module-private; `per_tu_val` is exported, defined once in the
  * module object every includer links. */
 static int !>(CCError) per_tu_step(int x) {
-    @errhandler(CCError e) { return cc_err(e); }
     return cc_ok(x);
 }
 

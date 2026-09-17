@@ -47,6 +47,7 @@ static int square(int x) { return x * x; }
 
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
+    @errhandler(CCIoError e) { cc_error_log(e.base); return 1; }
 
     /* 1. Assignment join. First arm on the caller; the rest may spawn.
      *    `.wait()` joins before the statement ends; both writes visible. */

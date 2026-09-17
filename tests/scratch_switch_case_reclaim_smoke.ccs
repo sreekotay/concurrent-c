@@ -13,7 +13,6 @@
 };
 
 @noblock static bool !>(CCError) exec(Op op, int64_t n) {
-    @errhandler(CCError e) { return cc_err(e); }
     @switch (op) {
     case .ping:
         return cc_ok(true);

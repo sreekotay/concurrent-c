@@ -14,12 +14,6 @@ static int run_all_flag(const char* flag) {
     CCArena arena = @create(megabytes(1)) @destroy;
 
     /* Exact CCIoError keeps os_code; CCError covers other Results. */
-    @errhandler(CCError e) {
-        CCString em = @string(
-            `  failed: ${cc_error_str(e)} (kind=${(int)e.kind})`, arena);
-        (void)em.eprintln();
-        return 1;
-    }
     @errhandler(CCIoError e) {
         CCString em = @string(
             `  failed: ${cc_io_error_str(e)} (kind=${(int)e.base.kind} os=${(int)e.os_code})`, arena);
@@ -42,12 +36,6 @@ static int run_all_flag(const char* flag) {
 static int examples_check() {
     CCArena arena = @create(megabytes(1)) @destroy;
 
-    @errhandler(CCError e) {
-        CCString em = @string(
-            `  failed: ${cc_error_str(e)} (kind=${(int)e.kind})`, arena);
-        (void)em.eprintln();
-        return 1;
-    }
     @errhandler(CCIoError e) {
         CCString em = @string(
             `  failed: ${cc_io_error_str(e)} (kind=${(int)e.base.kind} os=${(int)e.os_code})`, arena);

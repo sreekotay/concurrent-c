@@ -258,7 +258,6 @@ static double calib_batch_spawn_join(void) {
 }
 
 static void calib_report(const char* name, double (*fn)(void)) {
-    @errhandler(CCError e) cc_error_exit(e);
     double xs[g_samples];
     for (int i = 0; i < WARMUP; i++)
         (void)fn();
@@ -314,7 +313,6 @@ static double calib_serial_from_fiber(void) {
 }
 
 static double time_once(sum_fn fn, uint32_t expect) {
-    @errhandler(CCError e) cc_error_exit(e);
     double t0 = now_ms();
     uint32_t r = fn(0, 0);
     double t1 = now_ms();
@@ -326,7 +324,6 @@ static double time_once(sum_fn fn, uint32_t expect) {
 }
 
 static double time_once_fiber(sum_fn fn, uint32_t expect) {
-    @errhandler(CCError e) cc_error_exit(e);
     double t0 = now_ms();
     uint32_t r = run_on_fiber(fn);
     double t1 = now_ms();
@@ -338,7 +335,6 @@ static double time_once_fiber(sum_fn fn, uint32_t expect) {
 }
 
 static void bench(const char* name, sum_fn fn, uint32_t expect) {
-    @errhandler(CCError e) cc_error_exit(e);
     double samples[g_samples];
     double sum = 0.0;
     unsigned long long spawns = 0;
@@ -369,7 +365,6 @@ static void bench(const char* name, sum_fn fn, uint32_t expect) {
 }
 
 static void bench_fiber(const char* name, sum_fn fn, uint32_t expect) {
-    @errhandler(CCError e) cc_error_exit(e);
     double samples[g_samples];
     double sum = 0.0;
     unsigned long long spawns = 0;
@@ -426,7 +421,6 @@ static uint32_t env_u32(const char* key, uint32_t fallback) {
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     static const uint32_t grains[] = {0, 1, 2, 3, 4, 6, 8};
     int ngrain = (int)(sizeof(grains) / sizeof(grains[0]));
 

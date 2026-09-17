@@ -30,7 +30,6 @@ atomic_int g_heartbeats = 0;
 
 /* A "Heartbeat" fiber that should keep ticking if the scheduler is fair */
 void heartbeat_fiber() {
-    @errhandler(CCError e) { cc_error_log(e); return; }
     setvbuf(stdout, NULL, _IONBF, 0);
     println(@string(`[Heartbeat] Started`, @scratch));
     while (!cc_cancelled()) {
@@ -43,7 +42,6 @@ void heartbeat_fiber() {
 
 /* A "CPU Hog" fiber that performs intensive math in a tight loop */
 void hog_fiber(int id) {
-    @errhandler(CCError e) { cc_error_log(e); return; }
     println(@string(`[Hog ${id}] Started CPU-intensive loop...`, @scratch));
     
     volatile double x = 1.1;

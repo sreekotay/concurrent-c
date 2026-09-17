@@ -1,0 +1,49 @@
+/*
+ * A handler is reached from wherever its node ends up. A closure entry, a
+ * `@parallel` thunk and an `@async` poll body are declarations of their own
+ * and carry the very handler the function they stand in declared, so the
+ * one site that reaches it can be lowered after that function. None of
+ * these handlers is dead, and the unraised rule must not say they are.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+
+static int !>(CCIoError) io_step(int v) { return cc_ok(v); }
+static int !>(CCError) step(int v) { return cc_ok(v); }
+
+/* the only site is inside a closure the nursery runs */
+static int in_a_closure(void) {
+    @errhandler(CCIoError e) cc_error_exit(e.base);
+    {
+        CCNursery n = cc_nursery_create() !>(e) { (void)e; return 1; };
+        n.spawn(() => {
+            int v = io_step(7) !>;
+            (void)v;
+        }) !>(e) { (void)e; };
+        n.destroy();
+    }
+    return 7;
+}
+
+/* the only site is inside a `@parallel` arm, which becomes a thunk */
+static int in_an_arm(void) {
+    @errhandler(CCError e) { (void)e; return -1; }
+    int a = 0;
+    int b = 0;
+    @parallel {
+        @serial { a = step(2) !>; }
+        @serial { b = step(3) !>; }
+    } !>.wait()!>;
+    return a + b;
+}
+
+int main(void) {
+    int c = in_a_closure();
+    int p = in_an_arm();
+    if (c != 7 || p != 5) {
+        eprintln(@string(`FAIL c=${c} p=${p}`, @scratch));
+        return 1;
+    }
+    println("errhandler_reach_across_decls_smoke: OK");
+    return 0;
+}

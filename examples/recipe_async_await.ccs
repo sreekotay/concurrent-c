@@ -20,7 +20,7 @@
 
 /* Suspends twice on the channel, then returns the echoed value. */
 @async int !>(CCError) echo_through_channel(CCChanTx tx, CCChanRx rx, int value) {
-    @errhandler(CCError e) { return cc_err(e); }
+    @errhandler(CCIoError e) { return cc_err(e.base); }
     @await tx.send(value) !>;
     int received = 0;
     @await rx.recv(&received) !>;

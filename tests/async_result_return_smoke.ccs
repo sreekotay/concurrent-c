@@ -4,7 +4,7 @@
 #include <stdio.h>
 
 @async int !>(CCError) echo(CCChanTx tx, CCChanRx rx, int v) {
-    @errhandler(CCError e) { return cc_err(e); }
+    @errhandler(CCIoError e) { return cc_err(e.base); }
     @await tx.send(v) !>;
     int got = 0;
     @await rx.recv(&got) !>;

@@ -478,7 +478,6 @@ static void expire_gone(void* env, CCTemporalNode* node) {
 
 static bool !>(CCError) shard_init(Shard* s, int idx, int sweep, size_t wave,
                                    CCExclusive excl) {
-    @errhandler(CCError e) { return cc_err(e); }
     *s = (Shard){0};
     s->idx = idx;
     s->sweep_on = sweep;
@@ -629,7 +628,6 @@ static int64_t shard_next_due(Shard* s) {
 }
 
 static void note_hold(Shard* s, const char* verb, double us, size_t n) {
-    @errhandler(CCError e) { (void)e; }
     s->waves++;
     s->wave_sum_us += us;
     if (us > s->wave_max_us) s->wave_max_us = us;
@@ -978,7 +976,6 @@ typedef struct Reporter {
 } Reporter;
 
 static void reporter(Reporter* rp) {
-    @errhandler(CCError e) { (void)e; return; }
     println("#      t_s      keys logical_KiB commit_KiB rss_KiB drains dropped reinsert  waves rehash      ops");
     for (;;) {
         size_t keys = 0, committed = 0, drains = 0, dropped = 0, reins = 0, waves = 0, ops = 0;

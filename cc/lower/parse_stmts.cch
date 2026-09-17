@@ -881,6 +881,7 @@ static CcStmt* parse_errhandler(P* p) {
     eh.err_type = NULL;
     eh.binder = cc_slice_empty();
     eh.body = NULL;
+    eh.synthetic = false;
     adv(p);
     if (!at_p(p, CC_P_LPAREN)) {
         {

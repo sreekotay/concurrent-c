@@ -13,7 +13,6 @@
 #define PORT "127.0.0.1:18765"
 
 static void client_task(void) {
-    @errhandler(CCError e) cc_error_exit(e);
     CCSocket sock = cc_tcp_connect(PORT, sizeof(PORT) - 1) !>(e) {
         fprintf(stderr, "tcp_listen_accept_connect_smoke: connect err=%d\n", (int)e);
         return;

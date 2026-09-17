@@ -83,7 +83,7 @@ static int stats_eq(ScanStats a, ScanStats b) {
 
 /* --- slurp: read_all then scan in memory --- */
 static ScanStats scan_slurp(const char* path) {
-    @errhandler(CCError e) cc_error_exit(e);
+    @errhandler(CCIoError e) cc_error_exit(e.base);
     ScanStats s = {0};
     CCArena a = cc_arena_heap(megabytes(4));
     @defer cc_arena_free(&a);
@@ -100,7 +100,7 @@ static ScanStats scan_slurp(const char* path) {
 
 /* --- sync pull: read_line, tally, reset scratch (no full-file retain) --- */
 static ScanStats scan_sync(const char* path) {
-    @errhandler(CCError e) cc_error_exit(e);
+    @errhandler(CCIoError e) cc_error_exit(e.base);
     ScanStats s = {0};
     CCArena scratch = cc_arena_heap(megabytes(1));
     @defer cc_arena_free(&scratch);
@@ -129,6 +129,7 @@ typedef struct LineMsg {
 /* --- channel: producer alloc-and-send LineMsg; single consumer owns totals --- */
 static ScanStats scan_chan(const char* path) {
     @errhandler(CCError e) cc_error_exit(e);
+    @errhandler(CCIoError e) cc_error_exit(e.base);
     CCChanTx tx = {0};
     CCChanRx rx = {0};
     size_t cap = g_chan_cap ? g_chan_cap : 1;
@@ -208,7 +209,6 @@ static double time_mode(ScanStats (*fn)(const char*), const char* path, int pass
 
 static void report_mode(const char* name, double* samples, int n, double slurp_med,
                         ScanStats st, int64_t file_bytes, int passes) {
-    @errhandler(CCError e) cc_error_exit(e);
     sort_doubles(samples, n);
     double med = samples[n / 2];
     double mb = (file_bytes * (double)passes) / (1024.0 * 1024.0);
@@ -218,7 +218,7 @@ static void report_mode(const char* name, double* samples, int n, double slurp_m
 }
 
 int main(int argc, char** argv) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    @errhandler(CCIoError e) { cc_error_log(e.base); return 1; }
     const char* path = k_path_default;
     int samples = 7;
     int passes = 8;

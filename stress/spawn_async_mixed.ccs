@@ -88,7 +88,6 @@ int test_consumer_outside(void) {
  * Test 2: cc_block_all for compute tasks
  */
 int test_block_all_compute(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     println(@string(`  block_all_compute: 10 rounds x 8 tasks`, @scratch));
     
     int total_sum = 0;
@@ -119,7 +118,6 @@ int test_block_all_compute(void) {
  * Test 3: cc_block_race with compute tasks
  */
 int test_block_race_compute(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     println(@string(`  block_race_compute: 10 races x 4 tasks`, @scratch));
     
     for (int round = 0; round < 10; round++) {
@@ -142,7 +140,6 @@ int test_block_race_compute(void) {
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     println(@string(`spawn_async_mixed: starting`, @scratch));
     
     int err = 0;

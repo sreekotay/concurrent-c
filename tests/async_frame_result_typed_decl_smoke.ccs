@@ -19,7 +19,6 @@ static bool !>(CCIoError) maybe_io(int x) {
 }
 
 @async int worker(int limit) {
-    @errhandler(CCError e) cc_error_exit(e);
     int i = 0;
     while (i < limit) {
         /* Block comment before the result-typed decl: this keeps the

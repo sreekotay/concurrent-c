@@ -1,0 +1,25 @@
+/* A `!>` whose callee is a macro declares no `E`: it dispatches to the
+ * innermost `@errhandler(CCError)`, not to whichever handler was declared
+ * last. The io handler here is declared after the CCError one and must
+ * not take the macro's Result. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int !>(CCError) parse_two(int fail) {
+    if (fail) return cc_err(CC_ERR_INVALID_ARG, "no two");
+    return cc_ok(2);
+}
+#define parse_two_m(f) parse_two(f)
+
+static int !>(CCIoError) io_two(void) { return cc_ok(2); }
+
+int main(void) {
+    @errhandler(CCError e) { printf("ccerror: %s\n", e.message); return 0; }
+    @errhandler(CCIoError e) { printf("io: %s\n", cc_io_error_str(e)); return 0; }
+    int a = parse_two_m(0) !>;
+    int b = io_two() !>;
+    printf("a=%d b=%d\n", a, b);
+    int c = parse_two_m(1) !>;
+    printf("unreachable %d\n", c);
+    return 0;
+}

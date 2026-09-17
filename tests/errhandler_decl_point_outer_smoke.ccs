@@ -6,6 +6,7 @@
 #include <ccc/std/prelude.cch>
 
 static int g_hit;
+static int g_inner;
 
 static int !> (CCError) always_err_cc(void) {
     return cc_err(CC_ERR_NOT_FOUND, "cc");
@@ -17,12 +18,15 @@ int main(void) {
         g_hit = 1;
     }
     {
+        /* above the inner handler: this site takes the outer one */
         always_err_cc() !>;
         @errhandler(CCError e) {
             (void)e;
-            g_hit = 2;
+            g_inner = 2;
         }
+        /* below it: this one takes the inner */
+        always_err_cc() !>;
     }
-    printf("g_hit=%d\n", g_hit);
-    return (g_hit == 1) ? 0 : 1;
+    printf("g_hit=%d g_inner=%d\n", g_hit, g_inner);
+    return (g_hit == 1 && g_inner == 2) ? 0 : 1;
 }

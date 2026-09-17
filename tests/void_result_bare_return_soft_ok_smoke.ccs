@@ -22,7 +22,6 @@ static void Box_destroy(Box* b) {
 };
 
 static void !>(CCError) work(int* hits, int fail) {
-    @errhandler(CCError e) { return cc_err(e); }
     Box b = { .n = 1, .hits = hits } @destroy;
     if (fail) return cc_err(CC_ERR_INVALID_ARG, "boom");
     return;

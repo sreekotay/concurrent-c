@@ -188,7 +188,6 @@ static void spawn_compress_all(CompressJob* job, int n) {
     for (i = 0; i < n; i++) {
         ts->enter(i) !>;
         nur.spawn(() => [job, i, ts] {
-            @errhandler(CCError e) cc_error_exit(e);
             compress_and_write_i(job, i);
             ts->leave() !>;
         }) !>;

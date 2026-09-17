@@ -1,13 +1,15 @@
 /*
- * CCIoError as: CCError: face.message is filled so a CCError-only handler
- * can print without the Io vocabulary (cc_io_error_str).
+ * An error type that is a CCError through its `as:` face: the face's
+ * message is filled, so a CCError-only handler prints it without the
+ * type's own vocabulary.
  */
 #include <ccc/std/io.h>
+#include "as_face_error_helper.cch"
 #include <stdio.h>
 #include <string.h>
 
-static int !> (CCIoError) always_err_not_found(void) {
-    return cc_err(cc_io_from_errno(ENOENT));
+static int !> (AppError) always_err_not_found(void) {
+    return cc_err(app_error(CC_ERR_NOT_FOUND, 2));
 }
 
 int main(void) {

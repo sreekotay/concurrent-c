@@ -400,7 +400,12 @@ typedef struct CcAsm { CcSpan tokens; } CcAsm;
 /* Concurrent-C */
 typedef struct CcDefer { CCSlice name; char on; CcStmt* body; } CcDefer;  /* on: 0 always, 'o' ok, 'e' err */
 typedef struct CcCancelDefer { CCSlice name; } CcCancelDefer;
-typedef struct CcErrhandler { CcType* err_type; CCSlice binder; CcStmt* body; } CcErrhandler;
+typedef struct CcErrhandler {   /* `synthetic`: a handler a lowering step wrote, not the program.
+                                 * It is emitted defensively -- one per error type a construct can
+                                 * carry -- so an unreached one is dropped where a written one is
+                                 * refused. */
+    CcType* err_type; CCSlice binder; CcStmt* body; bool synthetic;
+} CcErrhandler;
 typedef struct CcErrFwd {      /* @err(e); -- `@errhandler(e);` is the same forward */
     CcExpr* err;
     bool delegate;              /* written `@errhandler(e);`: the delegation spelling, which

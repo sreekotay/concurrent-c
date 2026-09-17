@@ -5,7 +5,6 @@
 #include <stdio.h>
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
 
     double ratio = 1.5;
     CCString s = @string(`r=${ratio}`, @scratch);

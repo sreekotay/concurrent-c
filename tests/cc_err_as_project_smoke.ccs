@@ -1,16 +1,18 @@
-/* cc_err(e) projects unique as: path when Result face is CCError and
- * e is CCIoError — same rule as !>; / @errhandler binder projection.
- * Bang binder stays CCIoError (os_code visible); projection is at the sink. */
+/* cc_err(e) projects the unique as: path when the Result's error is
+ * CCError and e is a type with a CCError face — same rule as !>; and the
+ * @errhandler binder projection. The bang binder stays the face's own type
+ * (code visible); projection is at the sink. */
 #include <ccc/std/io.h>
+#include "as_face_error_helper.cch"
 #include <stdio.h>
 
 static int g_inline_kind;
 static int g_hoist_kind;
 static int g_os;
 
-static int !>(CCIoError) always_err_io(void) {
-    CCIoError e = cc_io_error(CC_IO_OTHER);
-    e.os_code = 42;
+static int !>(AppError) always_err_io(void) {
+    AppError e = app_error(CC_ERR_IO, 0);
+    e.code = 42;
     return cc_err(e);
 }
 
@@ -24,7 +26,7 @@ static int !>(CCError) via_hoist(void) {
 /* Inline: !>(e) return cc_err(e) — the gap this smoke pins. */
 static int !>(CCError) via_inline(void) {
     always_err_io() !>(e) {
-        g_os = e.os_code;
+        g_os = e.code;
         return cc_err(e);
     };
     return cc_ok(0);
@@ -32,11 +34,11 @@ static int !>(CCError) via_inline(void) {
 
 typedef struct { int _pad; } CcErrAsBox;
 
-static int !>(CCIoError) CcErrAsBox_as_project_io(CcErrAsBox *b) {
-    CCIoError e;
+static int !>(AppError) CcErrAsBox_as_project_io(CcErrAsBox *b) {
+    AppError e;
     (void)b;
-    e = cc_io_error(CC_IO_OTHER);
-    e.os_code = 42;
+    e = app_error(CC_ERR_IO, 0);
+    e.code = 42;
     return cc_err(e);
 }
 

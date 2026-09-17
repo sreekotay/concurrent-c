@@ -55,7 +55,6 @@ static uint32_t sum_seq(uint32_t d, uint32_t i) {
 }
 
 static uint32_t sum_par(uint32_t d, uint32_t i) {
-    @errhandler(CCError e) cc_error_exit(e);
     if (d >= g_depth)
         return i;
     uint32_t left = 0;
@@ -68,7 +67,6 @@ static uint32_t sum_par(uint32_t d, uint32_t i) {
 }
 
 static uint32_t sum_cut(uint32_t d, uint32_t i) {
-    @errhandler(CCError e) cc_error_exit(e);
     if (d >= g_depth)
         return i;
     uint32_t left = 0;
@@ -105,7 +103,6 @@ static uint32_t run_on_fiber(sum_fn fn) {
 }
 
 static double time_once(sum_fn fn, uint32_t expect, int on_fiber) {
-    @errhandler(CCError e) cc_error_exit(e);
     double t0 = now_ms();
     uint32_t r = on_fiber ? run_on_fiber(fn) : fn(0, 0);
     double t1 = now_ms();
@@ -138,7 +135,6 @@ static uint32_t env_u32(const char* key, uint32_t fallback) {
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     g_depth = env_u32("CC_PAR_DEPTH", 20);
     g_cut = env_u32("CC_PAR_CUT", 8);
     g_samples = (int)env_u32("CC_PAR_SAMPLES", 5);

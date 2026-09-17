@@ -6,10 +6,6 @@
 /* Bound @scratch string must survive a later call-local @string temp
  * (println restores to the pre-temp watermark, not a full reset). */
 int main(void) {
-    @errhandler(CCError e) {
-        cc_error_log(e);
-        return 1;
-    }
     const char* a = "alpha";
     const char* b = "beta";
     CCString kept = @string(`kept:${a}`, @scratch);

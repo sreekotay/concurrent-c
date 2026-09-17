@@ -20,7 +20,6 @@ static LaterBox !>(CCError) make_later(void) {
 }
 
 int main(void) {
-    @errhandler(CCError e) { (void)e; return 1; }
     int value = use_early() !> { return 1; };
     LaterBox box = make_later() !> { return 1; };
     printf("result_delayed_spec_generic_smoke: %d %d\n", value, box.value);

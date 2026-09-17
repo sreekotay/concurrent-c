@@ -8,7 +8,6 @@
  * QuoteParentT from that face; the module unit is the face with this
  * chapter spliced in, and the exported entry is declared in the `.h`. */
 int !>(CCError) quote_parent_leaf_n(const QuoteParentT *p) {
-    @errhandler(CCError e) { return cc_err(e); }
     if (!p) return cc_err(CC_ERR_INVALID_ARG, "null");
     return cc_ok(p->n);
 }

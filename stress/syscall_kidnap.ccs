@@ -32,7 +32,6 @@ atomic_int g_kidnappers_done = 0;
  * cancel still needs to work: after the parent nursery is cancelled, the
  * heartbeat exits its loop on the next wake. */
 void heartbeat_fiber() {
-    @errhandler(CCError e) { cc_error_log(e); return; }
     setvbuf(stdout, NULL, _IONBF, 0);
     struct timespec t0;
     clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -52,7 +51,6 @@ void heartbeat_fiber() {
 
 /* A "Kidnapper" fiber that uses a RAW blocking syscall (sleep) */
 void kidnapper_fiber(int id) {
-    @errhandler(CCError e) { cc_error_log(e); return; }
     setvbuf(stdout, NULL, _IONBF, 0);
     atomic_fetch_add(&g_kidnappers_active, 1);
     println(@string(`[Kidnapper ${id}] Kidnapping an OS thread for 2 seconds...`, @scratch));

@@ -23,7 +23,6 @@ const char* g_urls[] = {
 #define NUM_URLS 3
 
 static void fetch_one(int idx, int* status_p, size_t* body_len_p) {
-    @errhandler(CCError e) cc_error_exit(e);
     char buf[32 * 1024];
     {
         CCArena scratch = cc_arena_create_buffer(buf, sizeof(buf), CC_ARENA_GROWABLE) @destroy;
@@ -41,7 +40,6 @@ static void fetch_one(int idx, int* status_p, size_t* body_len_p) {
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
 
     println(@string(`Fetching ${NUM_URLS} URLs in parallel...`, @scratch));
     println("");

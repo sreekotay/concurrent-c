@@ -1,15 +1,16 @@
 /*
  * Expression-position `x = call() !>` must re-resolve as: projection per
- * callee. An earlier CCIoError unwrap must not leave `.base` stuck on a later
- * CCError Result (that is `struct CCError` — no `.base` member).
+ * callee. An earlier unwrap of a faced error must not leave `.base` stuck on
+ * a later CCError Result (that is `struct CCError` — no `.base` member).
  */
 #include <stdio.h>
 #include <ccc/std/io.h>
+#include "as_face_error_helper.cch"
 #include <ccc/cc_slice.h>
 
 static int g_hit;
 
-static bool !>(CCIoError) io_ok(void) {
+static bool !>(AppError) io_ok(void) {
     return cc_ok(true);
 }
 

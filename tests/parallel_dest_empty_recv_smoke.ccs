@@ -15,7 +15,7 @@ static int drain_sum(CCChanRx rx) {
 }
 
 static void send_int(int[~4 >] tx, int v) {
-    @errhandler(CCError e) cc_error_exit(e);
+    @errhandler(CCIoError e) cc_error_exit(e.base);
     tx.send(v) !>;
 }
 
@@ -92,7 +92,6 @@ int main(void) {
         } !>;
         prod.close(tx) !>;
         @parallel(prod) {
-            @errhandler(CCError e) cc_error_exit(e);
             send_int(tx, 2);
             send_int(tx, 3);
         }

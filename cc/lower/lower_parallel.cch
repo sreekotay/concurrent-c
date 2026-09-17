@@ -70,8 +70,8 @@ typedef struct PStep {
     CcType* fn_ret;             /* the enclosing function's return type: a walk records
                                  * a `return` into a cell of it */
     CcStmtList eh_top;          /* the `@errhandler`s the enclosing function carries, in order:
-                                 * a bare `!>` in an arm raises into one of them after the
-                                 * join, and the exit cell is typed by what they take */
+                                 * a bare `!>` in an arm raises after the join into the
+                                 * `CCError` one among them, which the exit cell is typed by */
     bool eh_any;
     int dest_depth;             /* how many dest bodies the walk is inside: the arms of a bound
                                  * construct and the body of an attach, lowered before they move */
@@ -1053,7 +1053,7 @@ static CCSlice pl_for_ex_type(CcLowerer* L, uint32_t id) {
     return lw_keep(L, &s);
 }
 
-static CcStmt* pl_raise_handler(CcLowerer* L, CCSlice ety, CCSlice cell, CcStmt* leave, CcSpan sp);
+static CcStmtList pl_raise_handlers(CcLowerer* L, CCSlice cell, CcStmt* le_err, CcStmt* le_io, CcSpan sp);
 
 /* The cell an exit is recorded in, and the environment each half carries.
  * `xk`: 0 nothing yet, 1 a `break`, 2 a `return` (`rv`), 3 a raise (`err`,
@@ -1337,12 +1337,16 @@ static CcDecl* pl_for_walk_decl(PStep* st, uint32_t id, PCapList* caps, CcForIn 
         if (err_ty.len) {
             /* a bare `!>` in the body: this half is a function of its own,
              * so the handler the frame carries is not here. The body opens
-             * under a handler that records the error in the exit cell and
-             * ends the walk; the site raises the record after the join.
+             * under handlers that record the error in the exit cell and
+             * end the walk; the site raises the record after the join.
              * Added after the exit rewriting walked the body, so the
              * `return` it ends in is its own. */
-            lw_push(fnbody, pl_raise_handler(L, err_ty, cstr_slice("e->__cc_pf_ex"),
-                                             cc_stmt_return(NULL, sp, L->arena), sp));
+            CcStmtList hs = pl_raise_handlers(L, cstr_slice("e->__cc_pf_ex"),
+                                              cc_stmt_return(NULL, sp, L->arena),
+                                              cc_stmt_return(NULL, sp, L->arena), sp);
+            size_t hk;
+            size_t hn = hs.len();
+            for (hk = 0; hk < hn; hk++) lw_push(fnbody, *hs.get_ptr(hk));
         }
         lw_push(fnbody, fs);
     }
@@ -1966,73 +1970,84 @@ static void pl_splice(CcStmt* dst, CcStmt* src) {
     for (i = 0; i < n; i++) lw_push(dst, *from->get_ptr(i));
 }
 
-/* The error type the exit cell carries: the one the handlers of the
- * function take. The join raises the cell into the innermost handler in scope after
- * the block, so every handler the function carries has to take that one
- * type, or the arm could not say which of them the cell is for. Empty when
- * there is none or they disagree, with the diagnostic emitted. */
+/* The error type the exit cell carries: `CCError`, whatever the arms
+ * themselves raise. The join is a rendezvous, not an operation of its own:
+ * what it reports is that an arm failed. An arm stores what makes its error
+ * a `CCError` -- one it raises as it stands, a `CCIoError` through its
+ * `base` -- and the join raises the record where the block stands, into the
+ * `CCError` handler the function carries. Empty when the function carries
+ * none, with the diagnostic emitted. */
 static CCSlice pl_eh_type(PStep* st, CcSpan sp) {
     CcLowerer* L = st->L;
-    CCSlice canon = cc_slice_empty();
+    CCSlice want = cstr_slice("CCError");
     size_t n = st->eh_top.len();
     size_t i;
     for (i = 0; i < n; i++) {
         CcStmt* t = *st->eh_top.get_ptr(i);
         CcType* et = NULL;
-        CCSlice c;
         @switch (t->k) {
             case .errhandler(x): et = x.err_type; break;
             default: break;
         }
         if (!et) continue;
-        c = L->ix->canon(et);
-        if (!canon.len) canon = c;
-        else if (!slice_eq(canon, c)) {
-            CCString m = @string(`a bare '!>' in this arm raises after the join into the handler of the function it stands in, and that function declares handlers for both '${canon}' and '${c}'; handle the Result in the arm with '!>(e) { ... }'`, L->arena);
-            lw_error(L, sp, m);
-            return cc_slice_empty();
-        }
+        if (slice_eq(L->ix->canon(et), want)) return want;
     }
-    if (!canon.len) {
+    {
         CCString m = cc_string_new();
-        m.push_cstr("an arm that unwraps needs an @errhandler on the function it stands in", L->arena);
+        m.push_cstr("an arm that unwraps raises after the join, into an '@errhandler(CCError e)' on the function it stands in, and this function declares none; declare one above the block, or handle the Result in the arm with '!>(e) { ... }'", L->arena);
         lw_error(L, sp, m);
     }
-    return canon;
+    return cc_slice_empty();
 }
 
-/* `@errhandler(E __cc_pe) { <claim>; <leave> }`: the handler an arm that
+/* `@errhandler(E __cc_pe) { <claim>; <leave> }`: a handler an arm that
  * raises opens with. It is not the handler the function carries and holds
  * none of that body: it records the error in the exit cell, first arrival winning, and
  * leaves the arm -- to the join on the caller, out of the thunk elsewhere.
- * The join then raises what the cell holds into the one handler the
+ * The join then raises what the cell holds into the `CCError` handler the
  * function emits. `cell` is the pointer the arm reaches the cell through;
- * `leave` is the statement that ends the arm once the cell is claimed. */
-static CcStmt* pl_raise_handler(CcLowerer* L, CCSlice ety, CCSlice cell, CcStmt* leave, CcSpan sp) {
+ * `proj` is what makes an `E` a `CCError`, appended to the binder; `leave`
+ * is the statement that ends the arm once the cell is claimed. */
+static CcStmt* pl_raise_handler(CcLowerer* L, CCSlice ety, CCSlice proj, CCSlice cell, CcStmt* leave, CcSpan sp) {
     CcStmt* s = cc__stmt_blank(sp, L->arena);
     CcStmt* body = lw_block(L, sp);
     CcErrhandler eh;
-    CCString claim = @string(`{ int __cc_z = 0; while (!cc_atomic_cas(&${cell}->lock, &__cc_z, 1)) __cc_z = 0; if (cc_atomic_load(&${cell}->xk) < 2) { ${cell}->err = __cc_pe; cc_atomic_store(&${cell}->xk, 3); } cc_atomic_store(&${cell}->lock, 0); }`, L->arena);
+    CCString claim = @string(`{ int __cc_z = 0; while (!cc_atomic_cas(&${cell}->lock, &__cc_z, 1)) __cc_z = 0; if (cc_atomic_load(&${cell}->xk) < 2) { ${cell}->err = __cc_pe${proj}; cc_atomic_store(&${cell}->xk, 3); } cc_atomic_store(&${cell}->lock, 0); }`, L->arena);
     lw_push(body, lw_expr_stmt(L, lw_text(L, claim, sp), sp));
     lw_push(body, leave);
     eh.err_type = cc_type_named(ety, sp, L->arena);
     eh.binder = cstr_slice("__cc_pe");
     eh.body = body;
+    eh.synthetic = true;
     { CcStmtK sk = { .errhandler = eh }; s->k = sk; }
     return s;
 }
 
-/* The handler goes first in the arm block, ahead of the statement that
- * unwraps. It is added after the exit rewriting has walked the arm, so the
- * `return` it ends in is its own and not an exit the cell records. */
-static void pl_arm_open_with(CcLowerer* L, CcStmt* body, CcStmt* handler) {
+/* The handlers an arm that raises opens with: one for each error type the
+ * exit cell takes a `CCError` from. A `CCError` is stored as it stands, a
+ * `CCIoError` through its `base`. An arm that unwraps a Result of any other
+ * error type finds no handler for it here and is refused for want of one --
+ * that arm has to say what to do with the error itself. Each handler holds
+ * its own `leave`, so the callers build one per handler. */
+static CcStmtList pl_raise_handlers(CcLowerer* L, CCSlice cell, CcStmt* le_err, CcStmt* le_io, CcSpan sp) {
+    CcStmtList hs = vec_new::[CcStmtRef](L->arena);
+    hs.push(pl_raise_handler(L, cstr_slice("CCError"), cc_slice_empty(), cell, le_err, sp));
+    hs.push(pl_raise_handler(L, cstr_slice("CCIoError"), cstr_slice(".base"), cell, le_io, sp));
+    return hs;
+}
+
+/* The handlers go first in the arm block, ahead of the statement that
+ * unwraps. They are added after the exit rewriting has walked the arm, so
+ * the `return` it ends in is its own and not an exit the cell records. */
+static void pl_arm_open_with(CcLowerer* L, CcStmt* body, CcStmtList handlers) {
     CcStmtList* bs = lw_block_stmts(body);
     CcStmtList joined = vec_new::[CcStmtRef](L->arena);
     size_t n;
     size_t i;
     if (!bs) return;
+    n = handlers.len();
+    for (i = 0; i < n; i++) joined.push(*handlers.get_ptr(i));
     n = bs->len();
-    joined.push(handler);
     for (i = 0; i < n; i++) {
         CcStmt* t = *bs->get_ptr(i);
         joined.push(t);
@@ -2041,9 +2056,10 @@ static void pl_arm_open_with(CcLowerer* L, CcStmt* body, CcStmt* handler) {
 }
 
 /* `@errhandler((<cell>.err));` after the join: the error an arm recorded,
- * raised where the block stands, into the handler the function carries. The
- * delegation spelling is the statement form of `!>`: the handler runs and,
- * unless it leaves, the statement after the block follows. */
+ * raised where the block stands, into the `CCError` handler the function
+ * carries. The delegation spelling is the statement form of `!>`: the
+ * handler runs and, unless it leaves, the statement after the block
+ * follows. */
 static CcStmt* pl_raise_after_join(CcLowerer* L, CCSlice cellv, CcSpan sp) {
     CcStmt* then = lw_block(L, sp);
     CcStmt* fw = cc__stmt_blank(sp, L->arena);
@@ -2085,7 +2101,7 @@ static bool pl_arm_unfold_unwrap(PStep* st, CcParallelArm* arm) {
     if (!pl_arm_raises(arm)) return true;
     if (!st->eh_any) {
         CCString m = cc_string_new();
-        m.push_cstr("an arm that unwraps needs an @errhandler on the function it stands in", L->arena);
+        m.push_cstr("an arm that unwraps raises after the join, and needs an '@errhandler(CCError e)' on the function it stands in", L->arena);
         lw_error(L, arm->span, m);
         return false;
     }
@@ -2488,8 +2504,9 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
             /* a bare `!>` in the thunk records its error in the cell and
              * ends the thunk; the join raises it on the caller */
             if (pl_arm_raises(arm))
-                pl_arm_open_with(L, ab, pl_raise_handler(L, pj_ety, pj_cell,
-                                                         cc_stmt_return(lw_text(L, @string(`NULL`, L->arena), sp), sp, L->arena), sp));
+                pl_arm_open_with(L, ab, pl_raise_handlers(L, pj_cell,
+                                                          cc_stmt_return(lw_text(L, @string(`NULL`, L->arena), sp), sp, L->arena),
+                                                          cc_stmt_return(lw_text(L, @string(`NULL`, L->arena), sp), sp, L->arena), sp));
             st->made.push(th);
             /* a bound handle makes the arms fibers of a dest */
             if (hspell.len) {
@@ -2548,7 +2565,8 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
              * but a `return` from it would leave while the arms behind
              * this one run */
             if (pl_arm_raises(arm))
-                pl_arm_open_with(L, ab, pl_raise_handler(L, pj_ety, pj_ptr, lw_goto(L, pj_leave, sp), sp));
+                pl_arm_open_with(L, ab, pl_raise_handlers(L, pj_ptr, lw_goto(L, pj_leave, sp),
+                                                          lw_goto(L, pj_leave, sp), sp));
             lw_push(body, ab);
         } else {
             CcExpr* e0 = arm->expr;
@@ -2957,7 +2975,7 @@ static void pl_for_lower(PStep* st, CcStmt* s, CcParallelFor pf, CcRange rg) {
          * handler the frame carries: the cell has to carry its error */
         if (!st->eh_any) {
             CCString m = cc_string_new();
-            m.push_cstr("a bare '!>' in a @parallel for body raises after the walk joins, into an @errhandler on the function it stands in, and this function declares none; declare one above the walk or handle the Result in the body with '!>(e) { ... }'", L->arena);
+            m.push_cstr("a bare '!>' in a @parallel for body raises after the walk joins, into an '@errhandler(CCError e)' on the function it stands in, and this function declares none; declare one above the walk or handle the Result in the body with '!>(e) { ... }'", L->arena);
             lw_error(L, sp, m);
             return;
         }
@@ -3750,21 +3768,32 @@ static CcDecl* pl_pw_run_decl(PStep* st, uint32_t id, PCapList* caps, CcForIn lo
     {
         /* every `!>` in the body is this ticket's error: the slot the site
          * reads, the cancel that stops the tickets that have not started,
-         * and the same exit the body's own ending takes.
+         * and the same exit the body's own ending takes. The slot holds a
+         * `CCError`, as the cell of every other form does, so there is one
+         * handler per error type it takes a `CCError` from -- a `CCIoError`
+         * through its `base`, as the leave below stores one.
          * `CcLowerer_results` runs after this step and registers a handler
          * per statement list, so a synthesized one needs nothing further. */
-        CcStmt* hb = lw_block(L, sp);
-        CcStmt* hs = cc__stmt_blank(sp, L->arena);
-        CcErrhandler eh;
-        CCString ht = @string(`__cc_pw_sl->err = __cc_pw_eb; __cc_pw_sl->failed = 1; __cc_pw_sl->i = __cc_pw_i; cc_nursery_cancel_host(__cc_pw_sh->nur)`, L->arena);
-        pl_pw_text(L, hb, ht, sp);
-        lw_push(hb, lw_goto(L, done, sp));
-        memset(&eh, 0, sizeof(eh));
-        eh.err_type = cc_type_named(cstr_slice("CCError"), sp, L->arena);
-        eh.binder = cstr_slice("__cc_pw_eb");
-        eh.body = hb;
-        { CcStmtK sk = { .errhandler = eh }; hs->k = sk; }
-        lw_push(fnbody, hs);
+        size_t hk;
+        for (hk = 0; hk < 2; hk++) {
+            CcStmt* hb = lw_block(L, sp);
+            CcStmt* hs = cc__stmt_blank(sp, L->arena);
+            CcErrhandler eh;
+            CCSlice hty = cstr_slice("CCError");
+            CCSlice proj = cc_slice_empty();
+            CCString ht;
+            if (hk) { hty = cstr_slice("CCIoError"); proj = cstr_slice(".base"); }
+            ht = @string(`__cc_pw_sl->err = __cc_pw_eb${proj}; __cc_pw_sl->failed = 1; __cc_pw_sl->i = __cc_pw_i; cc_nursery_cancel_host(__cc_pw_sh->nur)`, L->arena);
+            pl_pw_text(L, hb, ht, sp);
+            lw_push(hb, lw_goto(L, done, sp));
+            memset(&eh, 0, sizeof(eh));
+            eh.err_type = cc_type_named(hty, sp, L->arena);
+            eh.binder = cstr_slice("__cc_pw_eb");
+            eh.synthetic = true;
+            eh.body = hb;
+            { CcStmtK sk = { .errhandler = eh }; hs->k = sk; }
+            lw_push(fnbody, hs);
+        }
     }
     if (loop.body) { lw_push(fnbody, loop.body); }
     {
@@ -4019,8 +4048,9 @@ static bool pl_pw_cache_in_stage(CcStmt* body, CCSlice nm) {
  * join. D is one body: it becomes one function, `static R drop(T* ref)`,
  * whose body IS D with `s` read through the parameter, and both sites call
  * it. R is `void` when D raises nothing; when D holds a bare `!>` or an
- * `@err`, R is `void !>(E)` for the E the handlers of the frame take, the
- * drop opens with a handler that hands the error back, a `return;` in D is
+ * `@err`, R is `void !>(CCError)` -- as at the join, one D raises as it
+ * stands and a `CCIoError` through its `base`; the drop opens with the
+ * handlers that hand the error back, a `return;` in D is
  * `return cc_ok();`, and both call sites unwrap -- into the handler in
  * scope at the declaration, which is where D forwarded to before. */
 
@@ -4106,18 +4136,31 @@ static bool pl_pw_drop_make(PStep* st, uint32_t id, CCSlice cn, CcVarDecl* cv, C
         CcStmt_walk(body, v);
     }
     if (*raises) {
-        /* the error D raises leaves the drop as its Result */
-        CcStmt* hb = lw_block(L, sp);
-        CcStmt* hs = cc__stmt_blank(sp, L->arena);
-        CcErrhandler eh;
+        /* the error D raises leaves the drop as its Result, a `CCError` as
+         * at the join: one D raises as it stands, a `CCIoError` through its
+         * `base`. A Result of any other error type finds no handler here
+         * and is refused -- D has to say what to do with it. */
         CCSlice de = cstr_slice("__cc_de");
-        lw_push(hb, cc_stmt_return(lw_call1(L, cstr_slice("cc_err"), lw_ident(L, de, sp), sp), sp, L->arena));
-        memset(&eh, 0, sizeof(eh));
-        eh.err_type = cc_type_named(ety, sp, L->arena);
-        eh.binder = de;
-        eh.body = hb;
-        { CcStmtK sk = { .errhandler = eh }; hs->k = sk; }
-        lw_push(fnbody, hs);
+        size_t hk;
+        for (hk = 0; hk < 2; hk++) {
+            CcStmt* hb = lw_block(L, sp);
+            CcStmt* hs = cc__stmt_blank(sp, L->arena);
+            CcErrhandler eh;
+            CcExpr* raised = lw_ident(L, de, sp);
+            CCSlice ht = ety;
+            if (hk) {
+                raised = lw_member(L, raised, "base", sp);
+                ht = cstr_slice("CCIoError");
+            }
+            lw_push(hb, cc_stmt_return(lw_call1(L, cstr_slice("cc_err"), raised, sp), sp, L->arena));
+            memset(&eh, 0, sizeof(eh));
+            eh.err_type = cc_type_named(ht, sp, L->arena);
+            eh.binder = de;
+            eh.synthetic = true;
+            eh.body = hb;
+            { CcStmtK sk = { .errhandler = eh }; hs->k = sk; }
+            lw_push(fnbody, hs);
+        }
     }
     lw_push(fnbody, body);
     if (*raises) lw_push(fnbody, cc_stmt_return(lw_call0(L, cstr_slice("cc_ok"), sp), sp, L->arena));

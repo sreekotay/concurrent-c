@@ -82,7 +82,6 @@ static int64_t !>(CCError) incr(Cell* cell, int64_t delta) {
 }
 
 static void print_cell(const char* label, Cell* c) {
-    @errhandler(CCError e) { cc_error_log(e); return; }
     @switch (c) {
         case .num(nv):
             println(@string(`${label} num=${nv}`, @scratch));
@@ -96,7 +95,6 @@ static void print_cell(const char* label, Cell* c) {
 }
 
 static void print_wrapped(const char* label, WrappedCell* w) {
-    @errhandler(CCError e) { cc_error_log(e); return; }
     /* Field-path subject — same check as @switch (w.cell) on the value. */
     @switch (w->cell) {
         case .num(nv):

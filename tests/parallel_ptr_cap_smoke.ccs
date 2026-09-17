@@ -29,7 +29,6 @@ static int listing(Box* b) {
 }
 
 static CCParallel start_arm(Box* b) {
-    @errhandler(CCError e) { cc_error_log(e); return cc_parallel_empty(); }
     int dummy = 0;
     CCParallel h = @parallel {
         @serial { dummy = 0; }

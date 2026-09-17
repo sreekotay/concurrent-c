@@ -6,7 +6,6 @@
 /* Impl-grade leaf with no owner `.ccs`. Nested from an umbrella extract
  * must fail loud — not splice into the including unit. */
 static int !>(CCError) nested_impl_unowned_step(int x) {
-    @errhandler(CCError e) { return cc_err(e); }
     return cc_ok(x);
 }
 

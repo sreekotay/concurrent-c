@@ -25,10 +25,6 @@ static bool !>(CCError) check_chained_decl_unwrap(CCSlice key, CCArena arena) {
 }
 
 int main(void) {
-    @errhandler(CCError e) {
-        fprintf(stderr, "error: %s\n", e.message);
-        return 1;
-    }
 
     CCArena arena = cc_arena_heap(kilobytes(1)) @destroy;
     if (!cc_arena_is_live(arena)) return 2;

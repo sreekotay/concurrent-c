@@ -512,10 +512,13 @@ has "$dye" 'struct cc_dyn_vec live=1' || fail "cc_dyn_vec: struct should be live
 
 ioe=cc/include/ccc/cc_io_error.cch
 iop="$("$BIN" --preserve "$ioe")" || fail "preserve cc_io_error.cch"
-has "$iop" '@typeview on CCIoError' || fail "cc_io_error: dropped @typeview"
 has "$iop" 'CC_DECL_RESULT_SPEC' || fail "cc_io_error: dropped CC_DECL"
-ioee="$("$BIN" --evaluate "$ioe")" || fail "evaluate cc_io_error.cch"
-has "$ioee" 'data typeview live=1' || fail "cc_io_error: @typeview should be live"
+
+box=cc/include/ccc/cc_box.cch
+boxp="$("$BIN" --preserve "$box")" || fail "preserve cc_box.cch"
+has "$boxp" '@typeview on CCBox_' || fail "cc_box: dropped @typeview"
+boxe="$("$BIN" --evaluate "$box")" || fail "evaluate cc_box.cch"
+has "$boxe" 'data typeview live=1' || fail "cc_box: @typeview should be live"
 
 chan=cc/include/ccc/cc_channel.cch
 cnp="$("$BIN" --preserve "$chan")" || fail "preserve cc_channel.cch"

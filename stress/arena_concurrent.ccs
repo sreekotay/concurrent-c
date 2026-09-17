@@ -143,7 +143,6 @@ int test_reset_during_use(void) {
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     println(@string(`arena_concurrent: starting`, @scratch));
 
     int err = 0;

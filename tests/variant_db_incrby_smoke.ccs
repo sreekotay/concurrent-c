@@ -69,7 +69,6 @@ static void db_set(const char* key, RedisValue v) {
 }
 
 static int64_t !>(CCError) db_incrby(const char* key, int64_t delta) {
-    @errhandler(CCError e) { return cc_err(e); }
     RedisValue* cell = db_lookup(key);
     int64_t value = delta;
     if (cell) {

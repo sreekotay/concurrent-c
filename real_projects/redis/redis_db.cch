@@ -322,7 +322,6 @@ static int64_t db_cmd_clock_now(DbCmdClock* clock) {
 }
 
 static CCSlicePacked !>(CCError) db_clone_key_packed(RedisDb* db, char[:] key) {
-    @errhandler(CCError e) { return cc_err(e); }
     RedisDbShard* sh;
     if (!db) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db key clone without db"));
     sh = db_shard_for_key(db, key);
@@ -1017,7 +1016,6 @@ static int db_preload_key_count(void) {
 }
 
 static bool !>(CCError) db_preload_keys(RedisDb* db, int count) {
-    @errhandler(CCError e) { return cc_err(e); }
     if (!db || count <= 0) return cc_ok(true);
     static const char preload_value[] = "0";
     for (int i = 0; i < count; ++i) {

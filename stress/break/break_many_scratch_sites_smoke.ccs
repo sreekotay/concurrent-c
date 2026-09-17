@@ -4,7 +4,6 @@
 /* Forty call-local @scratch templates in one function: each is reclaimed after
  * its call and the shared 1 KiB scratch never spills. */
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     cc_arena_stack(a, kilobytes(4));
     int v = 100;
     println(@string(`site 0 value ${v + 0}`, @scratch));

@@ -115,7 +115,16 @@ A handler whose statement does not diverge (no `return`, `goto`, `exit`,
 with the index) is emitted inline at the unwrap site instead of hoisted.
 One cell and label per handler; handlers are selected by the Result's error
 type `E`, innermost first; no handler for `E` in scope is an error at the
-`!>` naming `E` and the handlers that are in scope.
+`!>` naming `E` and the handlers that are in scope. A macro callee
+declares no `E`, so its error is read off the functions its body can call
+(a `_Generic` dispatch, an arity pick, a wrapper of a function of its own
+name), followed as far as the macros go: one error type is the call's
+`E`; several (`_Generic` arms answering with different errors) make the
+read dispatch on the type that arrives, a `_Generic` numbering the arm
+and each number reaching the handler its type selects, every one of
+which must be in scope. A macro whose body calls no Result function
+takes the innermost `CCError` handler, and the cell is filled through a
+`_Generic` over the error types that reach that handler.
 
 **`e !> body` and `e !>(err) body`:**
 
@@ -798,6 +807,41 @@ raising arms still run the thunk at the join. Dest-live / `spawn` still use `CCT
 and `cc_parallel_spawn_admit`; a refused or failed spawn there dies rather
 than running inline. Wait-for plants a `CCParJoin` (kind + fiber) and
 fills the environment only on admit.
+
+`rl_pick_handler` records two things about every site: the handler it
+returns is *reached*, and every in-scope handler whose type the site raises
+-- by name, or through an `as:` face -- is *matched*. Both are keyed by the
+span of the `@errhandler` statement, not by the scope that carries it: a
+closure entry, a `@parallel` thunk and an `@async` poll body each take the
+very node the function they stand in declared, so a bit per scope would read
+a copy as dead and the original with it.
+
+The judgment waits until the whole unit is lowered, because the declaration
+that reaches a handler can be lowered after the one that declares it. A
+handler neither reached nor matched is for an error its scope cannot raise,
+and the program that wrote it is refused. One matched but not reached is
+shadowed by a nearer handler: a warning, since a site moving in or out makes
+it live. One a lowering step wrote is emitted defensively -- the `@parallel`
+arm pair is one per error type the cell takes -- so an unreached one is
+dropped, cell and label both, and leaves nothing in the emitted C. The
+handlers `script_entry` opens a synthetic `main` or `@task` body with name
+their binders in the reserved prefix and are exempt: the script did not
+write them.
+
+An arm that exits -- a `return`, or a bare `!>` -- does so through the
+block's exit cell, which the join reads once every arm has finished. The
+error half of that cell is a `CCError`, whatever the arm unwrapped: the join
+is a rendezvous, not an operation of its own, and what it reports is that an
+arm failed. An arm that raises therefore opens with one handler per error
+type that makes a `CCError`: `@errhandler(CCError)` stores what it binds as
+it stands, `@errhandler(CCIoError)` stores the `base` of it. The join raises
+the record where the block stands, into the `CCError` handler the function
+carries, which is the one the site requires -- a function is free to declare
+an `@errhandler(CCIoError)` beside it, for the io Results it unwraps itself.
+A Result of any other error type finds neither arm handler and is refused
+for want of one: that arm says what to do with the error itself. The body of
+`@parallel for`, the ticket body of `@parallel wait for`, and the drop of a
+cached name (`@destroy`) cross the same way.
 
 A gated wait-for (`@parallel (pred)` / `seq (cond)`) tests the predicate
 once. When it is false the arms are spelled with no TLS and no join

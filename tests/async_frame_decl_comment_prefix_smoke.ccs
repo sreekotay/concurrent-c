@@ -20,7 +20,6 @@
     int i = 0;
     int total = 0;
     while (i < limit) {
-        @errhandler(CCError e) { (void)e; return 99; }
 
         /* block comment right before the decl */
         size_t outstanding = 0;

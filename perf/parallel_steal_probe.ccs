@@ -48,7 +48,6 @@ static void spin_ms(double ms) {
 }
 
 static uint32_t storm_tree(uint32_t d, uint32_t i) {
-    @errhandler(CCError e) cc_error_exit(e);
     if (d >= g_storm_depth || g_storm_stop)
         return i;
     uint32_t left = 0;
@@ -70,7 +69,6 @@ static void* storm_thunk(void* arg) {
 }
 
 static void* victim_thunk(void* arg) {
-    @errhandler(CCError e) cc_error_exit(e);
     double* out = (double*)arg;
     int i;
     double t0 = now_ms();
@@ -120,7 +118,6 @@ static uint32_t env_u32(const char* key, uint32_t fallback) {
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     g_storm_depth = env_u32("CC_PROBE_DEPTH", 16);
     g_victims = (int)env_u32("CC_PROBE_VICTIMS", 64);
     g_arm_ms = (double)env_u32("CC_PROBE_ARM_MS", 3);

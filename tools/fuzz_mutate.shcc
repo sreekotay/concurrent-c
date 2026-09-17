@@ -365,7 +365,6 @@ typedef struct {
 
 static FmRun !>(CCError) fm_run_compile(const char* scratch, const char* src_path,
                                         const char* out_stem, CCArena* arena) {
-    @errhandler(CCError e) { return cc_err(e); }
     char outd[1024];
     snprintf(outd, sizeof(outd), "%s/out", scratch);
     CCCommand cmd = cc_command(arena, @slice("timeout"));
@@ -392,7 +391,6 @@ static FmRun !>(CCError) fm_run_compile(const char* scratch, const char* src_pat
 /* Host-cc syntax check of the emitted C.  Nonzero exit = rejected. */
 static int !>(CCError) fm_host_cc_rejects(const char* c_path, CCArena* arena,
                                           CCSlice* err_out) {
-    @errhandler(CCError e) { return cc_err(e); }
     CCCommand cmd = cc_command(arena, @slice("timeout"));
     cmd.arg("20");
     cmd.arg("cc");

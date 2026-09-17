@@ -161,7 +161,6 @@ void free_resource(Resource* r) {
 }
 
 void recv_leaf(int id, CCChanRx rx) {
-    @errhandler(CCError e) cc_error_exit(e);
     Resource* res = alloc_resource(id);
     if (!res) return;
     @defer free_resource(res);
@@ -181,7 +180,6 @@ void recv_leaf(int id, CCChanRx rx) {
 }
 
 void send_leaf(int id, CCChanTx tx) {
-    @errhandler(CCError e) cc_error_exit(e);
     Resource* res = alloc_resource(id);
     if (!res) return;
     @defer free_resource(res);
@@ -201,7 +199,6 @@ void send_leaf(int id, CCChanTx tx) {
 }
 
 void deadline_leaf(int id, CCChanRx rx) {
-    @errhandler(CCError e) cc_error_exit(e);
     Resource* res = alloc_resource(id);
     if (!res) return;
     @defer free_resource(res);

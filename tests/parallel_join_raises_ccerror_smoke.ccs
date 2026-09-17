@@ -1,0 +1,127 @@
+/*
+ * The join raises `CCError`, whatever the arms themselves raise. It is a
+ * rendezvous, not an operation of its own: what it reports is that an arm
+ * failed. An arm that unwraps an io Result with a bare `!>` stores its
+ * error through `base`, so the handler the record reaches after the join is
+ * the function's `@errhandler(CCError)` -- not its `@errhandler(CCIoError)`,
+ * which is for the io Results the function unwraps itself. A function that
+ * carries both is therefore free to hold arms that unwrap either.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+
+static int !>(CCError) boom(void) { return cc_err(CC_ERR_NOT_FOUND, "boom"); }
+static int !>(CCIoError) io_boom(void) {
+    return cc_err(cc_io_error(CC_ERR_TIMEOUT));
+}
+static int !>(CCIoError) io_fine(int v) { return cc_ok(v); }
+
+/* An arm unwraps an io Result: the join raises the `base` of what it
+ * carried, and this function's CCError handler is the one that runs. */
+static int arm_raises_io(int* kind) {
+    int n = 0;
+    @errhandler(CCError e) { *kind = (int)e.kind; return 3; }
+    @errhandler(CCIoError e) { *kind = -(int)e.base.kind; return 4; }
+    /* the io handler is for the io Results this function unwraps itself.
+     * The arm's io error does not reach it: it crosses the join as a
+     * CCError, and the CCError handler is what runs. */
+    n += io_fine(1) !>;
+    @parallel {
+        io_boom() !>;
+        @serial { n += 1; }
+    } !>.wait()!>;
+    (void)n;
+    return 0;
+}
+
+/* A spawned arm unwraps an io Result: same record, same handler. */
+static int spawned_raises_io(int* kind) {
+    int n = 0;
+    @errhandler(CCError e) { *kind = (int)e.kind; return 5; }
+    @parallel {
+        @serial { n += 1; }
+        @serial { io_boom() !>; n += 100; }
+    } !>.wait()!>;
+    (void)n;
+    return 0;
+}
+
+/* Arms of both error types under one pair of handlers: whichever claims the
+ * cell first, the handler that runs is the CCError one. */
+static int mixed_arms(void) {
+    int n = 0;
+    @errhandler(CCError e) { (void)e; return 7; }
+    @parallel {
+        boom() !>;
+        @serial { io_boom() !>; n += 100; }
+    } !>.wait()!>;
+    (void)n;
+    return 0;
+}
+
+/* A `@parallel for` body unwraps an io Result: the walk's exit cell carries
+ * a CCError too. */
+static int for_body_raises_io(int* kind) {
+    int i;
+    int sum = 0;
+    @errhandler(CCError e) { *kind = (int)e.kind; return 9; }
+    @parallel for (i in 0..8) {
+        if (i == 5) io_boom() !>;
+        sum += 0;
+    } !>.wait()!>;
+    (void)sum;
+    return 0;
+}
+
+/* Nothing errs: an io Result an arm unwraps and answers with is just a
+ * value, and neither handler runs. */
+static int ok_path(void) {
+    int a = 0;
+    int b = 0;
+    @errhandler(CCError e) { (void)e; return -1; }
+    @parallel {
+        @serial { a = io_fine(2) !>; }
+        @serial { b = io_fine(3) !>; }
+    } !>.wait()!>;
+    return a + b;
+}
+
+int main(void) {
+    int r;
+    int kind = 0;
+
+    r = arm_raises_io(&kind);
+    if (r != 3 || kind != (int)CC_ERR_TIMEOUT) {
+        eprintln(@string(`FAIL arm r=${r} kind=${kind}`, @scratch));
+        return 1;
+    }
+
+    kind = 0;
+    r = spawned_raises_io(&kind);
+    if (r != 5 || kind != (int)CC_ERR_TIMEOUT) {
+        eprintln(@string(`FAIL spawned r=${r} kind=${kind}`, @scratch));
+        return 1;
+    }
+
+    r = mixed_arms();
+    if (r != 7) {
+        eprintln(@string(`FAIL mixed r=${r}`, @scratch));
+        return 1;
+    }
+
+    kind = 0;
+    r = for_body_raises_io(&kind);
+    if (r != 9 || kind != (int)CC_ERR_TIMEOUT) {
+        eprintln(@string(`FAIL for r=${r} kind=${kind}`, @scratch));
+        return 1;
+    }
+
+    r = ok_path();
+    if (r != 5) {
+        eprintln(@string(`FAIL ok r=${r}`, @scratch));
+        return 1;
+    }
+
+    println("parallel_join_raises_ccerror_smoke: OK");
+    return 0;
+}

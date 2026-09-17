@@ -29,7 +29,6 @@ int sched_v2_in_context(void);
 #define ROUNDS 400
 
 static uint32_t sum_par(uint32_t d, uint32_t i) {
-    @errhandler(CCError e) cc_error_exit(e);
     if (d >= DEPTH)
         return i;
     uint32_t left = 0;
@@ -58,7 +57,6 @@ static uint32_t storm_on_fiber(void) {
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     int r;
     uint32_t want = 0, k;
     for (k = 0; k < (1u << DEPTH); k++) want += k;

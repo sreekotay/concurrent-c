@@ -85,7 +85,6 @@ typedef @typeview Encode on Conn {
 } *ConnEnc;
 
 static bool !>(CCIoError) write_all(CCSocket* sock, char[:] data) {
-    @errhandler(CCError e) cc_error_exit(e);
     size_t off = 0;
     while (off < data.len) {
         size_t n = sock->write(data.ptr + off, data.len - off) !>(e) {
@@ -99,7 +98,6 @@ static bool !>(CCIoError) write_all(CCSocket* sock, char[:] data) {
 }
 
 static bool !>(CCIoError) conn_flush(Conn* c) {
-    @errhandler(CCError e) cc_error_exit(e);
     char[:] data;
     if (!c || !c->arena.p)
         return cc_err(cc_io_error(CC_ERROR(CC_ERR_INVALID_ARG, "conn flush: null")));
@@ -203,7 +201,6 @@ static Hold hold_for(char[:] name) {
 
 static bool !>(CCError) exec_incr(CCShard* sh, char[:] key, size_t h,
                                   ConnEnc conn) {
-    @errhandler(CCError e) cc_error_exit(e);
     CCString* v = sh->get_h(key, h);
     int64_t n = 0;
     if (v) {
@@ -247,7 +244,6 @@ static bool !>(CCError) exec_key(DB* db, Cmd* c, size_t si, size_t h,
 
 static bool !>(CCError) exec_keys(DB* db, Cmd* c,
                                   ConnEnc conn) {
-    @errhandler(CCError e) { return cc_err(e); }
     CCShardMap* maps = &db->maps;
     char[:] name = c->args[0];
     size_t i;
@@ -363,7 +359,6 @@ static bool !>(CCError) exec_mget_parallel(DB* db, Cmd* c, ConnEnc conn) {
 /* Encode phase only — ship (flush/sock) stays on Conn* in handle_client. */
 static bool !>(CCError) execute(DB* db, Cmd* c,
                                 ConnEnc conn) {
-    @errhandler(CCError e) { return cc_err(e); }
     Hold h = { .none = {} };
     char[:] name;
 
@@ -489,7 +484,6 @@ static bool !>(CCIoError) read_cmd(BufReader::[CCSocket]* br, CCArena arena, Cmd
 }
 
 static void handle_client(CCSocket client, DB* db) {
-    @errhandler(CCError e) cc_error_exit(e);
     char read_buf[K_READ_BUF];
     char cmd_buf[K_CMD_ARENA];
     char out_slab[K_OUT_BUF];

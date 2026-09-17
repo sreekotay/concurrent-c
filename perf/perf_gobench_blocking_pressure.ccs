@@ -36,7 +36,6 @@ static void blocking_sleep(int us) {
 }
 
 static void print_sched_stats(const char* label) {
-    @errhandler(CCError e) cc_error_exit(e);
     CCSchedulerStats s;
     if (cc_scheduler_stats(&s) == 0) {
         println(@string(` ${label}: sched workers=${s.workers}u queue=${s.queue_len}u/${s.queue_cap}u`, @scratch));

@@ -1,0 +1,15 @@
+/* Fail oracle: a macro whose arms answer with different errors declares
+ * no one `E`; the read dispatches on the type that arrives, and each type
+ * the expansion can answer with needs a handler in scope. The io arm has
+ * none here, and the site says so. */
+#include <ccc/std/prelude.cch>
+
+static int !>(CCIoError) io_two(void) { return cc_ok(2); }
+static int !>(CCError) plain_two(void) { return cc_ok(2); }
+#define two_m(x) _Generic((x), double: io_two, default: plain_two)()
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    int b = two_m(1.0) !>;
+    return b - 2;
+}

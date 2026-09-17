@@ -16,7 +16,6 @@
 #define UNUSED_LIFETIME(T, v) T v @destroy
 
 int main(void) {
-    @errhandler(CCError e) { fprintf(stderr, "eh: %s\n", e.message); return 1; }
 
     /* The commented define in the header did not shadow the alias. */
     println("alias intact");

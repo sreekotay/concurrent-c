@@ -139,7 +139,6 @@ int test_block_any(void) {
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     println(@string(`block_combinators_stress: starting`, @scratch));
 
     int err = 0;

@@ -19,6 +19,8 @@ typedef struct RHandler {
     CcStmt* body;
     bool hoisted;
     bool emitted;               /* its label already stands in the block that declared it */
+    bool synthetic;             /* a lowering step wrote it, not the program */
+    bool dropped;               /* synthetic and unreached: it is not emitted at all */
     size_t depth;
     CcSpan span;                /* the `@errhandler` statement */
 } RHandler;
@@ -36,6 +38,7 @@ typedef struct RFn {
     bool nested_unwrap;         /* a `!>` in expression position was seen */
     RHandler* defining;         /* the handler whose body is being lowered, or NULL */
     CcNameList binders;         /* error binders in scope (`!> (e) {`, `@errhandler(E e)`), innermost last */
+    CcNameList binder_types;    /* the error type each binder holds, in step with `binders` */
     CcNameList rlocals;         /* locals declared with a Result type, in declaration order */
     CcTypeInfoList rlocal_specs;/* the Result each one holds, parallel to `rlocals` */
     bool dest_body;             /* this function IS a dest body: the frame's `@errhandler` stands
@@ -167,6 +170,34 @@ static CcTypeInfo* rl_ret_result(CcLowerer* L, CcType* fn_type) {
 
 /* The Result type a call expression yields, from the callee's declaration;
  * NULL when unknown (a UFCS call, an expression, an undeclared name). */
+/* The call a text node's value is: an earlier step (the channel step)
+ * writes a producer as text, `f(...)` or `({ ...; f(...); })`, and the
+ * Result is the last call's. The name before the `(` that matches the
+ * final `)`; empty when the text is not shaped so. */
+static CCSlice rl_text_call_name(CCSlice t) {
+    size_t e = t.len;
+    size_t i;
+    int depth = 0;
+    while (e && (t.ptr[e - 1] == ' ' || t.ptr[e - 1] == '\n' || t.ptr[e - 1] == '\t')) e--;
+    if (e >= 2 && t.ptr[e - 1] == '}' && t.ptr[e - 2] == ')') {
+        e -= 2;
+        while (e && (t.ptr[e - 1] == ' ' || t.ptr[e - 1] == '\n' || t.ptr[e - 1] == ';')) e--;
+    }
+    if (!e || t.ptr[e - 1] != ')') return cc_slice_empty();
+    i = e;
+    while (i) {
+        char c = t.ptr[--i];
+        if (c == ')') depth++;
+        else if (c == '(') { if (--depth == 0) break; }
+    }
+    if (depth) return cc_slice_empty();
+    e = i;
+    while (i && ((t.ptr[i - 1] >= 'a' && t.ptr[i - 1] <= 'z') || (t.ptr[i - 1] >= 'A' && t.ptr[i - 1] <= 'Z') ||
+                 (t.ptr[i - 1] >= '0' && t.ptr[i - 1] <= '9') || t.ptr[i - 1] == '_')) i--;
+    if (i == e) return cc_slice_empty();
+    return cc_slice_from_buffer((char*)t.ptr + i, e - i);
+}
+
 static CcTypeInfo* rl_result_of_call(CcLowerer* L, const CcExpr* e) {
     CcExpr* callee = NULL;
     CCSlice name;
@@ -174,13 +205,44 @@ static CcTypeInfo* rl_result_of_call(CcLowerer* L, const CcExpr* e) {
     if (!e) return NULL;
     @switch (e->k) {
         case .call(c): callee = c.callee; break;
+        case .ident(nm): {
+            /* a producer an earlier step wrote as text */
+            CCSlice tn;
+            bool has_paren = false;
+            size_t k;
+            for (k = 0; k < nm.len && !has_paren; k++) if (nm.ptr[k] == '(') has_paren = true;
+            if (!has_paren) return NULL;
+            tn = rl_text_call_name(nm);
+            if (!tn.len) return NULL;
+            sym = rl_ix_sym(L, tn);
+            while (sym && sym->kind != CC_SYM_FUNC) sym = sym->same_name;
+            if (!sym) return NULL;
+            return rl_ret_result(L, sym->type);
+        }
+        case .stmt_expr(se): {
+            /* `({ ...; f(); })`, as the channel step writes a send_task: the
+             * value is the last statement's, and its Result is that call's */
+            CcStmtList* stmts = se.block ? lw_block_stmts(se.block) : NULL;
+            size_t n = stmts ? stmts->len() : 0;
+            if (!n) return NULL;
+            {
+                CcStmt* last = *stmts->get_ptr(n - 1);
+                @switch (last->k) {
+                    case .expr(es): return rl_result_of_call(L, es.e);
+                    default: return NULL;
+                }
+            }
+        }
         default: return NULL;
     }
     if (!callee) return NULL;
     name = rl_ident_name(callee);
     if (!name.len) return NULL;
     sym = rl_ix_sym(L, name);
-    if (!sym || sym->kind != CC_SYM_FUNC) return NULL;
+    /* a macro that wraps a function of its own name (`#define f(a) (f)(a)`)
+     * shares the name: the function is the one with a type to read */
+    while (sym && sym->kind != CC_SYM_FUNC) sym = sym->same_name;
+    if (!sym) return NULL;
     return rl_ret_result(L, sym->type);
 }
 
@@ -508,6 +570,8 @@ static void rl_register_handler(RFn* fn, const CcErrhandler* eh, CcSpan sp) {
     RHandlerList* hs = &fn->handlers;
     h->id = CcLowerer_temp_id(L);
     h->emitted = false;
+    h->synthetic = eh->synthetic;
+    h->dropped = false;
     h->err_type = eh->err_type;
     h->err_canon = eh->err_type ? rl_ix_canon(L, eh->err_type) : cc_slice_empty();
     h->binder = eh->binder;
@@ -518,11 +582,13 @@ static void rl_register_handler(RFn* fn, const CcErrhandler* eh, CcSpan sp) {
     {
         RHandler* outer = fn->defining;
         CcNameList* bs = &fn->binders;
+        CcNameList* bts = &fn->binder_types;
         size_t nb = bs->len();
         fn->defining = h;
-        if (h->binder.len) bs->push(h->binder);
+        if (h->binder.len) { bs->push(h->binder); bts->push(h->err_canon); }
         h->body = rl_body(fn, eh->body);
         bs->truncate(nb);
+        bts->truncate(nb);
         fn->defining = outer;
     }
     hs->push(h);
@@ -618,8 +684,8 @@ static bool rl_as_search(CcLowerer* L, CCSlice from, CCSlice to, CcNameList* pat
  * through the error type's `as:` faces: exactly one handler type may be
  * reachable, and `*path` receives the faces to read. NULL after the
  * diagnostic (`bare` when no handler is in scope at all). */
-static RHandler* rl_pick_handler(RFn* fn, CCSlice err_canon, CcSpan sp, CCSlice bare, CcNameList* path,
-                                 const CcExpr* inner, CcTypeInfo* rt) {
+static RHandler* rl_pick_handler_at(RFn* fn, CCSlice err_canon, CcSpan sp, CCSlice bare, CcNameList* path,
+                                    const CcExpr* inner, CcTypeInfo* rt) {
     CcLowerer* L = fn->L;
     RHandlerList* hs = &fn->handlers;
     size_t n = hs->len();
@@ -646,6 +712,14 @@ static RHandler* rl_pick_handler(RFn* fn, CCSlice err_canon, CcSpan sp, CCSlice 
         CCString m = @string(`${bare}`, L->arena);
         lw_error(L, sp, m);
         return NULL;
+    }
+    /* an unwrap whose `E` nothing declares (a macro callee, an untyped
+     * form) is the ambient error type's: the innermost `CCError` handler */
+    if (!err_canon.len) {
+        for (i = n; i > 0; i--) {
+            RHandler* h = *hs->get_ptr(i - 1);
+            if (cc_slice_eq_cstr(&h->err_canon, "CCError")) return h;
+        }
     }
     for (i = n; i > 0; i--) {
         RHandler* h = *hs->get_ptr(i - 1);
@@ -702,6 +776,58 @@ static RHandler* rl_pick_handler(RFn* fn, CCSlice err_canon, CcSpan sp, CCSlice 
     return NULL;
 }
 
+/* Reach, keyed by the span of the `@errhandler` statement. The node is
+ * shared: a closure entry, a `@parallel` thunk and an `@async` poll body
+ * each carry the very handler the function they stand in declared, so the
+ * mark has to name the source handler and not the scope that reached it. */
+static bool rl_eh_seen(Vec::[uint32_t]* v, uint32_t key) {
+    size_t n = v->len();
+    size_t i;
+    for (i = 0; i < n; i++) if (*v->get_ptr(i) == key) return true;
+    return false;
+}
+
+/* A handler `script_entry` opened a synthetic `main` or `@task` body with.
+ * It spells its binder in the reserved prefix, which a program cannot. */
+static bool rl_eh_is_default(CCSlice binder) {
+    return binder.len > 12 && !memcmp(binder.ptr, "__cc_default_", 13);
+}
+
+static void rl_eh_mark(Vec::[uint32_t]* v, uint32_t key) {
+    if (!rl_eh_seen(v, key)) v->push(key);
+}
+
+/* The handler a site reaches, and the record of what the site raised. A
+ * handler nothing picked is dead either way, but the two ways differ: one a
+ * nearer handler shadows still stands for an error its scope raises, and one
+ * nothing even matched stands for an error the scope cannot raise at all. */
+static RHandler* rl_pick_handler(RFn* fn, CCSlice err_canon, CcSpan sp, CCSlice bare, CcNameList* path,
+                                 const CcExpr* inner, CcTypeInfo* rt) {
+    CcLowerer* L = fn->L;
+    RHandler* h = rl_pick_handler_at(fn, err_canon, sp, bare, path, inner, rt);
+    RHandlerList* hs = &fn->handlers;
+    size_t n = hs->len();
+    size_t i;
+    if (h) rl_eh_mark(&L->eh_reached, h->span.first);
+    for (i = 0; i < n; i++) {
+        RHandler* o = *hs->get_ptr(i);
+        bool same = err_canon.len ? cc_slice_eq(&o->err_canon, err_canon)
+                                  : cc_slice_eq_cstr(&o->err_canon, "CCError");
+        if (!same && o != h && err_canon.len) {
+            /* a handler this error reaches through an `as:` face is a
+             * candidate too, and a nearer one taking the site is what
+             * shadows it -- not an error the scope cannot raise */
+            CcNameList p = vec_new::[CCSlice](L->arena);
+            CcNameList seen = vec_new::[CCSlice](L->arena);
+            int n_found = 0;
+            bool cycle = false;
+            same = rl_as_search(L, err_canon, o->err_canon, &p, &seen, &n_found, &cycle);
+        }
+        if (same || o == h) rl_eh_mark(&L->eh_matched, o->span.first);
+    }
+    return h;
+}
+
 /* The name the SITE spells for a call, for a message that quotes the user's
  * own line: the member of a UFCS call, else the callee. `n.spawn(c)` resolves
  * to `cc_nursery_spawn_closure0`, and telling the user their call to THAT was
@@ -723,6 +849,12 @@ static CCSlice rl_call_name(const CcExpr* e) {
     if (!e) return cc_slice_empty();
     @switch (e->k) {
         case .call(c): return c.callee ? rl_ident_name(c.callee) : cc_slice_empty();
+        case .ident(nm): {
+            /* a producer an earlier step wrote as text: the call its value is */
+            size_t k;
+            for (k = 0; k < nm.len; k++) if (nm.ptr[k] == '(') return rl_text_call_name(nm);
+            return cc_slice_empty();
+        }
         default: return cc_slice_empty();
     }
 }
@@ -737,17 +869,87 @@ static CCSlice rl_call_name(const CcExpr* e) {
  * of another -- which the host rejects, about a line the user did not write.
  * Empty for every other callee: the Result its declaration names is the
  * answer there. */
-static CCSlice rl_macro_err(const CcExpr* inner) {
-    static const char* const print_fns[6] = {
-        "cc_println", "cc_eprintln", "cc_print",
-        "cc_eprint", "cc_fprintln", "cc_fprint"
-    };
+static bool rl_ident_char(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+/* The errors the functions a macro body can call answer with, gathered
+ * into `errs` (distinct canon names). A name in the body that is a macro
+ * is followed (a `_Generic` dispatch over typed arms, an arity pick, a
+ * forwarding wrapper); one already on the walk is a cycle and is left. */
+static void rl_macro_body_errs(CcLowerer* L, CcMacroDef* md, CcNameList* errs, CcNameList* walk, int depth) {
+    CCSlice body = md->body;
+    size_t i = 0;
+    if (depth > 6) return;
+    walk->push(md->name);
+    while (i < body.len) {
+        size_t b;
+        CCSlice id;
+        CcSym* sym;
+        bool is_param = false;
+        bool on_walk = false;
+        size_t k;
+        if (!rl_ident_char(body.ptr[i]) || (body.ptr[i] >= '0' && body.ptr[i] <= '9')) { i++; continue; }
+        b = i;
+        while (i < body.len && rl_ident_char(body.ptr[i])) i++;
+        id = cc_slice_from_buffer((char*)body.ptr + b, i - b);
+        for (k = 0; k < md->params.len() && !is_param; k++) { CCSlice pn = *md->params.get_ptr(k); if (cc_slice_eq(&pn, id)) is_param = true; }
+        if (is_param) continue;
+        /* a name already on the walk is not expanded again (the wrapper
+         * idiom `#define f(a) (f)(a)` names its own function, which is read
+         * as the function it is; a macro cycle is left alone) */
+        for (k = 0; k < walk->len() && !on_walk; k++) { CCSlice w = *walk->get_ptr(k); if (cc_slice_eq(&w, id)) on_walk = true; }
+        sym = rl_ix_sym(L, id);
+        while (sym) {
+            if (sym->kind == CC_SYM_FUNC) {
+                CcTypeInfo* rt = rl_ret_result(L, sym->type);
+                if (rt && rt->result_err) {
+                    CCSlice en = rl_ix_canon(L, rt->result_err);
+                    bool seen = false;
+                    for (k = 0; k < errs->len() && !seen; k++) { CCSlice x = *errs->get_ptr(k); if (cc_slice_eq(&x, en)) seen = true; }
+                    if (!seen) errs->push(en);
+                }
+                break;
+            }
+            if (sym->kind == CC_SYM_MACRO && sym->macro && sym->macro->function_like && !on_walk) {
+                CcMacroDef* alt;
+                for (alt = sym->macro; alt; alt = alt->alt) rl_macro_body_errs(L, alt, errs, walk, depth + 1);
+            }
+            sym = sym->same_name;
+        }
+    }
+    walk->truncate(walk->len() - 1);
+}
+
+/* The error a macro callee answers with.
+ *
+ * A `_Generic` macro the prelude defines (`cc_println`, `cc_channel_send`)
+ * declares no `void ?>(E)`, so `rl_result_of_call` has nothing to read.
+ * Every arm of such a macro answers with the same error, so its body
+ * settles it: the one error type the functions the expansion can call
+ * answer with. Empty when the callee is not a macro, calls no Result
+ * function, or its arms disagree -- the Result a declaration names is
+ * the answer there, or the host's. Without this the site takes whichever
+ * handler is innermost and reads an error of one type into a cell of
+ * another. */
+static void rl_macro_errs(CcLowerer* L, const CcExpr* inner, CcNameList* errs) {
     CCSlice name = rl_call_name(inner);
-    size_t i;
-    if (!name.len) return cc_slice_empty();
-    for (i = 0; i < 6; i++)
-        if (cc_slice_eq_cstr(&name, print_fns[i])) return rl_lit("CCPrintError");
-    return cc_slice_empty();
+    CcSym* sym;
+    CcNameList walk;
+    CcMacroDef* alt;
+    if (!name.len) return;
+    sym = rl_ix_sym(L, name);
+    while (sym && sym->kind != CC_SYM_MACRO) sym = sym->same_name;
+    if (!sym || !sym->macro || !sym->macro->function_like) return;
+    walk = vec_new::[CCSlice](L->arena);
+    for (alt = sym->macro; alt; alt = alt->alt) rl_macro_body_errs(L, alt, errs, &walk, 0);
+}
+
+static CCSlice rl_macro_err(CcLowerer* L, const CcExpr* inner) {
+    CcNameList errs = vec_new::[CCSlice](L->arena);
+    rl_macro_errs(L, inner, &errs);
+    if (errs.len() != 1) return cc_slice_empty();
+    return *errs.get_ptr(0);
 }
 
 static bool rl_sym_returns_pointer(const CcSym* sym) {
@@ -892,9 +1094,8 @@ static bool rl_is_plain_name(CCSlice s) {
  * `E` is the host's to decide and not ours. Reading `__r.u.error` into a
  * cell of type `to` is right only when `E` is `to`; where it is not, the
  * host rejects the assignment and the lowerer will have emitted a mismatch
- * it could have said something about — `rx.recv(&v) !>;` under an
- * `@errhandler(CCError e)` returns `CCIoError`, which reaches `CCError`
- * through its `as: base` face.
+ * it could have said something about — a `T !>(F)` whose `F` reaches
+ * `to` through an `as:` face of its own.
  *
  * So the choice is made where the types are known: one `_Generic` arm per
  * error type this unit declares a Result for that reaches `to`, each
@@ -963,6 +1164,13 @@ static CcExpr* rl_err_as(CcLowerer* L, CcSpan sp, CCSlice to) {
         arms++;
     }
     if (!arms) return NULL;
+    /* an error type no arm names has no handler in scope: the default arm
+     * calls a function the host refuses to emit a call to, so the error is
+     * reported at this site and says why, rather than a conversion nobody
+     * chose or a bare `_Generic` mismatch */
+    cc_string_push_cstr(&text, ", default: (*(", L->arena);
+    cc_string_push_slice(&text, to, L->arena);
+    cc_string_push_cstr(&text, "*)cc__result_error_type_has_no_errhandler_in_scope())", L->arena);
     cc_string_push_char(&text, ')', L->arena);
     return lw_text(L, text, sp);
 }
@@ -1087,6 +1295,49 @@ static void rl_check_delegates(RFn* fn, CcStmt* body, CCSlice binder) {
  *   `<target> = <inner> ?> fallback;`    or form (binder optional)
  * `target` may be NULL (`<inner> !>;`). Returns the block replacing it, or
  * NULL when the form could not be lowered (a diagnostic was emitted). */
+/* A macro callee whose arms answer with more than one error type: which
+ * one arrives is the host's to see, so the read dispatches on it -- a
+ * `_Generic` over the types the expansion can answer with numbers the
+ * arm, and each number reaches the handler that type selects (exact, or
+ * through its `as:` faces). A type no handler in scope takes is the
+ * diagnostic, at the site, naming it. `need_hoisted`: an expression-
+ * position site cannot inline a handler that returns to it. */
+static bool rl_dispatch_errs(RFn* fn, CcStmt* on_err, const CcExpr* inner, CcSpan sp, CCSlice bare,
+                             CcNameList* errs, bool need_hoisted) {
+    CcLowerer* L = fn->L;
+    size_t n = errs->len();
+    size_t i;
+    CCString sel = cc_string_new();
+    cc_string_push_cstr(&sel, "_Generic((__r).u.error", L->arena);
+    for (i = 0; i < n; i++) {
+        CCSlice en = *errs->get_ptr(i);
+        CCString arm = @string(`, ${en}: ${i + 1}`, L->arena);
+        cc_string_push_slice(&sel, arm.as_slice(), L->arena);
+    }
+    cc_string_push_char(&sel, ')', L->arena);
+    lw_push(on_err, lw_decl_stmt(L, lw_named_type(L, rl_lit("int"), sp), rl_lit("__cc_ek"), lw_text(L, sel, sp), sp));
+    for (i = 0; i < n; i++) {
+        CCSlice en = *errs->get_ptr(i);
+        CcNameList path;
+        RHandler* h = rl_pick_handler(fn, en, sp, bare, &path, inner, NULL);
+        CCString read = @string(`(*(${en}*)(void*)&(__r).u.error)`, L->arena);
+        CCString test = @string(`__cc_ek == ${i + 1}`, L->arena);
+        CcStmt* arm = lw_block(L, sp);
+        CcExpr* err;
+        if (!h) return false;
+        if (need_hoisted && !h->hoisted) {
+            CCString m = rl_at2(L, "errhandler body must visibly diverge when used as an expression-position '!>;' delegate", NULL);
+            lw_error(L, h->span, m);
+            return false;
+        }
+        err = rl_project(L, lw_text(L, read, sp), &path, sp);
+        if (h->hoisted) rl_push_jump(fn, arm, h, err, sp);
+        else lw_push(arm, rl_inline_handler(fn, h, err, sp));
+        lw_push(on_err, lw_if(L, lw_text(L, test, sp), arm, NULL, sp));
+    }
+    return true;
+}
+
 static CcStmt* rl_scaffold_ex(RFn* fn, CcExpr* uw, CcExpr* target, bool target_result, CcSpan sp) {
     CcLowerer* L = fn->L;
     CcExpr* inner = NULL;
@@ -1130,7 +1381,7 @@ static CcStmt* rl_scaffold_ex(RFn* fn, CcExpr* uw, CcExpr* target, bool target_r
         CCSlice bare_s = bare_stmt.as_slice();
         /* in a dest body the statement form has the same nothing to reach */
         CCSlice bare = (target || fn->dest_body) ? bare_v : bare_s;
-        CCSlice mac = rl_macro_err(inner);
+        CCSlice mac = rl_macro_err(L, inner);
         CCSlice err_canon = cc_slice_empty();
         RHandler* h;
         CcStmt* on_err = lw_block(L, sp);
@@ -1138,24 +1389,36 @@ static CcStmt* rl_scaffold_ex(RFn* fn, CcExpr* uw, CcExpr* target, bool target_r
         if (rt) err_canon = rl_ix_canon(L, rt->result_err);
         else if (mac.len) err_canon = mac;
         else if (ptr) err_canon = rl_lit("CCError");
-        h = rl_pick_handler(fn, err_canon, sp, bare, &path, inner, rt);
-        if (!h) return NULL;
-        /* `T x = call !>;` does not require the handler to leave. Invariant 6
-         * asks a handler to diverge where control cannot return to the site
-         * -- an `@err(e);` forward, an expression-position `!>` that inlines
-         * it -- and here it can: the handler runs and the assignment below
-         * follows it. A target whose own type is the Result takes it whole
-         * on the ok path instead, and assigns nothing on the error path. */
-        err = rl_project(L, rl_r_error2(L, sp, ptr, inner), &path, sp);
-        /* the callee named no `T !>(E)`: which error this is is the host's
-         * to decide, and the handler's type is what it has to become */
-        if (!rt && !ptr && !mac.len && h->err_canon.len) {
-            CcExpr* as = rl_err_as(L, sp, h->err_canon);
-            if (as) err = as;
+        bool dispatched = false;
+        if (!rt && !ptr && !mac.len) {
+            CcNameList errs = vec_new::[CCSlice](L->arena);
+            rl_macro_errs(L, inner, &errs);
+            if (errs.len() > 1) {
+                lw_push(on_err, rl_record_site(L, sp));
+                if (!rl_dispatch_errs(fn, on_err, inner, sp, bare, &errs, false)) return NULL;
+                dispatched = true;
+            }
         }
-        lw_push(on_err, rl_record_site(L, sp));
-        if (h->hoisted) rl_push_jump(fn, on_err, h, err, sp);
-        else lw_push(on_err, rl_inline_handler(fn, h, err, sp));
+        if (!dispatched) {
+            h = rl_pick_handler(fn, err_canon, sp, bare, &path, inner, rt);
+            if (!h) return NULL;
+            /* `T x = call !>;` does not require the handler to leave. Invariant 6
+             * asks a handler to diverge where control cannot return to the site
+             * -- an `@err(e);` forward, an expression-position `!>` that inlines
+             * it -- and here it can: the handler runs and the assignment below
+             * follows it. A target whose own type is the Result takes it whole
+             * on the ok path instead, and assigns nothing on the error path. */
+            err = rl_project(L, rl_r_error2(L, sp, ptr, inner), &path, sp);
+            /* the callee named no `T !>(E)`: which error this is is the host's
+             * to decide, and the handler's type is what it has to become */
+            if (!rt && !ptr && !mac.len && h->err_canon.len) {
+                CcExpr* as = rl_err_as(L, sp, h->err_canon);
+                if (as) err = as;
+            }
+            lw_push(on_err, rl_record_site(L, sp));
+            if (h->hoisted) rl_push_jump(fn, on_err, h, err, sp);
+            else lw_push(on_err, rl_inline_handler(fn, h, err, sp));
+        }
         if (target && target_result) {
             /* `T !>(E) x =<! call @err;`: the declaration holds the Result
              * itself, so the ok path assigns `__r` whole and the error path
@@ -1186,9 +1449,14 @@ static CcStmt* rl_scaffold_ex(RFn* fn, CcExpr* uw, CcExpr* target, bool target_r
             CcStmt* lowered;
             /* `@ok(v)` in the body writes the value slot the target reads below */
             ROk prev = rl_ok_enter(fn, (target && !value_is_void) ? rl_r_value2(L, sp, ptr) : NULL, sp);
-            if (binder.len) bs->push(binder);
+            if (binder.len) {
+                CCSlice bt = rt ? rl_ix_canon(L, rt->result_err) : (ptr ? rl_lit("CCError") : rl_macro_err(L, inner));
+                bs->push(binder);
+                fn->binder_types.push(bt);
+            }
             lowered = rl_body(fn, body);
             bs->truncate(nb);
+            fn->binder_types.truncate(nb);
             ok_lbl = rl_ok_leave(fn, prev);
             lw_push(on_err, lowered);
         }
@@ -1219,7 +1487,7 @@ static CcStmt* rl_scaffold_ex(RFn* fn, CcExpr* uw, CcExpr* target, bool target_r
             CcNameList path;
             CCString bare = rl_bare_msg(fn);
             CCSlice bare_s = bare.as_slice();
-            CCSlice mac = rl_macro_err(inner);
+            CCSlice mac = rl_macro_err(L, inner);
             CCSlice err_canon = cc_slice_empty();
             RHandler* h;
             CcStmt* on_err = lw_block(L, sp);
@@ -1229,16 +1497,28 @@ static CcStmt* rl_scaffold_ex(RFn* fn, CcExpr* uw, CcExpr* target, bool target_r
             CcExpr* err;
             if (rt) err_canon = rl_ix_canon(L, rt->result_err);
             else if (mac.len) err_canon = mac;
-            h = rl_pick_handler(fn, err_canon, sp, bare_s, &path, inner, rt);
-            if (!h) return NULL;
-            err = rl_project(L, rl_r_error(L, sp), &path, sp);
-            if (!rt && !mac.len && h->err_canon.len) {
-                CcExpr* as = rl_err_as(L, sp, h->err_canon);
-                if (as) err = as;
+            bool dispatched = false;
+            if (!rt && !mac.len) {
+                CcNameList errs = vec_new::[CCSlice](L->arena);
+                rl_macro_errs(L, inner, &errs);
+                if (errs.len() > 1) {
+                    lw_push(on_err, rl_record_site(L, sp));
+                    if (!rl_dispatch_errs(fn, on_err, inner, sp, bare_s, &errs, false)) return NULL;
+                    dispatched = true;
+                }
             }
-            lw_push(on_err, rl_record_site(L, sp));
-            if (h->hoisted) rl_push_jump(fn, on_err, h, err, sp);
-            else lw_push(on_err, rl_inline_handler(fn, h, err, sp));
+            if (!dispatched) {
+                h = rl_pick_handler(fn, err_canon, sp, bare_s, &path, inner, rt);
+                if (!h) return NULL;
+                err = rl_project(L, rl_r_error(L, sp), &path, sp);
+                if (!rt && !mac.len && h->err_canon.len) {
+                    CcExpr* as = rl_err_as(L, sp, h->err_canon);
+                    if (as) err = as;
+                }
+                lw_push(on_err, rl_record_site(L, sp));
+                if (h->hoisted) rl_push_jump(fn, on_err, h, err, sp);
+                else lw_push(on_err, rl_inline_handler(fn, h, err, sp));
+            }
             lw_push(on_ok, lw_expr_stmt(L, lw_assign(L, target,
                         target_result ? rl_r(L, sp) : rl_r_value(L, sp), sp), sp));
             lw_push(els, lw_decl_stmt(L, rl_typeof(L, alt, sp), rl_lit("__r_d"), alt, sp));
@@ -1463,13 +1743,16 @@ static void rl_stmts(RFn* fn, CcStmtList* list) {
                 CcStmt* blk = lw_block(L, s->span);
                 CCSlice nm = ef.err ? rl_ident_name(ef.err) : cc_slice_empty();
                 bool bound = !nm.len;
+                CCSlice bound_type = cc_slice_empty();
                 if (nm.len) {
                     CcNameList* bs = &fn->binders;
                     size_t nb = bs->len();
                     size_t bi;
+                    /* the innermost binder of that name: its type is the
+                     * error the forward carries, and picks the handler */
                     for (bi = 0; bi < nb; bi++) {
                         CCSlice b = *bs->get_ptr(bi);
-                        if (cc_slice_eq(&b, nm)) bound = true;
+                        if (cc_slice_eq(&b, nm)) { bound = true; bound_type = *fn->binder_types.get_ptr(bi); }
                     }
                     if (!bound) {
                         CcNameList* bsl = &fn->binders;
@@ -1491,12 +1774,12 @@ static void rl_stmts(RFn* fn, CcStmtList* list) {
                 if (bound) {
                     CCString bare_fwd = @string(`a bare unwrap ('!>;' or '${"@"}err') with no local handler requires an enclosing '${"@"}errhandler': the statement forwards the error to one`, L->arena);
                     CCSlice bare = bare_fwd.as_slice();
-                    h = rl_pick_handler(fn, cc_slice_empty(), s->span, bare, &path, NULL, NULL);
+                    h = rl_pick_handler(fn, bound_type, s->span, bare, &path, NULL, NULL);
                 }
                 if (!h) {
                     /* diagnosed above or by the lookup */
                 } else if (h->hoisted) {
-                    rl_push_jump(fn, blk, h, lw_paren(L, ef.err, s->span), s->span);
+                    rl_push_jump(fn, blk, h, rl_project(L, lw_paren(L, ef.err, s->span), &path, s->span), s->span);
                     pushed = blk;
                 } else if (ef.delegate) {
                     /* The delegation spelling is not the jump that `@err(e);`
@@ -1506,7 +1789,7 @@ static void rl_stmts(RFn* fn, CcStmtList* list) {
                      * diverge only where control cannot return, and here it
                      * can -- the same reason the statement form of
                      * `CALL !>;` takes a handler that ends in any statement. */
-                    lw_push(blk, rl_inline_handler(fn, h, lw_paren(L, ef.err, s->span), s->span));
+                    lw_push(blk, rl_inline_handler(fn, h, rl_project(L, lw_paren(L, ef.err, s->span), &path, s->span), s->span));
                     pushed = blk;
                 } else {
                     CCString m = rl_at2(L, "errhandler body must visibly diverge (end with return/break/continue/goto, ", "err(e);, or a call to exit/abort/longjmp/etc.)");
@@ -1549,6 +1832,32 @@ static void rl_stmts(RFn* fn, CcStmtList* list) {
             }
         }
     }
+    /* Every handler this scope declared, judged on whether a site reached
+     * it. One the program wrote for an error its scope cannot raise is
+     * refused: it reads as a way this scope can fail, and it cannot. One a
+     * nearer handler shadows still stands for an error the scope raises, and
+     * a site moving in or out makes it live again -- that is a warning. One a
+     * lowering step wrote is emitted defensively, one per error type a
+     * construct can carry, so an unreached one is simply dropped. */
+    {
+        RHandlerList* hs = &fn->handlers;
+        size_t nh = hs->len();
+        size_t hi;
+        for (hi = handlers_at_entry; hi < nh; hi++) {
+            RHandler* h = *hs->get_ptr(hi);
+            CCSlice et = h->err_canon;
+            if (rl_eh_seen(&L->eh_reached, h->span.first)) continue;
+            if (h->synthetic) { h->dropped = true; h->emitted = true; continue; }
+            /* the entry a script never wrote: `script_entry` opens every
+             * synthetic `main` and `@task` body with one handler per error
+             * type a statement-level `!>` can raise, and the script is not
+             * answerable for the ones it does not use */
+            if (rl_eh_is_default(h->binder)) continue;
+            L->eh_pend_first.push(h->span.first);
+            L->eh_pend_last.push(h->span.last);
+            L->eh_pend_type.push(et);
+        }
+    }
     /* A handler declared inside a block reads that block's names, so its
      * body stays in the block that declared it: at the end of the function
      * the `h` a `h.fail(e)` names is long out of scope. The normal path
@@ -1561,7 +1870,7 @@ static void rl_stmts(RFn* fn, CcStmtList* list) {
         bool any = false;
         for (hi = handlers_at_entry; hi < nh; hi++) {
             RHandler* h = *hs->get_ptr(hi);
-            if (!h->hoisted || h->emitted) continue;
+            if (!h->hoisted || h->emitted || h->dropped) continue;
             if (!any) { first = h->id; any = true; }
         }
         if (any) {
@@ -1571,7 +1880,7 @@ static void rl_stmts(RFn* fn, CcStmtList* list) {
             for (hi = handlers_at_entry; hi < nh; hi++) {
                 RHandler* h = *hs->get_ptr(hi);
                 CcExpr* cell;
-                if (!h->hoisted || h->emitted) continue;
+                if (!h->hoisted || h->emitted || h->dropped) continue;
                 cell = lw_ident(L, rl_cell_name(L, h->id), h->span);
                 out.push(lw_label(L, rl_label_name(L, h->id), NULL, h->span));
                 out.push(rl_inline_handler(fn, h, cell, h->span));
@@ -1721,7 +2030,7 @@ static bool rl_scaffold_expr(RFn* fn, CcExpr* e) {
         CcNameList path;
         CCString bare_value = rl_bare_msg(fn);
         CCSlice bare = bare_value.as_slice();
-        CCSlice mac = rl_macro_err(inner);
+        CCSlice mac = rl_macro_err(L, inner);
         CCSlice err_canon = cc_slice_empty();
         RHandler* h;
         CcStmt* on_err = lw_block(L, sp);
@@ -1729,23 +2038,35 @@ static bool rl_scaffold_expr(RFn* fn, CcExpr* e) {
         if (rt) err_canon = rl_ix_canon(L, rt->result_err);
         else if (mac.len) err_canon = mac;
         else if (ptr) err_canon = rl_lit("CCError");
-        h = rl_pick_handler(fn, err_canon, sp, bare, &path, inner, rt);
-        if (!h) return false;
-        if (!value_is_void && !h->hoisted) {
-            CCString m = rl_at2(L, "errhandler body must visibly diverge when used as an expression-position '!>;' delegate", NULL);
-            lw_error(L, h->span, m);
-            return false;
+        bool dispatched = false;
+        if (!rt && !ptr && !mac.len) {
+            CcNameList errs = vec_new::[CCSlice](L->arena);
+            rl_macro_errs(L, inner, &errs);
+            if (errs.len() > 1) {
+                lw_push(on_err, rl_record_site(L, sp));
+                if (!rl_dispatch_errs(fn, on_err, inner, sp, bare, &errs, true)) return false;
+                dispatched = true;
+            }
         }
-        err = rl_project(L, rl_r_error2(L, sp, ptr, inner), &path, sp);
-        /* the callee named no `T !>(E)`: which error this is is the host's
-         * to decide, and the handler's type is what it has to become */
-        if (!rt && !ptr && !mac.len && h->err_canon.len) {
-            CcExpr* as = rl_err_as(L, sp, h->err_canon);
-            if (as) err = as;
+        if (!dispatched) {
+            h = rl_pick_handler(fn, err_canon, sp, bare, &path, inner, rt);
+            if (!h) return false;
+            if (!value_is_void && !h->hoisted) {
+                CCString m = rl_at2(L, "errhandler body must visibly diverge when used as an expression-position '!>;' delegate", NULL);
+                lw_error(L, h->span, m);
+                return false;
+            }
+            err = rl_project(L, rl_r_error2(L, sp, ptr, inner), &path, sp);
+            /* the callee named no `T !>(E)`: which error this is is the host's
+             * to decide, and the handler's type is what it has to become */
+            if (!rt && !ptr && !mac.len && h->err_canon.len) {
+                CcExpr* as = rl_err_as(L, sp, h->err_canon);
+                if (as) err = as;
+            }
+            lw_push(on_err, rl_record_site(L, sp));
+            if (h->hoisted) rl_push_jump(fn, on_err, h, err, sp);
+            else lw_push(on_err, rl_inline_handler(fn, h, err, sp));
         }
-        lw_push(on_err, rl_record_site(L, sp));
-        if (h->hoisted) rl_push_jump(fn, on_err, h, err, sp);
-        else lw_push(on_err, rl_inline_handler(fn, h, err, sp));
         lw_push(blk, lw_if(L, lw_not(L, rl_r_ok2(L, sp, ptr), sp), on_err, NULL, sp));
     } else if (form == 2) {
         CcStmt* on_err = lw_block(L, sp);
@@ -1762,9 +2083,14 @@ static bool rl_scaffold_expr(RFn* fn, CcExpr* e) {
             CcStmt* lowered;
             /* `@ok(v)` writes the value slot the expression reads below */
             ROk prev = rl_ok_enter(fn, value_is_void ? NULL : rl_r_value2(L, sp, ptr), sp);
-            if (binder.len) bs->push(binder);
+            if (binder.len) {
+                CCSlice bt = rt ? rl_ix_canon(L, rt->result_err) : (ptr ? rl_lit("CCError") : rl_macro_err(L, inner));
+                bs->push(binder);
+                fn->binder_types.push(bt);
+            }
             lowered = rl_body(fn, body);
             bs->truncate(nb);
+            fn->binder_types.truncate(nb);
             ok_lbl = rl_ok_leave(fn, prev);
             lw_push(on_err, lowered);
         }
@@ -1847,6 +2173,7 @@ static void rl_function(CcLowerer* L, CcDecl* d, CcFuncDecl* f) {
     fn.handlers = vec_new::[RHandlerRef](L->arena);
     fn.hoisted = vec_new::[RHandlerRef](L->arena);
     fn.binders = vec_new::[CCSlice](L->arena);
+    fn.binder_types = vec_new::[CCSlice](L->arena);
     fn.rlocals = vec_new::[CCSlice](L->arena);
     fn.rlocal_specs = vec_new::[CcTypeInfoRef](L->arena);
     fn.dest_body = rl_is_dest_body(L, d);
@@ -1870,6 +2197,7 @@ static void rl_function(CcLowerer* L, CcDecl* d, CcFuncDecl* f) {
             size_t m = body_stmts->len();
             for (i = 0; i < n; i++) {
                 RHandler* h = *ho->get_ptr(i);
+                if (h->dropped) continue;
                 with_cells.push(lw_decl_stmt(L, h->err_type, rl_cell_name(L, h->id), NULL, d->span));
             }
             for (k = 0; k < m; k++) {
@@ -1894,6 +2222,7 @@ static void rl_function(CcLowerer* L, CcDecl* d, CcFuncDecl* f) {
             for (i = 0; i < n; i++) {
                 RHandler* h = *ho->get_ptr(i);
                 CcSpan hs = h->body ? h->body->span : d->span;
+                if (h->dropped) continue;   /* synthetic and unreached */
                 if (h->emitted) continue;   /* it stands in the block that declared it */
                 with_cells.push(lw_label(L, rl_label_name(L, h->id), NULL, hs));
                 with_cells.push(rl_inline_handler(&fn, h, lw_ident(L, rl_cell_name(L, h->id), hs), hs));
@@ -2351,6 +2680,33 @@ static bool rl_dest_is_result(CcLowerer* L, CcExpr* target) {
     return false;
 }
 
+/* The handlers nothing reached, once the unit holds no lowering that could
+ * still reach one. A handler the program wrote for an error its scope cannot
+ * raise is refused: it reads as a way the scope can fail, and it cannot. One
+ * a nearer handler shadows still stands for an error the scope raises -- a
+ * site moving in or out makes it live again -- and that is a warning. */
+static void rl_eh_judge_pending(CcLowerer* L) {
+    size_t n = L->eh_pend_first.len();
+    size_t i;
+    for (i = 0; i < n; i++) {
+        uint32_t first = *L->eh_pend_first.get_ptr(i);
+        CCSlice et = *L->eh_pend_type.get_ptr(i);
+        CcSpan sp;
+        if (rl_eh_seen(&L->eh_reached, first)) continue;
+        sp.first = first;
+        sp.last = *L->eh_pend_last.get_ptr(i);
+        if (rl_eh_seen(&L->eh_matched, first)) {
+            CCString m = @string(`'@errhandler(${et})' is shadowed: a nearer handler takes every site in its scope`, L->arena);
+            lw_warning(L, sp, m);
+            continue;
+        }
+        {
+            CCString m = @string(`'@errhandler(${et})' handles an error nothing in its scope raises; remove it, or unwrap a Result of '${et}' under it`, L->arena);
+            lw_error(L, sp, m);
+        }
+    }
+}
+
 void CcLowerer_results(CcLowerer* L) {
     CcDeclList* decls = &L->unit->decls;
     size_t n = decls->len();
@@ -2363,6 +2719,7 @@ void CcLowerer_results(CcLowerer* L) {
             default: break;
         }
     }
+    rl_eh_judge_pending(L);
     {
         CcVisitor v;
         RTypeEnv te;

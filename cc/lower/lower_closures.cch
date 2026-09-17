@@ -565,20 +565,45 @@ static bool kl_returns_value(CcStmt* s, void* env) {
     return true;
 }
 
-static CcStmt* kl_handler_in_scope(KStep* st) {
+static CCSlice kl_handler_type(KStep* st, CcStmt* s) {
+    CcIndex* ix = st->L->ix;
+    @switch (s->k) {
+        case .errhandler(x): return x.err_type ? ix->canon(x.err_type) : cc_slice_empty();
+        default: return cc_slice_empty();
+    }
+}
+
+/* The handlers in scope where a closure is written, one per error type
+ * (the innermost of each), outermost first so the entry declares them in
+ * the order the author did. Handlers are selected by error type, so a
+ * body that unwraps I/O under a CCError handler and an io handler needs
+ * both to travel. */
+static void kl_handlers_in_scope(KStep* st, CcStmtList* out) {
     KHandlerList* hv = &st->ehs;
+    CcLowerer* L = st->L;
+    CcNameList seen = vec_new::[CCSlice](L->arena);
+    CcStmtList picked = vec_new::[CcStmtRef](L->arena);
     size_t i = hv->len();
     while (i) {
         KHandler* h = *hv->get_ptr(--i);
         CcVisitor v;
         bool hit = false;
+        CCSlice et;
+        size_t k;
+        bool dup = false;
         memset(&v, 0, sizeof(v));
         v.stmt = kl_returns_value;
         v.env = &hit;
         CcStmt_walk(h->stmt, v);
-        if (!hit) return h->stmt;
+        if (hit) continue;
+        et = kl_handler_type(st, h->stmt);
+        for (k = 0; k < seen.len() && !dup; k++) { CCSlice x = *seen.get_ptr(k); if (cc_slice_eq(&x, et)) dup = true; }
+        if (dup) continue;
+        seen.push(et);
+        picked.push(h->stmt);
     }
-    return NULL;
+    i = picked.len();
+    while (i) out->push(*picked.get_ptr(--i));
 }
 
 /* The closures a `send_task` is sending.
@@ -728,8 +753,9 @@ static void kl_box_returns(CcLowerer* L, CcStmt* body, bool task_result) {
 
 static CcDecl* kl_entry_decl(KStep* st, uint32_t id, KCapList* caps, CcClosure cl, bool task_result, CcSpan sp) {
     CcLowerer* L = st->L;
-    CcStmt* eh = kl_handler_in_scope(st);
+    CcStmtList ehs = vec_new::[CcStmtRef](L->arena);
     CCSlice env = kl_name(L, id, "_env");
+    kl_handlers_in_scope(st, &ehs);
     CcStmt* body = lw_block(L, sp);
     CcParamList params = vec_new::[CcParam](L->arena);
     CcType* fn_type = cc__type_blank(sp, L->arena);
@@ -740,7 +766,11 @@ static CcDecl* kl_entry_decl(KStep* st, uint32_t id, KCapList* caps, CcClosure c
     size_t i;
     Vec::[CcParam]* clp = &cl.params;
     size_t np = clp->len();
-    if (eh) lw_push(body, eh);   /* the handler the author had in scope here */
+    {
+        /* the handlers the author had in scope here */
+        size_t k;
+        for (k = 0; k < ehs.len(); k++) lw_push(body, *ehs.get_ptr(k));
+    }
     {
         /* `<env>* __env = (<env>*)__p;` */
         CcType* pt = cc_type_pointer(cc_type_named(env, sp, L->arena), sp, L->arena);

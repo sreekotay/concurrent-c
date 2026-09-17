@@ -1,0 +1,17 @@
+/* An `@errhandler` for an error nothing in its scope raises is refused: it
+ * says the scope can fail that way, and it cannot. */
+#include <ccc/std/prelude.cch>
+
+static int !>(CCError) boom(void) { return cc_err(CC_ERR_NOT_FOUND, "x"); }
+
+static int reached(void) {
+    @errhandler(CCError e) { (void)e; return 1; }
+    return boom() !>;
+}
+
+static int nothing_raises(void) {
+    @errhandler(CCError e) { (void)e; return 1; }
+    return 0;
+}
+
+int main(void) { return reached() + nothing_raises(); }

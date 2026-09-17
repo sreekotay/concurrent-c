@@ -19,23 +19,20 @@
 #include <unistd.h>
 
 int main(void) {
-    @errhandler(CCError e) cc_error_exit(e);
 
     cc_arena_stack(a, kilobytes(4));
     CCStdio io = cc_stdio_create(a);
 
     @parallel spawn {
         @serial {
-            @errhandler(CCError e) cc_error_exit(e);
             usleep(100000);
             io.println("Hello from task A! (last)");
         }
         @serial {
-            @errhandler(CCError e) cc_error_exit(e);
             io.println("Hello from task B!");
         }
         @serial {
-            @errhandler(CCError e) cc_error_exit(e);
+            @errhandler(CCPrintError pe) cc_error_exit(CC_ERROR(CC_ERR_IO, cc_print_error_str(pe)));
             io.println("Hello from task C!") !>(e) {
                 io.println("Task C failed!");
                 @err(e); //forward to installed error handler

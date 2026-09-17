@@ -27,7 +27,6 @@ static void srv_go(Srv* s, CCClosure2 cb) {
 }
 
 static void !>(CCError) run(Srv* s, int cap) {
-    @errhandler(CCError e) { return cc_err(e); }
     s->go((Box* a, Box* b) => [cap] {
         a->bump(cap);
         g_sum = a->n + b->n;

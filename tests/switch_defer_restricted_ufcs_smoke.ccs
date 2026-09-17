@@ -41,7 +41,6 @@ typedef enum Op { OP_A = 0, OP_B, OP_C } Op;
 
 @noblock static bool !>(CCError) execute(ConnEnc enc, Op op,
                                          CCShardDomain* shards) {
-    @errhandler(CCError e) { return cc_err(e); }
 
     switch (op) {
     case OP_A: {

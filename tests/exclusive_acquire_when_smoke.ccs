@@ -30,7 +30,6 @@ static void* write_slot(void* envp, intptr_t slot_i, intptr_t arena_i) {
 }
 
 static void* thread_wait(void* arg) {
-    @errhandler(CCError e) cc_error_exit(e);
     CCExclusiveGuard !>(CCError) r;
     (void)arg;
     r = cc_exclusive_acquire_when(g_excl, 1u, pred_ready, NULL);
@@ -42,7 +41,6 @@ static void* thread_wait(void* arg) {
 }
 
 static void* thread_timeout(void* arg) {
-    @errhandler(CCError e) cc_error_exit(e);
     CCDeadline d = cc_deadline_after_ms(40);
     CCDeadline* prev = cc_deadline_push(&d);
     CCExclusiveGuard !>(CCError) r;

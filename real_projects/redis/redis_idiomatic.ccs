@@ -771,7 +771,6 @@ static bool !>(CCIoError) enc_unsupported(RedisConnEnc enc) {
  * (unknown command / decode-adjacent policy). */
 @noblock static bool !>(CCIoError) execute(RedisDb* db, CCShardDomain* shards,
                                            RedisCmd* cmd, RedisConnEnc enc) {
-    @errhandler(CCIoError e) { return cc_err(e); }
     if (cmd->argc == 0) return enc->err("empty command");
     RedisCommand op = redis_op(cmd->args[0]) !> { return enc_unsupported(enc); };
 
@@ -845,10 +844,6 @@ static void redis_client_drop_log(const char* phase, CCError e) {
 }
 
 static bool redis_conn_write_err_now(RedisConn* conn, CCError e) {
-    @errhandler(CCError e) {
-        redis_client_drop_log("write -ERR", e);
-        return 0;
-    }
     RedisConnEnc enc = conn;
     const char* msg = e.message ? e.message : "internal error";
     /* Strip leading "ERR " if present — redis_conn_err adds -ERR. */
@@ -866,10 +861,6 @@ static bool redis_conn_write_err_now(RedisConn* conn, CCError e) {
 }
 
 static bool db_setup(RedisDb* db, size_t shard_count, const char* shard_src) {
-    @errhandler(CCError e) {
-        cc_error_log(e);
-        return 0;
-    }
     if (!db_init(db, 1024, shard_count)) {
         eprintln("redis_idiomatic: db_init failed (out of memory?)");
         return 0;
@@ -983,6 +974,7 @@ static void handle_client(CCSocket client, RedisDb* db, CCShardDomain* shards) {
 
 int main(int argc, char** argv) {
     @errhandler(CCError err) { cc_error_log(err); return 1; }
+    @errhandler(CCIoError ioe) { cc_error_log(ioe.base); return 1; }
 
     int port = 6380;
     if (argc > 1) {
