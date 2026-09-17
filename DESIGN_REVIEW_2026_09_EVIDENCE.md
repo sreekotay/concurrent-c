@@ -59,7 +59,7 @@ Work:
   place of "on successful construction" (getting-started, cheatsheet,
   language-concepts).
 
-| A bare `!>` on a `CCIoError` result with only a `CCError` handler in scope dispatches through the face; `redis_std.ccs` `exec` does this in `.mget` and `.keys`, so an I/O failure is answered by a `-ERR` write on the dead socket, against the file's own header | `studies/face_dispatch/` | decided: face removed in 0.4.0-412 (`cc_io_error.cch`); `redis_std.ccs` on main still carries the per-site handlers and the comment |
+| A bare `!>` on a `CCIoError` result with only a `CCError` handler in scope dispatches through the face; `redis_std.ccs` `exec` does this in `.mget` and `.keys`, so an I/O failure is answered by a `-ERR` write on the dead socket, against the file's own header | `studies/face_dispatch/` | decided: face removed in 0.4.0-412; on 414 the probe is refused with two diagnostics naming the rule and the types (`studies/face_dispatch/README.md`); `redis_std.ccs` still carries the five per-site handlers, now unnecessary |
 
 | `redis_std.ccs` `exec` works around "a top-level `CCIoError` handler makes `return enc->…()` lower to brk on Ok" with five per-site `!>(e) { return cc_err(e); }`; on 0.4.0-411 the shape lowers correctly in three probes, including `@scratch` inside a `@switch` case; the defect was `796b454`'s switch-scratch-reclaim, now fixed | `studies/face_dispatch/return_*.ccs` | fixed (workaround can go) |
 | Comment-held policy in `redis_std.ccs` v3: six items; enforcers named (face removal ×2, lowerer fix ×1, `@noblock` check, KEYS hold parameter, and one already enforced by the `Encode` view hiding `io`) | review discussion 2026-09-17 | design |
