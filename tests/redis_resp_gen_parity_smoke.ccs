@@ -47,98 +47,98 @@ static bool rr_try_read_line(RespReader* r, char[:]* out) {
     }
     return false;
 }
-static RespParseStatus rr_try_read_bulk_buffered(RespReader* r, char[:]* out, CCError* err) {
+static RespParse rr_try_read_bulk_buffered(RespReader* r, char[:]* out, CCError* err) {
     size_t saved_start = r->start;
     char[:] line = {0};
-    if (!rr_try_read_line(r, &line)) return RESP_PARSE_INCOMPLETE;
+    if (!rr_try_read_line(r, &line)) return (RespParse){ .incomplete = {} };
 
     if (line.len < 2 || ((const char*)line.ptr)[0] != '$') {
         r->start = saved_start;
         *err = CC_ERROR(CC_ERR_PARSE, "expected bulk string");
-        return RESP_PARSE_ERROR;
+        return (RespParse){ .error = {} };
     }
 
     int64_t !>(CCError) n_res = parse_i64(CCSlice_sub(&line, 1, line.len));
     if (n_res.is_err()) {
         r->start = saved_start;
         *err = n_res.error();
-        return RESP_PARSE_ERROR;
+        return (RespParse){ .error = {} };
     }
     int64_t n = n_res.value();
     if (n < 0) {
         r->start = saved_start;
         *err = CC_ERROR(CC_ERR_PARSE, "negative bulk length");
-        return RESP_PARSE_ERROR;
+        return (RespParse){ .error = {} };
     }
 
     if ((uint64_t)n > (uint64_t)SIZE_MAX - 2u || (size_t)n + 2u > r->cap) {
         r->start = saved_start;
         *err = CC_ERROR(CC_ERR_INVALID_ARG, "ERR bulk string too large");
-        return RESP_PARSE_ERROR;
+        return (RespParse){ .error = {} };
     }
 
     size_t need = (size_t)n + 2;
     if ((r->end - r->start) < need) {
         r->start = saved_start;
-        return RESP_PARSE_INCOMPLETE;
+        return (RespParse){ .incomplete = {} };
     }
 
     if (r->data[r->start + n] != '\r' || r->data[r->start + n + 1] != '\n') {
         r->start = saved_start;
         *err = CC_ERROR(CC_ERR_PARSE, "malformed bulk string");
-        return RESP_PARSE_ERROR;
+        return (RespParse){ .error = {} };
     }
 
     *out = cc_slice_from_parts(r->data + r->start,
                                (size_t)n,
                                CC_SLICE_ID_UNTRACKED);
     r->start += need;
-    return RESP_PARSE_OK;
+    return (RespParse){ .ok = {} };
 }
-static RespParseStatus rr_try_read_args_buffered(RespReader* r,
+static RespParse rr_try_read_args_buffered(RespReader* r,
                                                  char[:]* args,
                                                  size_t cap,
                                                  size_t* out_argc,
                                                  CCError* err) {
     size_t saved_start = r->start;
     char[:] line = {0};
-    if (!rr_try_read_line(r, &line)) return RESP_PARSE_INCOMPLETE;
+    if (!rr_try_read_line(r, &line)) return (RespParse){ .incomplete = {} };
 
     if (!(line.len > 0 && ((const char*)line.ptr)[0] == '*')) {
         size_t !>(CCError) argc_res = parse_inline_args(line, args, cap);
         if (argc_res.is_err()) {
             r->start = saved_start;
             *err = argc_res.error();
-            return RESP_PARSE_ERROR;
+            return (RespParse){ .error = {} };
         }
         *out_argc = argc_res.value();
-        return RESP_PARSE_OK;
+        return (RespParse){ .ok = {} };
     }
 
     int64_t !>(CCError) argc_res_i64 = parse_i64(CCSlice_sub(&line, 1, line.len));
     if (argc_res_i64.is_err()) {
         r->start = saved_start;
         *err = argc_res_i64.error();
-        return RESP_PARSE_ERROR;
+        return (RespParse){ .error = {} };
     }
     int64_t argc_i64 = argc_res_i64.value();
     if (argc_i64 < 1 || argc_i64 > (int64_t)cap) {
         r->start = saved_start;
         *err = CC_ERROR(CC_ERR_PARSE, "unsupported argument count");
-        return RESP_PARSE_ERROR;
+        return (RespParse){ .error = {} };
     }
 
     size_t argc = (size_t)argc_i64;
     for (size_t i = 0; i < argc; ++i) {
-        RespParseStatus bulk_status = rr_try_read_bulk_buffered(r, &args[i], err);
-        if (bulk_status != RESP_PARSE_OK) {
+        RespParse bulk_status = rr_try_read_bulk_buffered(r, &args[i], err);
+        if (bulk_status.kind != .ok) {
             r->start = saved_start;
             return bulk_status;
         }
     }
 
     *out_argc = argc;
-    return RESP_PARSE_OK;
+    return (RespParse){ .ok = {} };
 }
 
 /* ---- the generated side: the schema IS the protocol description ---- */
@@ -171,7 +171,7 @@ static RespParseStatus rr_try_read_args_buffered(RespReader* r,
  * (pathological input only, keep the harness clear of it): a lone CR or LF
  * INSIDE an inline line is a parse error here but accepted by the hand
  * reader's \r\n pair scan. */
-static RespParseStatus gen_try_read_args_buffered(RespReader* r,
+static RespParse gen_try_read_args_buffered(RespReader* r,
                                                   char[:]* args,
                                                   size_t cap,
                                                   size_t* out_argc,
@@ -182,31 +182,31 @@ static RespParseStatus gen_try_read_args_buffered(RespReader* r,
     bool !>(CCError) rr = GCmd_try_read((const char*)(r->data + r->start),
                                         r->end - r->start, &pos, arena, &c);
     if (rr.is_err()) {
-        if (rr.error().kind == CC_ERR_WOULD_BLOCK) return RESP_PARSE_INCOMPLETE;
+        if (rr.error().kind == CC_ERR_WOULD_BLOCK) return (RespParse){ .incomplete = {} };
         *err = rr.error();
-        return RESP_PARSE_ERROR;
+        return (RespParse){ .error = {} };
     }
-    if (!rr.value()) return RESP_PARSE_INCOMPLETE;   /* empty window */
+    if (!rr.value()) return (RespParse){ .incomplete = {} };   /* empty window */
     if (c.kind == GCmd_plain) {
         size_t !>(CCError) a = parse_inline_args(c.plain.text, args, cap);
-        if (a.is_err()) { *err = a.error(); return RESP_PARSE_ERROR; }
+        if (a.is_err()) { *err = a.error(); return (RespParse){ .error = {} }; }
         *out_argc = a.value();
         r->start += pos;
-        return RESP_PARSE_OK;
+        return (RespParse){ .ok = {} };
     }
     if (c.kind == GCmd_framed) {
         if (c.framed.args_n < 1 || c.framed.args_n > cap) {
             *err = CC_ERROR(CC_ERR_PARSE, "unsupported argument count");
-            return RESP_PARSE_ERROR;
+            return (RespParse){ .error = {} };
         }
         for (size_t i = 0; i < c.framed.args_n; i++)
             args[i] = c.framed.args[i].data.as_slice();
         *out_argc = c.framed.args_n;
         r->start += pos;
-        return RESP_PARSE_OK;
+        return (RespParse){ .ok = {} };
     }
     *err = CC_ERROR(CC_ERR_PARSE, "unsupported RESP command shape");
-    return RESP_PARSE_ERROR;
+    return (RespParse){ .error = {} };
 }
 
 /* ---- parity harness: identical streams, many chunkings, equal event logs ---- */
@@ -235,15 +235,15 @@ static int drive(const char* stream, size_t slen, size_t chunk, int use_gen,
             char[:] args[4];
             size_t argc = 0;
             CCError err = {0};
-            RespParseStatus st = use_gen
+            RespParse st = use_gen
                 ? gen_try_read_args_buffered(&r, args, 4, &argc, &err, arena)
                 : rr_try_read_args_buffered(&r, args, 4, &argc, &err);
-            if (st == RESP_PARSE_OK) {
+            if (st.kind == .ok) {
                 if (nev < max_evs) { evs[nev].status = 0; evs[nev].argc = argc;
                                      evs[nev].hash = ev_hash(args, argc); nev++; }
                 continue;
             }
-            if (st == RESP_PARSE_ERROR) {
+            if (st.kind == .error) {
                 if (nev < max_evs) { evs[nev].status = 1; evs[nev].argc = (size_t)err.kind;
                                      evs[nev].hash = 0; nev++; }
                 return nev;   /* connection would be torn down */

@@ -23,8 +23,6 @@ int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
     CCServer srv;
     int port;
-    srv.init(1);
-    @defer srv.close();
     /* the suite runs rows in parallel: take the first free port of a run */
     {
         int try_port;
@@ -33,11 +31,12 @@ int main(void) {
             cc_arena_stack(la, 256);
             CCString addr = @string(`127.0.0.1:${try_port}`, la);
             char[:] addr_v = addr.as_slice();
-            srv.listen(addr_v) !>(e) { (void)e; continue; };
+            srv = cc_server_listen(addr_v) !>(e) { (void)e; continue; };
             bound = 1;
         }
         if (!bound) { printf("no free port\n"); return 1; }
     }
+    @defer srv.close();
     port = bound_port(&srv);
     if (port <= 0) { printf("no bound port\n"); return 1; }
 
@@ -75,9 +74,9 @@ int main(void) {
 
     srv.serve(NULL, (CCIoSess* io) => [] {
         char[:] in = io->window();
-        io->write(in) !>(e) { (void)e; io->apply((CCIoAct){ .close = {} }); return; };
+        io->write(in) !>(e) { (void)e; io->close(); return; };
         io->consume(in.len);
-        io->apply((CCIoAct){ .wait = {} });
+        io->wait();
     }) !>;
     clients.wait() !>;
     printf("std_server_echo_smoke: %s\n", g_echoed ? "PASS" : "FAIL");

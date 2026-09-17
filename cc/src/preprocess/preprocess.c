@@ -20973,6 +20973,11 @@ const char* cc_lowered_header_source_for(const char* lowered_path) {
     return NULL;
 }
 
+const char* cc_lowered_local_header_path(size_t i) {
+    if (i >= g_lowered_local_header_count) return NULL;
+    return g_lowered_local_headers[i].lowered_path;
+}
+
 char* cc_rewrite_system_cch_includes_to_lowered_headers(const char* src, size_t n) {
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;

@@ -1,0 +1,12 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+
+/* A block is straight-line compile-time code: a closure in it is refused
+ * at the closure, not reported by the host as a missing symbol. */
+@comptime {
+    int n = 3;
+    CCClosure0 f = () => [n] { (void)n; return NULL; };
+    (void)f;
+    cc_emit_format(CC_EMIT_AFTER_PRELUDE, "enum { CT_N = %d };\n", n);
+}
+int main(void) { return 0; }

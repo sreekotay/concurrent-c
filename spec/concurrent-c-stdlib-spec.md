@@ -1711,6 +1711,18 @@ and a program that includes the face links the module's C without naming
 it.
 
 ```c
+CCServer srv = cc_server_listen(addr) !>;
+@defer srv.close();
+CCSignal stop = cc_signal_watch2(SIGINT, SIGTERM) !> @destroy;
+srv.serve(&stop, (CCIoSess* io) => [] {
+    char[:] in = io->window();
+    io->write(in) !>(e) { (void)e; io->close(); return; };
+    io->consume(in.len);
+    io->wait();
+}) !>;
+```
+
+```c
 @variant CCIoAct { wait: void; wait_out: void; close: void; };
 
 typedef struct CCIoSess {
@@ -1725,18 +1737,18 @@ typedef struct CCIoSess {
 typedef struct CCServer {
     CCListener ln;
     int tls;
-    int workers_max;
+    int workers_max;      /* the host's processor count */
     int workers_start;    /* workers at serve; 0 = 2 */
     size_t row_size;      /* page row bytes per session; 0 = none */
     void (*row_drop)(void *row); /* runs once per session at its end */
-    int sec_tls_hs;       /* first-byte budget during the TLS handshake, seconds */
-    int sec_first_byte;   /* first-byte budget after accept or handshake, seconds */
+    int sec_tls_hs;       /* first-byte budget during the TLS handshake, seconds; default 10 */
+    int sec_first_byte;   /* first-byte budget after accept or handshake, seconds; default 0 = none */
     CCParallel app;
     /* … atomics the workers share */
 } CCServer;
 
-void                cc_server_init(CCServer *srv, int workers_max);
-void !>(CCError)    cc_server_listen(CCServer *srv, CCSlice addr);
+CCServer !>(CCError) cc_server_listen(CCSlice addr);
+void                cc_server_row(CCServer *srv, size_t size, void (*drop)(void *row));
 void !>(CCError)    cc_server_load_tls(CCServer *srv, const char *cert, const char *key);
 void !>(CCError)    cc_server_serve(CCServer *srv, CCSignal *stop, CCClosure1 on_step);
 void                cc_server_shutdown(CCServer *srv);
@@ -1754,14 +1766,20 @@ void !>(CCIoError)  cc_io_sess_write(CCIoSess *io, char[:] data);
 int                 cc_io_sess_flush(CCIoSess *io);
 size_t !>(CCIoError) cc_io_sess_try_write(CCIoSess *io, char[:] data);
 int                 cc_io_sess_pending_out(CCIoSess *io);
+void                cc_io_sess_wait(CCIoSess *io);
+void                cc_io_sess_wait_out(CCIoSess *io);
+void                cc_io_sess_close(CCIoSess *io);
 void                cc_io_sess_apply(CCIoSess *io, CCIoAct a);
 void                cc_io_sess_touch(CCIoSess *io, time_t now, int secs);
 ```
 
-`serve` starts `start_n` workers on `app` (`workers_start`, or 2 when it is
-0) and returns when the server is shut down and every session is gone.
-`stop` may be null; when it is a `CCSignal`, its delivery shuts the server
-down. `init(0)` caps the workers at the host's processor count.
+`cc_server_listen` is the constructor: a server bound to `addr`
+(`host:port`), workers capped at the host's processor count, no row, no
+deadlines. `serve` starts `start_n` workers on `app` (`workers_start`, or 2
+when it is 0) and returns when the server is shut down and every session is
+gone. `stop` may be null; when it is a `CCSignal`, its delivery shuts the
+server down, and a server shut down by `shutdown` instead releases the
+watcher parked on that signal before `serve` returns.
 
 The workers find their own level; a page sets nothing. Every worker
 accepts, and a worker holding more sessions than a peer leaves the listen
@@ -1779,17 +1797,19 @@ The step. `on_step` is borrowed for the whole run and invoked with the
 `CCIoSess*` whenever the session's window holds bytes the page has not
 consumed, or the page asked to be woken when the socket is writable. The
 page reads the window, queues its reply with `write`, consumes what it
-handled, and answers with `apply`: `wait` for more input, `wait_out` when
-it streams bytes of its own with `try_write` and was told BUSY, `close` to
-end the session once everything queued has drained. A step that returns
-without `apply` is a page fault: the engine closes that session and counts
-it in `step_faults`; it never carries the previous answer forward.
+handled, and answers: `wait` for more input, `wait_out` when it streams
+bytes of its own with `try_write` and was told BUSY, `close` to end the
+session once everything queued has drained. `apply` gives the same answer
+as a `CCIoAct` value, for a page whose helper returns it. A step that
+returns without an answer is a page fault: the engine closes that session
+and counts it in `step_faults`; it never carries the previous answer
+forward. A session that dies is not stepped again.
 
-The row. `row_size` bytes of page state travel with every session, zeroed
-at accept and reachable as `app`. `row_drop` runs once when the session
-ends, on a row the page may never have stepped, so it must tolerate the
-zeroed state. The page allocates nothing per connection and is not told
-when a session dies.
+The row. A page whose sessions carry state between steps says so once,
+before `serve`: `row(size, drop)`. The engine keeps `size` bytes with every
+session, zeroed at accept and reachable as `app`; `drop` runs once when the
+session ends, on a row the page may never have stepped, so it must tolerate
+the zeroed state. A page that keeps nothing between steps has no row.
 
 Output. `write` appends to the session's queue; the engine drains the
 queue after the step and on every writable wake, and does not step the
@@ -1800,13 +1820,17 @@ and answers `wait_out` on BUSY. `flush` drains the queue now and reports
 headers sent with `write`. `pending_out` is 1 while the engine still holds
 bytes for the socket, queued or TLS ciphertext.
 
+Deadlines. `sec_first_byte` closes a session that has sent nothing for
+that many seconds after accept (or after the handshake); 0 is no deadline.
+`sec_tls_hs` bounds the handshake. `touch` sets a session's own deadline.
+
 `load_tls` loads the process-wide certificate chain and key; sessions
 accepted after it are wrapped, and the handshake steps from readiness
 before the page first sees the session. On a runtime built without TLS,
 `load_tls` fails at that call with the error naming the fact; every other
-entry point is the same either way. UFCS: `srv.init(n)`, `srv.listen(addr)`,
-`srv.serve(&stop, closure)`, `io->window()`, `io->write(v)`,
-`io->apply(a)`.
+entry point is the same either way. UFCS: `srv.row(n, drop)`,
+`srv.serve(&stop, closure)`, `io->window()`, `io->write(v)`, `io->wait()`,
+`io->close()`, `io->apply(a)`.
 
 ## HTTP
 

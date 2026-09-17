@@ -22,17 +22,11 @@ static bool reply_slice_eq_ignore_case(char[:] s, const char* cstr) {
 }
 
 static RedisReply reply_simple(const char* s) {
-    RedisReply r;
-    r.kind = REDIS_REPLY_SIMPLE_STRING;
-    r.data = cc_slice_cstr(s);
-    return r;
+    return (RedisReply){ .simple = cc_slice_cstr(s) };
 }
 
 static RedisReply reply_error(const char* s) {
-    RedisReply r;
-    r.kind = REDIS_REPLY_ERROR;
-    r.data = cc_slice_cstr(s);
-    return r;
+    return (RedisReply){ .error = cc_slice_cstr(s) };
 }
 
 static RedisReply err_reply(CCError err) {
@@ -44,32 +38,19 @@ static RedisReply io_err_reply(CCIoError err) {
 }
 
 static RedisReply reply_bulk(char[:] s) {
-    RedisReply r;
-    r.kind = REDIS_REPLY_BULK_STRING;
-    r.data = s;
-    return r;
+    return (RedisReply){ .bulk = s };
 }
 
 static RedisReply reply_null(void) {
-    RedisReply r;
-    r.kind = REDIS_REPLY_NULL_BULK;
-    r.data = cc_slice_empty();
-    return r;
+    return (RedisReply){ .null_bulk = {} };
 }
 
 static RedisReply reply_integer(int64_t v) {
-    RedisReply r;
-    r.kind = REDIS_REPLY_INTEGER;
-    r.int_value = v;
-    r.data = cc_slice_empty();
-    return r;
+    return (RedisReply){ .integer = v };
 }
 
 static RedisReply reply_wire(char[:] s) {
-    RedisReply r;
-    r.kind = REDIS_REPLY_WIRE;
-    r.data = s;
-    return r;
+    return (RedisReply){ .wire = s };
 }
 
 static inline RespGReply wire_bulk(char[:] data) {
@@ -82,21 +63,21 @@ static inline RespGBulk wire_bulk_or_nil(char[:] data, bool found) {
 }
 
 static bool redis_reply_to_wire(const RedisReply* reply, RespGReply* wire) {
-    switch (reply->kind) {
-        case REDIS_REPLY_SIMPLE_STRING:
-            *wire = (RespGReply){ .simple = { .s = reply->data } };
+    @switch (*reply) {
+        case .simple(s):
+            *wire = (RespGReply){ .simple = { .s = s } };
             return 1;
-        case REDIS_REPLY_ERROR:
-            *wire = (RespGReply){ .error = { .msg = reply->data } };
+        case .error(msg):
+            *wire = (RespGReply){ .error = { .msg = msg } };
             return 1;
-        case REDIS_REPLY_INTEGER:
-            *wire = (RespGReply){ .integer = { .v = reply->int_value } };
+        case .integer(v):
+            *wire = (RespGReply){ .integer = { .v = v } };
             return 1;
-        case REDIS_REPLY_BULK_STRING:
-            *wire = wire_bulk(reply->data);
+        case .bulk(b):
+            *wire = wire_bulk(b);
             return 1;
-        case REDIS_REPLY_WIRE:
-        case REDIS_REPLY_NULL_BULK:
+        case .wire:
+        case .null_bulk:
             return 0;
     }
     return 0;
@@ -104,12 +85,13 @@ static bool redis_reply_to_wire(const RedisReply* reply, RespGReply* wire) {
 
 static size_t RedisReply_write(const RedisReply* reply, char* dst, size_t cap) {
     if (!reply || !dst) return 0;
-    if (reply->kind == REDIS_REPLY_WIRE) {
-        if (reply->data.len > cap) return 0;
-        if (reply->data.len > 0) memcpy(dst, reply->data.ptr, reply->data.len);
-        return reply->data.len;
+    if (reply->kind == .wire) {
+        char[:] w = reply->wire;
+        if (w.len > cap) return 0;
+        if (w.len > 0) memcpy(dst, w.ptr, w.len);
+        return w.len;
     }
-    if (reply->kind == REDIS_REPLY_NULL_BULK) {
+    if (reply->kind == .null_bulk) {
         RespGBulk nil = { .nil = {} };
         return RespGBulk_write(&nil, dst, cap);
     }

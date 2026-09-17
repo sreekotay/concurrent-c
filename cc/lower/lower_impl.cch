@@ -980,8 +980,14 @@ static bool lw_tof_scalar(CCSlice n) {
  * `_Static_assert`. Left as written they are a member of a call to
  * `cc_type_of`, which returns a pointer: the host explains a `.` on a
  * pointer, about a line that has no pointer in it. */
+typedef struct TofEnv {
+    CcLowerer* L;
+    bool in_block;   /* inside a `@comptime { }` block: the executor's reflection answers */
+} TofEnv;
+
 static bool lw_tof_visit(CcExpr* e, void* env) {
-    CcLowerer* L = (CcLowerer*)env;
+    TofEnv* te = (TofEnv*)env;
+    CcLowerer* L = te->L;
     CcExpr* base = NULL;
     CCSlice field = cc_slice_empty();
     bool arrow = false;
@@ -1004,10 +1010,12 @@ static bool lw_tof_visit(CcExpr* e, void* env) {
     else if (cc_slice_eq_cstr(&field, "name")) out = @string(`"${tn}"`, L->arena);
     else if (cc_slice_eq_cstr(&field, "kind"))
         out = scalar ? @string(`(CC_TK_PRIMITIVE)`, L->arena)
-                     : @string(`(cc_type_of("${tn}")->kind)`, L->arena);
+            : te->in_block ? @string(`(cc_reflect_kind("${tn}"))`, L->arena)
+                           : @string(`(cc_type_of("${tn}")->kind)`, L->arena);
     else if (cc_slice_eq_cstr(&field, "nfields"))
         out = scalar ? @string(`((size_t)0)`, L->arena)
-                     : @string(`((size_t)cc_type_of("${tn}")->nfields)`, L->arena);
+            : te->in_block ? @string(`((size_t)cc_reflect_field_count("${tn}"))`, L->arena)
+                           : @string(`((size_t)cc_type_of("${tn}")->nfields)`, L->arena);
     else ok = false;
     if (!ok) return true;
     {
@@ -1019,9 +1027,27 @@ static bool lw_tof_visit(CcExpr* e, void* env) {
 
 static void CcLowerer_typeof_members(CcLowerer* L) {
     CcVisitor v;
+    TofEnv te;
+    size_t i;
+    size_t nb = L->ct_fns.len();
+    memset(&te, 0, sizeof(te));
+    te.L = L;
     memset(&v, 0, sizeof(v));
     v.expr = lw_tof_visit;
-    v.env = L;
+    v.env = &te;
+    /* a block's members first: there `type_of(T).nfields` is a question
+     * for the executor's reflection, not the runtime registry */
+    te.in_block = true;
+    for (i = 0; i < nb; i++) {
+        CcDecl* d = *L->ct_fns.get_ptr(i);
+        CcStmt* body = NULL;
+        @switch (d->k) {
+            case .func(fd): body = fd.body; break;
+            default: break;
+        }
+        if (body) CcStmt_walk(body, v);
+    }
+    te.in_block = false;
     CcUnit_walk(L->unit, v);
 }
 
@@ -1161,7 +1187,8 @@ static void lw_fwd_typedefs(CcLowerer* L) {
 }
 
 void CcLowerer_lower_unit(CcLowerer* L) {
-    CcLowerer_comptime(L);  /* first: a value the user asked for at compile time is a constant to every step */
+    CcLowerer_ct_blocks(L); /* first: a compile-time block is a function to every step */
+    CcLowerer_comptime(L);  /* then: a value the user asked for at compile time is a constant to every step */
     CcLowerer_own(L);       /* then, before any rewrite: the ownership checks read the program as written */
     CcLowerer_typeof(L);    /* likewise: `type_of(T)` names a type by its spelling, as written */
     CcLowerer_typeof_members(L);  /* then fold its members: a constant where C wants one */
@@ -1185,6 +1212,7 @@ void CcLowerer_lower_unit(CcLowerer* L) {
     CcLowerer_strswitch(L);/* last but cleanup: the subject it spells is the C it will be */
     CcLowerer_cleanup(L);
     lw_drop_cc_only(L);   /* after the steps: the index reads faces off the unit's declarations */
+    lw_ct_regions(L);     /* after the drop: the block functions stay, between their markers */
     lw_fwd_typedefs(L);   /* after them: the records the steps spliced need forwards too */
     lw_banner(L);
 }

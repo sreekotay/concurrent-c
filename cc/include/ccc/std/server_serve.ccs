@@ -214,6 +214,21 @@ void cc_io_sess_apply(CCIoSess* io, CCIoAct a) {
     }
 }
 
+void cc_io_sess_wait(CCIoSess* io) {
+    io->answered = 1;
+    io->act = 0;
+}
+
+void cc_io_sess_wait_out(CCIoSess* io) {
+    io->answered = 1;
+    io->act = 1;
+}
+
+void cc_io_sess_close(CCIoSess* io) {
+    io->answered = 1;
+    io->act = 2;
+}
+
 void cc_io_sess_drop(CCIoSess* io) {
     if (!io) return;
     if (io->tls_on) {
@@ -258,7 +273,7 @@ void cc_server_note_close(CCServer* srv) {
 
 int cc_server_bind_conn(CCServer* srv, CCIoSess* io, int fd,
                                char* buf, size_t cap) {
-    int first = (srv && srv->sec_first_byte > 0) ? srv->sec_first_byte : 15;
+    int first = srv ? srv->sec_first_byte : 0;   /* 0 = no deadline */
     int tls_hs = (srv && srv->sec_tls_hs > 0) ? srv->sec_tls_hs : 10;
     cc_io_sess_init(io, (CCSocket){ .fd = fd }, buf, cap);
     io->sec_after_hs = first;
@@ -393,7 +408,18 @@ typedef struct ServeCtx {
     CCServer* srv;
     CCClosure1 on_app;
     CCStepHub* hub; /* ready-app steal hub; NULL = serial steps only */
+    CCSignal* stop; /* the watcher's signal; the last worker out releases it */
 } ServeCtx;
+
+/* The last worker to leave a stopped server releases a watcher still
+ * parked on `stop` (the server was shut down from the page, not by the
+ * signal). A worker leaving a live server is respawned, not the end. */
+static void cc_server_worker_left(ServeCtx* ctx) {
+    if (!ctx || !ctx->srv) return;
+    if (cc_atomic_fetch_sub(&ctx->srv->nworkers, 1) == 1 && ctx->stop &&
+        ctx->srv->stopped())
+        ctx->stop->close();
+}
 
 /* Per-dest stealable ready-app deque. Owner pushes/pops tail; thieves pop
  * head. Arm stays on the home tape (stealer may arm while home is in wait).
@@ -759,7 +785,7 @@ static int !>(CCError) cc_io_ready(CCIoSess* io, CCTape* tape, int id,
             io->want_in = 1;
             io->want_out = 0;
             cc_io_sess_touch(io, time(NULL),
-                          io->sec_after_hs > 0 ? io->sec_after_hs : 15);
+                          io->sec_after_hs);
             {
                 int ar = cc_io_arm(io, tape, id, arm_mx) !>;
                 if (ar < 0) return cc_ok(-1);
@@ -910,14 +936,9 @@ static int cc_serve_step(CCIoSess* io, ServeCtx* ctx, CCTape* tape, int id,
     int st = cc_io_ready(io, tape, id, r, arm_mx) !>(e) {
         (void)e;
         io->dead = 1;
-        cc_serve_invoke(ctx, io);
         return 0;
     };
-    if (st < 0) {
-        cc_serve_invoke(ctx, io);
-        return 0;
-    }
-    if (st == 0) return 0;
+    if (st <= 0) return 0;   /* dead (row_drop follows) or nothing to step */
     {
         int rc = cc_serve_app_arm(io, ctx, tape, id, arm_mx, 1);
         return rc < 0 ? -1 : 0;
@@ -927,16 +948,12 @@ static int cc_serve_step(CCIoSess* io, ServeCtx* ctx, CCTape* tape, int id,
 /* -1 = died (invoked); 0 = wait/armed; 1 = window ready for on_app. */
 static int cc_serve_ready_for_queue(CCIoSess* io, ServeCtx* ctx, CCTape* tape,
                                     int id, CCReady r) {
+    (void)ctx;
     int st = cc_io_ready(io, tape, id, r, NULL) !>(e) {
         (void)e;
         io->dead = 1;
-        cc_serve_invoke(ctx, io);
         return -1;
     };
-    if (st < 0) {
-        cc_serve_invoke(ctx, io);
-        return -1;
-    }
     return st;
 }
 
@@ -1158,7 +1175,7 @@ static void cc_server_worker(ServeCtx* ctx);
 
 static void cc_server_worker_bail(ServeCtx* ctx) {
     if (!ctx || !ctx->srv) return;
-    cc_atomic_fetch_sub(&ctx->srv->nworkers, 1);
+    cc_server_worker_left(ctx);
     cc_server_maybe_respawn(ctx);
 }
 
@@ -1294,7 +1311,7 @@ static void cc_server_worker(ServeCtx* ctx) {
             (void)pthread_mutex_destroy(&lane.mx);
         }
         worker_tape_exit(&tape, slots, ctx);
-        cc_atomic_fetch_sub(&srv->nworkers, 1);
+        cc_server_worker_left(ctx);
         if (!srv->stopped())
             cc_server_maybe_respawn(ctx);
     };
@@ -1469,7 +1486,7 @@ void !>(CCError) cc_server_serve(CCServer* srv, CCSignal* stop,
     @errhandler(CCError e) { return cc_err(e); }
     CCStepHub hub;
     int hub_on = 0;
-    ServeCtx ctx = { .srv = srv, .on_app = on_app, .hub = NULL };
+    ServeCtx ctx = { .srv = srv, .on_app = on_app, .hub = NULL, .stop = stop };
     ServeCtx* ctxp = &ctx;
     int w, n;
     @defer cc_closure1_drop(on_app);

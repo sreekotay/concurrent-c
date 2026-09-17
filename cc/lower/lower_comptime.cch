@@ -231,4 +231,346 @@ static void CcLowerer_comptime(CcLowerer* L) {
     CcUnit_walk(L->unit, v);
 }
 
+/* ---- `@comptime { }` blocks: the language, lowered, run by the executor --
+ *
+ * A block is written in the language: it declares variants, spells
+ * `@string`, calls methods, switches on strings. The executor compiles C.
+ * So the block becomes a function of this unit, `static void
+ * __cc_ct_block_<k>(void) { ... }`, and every step lowers its body as it
+ * lowers any other. The printer sets the function between two marker
+ * comments and follows it with the anchor the driver splices the block's
+ * emits at; the driver cuts the region out of the C, hands it to the
+ * executor, and the unit the host compiles never sees it.
+ *
+ * A block is straight-line compile-time code: a closure, a dest or a task
+ * in it is refused, since their lowering hoists declarations to the end
+ * of the unit, outside the region the executor is handed.
+ *
+ * A block that registers type hooks (`cc_type_register(...)`) is the
+ * index's: read as it was written and dropped, as before. */
+
+typedef struct CtScan {
+    CcLowerer* L;
+    bool hooks;             /* the block calls a hook registrar */
+    bool emits;             /* the block spells an `@emit` */
+    CcSpan bad;             /* a construct a block may not carry; last=0 when none */
+    CCSlice bad_what;
+} CtScan;
+
+static bool ct_call_named(CcExpr* e, const char* name) {
+    CCSlice fn = cc_slice_empty();
+    CcExpr* callee = NULL;
+    @switch (e->k) {
+        case .call(c): callee = c.callee; break;
+        default: return false;
+    }
+    if (!callee) return false;
+    @switch (callee->k) {
+        case .ident(nm): fn = nm; break;
+        default: return false;
+    }
+    return slice_eq(fn, cstr_slice((char*)name));
+}
+
+static bool ct_scan_expr(CcExpr* e, void* env) {
+    CtScan* sc = (CtScan*)env;
+    if (ct_call_named(e, "cc_type_register") || ct_call_named(e, "cc_type_define") ||
+        ct_call_named(e, "cc_ufcs_register"))
+        sc->hooks = true;
+    @switch (e->k) {
+        case .emit: sc->emits = true; break;
+        case .closure: sc->bad = e->span; sc->bad_what = cstr_slice("a closure"); break;
+        case .await_: sc->bad = e->span; sc->bad_what = cstr_slice("an await"); break;
+        case .create: sc->bad = e->span; sc->bad_what = cstr_slice("a nursery"); break;
+        default: break;
+    }
+    return true;
+}
+
+static bool ct_scan_stmt(CcStmt* s, void* env) {
+    CtScan* sc = (CtScan*)env;
+    @switch (s->k) {
+        case .parallel: sc->bad = s->span; sc->bad_what = cstr_slice("a parallel block"); break;
+        case .parallel_for: sc->bad = s->span; sc->bad_what = cstr_slice("a parallel loop"); break;
+        case .parallel_dest: sc->bad = s->span; sc->bad_what = cstr_slice("a dest"); break;
+        case .spawn_block: sc->bad = s->span; sc->bad_what = cstr_slice("a spawn"); break;
+        case .with_deadline: sc->bad = s->span; sc->bad_what = cstr_slice("a deadline"); break;
+        default: break;
+    }
+    return true;
+}
+
+/* The byte offset of the block's `{` in the unit's text: what the driver's
+ * blanking wrote into the anchor it looks for. */
+static size_t ct_brace_off(CcLowerer* L, CcSpan sp) {
+    CcTape* tp = &L->unit->tape;
+    uint32_t i;
+    for (i = sp.first; i <= sp.last; i++) {
+        const CcToken* tk = tp->at(i);
+        if (tk->kind == CC_TK_PUNCT && tk->punct == CC_P_LBRACE)
+            return (size_t)(tk->text.ptr - tp->src.ptr);
+    }
+    return (size_t)(tp->at(sp.first)->text.ptr - tp->src.ptr);
+}
+
+static void ct_block_to_fn(CcLowerer* L, CcDecl* d, CcBlock b, uint32_t k) {
+    CcSpan sp = d->span;
+    CcStmt* body = lw_block(L, sp);
+    CcType* fn_type = cc__type_blank(sp, L->arena);
+    CcFuncType ft;
+    CcFuncDecl fd;
+    CCString name = @string(`__cc_ct_block_${k}`, L->arena);
+    CCString marker;
+    size_t off = ct_brace_off(L, sp);
+    {
+        CcStmtList* into = lw_block_stmts(body);
+        size_t n = b.stmts.len();
+        size_t i;
+        for (i = 0; i < n; i++) into->push(*b.stmts.get_ptr(i));
+    }
+    memset(&ft, 0, sizeof(ft));
+    ft.ret = cc_type_named(cstr_slice("void"), sp, L->arena);
+    ft.params = vec_new::[CcParam](L->arena);
+    ft.has_prototype = true;
+    { CcTypeK tk = { .func = ft }; fn_type->k = tk; }
+    memset(&fd, 0, sizeof(fd));
+    fd.type = fn_type;
+    fd.name = lw_keep(L, &name);
+    fd.body = body;
+    d->specs = CC_SPEC_STATIC;
+    { CcDeclK dk = { .func = fd }; d->k = dk; }
+    marker = @string(`enum{__ccs${off}=0};`, L->arena);
+    L->ct_fns.push(d);
+    L->ct_markers.push(lw_keep(L, &marker));
+}
+
+static void CcLowerer_ct_blocks(CcLowerer* L) {
+    CcDeclList* decls = &L->unit->decls;
+    size_t n = decls->len();
+    size_t i;
+    uint32_t k = 0;
+    L->ct_fns = vec_new::[CcDeclRef](L->arena);
+    L->ct_markers = vec_new::[CCSlice](L->arena);
+    if (L->header_mode || L->fragment) return;
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *decls->get_ptr(i);
+        CcBlock b;
+        bool is_block = false;
+        @switch (d->k) {
+            case .comptime_block(cb): b = cb; is_block = true; break;
+            default: break;
+        }
+        if (!is_block) continue;
+        {
+            CtScan sc;
+            CcVisitor v;
+            CcStmt* probe = lw_block(L, d->span);
+            CcStmtList* into = lw_block_stmts(probe);
+            size_t m = b.stmts.len();
+            size_t j;
+            for (j = 0; j < m; j++) into->push(*b.stmts.get_ptr(j));
+            memset(&sc, 0, sizeof(sc));
+            sc.L = L;
+            memset(&v, 0, sizeof(v));
+            v.expr = ct_scan_expr;
+            v.stmt = ct_scan_stmt;
+            v.env = &sc;
+            CcStmt_walk(probe, v);
+            if (sc.hooks && !sc.emits) continue;   /* the index's: dropped as written */
+            if (sc.bad.last) {
+                CCSlice what = sc.bad_what;
+                CCString m2 = @string(`${what} does not belong in a ${"@"}comptime block: a block is straight-line compile-time code`, L->arena);
+                lw_error(L, sc.bad, m2);
+                continue;
+            }
+        }
+        ct_block_to_fn(L, d, b, k++);
+    }
+}
+
+/* ---- what a block reaches ------------------------------------------------
+ *
+ * A block calls the unit's own functions and reads its file-scope
+ * variables as any function does. The executor compiles the region on
+ * its own, so the region carries them: every function definition and
+ * file-scope variable the block names, and every one those name in turn,
+ * printed once more inside the markers (the unit keeps its own copy; the
+ * driver cuts the region out before the host sees the C). A prototype for
+ * each function goes first, so the order among them does not matter. */
+
+typedef struct CtReach {
+    CcLowerer* L;
+    CCString names;      /* `;name;` for every identifier seen */
+} CtReach;
+
+static bool ct_reach_has(CtReach* r, CCSlice nm) {
+    CCString key = cc_string_new();
+    CCSlice text;
+    cc_string_push_char(&key, ';', r->L->arena);
+    cc_string_push_slice(&key, nm, r->L->arena);
+    cc_string_push_char(&key, ';', r->L->arena);
+    text = cc_string_as_slice(&r->names);
+    {
+        bool found = false;
+        (void)cc_slice_index_of(text, cc_string_as_slice(&key), &found);
+        return found;
+    }
+}
+
+static void ct_reach_add(CtReach* r, CCSlice nm) {
+    if (ct_reach_has(r, nm)) return;
+    cc_string_push_slice(&r->names, nm, r->L->arena);
+    cc_string_push_char(&r->names, ';', r->L->arena);
+}
+
+static bool ct_reach_expr(CcExpr* e, void* env) {
+    CtReach* r = (CtReach*)env;
+    @switch (e->k) {
+        case .ident(nm): ct_reach_add(r, nm); break;
+        default: break;
+    }
+    return true;
+}
+
+/* The name a unit declaration defines, when a block could name it: a
+ * function with a body, or a file-scope variable. */
+static CCSlice ct_decl_name(CcDecl* d, bool* is_fn) {
+    *is_fn = false;
+    @switch (d->k) {
+        case .func(fd): if (fd.body) { *is_fn = true; return fd.name; } break;
+        case .var(vd): return vd.name;
+        default: break;
+    }
+    return cc_slice_empty();
+}
+
+/* Walk one declaration with the unit's walker: the body of a function,
+ * the initializer of a variable. */
+static void ct_reach_walk_decl(CtReach* r, CcDecl* d) {
+    CcUnit tmp = *r->L->unit;
+    CcVisitor v;
+    tmp.decls = vec_new::[CcDeclRef](r->L->arena);
+    tmp.decls.push(d);
+    memset(&v, 0, sizeof(v));
+    v.expr = ct_reach_expr;
+    v.env = r;
+    CcUnit_walk(&tmp, v);
+}
+
+/* The declarations the block function `bf` reaches, in unit order. */
+static CcDeclList ct_reach(CcLowerer* L, CcDecl* bf) {
+    CcDeclList* decls = &L->unit->decls;
+    CcDeclList out = vec_new::[CcDeclRef](L->arena);
+    CtReach r;
+    size_t n = decls->len();
+    bool grew = true;
+    r.L = L;
+    r.names = cc_string_new();
+    cc_string_push_char(&r.names, ';', L->arena);
+    ct_reach_walk_decl(&r, bf);
+    while (grew) {
+        size_t i;
+        grew = false;
+        for (i = 0; i < n; i++) {
+            CcDecl* d = *decls->get_ptr(i);
+            bool is_fn;
+            CCSlice nm;
+            size_t k;
+            bool seen = false;
+            size_t nb = L->ct_fns.len();
+            if (d == bf) continue;
+            for (k = 0; k < nb; k++) if (*L->ct_fns.get_ptr(k) == d) { seen = true; break; }
+            if (seen) continue;
+            nm = ct_decl_name(d, &is_fn);
+            if (!nm.len || !ct_reach_has(&r, nm)) continue;
+            for (k = 0; k < out.len(); k++) if (*out.get_ptr(k) == d) { seen = true; break; }
+            if (seen) continue;
+            out.push(d);
+            ct_reach_walk_decl(&r, d);
+            grew = true;
+        }
+    }
+    /* unit order: the loop above appends in the order it finds them,
+     * which a later round can break; sort by position in the unit */
+    {
+        size_t a, b;
+        size_t m = out.len();
+        for (a = 0; a + 1 < m; a++) {
+            for (b = a + 1; b < m; b++) {
+                CcDecl* da = *out.get_ptr(a);
+                CcDecl* db = *out.get_ptr(b);
+                if (db->span.first < da->span.first) {
+                    *out.get_ptr(a) = db;
+                    *out.get_ptr(b) = da;
+                }
+            }
+        }
+    }
+    return out;
+}
+
+/* A prototype for a reached function, as its own declaration. */
+static CcDecl* ct_prototype(CcLowerer* L, CcDecl* d) {
+    CCString text = cc_string_new();
+    @switch (d->k) {
+        case .func(fd): {
+            CCString sp = CcType_spell(fd.type, fd.name, &L->unit->tape, L->arena);
+            if (d->specs & (uint32_t)CC_SPEC_STATIC) cc_string_push_cstr(&text, "static ", L->arena);
+            cc_string_push_slice(&text, cc_string_as_slice(&sp), L->arena);
+            cc_string_push_char(&text, ';', L->arena);
+            break;
+        }
+        default: break;
+    }
+    return lw_raw_decl(L, text, d->span);
+}
+
+/* After the steps: each block's function between its markers, with the
+ * declarations it reaches before it, and its anchor after. The driver
+ * reads the region out of the C by the markers. */
+static void lw_ct_regions(CcLowerer* L) {
+    CcDeclList* decls = &L->unit->decls;
+    CcDeclList with = vec_new::[CcDeclRef](L->arena);
+    size_t n = decls->len();
+    size_t nf = L->ct_fns.len();
+    size_t i;
+    if (!nf) return;
+    for (i = 0; i < n; i++) {
+        CcDecl* d = *decls->get_ptr(i);
+        size_t f;
+        bool hit = false;
+        for (f = 0; f < nf; f++) {
+            if (*L->ct_fns.get_ptr(f) != d) continue;
+            {
+                CcUnit* u = L->unit;
+                CcLoc at = u->loc(d->span);
+                CCSlice marker = *L->ct_markers.get_ptr(f);
+                CCString open = @string(`/*__cc_ct_block ${(int)f} begin line=${(int)at.line}*/`, L->arena);
+                CCString close = cc_string_new();
+                CCString anchor = cc_string_new();
+                CcDeclList reach = ct_reach(L, d);
+                size_t nr = reach.len();
+                size_t k;
+                cc_string_push_cstr(&close, "/*__cc_ct_block end*/", L->arena);
+                cc_string_push_slice(&anchor, marker, L->arena);
+                with.push(lw_raw_decl(L, open, d->span));
+                for (k = 0; k < nr; k++) {
+                    CcDecl* rd = *reach.get_ptr(k);
+                    bool is_fn;
+                    (void)ct_decl_name(rd, &is_fn);
+                    if (is_fn) with.push(ct_prototype(L, rd));
+                }
+                for (k = 0; k < nr; k++) with.push(*reach.get_ptr(k));
+                with.push(d);
+                with.push(lw_raw_decl(L, close, d->span));
+                with.push(lw_raw_decl(L, anchor, d->span));
+            }
+            hit = true;
+            break;
+        }
+        if (!hit) with.push(d);
+    }
+    *decls = with;
+}
+
 #endif

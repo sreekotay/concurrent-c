@@ -26,6 +26,7 @@ typedef struct CScope CScope;
 struct CScope {
     CScope* parent;
     CSiteList sites;            /* registration order */
+    Vec::[CCSlice] labels;      /* `__cc_eh_N` handler labels that sit directly in this scope */
     int kind;                   /* 0 block, 1 loop body, 2 switch body, 3 function body */
     bool virtual_;              /* a single-statement body: no list to hang cleanup on */
 };
@@ -414,25 +415,44 @@ static CcStmt* cl_soft_return(CFn* fn, CcStmt* s, CcExpr* value) {
     return blk;
 }
 
-/* `goto __cc_eh_N;` -> `{ <unwind to the function scope>; goto __cc_eh_N; }`.
+/* `goto __cc_eh_N;` -> `{ <unwind to the handler's scope>; goto __cc_eh_N; }`.
  *
  * The Results step turns a `!>` with no local handler into a jump to the
- * handler's label, and that label sits at function scope: the jump leaves
- * every block between it and there, so those blocks' `@destroy` runs, the
- * same amount a `return` from the same place unwinds. A `goto` the user
- * wrote is theirs and is left alone -- where it should not cross a scope,
- * that is a diagnostic, not an unwind. */
+ * handler's label, which sits in the block that declared the
+ * `@errhandler`: the jump leaves every block between the site and that
+ * one, so those blocks' `@destroy` runs, and nothing outside it does --
+ * the handler's own `return` unwinds the rest. A `goto` the user wrote is
+ * theirs and is left alone -- where it should not cross a scope, that is
+ * a diagnostic, not an unwind. */
 static bool cl_is_handler_label(CCSlice name) {
     return name.len > 8 && memcmp(name.ptr, "__cc_eh_", 8) == 0;
+}
+
+/* The enclosing scope whose statement list carries `label`; the function
+ * scope when none does. */
+static CScope* cl_label_scope(CFn* fn, CCSlice label) {
+    CScope* sc;
+    for (sc = fn->scope; sc; sc = sc->parent) {
+        Vec::[CCSlice]* labels = &sc->labels;
+        size_t n = labels->len();
+        size_t i;
+        for (i = 0; i < n; i++) {
+            CCSlice have = *labels->get_ptr(i);
+            if (have.len == label.len && memcmp(have.ptr, label.ptr, label.len) == 0) return sc;
+        }
+    }
+    return cl_function_scope(fn);
 }
 
 static CcStmt* cl_soft_goto(CFn* fn, CcStmt* s, CcGoto g) {
     CcLowerer* L = fn->L;
     CcStmt* blk;
+    CScope* target;
     if (!g.label.len || !cl_is_handler_label(g.label)) return s;
-    if (!cl_any_sites_upto(fn, cl_function_scope(fn), false)) return s;
+    target = cl_label_scope(fn, g.label);
+    if (!cl_any_sites_upto(fn, target, false)) return s;
     blk = lw_block(L, s->span);
-    cl_unwind(fn, cl_function_scope(fn), false, blk);
+    cl_unwind(fn, target, false, blk);
     lw_push(blk, s);
     return blk;
 }
@@ -536,8 +556,18 @@ static void cl_stmts(CFn* fn, CcStmtList* list, int kind) {
     memset(&sc, 0, sizeof(sc));
     sc.parent = outer;
     sc.sites = vec_new::[CSiteRef](L->arena);
+    sc.labels = vec_new::[CCSlice](L->arena);
     sc.kind = kind;
     fn->scope = &sc;
+    /* handler labels are direct statements of the block that declared the
+     * handler; a jump to one from inside unwinds only up to here */
+    for (i = 0; i < n; i++) {
+        CcStmt* s = *list->get_ptr(i);
+        @switch (s->k) {
+            case .label(x): if (cl_is_handler_label(x.name)) sc.labels.push(x.name); break;
+            default: break;
+        }
+    }
     for (i = 0; i < n; i++) {
         CcStmt* s = *list->get_ptr(i);
         CcStmt* arm_now = arm_pending;

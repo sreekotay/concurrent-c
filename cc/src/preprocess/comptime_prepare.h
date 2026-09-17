@@ -49,6 +49,11 @@ char* cc_comptime_blank_blocks(const char* src, size_t n);
  * the block, and drops the block itself. A block that also emits is
  * blanked as usual, so its site marker stays where the emits splice. */
 #define CC_BLANK_KEEP_HOOKS 4u
+/* Leave every file-scope `@comptime { }` block in place: the caller lowers
+ * them itself, as functions the executor runs, and cuts them out of the C.
+ * A block nested in an `enum { }` body is still blanked to its enumerator
+ * marker. */
+#define CC_BLANK_KEEP_FILE_SCOPE 8u
 char* cc_comptime_blank_blocks_ex(const char* src, size_t n, unsigned keep);
 
 /* Resolve `@comptime if/for`, then lower `@emit` / `@string` templates.

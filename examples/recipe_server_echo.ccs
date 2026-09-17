@@ -1,0 +1,106 @@
+/*
+ * Recipe: TCP Echo on the std server
+ *
+ * The same echo as recipe_tcp_echo, on <ccc/std/server.cch>. The server
+ * owns accept, poll, and the workers; the page is one step:
+ *
+ *   srv.serve(&stop, (CCIoSess* io) => [] {
+ *       char[:] in = io->window();   // bytes not yet consumed
+ *       io->write(in) !> ...;        // queue the reply
+ *       io->consume(in.len);         // done with them
+ *       io->wait();                  // the answer: more input, please
+ *   }) !>;
+ *
+ * A step answers wait, wait_out, or close. The engine sends what was
+ * queued and calls the step again when more bytes arrive. Nothing is
+ * kept between steps here, so there is no row.
+ *
+ * Manual run:
+ *   ./ccc run examples/recipe_server_echo.ccs
+ *   (in another shell:)  echo "hello" | nc 127.0.0.1 9000
+ *
+ * --test: one in-process client sends a line, reads it back, and stops
+ * the server through `shutdown`.
+ */
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/prelude.cch>
+#include <ccc/std/server.cch>
+#include <ccc/std/cli.cch>
+#include <ccc/stdio.cch>
+#include <signal.h>
+
+#define PORT "127.0.0.1:9000"
+
+/* In-process client: connect, send, read the echo, stop the server. */
+static void run_test_client(CCServer* srv) {
+    @errhandler(CCError e) cc_error_exit(e);
+    @defer srv->shutdown();
+    CCSocket sock = cc_tcp_connect(PORT, sizeof(PORT) - 1) !>(e) {
+        eprintln(@string(`dial error: ${e}`, @scratch));
+        return;
+    };
+    @defer sock.close();
+
+    const char msg[] = "hello from test\n";
+    size_t nw = sock.write(msg, sizeof(msg) - 1) !>(e) {
+        eprintln(@string(`write error: ${cc_io_error_str(e)}`, @scratch));
+        return;
+    };
+    (void)nw;
+
+    char buf[64] = {0};
+    size_t got = 0;
+    bool ok = sock.read_into(buf, sizeof(buf) - 1, &got) !>(e) {
+        eprintln(@string(`read error: ${cc_io_error_str(e)}`, @scratch));
+        return;
+    };
+    if (!ok) got = 0;
+    char[:] got_slice = buf.to_slice_n(got);
+    println(@string(`test client got ${got} bytes: ${got_slice}`, @scratch));
+}
+
+@grammar(cli) ServerEchoOpts {~~~~
+    test: flag --test desc "Self-test: one client, one echo, exit."
+~~~~}
+
+static bool parse_test_flag(int argc, char** argv) {
+    cc_arena_stack(a, kilobytes(4));
+    ServerEchoOpts opts = {0};
+    if (!cc_parse_args(ServerEchoOpts, argc, argv, a, &opts)) return false;
+    return opts.test;
+}
+
+int main(int argc, char** argv) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    bool test_mode = parse_test_flag(argc, argv);
+
+    CCServer srv = cc_server_listen(PORT) !>(e) {
+        const char* msg = cc_error_str(e);
+        println(@string(`listen error: ${msg}`, @scratch));
+        return 1;
+    };
+    @defer srv.close();
+    const char* mode = test_mode ? "test" : "demo";
+    println(@string(`listening on ${PORT} (${mode} mode)`, @scratch));
+
+    /* Ctrl-C stops admission; serve returns once the last session is gone. */
+    CCSignal stop = cc_signal_watch2(SIGINT, SIGTERM) !> @destroy;
+
+    CCNursery side = @create() !> @destroy;
+    if (test_mode) {
+        side.spawn(() => [srvp = &srv] { run_test_client(srvp); return NULL; }) !>;
+    }
+
+    srv.serve(&stop, (CCIoSess* io) => [] {
+        char[:] in = io->window();
+        println(@string(`echo ${in.len} bytes`, @scratch));
+        io->write(in) !>(e) { (void)e; io->close(); return; };
+        io->consume(in.len);
+        io->wait();
+    }) !>;
+    side.wait() !>;
+
+    println("server done");
+    return 0;
+}

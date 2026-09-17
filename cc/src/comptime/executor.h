@@ -31,6 +31,13 @@ void cc_comptime_fn_registry_set_prelude(const char* prelude);
  * typed static_map call sites need in the executor TU).  No-op if `text` is
  * empty or already present as a substring of the current prelude. */
 void cc_comptime_fn_registry_append_prelude(const char* text);
+/* The prelude's length now, and the prelude cut back to a length taken
+ * earlier: what the prepare passes appended after the harvest (a
+ * static_map call's value and entry typedefs, as the source spelled them)
+ * gives way to the same types as the lowerer spelled them. */
+size_t cc_comptime_fn_registry_prelude_mark(void);
+const char* cc_comptime_fn_registry_prelude_text(void);
+void cc_comptime_fn_registry_prelude_truncate(size_t mark);
 const char* cc_comptime_fn_registry_defs(void);
 /* `#include "rel"` lines of a body read from memory, resolved beside the
  * file the text is from (or the nearest `#line` above): a new buffer, or
@@ -46,6 +53,20 @@ const char* cc_comptime_fn_registry_lookup_file(const char* name);
 int cc_comptime_exec_block_body(const char* body, size_t body_len,
                                 const CCComptimeExecOpts* opts,
                                 char* err_buf, size_t err_sz);
+
+/* Run a block the lowerer already lowered: `region` is C that defines
+ * `entry_fn` (the block's function) and whatever `#line` pins the printer
+ * set around it. No text rewrite touches it; the TU is the prelude, the
+ * registered definitions, the region, and an entry that calls `entry_fn`. */
+int cc_comptime_exec_block_region(const char* region, size_t region_len,
+                                  const char* entry_fn,
+                                  const char* pp_view, const char* types,
+                                  const CCComptimeExecOpts* opts,
+                                  char* err_buf, size_t err_sz);
+
+/* The registered definitions without the harvest prelude in front of them:
+ * for a unit whose headers the TU includes itself. */
+const char* cc_comptime_fn_registry_defs_only(void);
 
 /* Evaluate `expr` with registered @comptime fn defs in scope; writes integer
  * result to *out on success.  Used for result marshaling from @comptime code. */

@@ -1,0 +1,16 @@
+/* Helper for comptime_block_after_grammar_smoke: a face with a variant, so
+ * the include is inlined into the unit behind a line directive. */
+#ifndef COMPTIME_BLOCK_AFTER_GRAMMAR_HELPER_CCH
+#define COMPTIME_BLOCK_AFTER_GRAMMAR_HELPER_CCH
+
+@variant Verb {
+    ping: void;
+    get: void;
+};
+
+typedef struct Spec {
+    Verb verb;
+    int min_args;
+} Spec;
+
+#endif

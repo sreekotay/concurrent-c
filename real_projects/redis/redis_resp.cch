@@ -14,11 +14,13 @@ typedef struct RespReader {
     size_t cap;
 } RespReader;
 
-typedef enum RespParseStatus {
-    RESP_PARSE_ERROR = -1,
-    RESP_PARSE_INCOMPLETE = 0,
-    RESP_PARSE_OK = 1,
-} RespParseStatus;
+/* What one read attempt found: a whole command, not yet a whole one, or
+ * bytes that are not a command. */
+@variant RespParse {
+    error: void;
+    incomplete: void;
+    ok: void;
+};
 
 static RespReader rr_init(char* data, size_t cap) {
     RespReader r = {0};

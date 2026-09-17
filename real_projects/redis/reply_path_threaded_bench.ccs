@@ -46,7 +46,6 @@ static void bench_abort(const char* msg) {
 
 static void reply_init_inline(BenchWireReply* wr, uint64_t seq) {
     memset(wr, 0, sizeof(*wr));
-    wr->reply.kind = REDIS_REPLY_WIRE;
     wr->data_inline = 1;
     int len = snprintf(wr->inline_buf, sizeof(wr->inline_buf),
                        "$5\r\n%05llu\r\n",
@@ -54,12 +53,22 @@ static void reply_init_inline(BenchWireReply* wr, uint64_t seq) {
     if (len < 0 || (size_t)len >= sizeof(wr->inline_buf)) {
         bench_abort("failed to build inline reply");
     }
-    wr->reply.data = wr->inline_buf.to_slice_n((size_t)len);
+    char[:] w = wr->inline_buf.to_slice_n((size_t)len);
+    wr->reply = (RedisReply){ .wire = w };
+}
+
+/* The wire bytes a reply points at; NULL for any other arm. */
+static const char* reply_wire_ptr(const RedisReply* r) {
+    if (r->kind == .wire) return r->wire.ptr;
+    return NULL;
 }
 
 static void reply_rebase_inline_ptr(BenchWireReply* wr) {
     if (!wr || !wr->data_inline) return;
-    wr->reply.data = wr->inline_buf.to_slice_n(wr->reply.data.len);
+    if (wr->reply.kind == .wire) {
+        char[:] w = wr->inline_buf.to_slice_n(wr->reply.wire.len);
+        wr->reply = (RedisReply){ .wire = w };
+    }
 }
 
 static void* local_producer(void* arg) {
@@ -83,7 +92,7 @@ static void* local_consumer(void* arg) {
             continue;
         }
         reply_rebase_inline_ptr(&reply);
-        if (reply.reply.data.ptr != reply.inline_buf) bench_abort("local threaded rebase failed");
+        if (reply_wire_ptr(&reply.reply) != reply.inline_buf) bench_abort("local threaded rebase failed");
         seen++;
         atomic_store_explicit(&ctx->consumed, seen, memory_order_release);
         if (seen == atomic_load_explicit(&ctx->produced, memory_order_acquire)) {
@@ -111,7 +120,7 @@ static void* chan_consumer(void* arg) {
         BenchWireReply reply = {0};
         if (cc_chan_try_recv(ctx->ch, &reply, sizeof(reply)) != 0) continue;
         reply_rebase_inline_ptr(&reply);
-        if (reply.reply.data.ptr != reply.inline_buf) bench_abort("chan threaded value rebase failed");
+        if (reply_wire_ptr(&reply.reply) != reply.inline_buf) bench_abort("chan threaded value rebase failed");
         seen++;
         atomic_store_explicit(&ctx->consumed, seen, memory_order_release);
     }

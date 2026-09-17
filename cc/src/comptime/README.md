@@ -12,6 +12,16 @@ before comptime execution:
 2. `cc__resolve_comptime_value` — hoist `@comptime(expr)` to C literals (after if/for prune)
 3. `cc_rewrite_string_templates_text` — lower `@emit` / `@string` backtick templates
 
+On the clean path (`cc_main.c`, `cc__materialize_comptime_for_clean`) a
+file-scope `@comptime { }` block is lowered by the lowerer as a function and
+run afterwards: the driver cuts the block's region out of the lowered C and
+hands it to `cc_comptime_exec_block_region`; blocks nested in an `enum` body
+and blocks harvested from headers still run from the executor copy as text.
+Factory registrations are read off the source before lowering. The reflect
+verbs (`cc_reflect_kind`, fields, enum members) read the unit's source, then
+its lowered C, then the lowered `.h` of each quoted `.cch` it includes, so a
+type a header declares reflects as the C it lowered to.
+
 The emit side (`visit_codegen.c`) does not re-run `cc_comptime_prepare_source()`;
 it drives comptime instantiation/splicing through the emit-plan layer
 (`cc_emit_plan_splice_comptime_fragments`, `cc_emit_plan_apply_comptime_instantiations`

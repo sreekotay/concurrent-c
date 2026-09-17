@@ -341,6 +341,10 @@ int cc_writeback_local_lowered_headers_from_codegen(char** src, size_t* n);
 // `#line`/`# N "file"` markers so diagnostics in header content blame the .cch.
 const char* cc_lowered_header_source_for(const char* lowered_path);
 
+/* The `.h` the i-th lowered local header became (see
+ * cc_lowered_local_header_source_path for the `.cch` it came from). */
+const char* cc_lowered_local_header_path(size_t i);
+
 /* ---- Header comptime harvest --------------------------------------------
  * lower_header blanks `@comptime` / CC_GENERIC_FACTORY from `.cch` → `.h` so
  * the lowered header stays host-C. The including TU re-appends the raw forms

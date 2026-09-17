@@ -1,0 +1,28 @@
+/* A `!>` that dispatches to an `@errhandler` declared in a loop body leaves
+ * no block that holds the outer `@defer`: the handler runs first, and the
+ * defer runs exactly once, on the handler's return. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int !>(CCError) fails(void) { return cc_err(CC_ERR_INVALID_ARG, "boom"); }
+static int closed = 0;
+static void close_it(int* p) { (void)p; closed++; printf("close %d\n", closed); }
+
+static int run(void) {
+    {
+        int res = 0;
+        @defer close_it(&res);
+        for (int i = 0; i < 1; i++) {
+            @errhandler(CCError e) { (void)e; printf("handler closed=%d\n", closed); return 0; }
+            int v = fails() !>;
+            (void)v;
+        }
+    }
+    return 1;
+}
+
+int main(void) {
+    int rc = run();
+    printf("rc=%d closed=%d\n", rc, closed);
+    return 0;
+}

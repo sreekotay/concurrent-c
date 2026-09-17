@@ -1662,10 +1662,42 @@ int cc_ct_field_reg_put(const char* type_name, const char* const* names,
     return 0;
 }
 
+/* The lowered C of the unit whose blocks run: what a `@variant` is in C
+ * (its enum and struct) is read here first, then the source. Positions,
+ * tags and methods are the source's. */
+static const char* cc__reflect_lowered = NULL;
+static size_t cc__reflect_lowered_len = 0;
+
 void cc_emit_plan_set_reflect_source(const char* src, size_t len) {
     cc__rm_cache_clear();
     cc__reflect_src = src;
     cc__reflect_src_len = len;
+}
+
+void cc_emit_plan_set_reflect_lowered(const char* lowered, size_t len) {
+    cc__reflect_lowered = lowered;
+    cc__reflect_lowered_len = lowered ? len : 0;
+}
+
+/* Struct fields of `type_name`: the source as written, and when the
+ * source has no such type (a `@variant`, which is a struct only once
+ * lowered), the lowered C. A type the source declares reflects from the
+ * source, so what the field parser refuses there stays refused. */
+static int cc__reflect_fields_hdrs(const char* type_name, CCCtField** out, size_t* out_n);
+static int cc__reflect_enum_hdrs(const char* type_name, CCCtEnumMember** out, size_t* out_n);
+
+static int cc__reflect_fields_any(const char* type_name, CCCtField** out, size_t* out_n) {
+    if (cc_ct_reflect_struct_fields(cc__reflect_src, cc__reflect_src_len,
+                                    type_name, out, out_n))
+        return 1;
+    if (cc_ct_reflect_type_kind(cc__reflect_src, cc__reflect_src_len, type_name) !=
+            CC_REFLECT_KIND_UNKNOWN)
+        return 0;
+    if (cc__reflect_lowered && cc__reflect_lowered_len &&
+        cc_ct_reflect_struct_fields(cc__reflect_lowered, cc__reflect_lowered_len,
+                                    type_name, out, out_n))
+        return 1;
+    return cc__reflect_fields_hdrs(type_name, out, out_n);
 }
 
 /* The declarations a generated fragment may depend on: the file's own type
@@ -1729,8 +1761,7 @@ int cc_reflect_field_count(const char* type_name) {
      * unmodelable forms). Do not fall back to registry after a CC refuse —
      * that would turn all-or-nothing -1 into a partial hit. */
     if (cc__reflect_src && cc__reflect_src_len > 0) {
-        if (!cc_ct_reflect_struct_fields(cc__reflect_src, cc__reflect_src_len,
-                                         type_name, &fields, &nf))
+        if (!cc__reflect_fields_any(type_name, &fields, &nf))
             return -1;
         cc_ct_free_fields(fields, nf);
         return (int)nf;
@@ -1748,8 +1779,7 @@ static int cc__reflect_field_member(const char* type_name, int idx, int want_typ
     int rc = -1;
     if (buf && buf_sz > 0) buf[0] = '\0';
     if (cc__reflect_src && cc__reflect_src_len > 0) {
-        if (!cc_ct_reflect_struct_fields(cc__reflect_src, cc__reflect_src_len,
-                                         type_name, &fields, &nf))
+        if (!cc__reflect_fields_any(type_name, &fields, &nf))
             return -1;
         if (idx >= 0 && (size_t)idx < nf)
             rc = cc__rfl_emit(want_type ? fields[idx].type : fields[idx].name,
@@ -1783,8 +1813,7 @@ int cc_reflect_field_is_as(const char* type_name, int idx) {
         return e->is_as[idx] ? 1 : 0;
     }
     if (cc__reflect_src && cc__reflect_src_len > 0) {
-        if (!cc_ct_reflect_struct_fields(cc__reflect_src, cc__reflect_src_len,
-                                         type_name, &fields, &nf))
+        if (!cc__reflect_fields_any(type_name, &fields, &nf))
             return -1;
         if (idx >= 0 && (size_t)idx < nf) rc = fields[idx].is_as ? 1 : 0;
         cc_ct_free_fields(fields, nf);
@@ -1996,6 +2025,19 @@ int cc_reflect_method_err(const char* type_name, int idx, char* buf, int buf_sz)
     return cc__reflect_method_member(type_name, idx, CC__RM_ERR, buf, buf_sz);
 }
 
+/* Enum members of `type_name`: the source, then the lowered C (a
+ * variant's kind enum is declared only there). */
+static int cc__reflect_enum_any(const char* type_name, CCCtEnumMember** out, size_t* out_n) {
+    if (cc_ct_reflect_enum_members(cc__reflect_src, cc__reflect_src_len,
+                                   type_name, out, out_n))
+        return 1;
+    if (cc__reflect_lowered && cc__reflect_lowered_len &&
+        cc_ct_reflect_enum_members(cc__reflect_lowered, cc__reflect_lowered_len,
+                                   type_name, out, out_n))
+        return 1;
+    return cc__reflect_enum_hdrs(type_name, out, out_n);
+}
+
 /* --- enum reflection host verbs (edge-push #1) ---
  * Bytes-only across the user-space waist: enumerator names copy out as bytes,
  * values cross as a scalar.  Backed by an on-demand scan of the current source
@@ -2004,7 +2046,7 @@ int cc_reflect_method_err(const char* type_name, int idx, char* buf, int buf_sz)
 int cc_reflect_enum_count(const char* enum_name) {
     CCCtEnumMember* m = NULL;
     size_t nm = 0;
-    if (!cc_ct_reflect_enum_members(cc__reflect_src, cc__reflect_src_len,
+    if (!cc__reflect_enum_any(
                                     enum_name, &m, &nm))
         return -1;
     cc_ct_free_enum_members(m, nm);
@@ -2015,7 +2057,7 @@ int cc_reflect_enum_name(const char* enum_name, int idx, char* buf, int buf_sz) 
     if (buf && buf_sz > 0) buf[0] = '\0';
     CCCtEnumMember* m = NULL;
     size_t nm = 0;
-    if (!cc_ct_reflect_enum_members(cc__reflect_src, cc__reflect_src_len,
+    if (!cc__reflect_enum_any(
                                     enum_name, &m, &nm))
         return -1;
     int rc = -1;
@@ -2029,7 +2071,7 @@ int cc_reflect_enum_value(const char* enum_name, int idx, long long* out) {
     if (out) *out = 0;
     CCCtEnumMember* m = NULL;
     size_t nm = 0;
-    if (!cc_ct_reflect_enum_members(cc__reflect_src, cc__reflect_src_len,
+    if (!cc__reflect_enum_any(
                                     enum_name, &m, &nm))
         return -1;
     int rc = -1;
@@ -2042,9 +2084,89 @@ int cc_reflect_enum_value(const char* enum_name, int idx, long long* out) {
 }
 
 /* Type-kind classifier host verb (edge-push #2): returns a CC_REFLECT_KIND_*
- * code for a type spelling, scanning the current source buffer. */
+ * code for a type spelling: the lowered C first (a variant's kind enum
+ * lives only there), then the source. */
+/* The lowered local headers of this unit, read once per set: a type a
+ * quoted `.cch` declares (a `@variant`, a struct, an enum) reflects from
+ * the C it lowered to, as a unit-declared one reflects from the unit's
+ * lowered C. The unit's own source and lowered C come first. */
+typedef struct CCReflectHdr { char* text; size_t len; } CCReflectHdr;
+static CCReflectHdr* cc__reflect_hdrs = NULL;
+static size_t cc__reflect_hdr_n = 0;
+static int cc__reflect_hdrs_loaded = 0;
+
+static void cc__reflect_hdrs_load(void) {
+    size_t n = cc_lowered_local_header_count();
+    size_t i;
+    if (cc__reflect_hdrs_loaded && cc__reflect_hdr_n == n) return;
+    for (i = 0; i < cc__reflect_hdr_n; i++) free(cc__reflect_hdrs[i].text);
+    free(cc__reflect_hdrs);
+    cc__reflect_hdrs = n ? (CCReflectHdr*)calloc(n, sizeof(*cc__reflect_hdrs)) : NULL;
+    cc__reflect_hdr_n = cc__reflect_hdrs ? n : 0;
+    for (i = 0; i < cc__reflect_hdr_n; i++) {
+        const char* path = cc_lowered_local_header_path(i);
+        FILE* f = path ? fopen(path, "rb") : NULL;
+        long flen;
+        if (!f) continue;
+        fseek(f, 0, SEEK_END);
+        flen = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        if (flen > 0) {
+            char* t = (char*)malloc((size_t)flen + 1);
+            if (t) {
+                size_t got = fread(t, 1, (size_t)flen, f);
+                t[got] = '\0';
+                cc__reflect_hdrs[i].text = t;
+                cc__reflect_hdrs[i].len = got;
+            }
+        }
+        fclose(f);
+    }
+    cc__reflect_hdrs_loaded = 1;
+}
+
+static int cc__reflect_kind_hdrs(const char* type_name) {
+    size_t i;
+    cc__reflect_hdrs_load();
+    for (i = 0; i < cc__reflect_hdr_n; i++) {
+        int k;
+        if (!cc__reflect_hdrs[i].text) continue;
+        k = cc_ct_reflect_type_kind(cc__reflect_hdrs[i].text, cc__reflect_hdrs[i].len, type_name);
+        if (k != CC_REFLECT_KIND_UNKNOWN) return k;
+    }
+    return CC_REFLECT_KIND_UNKNOWN;
+}
+
+static int cc__reflect_fields_hdrs(const char* type_name, CCCtField** out, size_t* out_n) {
+    size_t i;
+    cc__reflect_hdrs_load();
+    for (i = 0; i < cc__reflect_hdr_n; i++) {
+        if (!cc__reflect_hdrs[i].text) continue;
+        if (cc_ct_reflect_struct_fields(cc__reflect_hdrs[i].text, cc__reflect_hdrs[i].len,
+                                        type_name, out, out_n))
+            return 1;
+    }
+    return 0;
+}
+
+static int cc__reflect_enum_hdrs(const char* type_name, CCCtEnumMember** out, size_t* out_n) {
+    size_t i;
+    cc__reflect_hdrs_load();
+    for (i = 0; i < cc__reflect_hdr_n; i++) {
+        if (!cc__reflect_hdrs[i].text) continue;
+        if (cc_ct_reflect_enum_members(cc__reflect_hdrs[i].text, cc__reflect_hdrs[i].len,
+                                       type_name, out, out_n))
+            return 1;
+    }
+    return 0;
+}
+
 int cc_reflect_kind(const char* type_name) {
-    return cc_ct_reflect_type_kind(cc__reflect_src, cc__reflect_src_len, type_name);
+    int k = cc_ct_reflect_type_kind(cc__reflect_src, cc__reflect_src_len, type_name);
+    if (k == CC_REFLECT_KIND_UNKNOWN && cc__reflect_lowered && cc__reflect_lowered_len)
+        k = cc_ct_reflect_type_kind(cc__reflect_lowered, cc__reflect_lowered_len, type_name);
+    if (k == CC_REFLECT_KIND_UNKNOWN) k = cc__reflect_kind_hdrs(type_name);
+    return k;
 }
 
 /* Canonical generic mangling host verb (naming/composition): the exact mangled
@@ -2214,18 +2336,96 @@ void cc_emit_warning_at(const char* file, int line, const char* msg) {
             msg && msg[0] ? msg : "comptime warning");
 }
 
+/* The lowered regions the driver handed over for this run, and the copy
+ * offset past which a block is a harvested header block, which the
+ * lowerer never saw. */
+static CCLoweredBlock* cc__lowered_blocks = NULL;
+static size_t cc__lowered_block_count = 0;
+static size_t cc__lowered_unit_end = (size_t)-1;
+static char* cc__lowered_pp_view = NULL;   /* the unit's top-level directives */
+static char* cc__lowered_types = NULL;     /* the unit's types the regions name */
+
+/* The top-level preprocessor lines of the lowered C, guards intact:
+ * every `#` line outside a brace, except the `#line` pins and pragmas. */
+static char* cc__pp_view_of(const char* c, size_t n) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0;
+    int depth = 0;
+    while (i < n) {
+        size_t ls = i;
+        size_t le = i;
+        size_t j;
+        char q = 0;
+        while (le < n && c[le] != '\n') le++;
+        j = ls;
+        while (j < le && (c[j] == ' ' || c[j] == '\t')) j++;
+        if (depth == 0 && j < le && c[j] == '#' &&
+            strncmp(c + j, "#line", 5) != 0 && strncmp(c + j, "#pragma", 7) != 0) {
+            cc_sb_append(&out, &out_len, &out_cap, c + j, le - j);
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+        } else {
+            for (j = ls; j < le; j++) {
+                char ch = c[j];
+                if (q) {
+                    if (ch == '\\' && j + 1 < le) { j++; continue; }
+                    if (ch == q) q = 0;
+                    continue;
+                }
+                if (ch == '"' || ch == '\'') { q = ch; continue; }
+                if (ch == '/' && j + 1 < le && c[j + 1] == '/') break;
+                if (ch == '/' && j + 1 < le && c[j + 1] == '*') {
+                    const char* e = strstr(c + j + 2, "*/");
+                    if (!e) { j = le; break; }
+                    if ((size_t)(e - c) >= le) { j = le; break; }
+                    j = (size_t)(e - c) + 1;
+                    continue;
+                }
+                if (ch == '{') depth++;
+                else if (ch == '}') { if (depth) depth--; }
+            }
+        }
+        i = le < n ? le + 1 : le;
+    }
+    if (!out) out = strdup("");
+    return out;
+}
+
+/* The lowered region of the block whose `{` is on `line`: the first unused
+ * one on that line, so blocks an unrolled `@comptime for` left on one
+ * line pair up in order. */
+static CCLoweredBlock* cc__lowered_block_for_line(int line) {
+    size_t i;
+    if (line <= 0) return NULL;
+    for (i = 0; i < cc__lowered_block_count; i++) {
+        CCLoweredBlock* b = &cc__lowered_blocks[i];
+        if (!b->used && b->line == line) return b;
+    }
+    return NULL;
+}
+
 static void cc__exec_visit_block(const char* src, size_t len,
                                  size_t body_l, size_t body_r, void* ctx) {
     const char* input_path = (const char*)ctx;
-    (void)len;
-    if (!cc__block_needs_executor(src, body_l, body_r)) return;
-    if (cc__exec_range_contains(body_l, body_r)) return;
-
     CCComptimeExecOpts opts = {0};
     char ofile[PATH_MAX];
     char rel[1024];
     int oline = 0;
+    int bline = 0;
     const char* diag_file;
+    CCLoweredBlock* lowered = NULL;
+    (void)len;
+    if (cc__exec_range_contains(body_l, body_r)) return;
+    /* A block the lowerer lowered always runs: what it emits is what its
+     * code computes, not what a scan of its text can collect. A block only
+     * the text path knows runs when that path judges it needs to. */
+    if (cc__lowered_block_count && body_l < cc__lowered_unit_end) {
+        char bfile[PATH_MAX];
+        cc__diag_origin_for_pos(body_l, bfile, sizeof(bfile), &bline);
+        lowered = cc__lowered_block_for_line(bline);
+    }
+    if (!lowered && !cc__block_needs_executor(src, body_l, body_r)) return;
+
     /* Honor `#line` in the prepared buffer (unit_native copies start with
      * `#line 2 "user.ccs"`).  libtcc must name that file, not the cache path. */
     cc__diag_origin_for_pos((body_l + 1 <= body_r) ? body_l + 1 : body_l,
@@ -2235,7 +2435,48 @@ static void cc__exec_visit_block(const char* src, size_t len,
     opts.input_path = diag_file;
     opts.site_pos = body_l;
     opts.site_line = oline > 0 ? oline : 0;
+    if (cc__lowered_block_count && body_l < cc__lowered_unit_end) {
+        if (getenv("CC_DEBUG_COMPTIME_EXEC")) {
+            size_t i;
+            fprintf(stderr, "[cc:comptime] block at copy offset %zu line %d: lowered region %s (regions:",
+                    body_l, bline, lowered ? "found" : "none");
+            for (i = 0; i < cc__lowered_block_count; i++)
+                fprintf(stderr, " %d%s", cc__lowered_blocks[i].line, cc__lowered_blocks[i].used ? "*" : "");
+            fprintf(stderr, ")\n");
+        }
+    } else if (getenv("CC_DEBUG_COMPTIME_EXEC")) {
+        fprintf(stderr, "[cc:comptime] block at copy offset %zu: no lowered regions (%zu known, unit end %zu)\n",
+                body_l, cc__lowered_block_count, cc__lowered_unit_end);
+    }
     char err[512];
+    if (lowered) {
+        /* An `@emit` template in the block is still the template the user
+         * wrote: the lowerer leaves them to this engine. */
+        char* c = cc_rewrite_string_templates_text(lowered->text, lowered->len, diag_file);
+        const char* region = c ? c : lowered->text;
+        size_t rlen = c ? strlen(c) : lowered->len;
+        char entry[64];
+        int rc;
+        lowered->used = 1;
+        snprintf(entry, sizeof(entry), "__cc_ct_block_%d",
+                 (int)(lowered - cc__lowered_blocks));
+        rc = cc_comptime_exec_block_region(region, rlen, entry, cc__lowered_pp_view,
+                                           cc__lowered_types, &opts, err, sizeof(err));
+        free(c);
+        if (rc != 0) {
+            if (err[0] && strstr(err, "error:")) {
+                fprintf(stderr, "%s\n", err);
+            } else {
+                int line = opts.site_line > 0 ? opts.site_line
+                                              : cc__diag_line_for_pos(body_l);
+                fprintf(stderr, "%s:%d: error: @comptime block execution failed: %s\n",
+                        diag_file, line, err[0] ? err : "unknown");
+            }
+            cc__exec_failed = 1;
+        }
+        cc__exec_range_mark(body_l, body_r);
+        return;
+    }
     if (cc_comptime_exec_block_body(src + body_l + 1, body_r - body_l - 1,
                                     &opts, err, sizeof(err)) != 0) {
         /* libtcc messages (with `#line`) already look like
@@ -2263,6 +2504,215 @@ int cc_emit_plan_take_exec_error(void) {
     int had = cc__exec_failed;
     cc__exec_failed = 0;
     return had;
+}
+
+/* The name a top-level `typedef ... Name;` or `struct/enum Tag {...};`
+ * piece declares: the last identifier before the `;`. */
+static void cc__piece_name(const char* piece, size_t n, char* out, size_t cap) {
+    size_t e = n;
+    size_t b;
+    out[0] = '\0';
+    while (e > 0 && (piece[e - 1] == ';' || piece[e - 1] == ' ' || piece[e - 1] == '\t' ||
+                     piece[e - 1] == '\n' || piece[e - 1] == '\r'))
+        e--;
+    b = e;
+    while (b > 0 && cc_is_ident_char(piece[b - 1])) b--;
+    if (e > b && e - b < cap) {
+        memcpy(out, piece + b, e - b);
+        out[e - b] = '\0';
+    }
+}
+
+/* Does `types` declare `name` (as `... name;` at a piece's end)? */
+static int cc__types_declare(const char* types, const char* name) {
+    const char* p = types;
+    size_t nlen = strlen(name);
+    if (!types || !name[0]) return 0;
+    while ((p = strstr(p, name)) != NULL) {
+        const char* q = p + nlen;
+        while (*q == ' ' || *q == '\t') q++;
+        if (*q == ';' && (p == types || !cc_is_ident_char(p[-1]))) return 1;
+        p += nlen;
+    }
+    return 0;
+}
+
+static int cc__names_has(const char* names, const char* name);
+
+/* Every identifier of `text` appended to `*names` as `;ident;`. */
+static void cc__collect_idents(const char* text, size_t n, char** names,
+                               size_t* nlen, size_t* ncap) {
+    size_t i = 0;
+    while (i < n) {
+        if (cc_is_ident_start(text[i]) && (i == 0 || !cc_is_ident_char(text[i - 1]))) {
+            size_t b = i;
+            char id[128];
+            while (i < n && cc_is_ident_char(text[i])) i++;
+            if (i - b < sizeof(id)) {
+                memcpy(id, text + b, i - b);
+                id[i - b] = '\0';
+                cc_sb_append_cstr(names, nlen, ncap, id);
+                cc_sb_append_cstr(names, nlen, ncap, ";");
+            }
+            continue;
+        }
+        i++;
+    }
+}
+
+/* The names of the type pieces of `types` a block region names, closed
+ * over the pieces those name in turn: `MimeEntry` in a region admits
+ * `MimeEntry`, whose `MimeTag value` admits `MimeTag`, whose `MimeTagKind
+ * kind` admits the enum. A unit type no block names stays out, with
+ * whatever header types its fields would drag in. */
+static char* cc__names_regions_need(const char* types, CCLoweredBlock* blocks, size_t nblocks) {
+    char* seen = NULL;
+    size_t seen_len = 0, seen_cap = 0;
+    char* admitted = NULL;
+    size_t adm_len = 0, adm_cap = 0;
+    size_t i;
+    int grew = 1;
+    cc_sb_append_cstr(&seen, &seen_len, &seen_cap, ";");
+    cc_sb_append_cstr(&admitted, &adm_len, &adm_cap, ";");
+    for (i = 0; i < nblocks; i++)
+        if (blocks[i].text) cc__collect_idents(blocks[i].text, blocks[i].len, &seen, &seen_len, &seen_cap);
+    while (grew) {
+        const char* p = types ? types : "";
+        const char* start = p;
+        int depth = 0, in_str = 0;
+        char qch = 0;
+        grew = 0;
+        while (*p) {
+            if (in_str) {
+                if (*p == '\\' && p[1]) { p += 2; continue; }
+                if (*p == qch) in_str = 0;
+                p++;
+                continue;
+            }
+            if (*p == '"' || *p == '\'') { qch = *p; in_str = 1; p++; continue; }
+            if (*p == '{') depth++;
+            else if (*p == '}') { if (depth) depth--; }
+            else if (*p == ';' && depth == 0) {
+                char name[128];
+                size_t n = (size_t)(p - start + 1);
+                cc__piece_name(start, n, name, sizeof(name));
+                if (name[0] && !cc__names_has(admitted, name) && cc__names_has(seen, name)) {
+                    cc_sb_append_cstr(&admitted, &adm_len, &adm_cap, name);
+                    cc_sb_append_cstr(&admitted, &adm_len, &adm_cap, ";");
+                    cc__collect_idents(start, n, &seen, &seen_len, &seen_cap);
+                    grew = 1;
+                }
+                p++;
+                start = p;
+                continue;
+            }
+            p++;
+        }
+    }
+    free(seen);
+    return admitted;
+}
+
+static int cc__names_has(const char* names, const char* name) {
+    char key[136];
+    if (!names || !name || !name[0]) return 0;
+    snprintf(key, sizeof(key), ";%s;", name);
+    return strstr(names, key) != NULL;
+}
+
+/* Every top-level type piece of `types` into the prelude, except the ones
+ * that declare a name `unless` already declares: the lowered C's spelling
+ * of a unit type wins over the source's. With `only`, a piece goes in
+ * only when it declares one of those names: the lowered C also carries
+ * the records a lowering made (closure environments, thunks), which name
+ * header types the executor's unit does not have. */
+static void cc__exec_append_type_pieces_ex(const char* types, const char* unless, const char* only);
+
+/* The pieces of `types` whose names `only` lists, as one text, in order. */
+static char* cc__type_pieces_text(const char* types, const char* only) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    const char* p = types ? types : "";
+    const char* start = p;
+    int depth = 0, in_str = 0;
+    char qch = 0;
+    while (*p) {
+        if (in_str) {
+            if (*p == '\\' && p[1]) { p += 2; continue; }
+            if (*p == qch) in_str = 0;
+            p++;
+            continue;
+        }
+        if (*p == '"' || *p == '\'') { qch = *p; in_str = 1; p++; continue; }
+        if (*p == '{') depth++;
+        else if (*p == '}') { if (depth) depth--; }
+        else if (*p == ';' && depth == 0) {
+            char name[128];
+            size_t n = (size_t)(p - start + 1);
+            cc__piece_name(start, n, name, sizeof(name));
+            if (name[0] && cc__names_has(only, name)) {
+                cc_sb_append(&out, &out_len, &out_cap, start, n);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+            }
+            p++;
+            while (*p == '\n' || *p == '\r' || *p == ' ' || *p == '\t') p++;
+            start = p;
+            continue;
+        }
+        p++;
+    }
+    if (!out) out = strdup("");
+    return out;
+}
+
+static void cc__exec_append_type_pieces(const char* types, const char* unless) {
+    cc__exec_append_type_pieces_ex(types, unless, NULL);
+}
+static void cc__exec_append_type_pieces_ex(const char* types, const char* unless, const char* only) {
+    const char* p;
+    const char* start;
+    int depth;
+    int in_str;
+    char qch;
+    if (!types || !types[0]) return;
+    p = types;
+    start = p;
+    depth = 0;
+    in_str = 0;
+    qch = 0;
+    while (*p) {
+        if (in_str) {
+            if (*p == '\\' && p[1]) { p += 2; continue; }
+            if (*p == qch) in_str = 0;
+            p++;
+            continue;
+        }
+        if (*p == '"' || *p == '\'') { qch = *p; in_str = 1; p++; continue; }
+        if (*p == '{') depth++;
+        else if (*p == '}') { if (depth) depth--; }
+        else if (*p == ';' && depth == 0) {
+            size_t n = (size_t)(p - start + 1);
+            char name[128];
+            const char* t = start;
+            while (*t == ' ' || *t == '\t' || *t == '\n' || *t == '\r') t++;
+            cc__piece_name(start, n, name, sizeof(name));
+            if (t < p && !(unless && name[0] && cc__types_declare(unless, name)) &&
+                !(only && !cc__names_has(only, name))) {
+                char* piece = (char*)malloc(n + 1);
+                if (piece) {
+                    memcpy(piece, start, n);
+                    piece[n] = '\0';
+                    cc_comptime_fn_registry_append_prelude(piece);
+                    free(piece);
+                }
+            }
+            p++;
+            while (*p == '\n' || *p == '\r' || *p == ' ' || *p == '\t') p++;
+            start = p;
+            continue;
+        }
+        p++;
+    }
 }
 
 /* One top-level typedef/struct/enum at a time so a later, larger extract
@@ -2336,15 +2786,63 @@ static void cc__exec_append_type_decls(const char* types) {
 }
 
 int cc_emit_plan_exec_comptime_blocks(const char* src, size_t len, const char* input_path) {
+    return cc_emit_plan_exec_comptime_blocks_ex(src, len, input_path, NULL, 0, len, 0, NULL, 0);
+}
+
+int cc_emit_plan_exec_comptime_blocks_ex(const char* src, size_t len, const char* input_path,
+                                         const char* lowered_c, size_t lowered_len,
+                                         size_t harvest_off, size_t prelude_mark,
+                                         CCLoweredBlock* blocks, size_t nblocks) {
     char* types;
     cc__exec_failed = 0;
     cc__diag_input_path = input_path;
+    cc__lowered_blocks = blocks;
+    cc__lowered_block_count = blocks ? nblocks : 0;
+    cc__lowered_unit_end = lowered_c ? harvest_off : (size_t)-1;
     cc_emit_plan_set_reflect_source(src, len);
-    /* File-scope typedef/enum/struct so isolated comptime TUs see
-     * MIME_HTML / CmdKind used as static_map initializers. */
-    types = src ? cc_ct_extract_type_decls_prelude(src, len) : NULL;
-    cc__exec_append_type_decls(types);
-    free(types);
+    cc_emit_plan_set_reflect_lowered(lowered_c, lowered_len);
+    if (lowered_c) {
+        /* The prelude the prepare passes grew since the harvest (a
+         * static_map call's value and entry typedefs, as the source spelled
+         * them) is re-based on the lowered C: the unit's types as the
+         * lowerer spelled them (a `@variant` is its enum and struct), then
+         * the types the header harvests carry, then whatever those appends
+         * named that neither declares (a value type from a header). */
+        char* kept = NULL;
+        {
+            const char* pre = cc_comptime_fn_registry_prelude_text();
+            size_t plen = pre ? strlen(pre) : 0;
+            if (pre && prelude_mark < plen) kept = strdup(pre + prelude_mark);
+            cc_comptime_fn_registry_prelude_truncate(prelude_mark);
+        }
+        types = cc_ct_extract_type_decls_prelude(lowered_c, lowered_len);
+        {
+            /* the unit's types the blocks name, in the lowerer's spelling,
+             * and the types those name in turn: the region TU's own, kept
+             * apart from the prelude the text-path blocks share */
+            char* names = cc__names_regions_need(types, blocks, nblocks);
+            free(cc__lowered_types);
+            cc__lowered_types = cc__type_pieces_text(types, names);
+            free(names);
+        }
+        free(cc__lowered_pp_view);
+        cc__lowered_pp_view = cc__pp_view_of(lowered_c, lowered_len);
+        if (harvest_off < len) {
+            char* ht = cc_ct_extract_type_decls_prelude(src + harvest_off, len - harvest_off);
+            cc__exec_append_type_decls(ht);
+            free(ht);
+        }
+        if (kept) cc__exec_append_type_pieces(kept, types);
+        free(kept);
+        free(types);
+    } else {
+        cc_emit_plan_set_reflect_source(src, len);
+        /* File-scope typedef/enum/struct so isolated comptime TUs see
+         * MIME_HTML / CmdKind used as static_map initializers. */
+        types = src ? cc_ct_extract_type_decls_prelude(src, len) : NULL;
+        cc__exec_append_type_decls(types);
+        free(types);
+    }
     if (cc_comptime_fn_registry_scan(src, len) < 0) {
         const char* err = cc_comptime_fn_registry_scan_error();
         fprintf(stderr, "%s: error: %s\n",

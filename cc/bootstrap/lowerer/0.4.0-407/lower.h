@@ -424,6 +424,9 @@ typedef struct CcLowerer {
 #line 75 "cc/lower/lower.cch"
     bool factories_ready; /* the compiled factories have been bound to their handlers */
     bool factories_ok; /* and the binding worked */
+#line 80 "cc/lower/lower.cch"
+    CcDeclList ct_fns;
+    CCVec_CCSlice ct_markers;
 } CcLowerer;
 
 CcLowerer cc_lowerer_new(CcUnit *u, CcIndex *ix, CcLowerOpts opts, CcDiags *ds);
@@ -456,7 +459,7 @@ uint32_t CcLowerer_temp_id(CcLowerer *L); /* the next N */
 /* The members of module `lower` (spec 1.7). A tool includes this face and
  * links the one object the members lower into; what a tool calls is the
  * exported surface the faces above declare. */
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lex_impl.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lex_impl.cch*/
 #line 1 "cc/lower/lex_impl.cch"
 
 /* Lexer: bodies for lex.cch. Included by the unit that owns the tape (a
@@ -667,9 +670,9 @@ bool CcToken_is_at(const CcToken *t, const char *word);
 #line 690 "cc/lower/lex_impl.cch"
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lex_impl.cch*/
-#line 110 "cc/lower/lower.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/diag_impl.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lex_impl.cch*/
+#line 115 "cc/lower/lower.cch"
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/diag_impl.cch*/
 #line 1 "cc/lower/diag_impl.cch"
 
 /* Diagnostics: bodies for diag.cch. Included by the unit that owns the
@@ -736,9 +739,9 @@ void CcDiags_print(const CcDiags *ds, FILE *out, CcSourceFn source, void *ctx);
 #line 219 "cc/lower/diag_impl.cch"
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/diag_impl.cch*/
-#line 111 "cc/lower/lower.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/ast_impl.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/diag_impl.cch*/
+#line 116 "cc/lower/lower.cch"
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/ast_impl.cch*/
 #line 1 "cc/lower/ast_impl.cch"
 
 /* AST support: constructors, kind names, predicates, span and location
@@ -855,9 +858,9 @@ CCSlice CcUnit_text(const CcUnit *u, CcSpan span);
 #line 417 "cc/lower/ast_impl.cch"
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/ast_impl.cch*/
-#line 112 "cc/lower/lower.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/parse_state.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/ast_impl.cch*/
+#line 117 "cc/lower/lower.cch"
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/parse_state.cch*/
 #line 1 "cc/lower/parse_state.cch"
 
 /* Parser state shared by every section of the parser: the token cursor,
@@ -2025,9 +2028,9 @@ typedef enum PpKind {
 #line 833 "cc/lower/parse_state.cch"
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/parse_state.cch*/
-#line 113 "cc/lower/lower.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/parse_fwd.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/parse_state.cch*/
+#line 118 "cc/lower/lower.cch"
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/parse_fwd.cch*/
 #line 1 "cc/lower/parse_fwd.cch"
 
 /* Forward declarations across the parser's sections. The sections are
@@ -2073,9 +2076,9 @@ static CcStmt *parse_parallel(P *p);
 static void parse_stmt_into(P *p, CcStmtList *list);
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/parse_fwd.cch*/
-#line 114 "cc/lower/lower.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/parse_exprs.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/parse_fwd.cch*/
+#line 119 "cc/lower/lower.cch"
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/parse_exprs.cch*/
 #line 1 "cc/lower/parse_exprs.cch"
 
 /* Parser section 3: expressions, templates, closures and initializers.
@@ -2357,9 +2360,9 @@ static CcExpr *parse_legacy_err_tail(P *p, CcExpr *lhs);
 #line 1897 "cc/lower/parse_exprs.cch"
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/parse_exprs.cch*/
-#line 115 "cc/lower/lower.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/parse_stmts.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/parse_exprs.cch*/
+#line 120 "cc/lower/lower.cch"
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/parse_stmts.cch*/
 #line 1 "cc/lower/parse_stmts.cch"
 
 /* Parser section 4: statements.
@@ -2598,9 +2601,9 @@ typedef struct PaDests {
 #line 1644 "cc/lower/parse_stmts.cch"
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/parse_stmts.cch*/
-#line 116 "cc/lower/lower.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/parse_types.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/parse_stmts.cch*/
+#line 121 "cc/lower/lower.cch"
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/parse_types.cch*/
 #line 1 "cc/lower/parse_types.cch"
 
 /* Parser section 2: types. Declaration specifiers, the builtin keyword
@@ -2830,9 +2833,9 @@ static CcType *parse_declarator(P *p, CcType *base, bool abstract_ok, CCSlice *n
 #line 1245 "cc/lower/parse_types.cch"
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/parse_types.cch*/
-#line 117 "cc/lower/lower.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/parse_decls.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/parse_types.cch*/
+#line 122 "cc/lower/lower.cch"
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/parse_decls.cch*/
 #line 1 "cc/lower/parse_decls.cch"
 
 /* Parser section 5: declarations and the unit. One declaration at a time
@@ -3033,9 +3036,9 @@ CcStmt *cc_parse_stmt_at(CcUnit *u, uint32_t first, CcParseOpts opts, CcDiags *d
 #line 1374 "cc/lower/parse_decls.cch"
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/parse_decls.cch*/
-#line 118 "cc/lower/lower.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/parse_walk.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/parse_decls.cch*/
+#line 123 "cc/lower/lower.cch"
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/parse_walk.cch*/
 #line 1 "cc/lower/parse_walk.cch"
 
 /* The generic walk (CcUnit_walk / CcStmt_walk / CcExpr_walk), the debug
@@ -3377,9 +3380,9 @@ CCResult_CcExprptr_CcDiag cc_parse_expr(CCSlice text, CcLoc at, CcUnit *u);
 #line 1757 "cc/lower/parse_walk.cch"
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/parse_walk.cch*/
-#line 119 "cc/lower/lower.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/print_impl.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/parse_walk.cch*/
+#line 124 "cc/lower/lower.cch"
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/print_impl.cch*/
 #line 1 "cc/lower/print_impl.cch"
 
 /* Printer: bodies for print.cch. Included by the unit that owns the tape
@@ -4128,9 +4131,9 @@ CCString CcStmt_spell(const CcStmt *s, const CcTape *tape, CCArena a);
 #line 2194 "cc/lower/print_impl.cch"
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/print_impl.cch*/
-#line 120 "cc/lower/lower.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/index_impl.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/print_impl.cch*/
+#line 125 "cc/lower/lower.cch"
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/index_impl.cch*/
 #line 1 "cc/lower/index_impl.cch"
 
 /* Declaration index: bodies for index.cch.
@@ -5155,9 +5158,9 @@ int CcIndex_arena_param(CcIndex *ix, CcSym *f);
 #line 4182 "cc/lower/index_impl.cch"
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/index_impl.cch*/
-#line 121 "cc/lower/lower.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/typing.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/index_impl.cch*/
+#line 126 "cc/lower/lower.cch"
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/typing.cch*/
 #line 1 "cc/lower/typing.cch"
 
 /* Receiver typing for UFCS call sites, shared by the index tool (which
@@ -5548,9 +5551,9 @@ void tw_unit(Walker *w);
 #line 1252 "cc/lower/typing.cch"
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/typing.cch*/
-#line 122 "cc/lower/lower.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_impl.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/typing.cch*/
+#line 127 "cc/lower/lower.cch"
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_impl.cch*/
 #line 1 "cc/lower/lower_impl.cch"
 
 /* Lowering: the pipeline and the node builders the steps share. Every
@@ -5687,7 +5690,7 @@ uint32_t CcLowerer_temp_id(CcLowerer *L);
  * needs this one before it is defined. */
 static void lw_drop_cc_only(CcLowerer *L);
 
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_comptime.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_comptime.cch*/
 #line 1 "cc/lower/lower_comptime.cch"
 
 /* Clean lowerer, step: `@comptime(expr)` in value position.
@@ -5784,10 +5787,61 @@ typedef struct XStep {
 
 #line 233 "cc/lower/lower_comptime.cch"
 
+/* ---- `@comptime { }` blocks: the language, lowered, run by the executor --
+ *
+ * A block is written in the language: it declares variants, spells
+ * `@string`, calls methods, switches on strings. The executor compiles C.
+ * So the block becomes a function of this unit, `static void
+ * __cc_ct_block_<k>(void) { ... }`, and every step lowers its body as it
+ * lowers any other. The printer sets the function between two marker
+ * comments and follows it with the anchor the driver splices the block's
+ * emits at; the driver cuts the region out of the C, hands it to the
+ * executor, and the unit the host compiles never sees it.
+ *
+ * A block is straight-line compile-time code: a closure, a dest or a task
+ * in it is refused, since their lowering hoists declarations to the end
+ * of the unit, outside the region the executor is handed.
+ *
+ * A block that registers type hooks (`cc_type_register(...)`) is the
+ * index's: read as it was written and dropped, as before. */
+
+typedef struct CtScan {
+    CcLowerer *L;
+    bool hooks; /* the block calls a hook registrar */
+    bool emits; /* the block spells an `@emit` */
+    CcSpan bad; /* a construct a block may not carry; last=0 when none */
+    CCSlice bad_what;
+} CtScan;
+
+
+#line 274 "cc/lower/lower_comptime.cch"
+
+
+#line 289 "cc/lower/lower_comptime.cch"
+
+
+#line 302 "cc/lower/lower_comptime.cch"
+
+/* The byte offset of the block's `{` in the unit's text: what the driver's
+ * blanking wrote into the anchor it looks for. */
+
+#line 315 "cc/lower/lower_comptime.cch"
+
+
+#line 346 "cc/lower/lower_comptime.cch"
+
+
+#line 390 "cc/lower/lower_comptime.cch"
+
+/* After the steps: each block's function between its markers, its anchor
+ * after it. The driver reads the region out of the C by the markers. */
+
+#line 427 "cc/lower/lower_comptime.cch"
+
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_comptime.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_comptime.cch*/
 #line 288 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_generics.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_generics.cch*/
 #line 1 "cc/lower/lower_generics.cch"
 
 /* Clean lowerer, step: generic instances. `Vec::[T]` in a type position is
@@ -6214,9 +6268,9 @@ void CcLowerer_generics(CcLowerer *L);
 #line 1795 "cc/lower/lower_generics.cch"
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_generics.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_generics.cch*/
 #line 289 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_slices.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_slices.cch*/
 #line 1 "cc/lower/lower_slices.cch"
 
 /* Clean lowerer, step: slice values. The slice types themselves are an
@@ -6413,9 +6467,9 @@ void CcLowerer_slice_args(CcLowerer *L);
 #line 629 "cc/lower/lower_slices.cch"
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_slices.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_slices.cch*/
 #line 290 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_strings.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_strings.cch*/
 #line 1 "cc/lower/lower_strings.cch"
 
 /* Clean lowerer, step: string templates. `@string(`...`, arena)` builds a
@@ -6736,9 +6790,9 @@ void CcLowerer_strings(CcLowerer *L);
 #line 1031 "cc/lower/lower_strings.cch"
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_strings.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_strings.cch*/
 #line 291 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_closures.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_closures.cch*/
 #line 1 "cc/lower/lower_closures.cch"
 
 /* Clean lowerer, step: closures. `(params) => body` becomes three C
@@ -7375,9 +7429,9 @@ void CcLowerer_closures(CcLowerer *L);
 #line 1769 "cc/lower/lower_closures.cch"
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_closures.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_closures.cch*/
 #line 292 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_create.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_create.cch*/
 #line 1 "cc/lower/lower_create.cch"
 
 /* Clean lowerer, step: `@create`. `T x = @create(args);` calls whatever
@@ -7485,9 +7539,9 @@ void CcLowerer_create(CcLowerer *L);
 #line 349 "cc/lower/lower_create.cch"
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_create.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_create.cch*/
 #line 293 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_forin.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_forin.cch*/
 #line 1 "cc/lower/lower_forin.cch"
 
 /* Clean lowerer, step: walks. `@for (x in xs)` is an index loop over the
@@ -7780,9 +7834,9 @@ void CcLowerer_forin(CcLowerer *L);
 #line 1035 "cc/lower/lower_forin.cch"
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_forin.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_forin.cch*/
 #line 294 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_deadline.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_deadline.cch*/
 #line 1 "cc/lower/lower_deadline.cch"
 
 /* Clean lowerer, step: deadline scopes. `@with_deadline(d) { ... }` runs
@@ -7819,9 +7873,9 @@ void CcLowerer_deadline(CcLowerer *L);
 #line 87 "cc/lower/lower_deadline.cch"
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_deadline.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_deadline.cch*/
 #line 295 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_chan.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_chan.cch*/
 #line 1 "cc/lower/lower_chan.cch"
 
 /* Clean lowerer, step: channels. An endpoint is declared by what travels
@@ -8176,9 +8230,9 @@ void CcLowerer_chan(CcLowerer *L);
 #line 985 "cc/lower/lower_chan.cch"
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_chan.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_chan.cch*/
 #line 296 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_async.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_async.cch*/
 #line 1 "cc/lower/lower_async.cch"
 
 /* Clean lowerer, step: asynchronous functions. `@async Ret f(a)` is a
@@ -8573,9 +8627,9 @@ void CcLowerer_async(CcLowerer *L);
 #line 1318 "cc/lower/lower_async.cch"
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_async.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_async.cch*/
 #line 297 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_parallel.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_parallel.cch*/
 #line 1 "cc/lower/lower_parallel.cch"
 
 /* Clean lowerer, step: `@parallel`. The arms of
@@ -8591,9 +8645,8 @@ void CcLowerer_async(CcLowerer *L);
  * addresses.
  *
  * The runtime may refuse to spawn (`cc_parallel_deny_fast`), and a spawn
- * may fail. A wait-for expression arm is then spelled on the caller — the
- * assignment as written, not a trip through the thunk. A serial or
- * raising arm still runs the thunk, so those bodies are emitted once.
+ * may fail. Both fall back to running the thunk inline, so the arms run
+ * either way and the difference is only whether they overlapped.
  *
  * `spawn` is the same block with one promise added: every arm but the
  * first is running while the block is, so the runtime may not deny one and
@@ -8609,7 +8662,7 @@ void CcLowerer_async(CcLowerer *L);
 #ifndef CC_LOWER_PARALLEL_CCH
 #define CC_LOWER_PARALLEL_CCH
 
-#line 35 "cc/lower/lower_parallel.cch"
+#line 34 "cc/lower/lower_parallel.cch"
 typedef struct PCap {
     CCSlice name;
     CcType *type;
@@ -8637,35 +8690,10 @@ static __attribute__((constructor)) void cc__ti_reg_CCVec_PCapRef(void) {
     cc_type_info_register(&__cc_ti_CCVec_PCapRef);
 }
 #endif
-#line 41 "cc/lower/lower_parallel.cch"
+#line 40 "cc/lower/lower_parallel.cch"
 
-#line 41 "cc/lower/lower_parallel.cch"
+#line 40 "cc/lower/lower_parallel.cch"
 typedef CCVec_PCapRef PCapList;
-
-#ifndef CC_HEADER_VEC_CCVec_PCapList
-#define CC_HEADER_VEC_CCVec_PCapList
-/* generic CCVec_PCapList */
-
-#ifdef CC_HAS_CCSLICE_PCapList
-CC_VEC_DECL_ARENA_TSLICE(PCapList, CCVec_PCapList, CCSlice_PCapList)
-#else
-CC_VEC_DECL_ARENA(PCapList, CCVec_PCapList)
-#endif
-static inline CCVec_PCapList cc__CCVec_PCapList_new(CCArena __a) {
-    return CCVec_PCapList_init(__a, 0);
-}
-#define CCVec_PCapList_new(ar) cc__CCVec_PCapList_new(CC__ARENA_HANDLE(ar))
-
-/* cc_type_info for CCVec_PCapList (serdes) */
-static const cc_type_info __cc_ti_CCVec_PCapList = { .name = "CCVec_PCapList", .mangled = "CCVec_PCapList", .id = 0, .size = (uint32_t)(sizeof(CCVec_PCapList)), .align = (uint32_t)(_Alignof(CCVec_PCapList)), .kind = (uint16_t)(CC_TK_GENERIC_INST), .nfields = 0, .flags = (uint16_t)(CC_TF_ERASABLE), ._reserved = 0, .fields = NULL, .copy_fn = NULL, .drop_fn = NULL };
-static __attribute__((constructor)) void cc__ti_reg_CCVec_PCapList(void) {
-    cc_type_info_register(&__cc_ti_CCVec_PCapList);
-}
-#endif
-#line 42 "cc/lower/lower_parallel.cch"
-
-#line 42 "cc/lower/lower_parallel.cch"
-typedef CCVec_PCapList PCapLists;
 
 /* A site that binds a handle: the handle outlives the block, so its
  * declaration goes before it, in the list the block sits in. */
@@ -8674,7 +8702,7 @@ typedef struct PBind {
     CCSlice name;
     CcType *type;
     bool destroy;
-#line 52 "cc/lower/lower_parallel.cch"
+#line 50 "cc/lower/lower_parallel.cch"
     CcStmt *destroy_body;
 } PBind;
 typedef PBind *PBindRef;
@@ -8699,9 +8727,9 @@ static __attribute__((constructor)) void cc__ti_reg_CCVec_PBindRef(void) {
     cc_type_info_register(&__cc_ti_CCVec_PBindRef);
 }
 #endif
-#line 55 "cc/lower/lower_parallel.cch"
+#line 53 "cc/lower/lower_parallel.cch"
 
-#line 55 "cc/lower/lower_parallel.cch"
+#line 53 "cc/lower/lower_parallel.cch"
 typedef CCVec_PBindRef PBindList;
 
 typedef struct PStep {
@@ -8710,24 +8738,24 @@ typedef struct PStep {
     uint32_t next_id;
     CcDeclList made; /* the thunks, in order */
     CcDeclList protos;
-#line 65 "cc/lower/lower_parallel.cch"
+#line 63 "cc/lower/lower_parallel.cch"
     CCString fwd; /* their forward declarations */
     PBindList binds; /* sites whose handle is declared before the block */
     CcStmtList stages; /* `@stage` statements a `@parallel wait for` claimed */
     CcDecl *at_decl; /* the unit declaration the walk is inside */
     CcDecl *first_host; /* the first one that needed a forward declaration */
     CcType *fn_ret;
-#line 72 "cc/lower/lower_parallel.cch"
+#line 70 "cc/lower/lower_parallel.cch"
     CcStmtList eh_top;
-#line 75 "cc/lower/lower_parallel.cch"
+#line 73 "cc/lower/lower_parallel.cch"
     bool eh_any;
     int dest_depth;
-#line 78 "cc/lower/lower_parallel.cch"
+#line 76 "cc/lower/lower_parallel.cch"
     size_t eh_in_scope;
-#line 80 "cc/lower/lower_parallel.cch"
+#line 78 "cc/lower/lower_parallel.cch"
     CCVec_size_t eh_marks; /* `eh_in_scope` as it was on entering each open statement */
     bool any;
-#line 85 "cc/lower/lower_parallel.cch"
+#line 83 "cc/lower/lower_parallel.cch"
     CCVec_uint32_t off_from;
     CCVec_uint32_t off_to;
 } PStep;
@@ -8739,7 +8767,7 @@ typedef struct PStep {
  * spec allows exactly the two, and a scan that skipped a third would leave
  * the block parallel for a user who wrote the pragma to make it not so. */
 
-#line 113 "cc/lower/lower_parallel.cch"
+#line 111 "cc/lower/lower_parallel.cch"
 
 /* The `#pragma(@parallel) off` regions of the unit, read off the token tape.
  * The pragma is one preprocessor token whether it stands at file scope or
@@ -8747,22 +8775,22 @@ typedef struct PStep {
  * question a site asks is the same either way: was the toggle nearest above
  * me `off`? A region runs to the matching `on`, or to the end of the file. */
 
-#line 158 "cc/lower/lower_parallel.cch"
+#line 156 "cc/lower/lower_parallel.cch"
 
 
-#line 172 "cc/lower/lower_parallel.cch"
+#line 170 "cc/lower/lower_parallel.cch"
 
 
-#line 177 "cc/lower/lower_parallel.cch"
+#line 175 "cc/lower/lower_parallel.cch"
 
 
-#line 182 "cc/lower/lower_parallel.cch"
+#line 180 "cc/lower/lower_parallel.cch"
 
 /* ---- captures ----------------------------------------------------------- */
 
 /* The local a gated site tests once: true when the arms run in order. */
 
-#line 190 "cc/lower/lower_parallel.cch"
+#line 188 "cc/lower/lower_parallel.cch"
 
 typedef struct PScan {
     PStep *st;
@@ -8773,19 +8801,19 @@ typedef struct PScan {
 } PScan;
 
 
-#line 209 "cc/lower/lower_parallel.cch"
+#line 207 "cc/lower/lower_parallel.cch"
 
 
-#line 232 "cc/lower/lower_parallel.cch"
+#line 230 "cc/lower/lower_parallel.cch"
 
 /* Every use of `name` read through `through` instead. */
 typedef struct PRef {
     CCArena arena;
-#line 235 "cc/lower/lower_parallel.cch"
+#line 233 "cc/lower/lower_parallel.cch"
     CCSlice name;
-#line 235 "cc/lower/lower_parallel.cch"
+#line 233 "cc/lower/lower_parallel.cch"
     CCSlice through;
-#line 235 "cc/lower/lower_parallel.cch"
+#line 233 "cc/lower/lower_parallel.cch"
 } PRef;
 
 /* The captured name, read through the pointer the environment carries.
@@ -8795,10 +8823,10 @@ typedef struct PRef {
  * the captured name would lose its receiver's type. The node types from
  * the pointer's own declaration. */
 
-#line 261 "cc/lower/lower_parallel.cch"
+#line 259 "cc/lower/lower_parallel.cch"
 
 
-#line 274 "cc/lower/lower_parallel.cch"
+#line 272 "cc/lower/lower_parallel.cch"
 
 /* What a site asks of an arm, and the name that answered. Which of these
  * captures does the arm declare again, which one does it write a copy of,
@@ -8811,20 +8839,20 @@ typedef struct PAsk {
 } PAsk;
 
 
-#line 305 "cc/lower/lower_parallel.cch"
+#line 303 "cc/lower/lower_parallel.cch"
 
 /* The block inside `@serial { ... }`, as an ordinary block: the arm is
  * where the ordering is decided, so the marker itself has nothing left to
  * say to C. */
 
-#line 323 "cc/lower/lower_parallel.cch"
+#line 321 "cc/lower/lower_parallel.cch"
 
 /* ---- the generated C ---------------------------------------------------- */
 
 /* The environment one arm carries: a pointer per name it reads, and the
  * one it writes. */
 
-#line 362 "cc/lower/lower_parallel.cch"
+#line 360 "cc/lower/lower_parallel.cch"
 
 /* `static void* <thunk>(void*);` and the site slot the runtime keys its
  * deny decision on. */
@@ -8833,14 +8861,14 @@ typedef struct PAsk {
  * this unit. Above the first declaration that needed one, every type it
  * reads is declared -- and nothing before it calls a thunk. */
 
-#line 372 "cc/lower/lower_parallel.cch"
+#line 370 "cc/lower/lower_parallel.cch"
 
 
-#line 384 "cc/lower/lower_parallel.cch"
+#line 382 "cc/lower/lower_parallel.cch"
 
 /* `(*__e->__cc_out)`: where an arm's one outer name lives on the caller. */
 
-#line 390 "cc/lower/lower_parallel.cch"
+#line 388 "cc/lower/lower_parallel.cch"
 
 /* An exit a body converts, and where it goes instead.
  *
@@ -8863,34 +8891,34 @@ typedef struct PForExit {
 
 /* The names the block's own exit goes by. */
 
-#line 415 "cc/lower/lower_parallel.cch"
+#line 413 "cc/lower/lower_parallel.cch"
 
 /* A `return` inside a closure the arm holds leaves that closure, not the
  * arm: the walk stops at one rather than claiming its exit. */
 
-#line 427 "cc/lower/lower_parallel.cch"
+#line 425 "cc/lower/lower_parallel.cch"
 
 
-#line 436 "cc/lower/lower_parallel.cch"
+#line 434 "cc/lower/lower_parallel.cch"
 
 /* A dest body is a fiber: it has no frame to hand a value to. */
 
-#line 446 "cc/lower/lower_parallel.cch"
+#line 444 "cc/lower/lower_parallel.cch"
 
 /* The first `return` an arm makes, or the first that hands a value back. */
 
-#line 460 "cc/lower/lower_parallel.cch"
+#line 458 "cc/lower/lower_parallel.cch"
 
 /* A bare `e !>` -- one that names no handler of its own. */
 
-#line 470 "cc/lower/lower_parallel.cch"
+#line 468 "cc/lower/lower_parallel.cch"
 
 
-#line 481 "cc/lower/lower_parallel.cch"
+#line 479 "cc/lower/lower_parallel.cch"
 
 /* Whether a block already opens with a handler of its own. */
 
-#line 507 "cc/lower/lower_parallel.cch"
+#line 505 "cc/lower/lower_parallel.cch"
 
 /* `return` inside an arm.
  *
@@ -8902,80 +8930,48 @@ typedef struct PForExit {
  * A cell-less arm is one whose exit carries nothing -- a fiber of a handle
  * -- and leaving is the whole of it. */
 
-#line 549 "cc/lower/lower_parallel.cch"
+#line 547 "cc/lower/lower_parallel.cch"
 
 
-#line 566 "cc/lower/lower_parallel.cch"
+#line 564 "cc/lower/lower_parallel.cch"
 
 /* The thunk: the environment, the names it reads, then the arm. */
 
-#line 664 "cc/lower/lower_parallel.cch"
+#line 662 "cc/lower/lower_parallel.cch"
 
-/* The spawn, and the join that always runs: a refused or failed wait-for
- * spawn spells an expression arm on the caller, or runs the thunk for a
- * serial / raising body, so the arm happens either way. */
+/* The spawn, and the join that always runs: a refused or failed spawn
+ * runs the same thunk inline, so the arm happens either way. */
 
-#line 672 "cc/lower/lower_parallel.cch"
+#line 669 "cc/lower/lower_parallel.cch"
 
 
-#line 678 "cc/lower/lower_parallel.cch"
+#line 675 "cc/lower/lower_parallel.cch"
 
-/* The fields of the environment, assigned so a wait-for admit can skip
- * zeroing the struct. Dest-live fills at the same time it allocates. */
+/* The environment an arm runs from: declared, zeroed and filled. Nothing
+ * here starts anything, so it stands on both schedules -- a gated site
+ * fills the environment once and then decides whether to spawn. */
 
-#line 710 "cc/lower/lower_parallel.cch"
-
-/* The environment an arm runs from. Wait-for declares a compact join
- * handle and leaves the env unfilled until admit: a denied CHURN site
- * never takes a 128-byte CCTask or writes the env. Dest-live / `spawn`
- * still plant CCTask and fill immediately. */
-
-#line 751 "cc/lower/lower_parallel.cch"
+#line 730 "cc/lower/lower_parallel.cch"
 
 /* Offering the arm to the runtime. This is the half a gate skips: when the
  * site runs its arms in order, nothing is spawned and the thunks are
  * called on the caller instead. */
 
-#line 827 "cc/lower/lower_parallel.cch"
+#line 796 "cc/lower/lower_parallel.cch"
 
 
-#line 833 "cc/lower/lower_parallel.cch"
+#line 802 "cc/lower/lower_parallel.cch"
 
 /* The arm on the caller: the same thunk a spawn would have run, called
- * straight through. Serial / raising wait-for arms still reach here; an
- * expression wait-for is spelled instead. */
+ * straight through. The arms are emitted once and the gate picks the route
+ * to them, so this is how the sequential schedule reaches an arm. */
 
-#line 848 "cc/lower/lower_parallel.cch"
+#line 817 "cc/lower/lower_parallel.cch"
 
+
+#line 852 "cc/lower/lower_parallel.cch"
 
 #line 854 "cc/lower/lower_parallel.cch"
-
-
-#line 894 "cc/lower/lower_parallel.cch"
-
-static void pl_splice(CcStmt *dst, CcStmt *src);
-
-/* A dest or capture already on the helper's parameter list. */
-
-#line 907 "cc/lower/lower_parallel.cch"
-
-
-#line 912 "cc/lower/lower_parallel.cch"
-
-/* The spawn/join of a wait-for, off the sequential recursive frame.
- * Locals of this helper must not live in the function that walks skip /
- * `!pred`: that walk is the cheap tree, and a 128-byte frame + TLS there
- * is the tax. */
-
-#line 974 "cc/lower/lower_parallel.cch"
-
-
-#line 1005 "cc/lower/lower_parallel.cch"
-
-
-#line 1021 "cc/lower/lower_parallel.cch"
-
-#line 1023 "cc/lower/lower_parallel.cch"
 /* ---- `@parallel for (i in lo..hi)` --------------------------------------
  *
  * A walk over a range, split rather than queued: the span halves until a
@@ -8992,13 +8988,13 @@ static void pl_splice(CcStmt *dst, CcStmt *src);
  * so the body is left exactly as written. Anything else is reached through
  * its address. */
 
-#line 1045 "cc/lower/lower_parallel.cch"
+#line 876 "cc/lower/lower_parallel.cch"
 
 
-#line 1050 "cc/lower/lower_parallel.cch"
+#line 881 "cc/lower/lower_parallel.cch"
 
 
-#line 1055 "cc/lower/lower_parallel.cch"
+#line 886 "cc/lower/lower_parallel.cch"
 
 static CcStmt *pl_raise_handler(CcLowerer *L, CCSlice ety, CCSlice cell, CcStmt *leave, CcSpan sp);
 
@@ -9006,10 +9002,10 @@ static CcStmt *pl_raise_handler(CcLowerer *L, CCSlice ety, CCSlice cell, CcStmt 
  * `xk`: 0 nothing yet, 1 a `break`, 2 a `return` (`rv`), 3 a raise (`err`,
  * present when `err_ty` names a type). */
 
-#line 1097 "cc/lower/lower_parallel.cch"
+#line 928 "cc/lower/lower_parallel.cch"
 
 
-#line 1109 "cc/lower/lower_parallel.cch"
+#line 940 "cc/lower/lower_parallel.cch"
 
 /* `break` and `return v` inside the walked body.
  *
@@ -9019,21 +9015,21 @@ static CcStmt *pl_raise_handler(CcLowerer *L, CCSlice ety, CCSlice cell, CcStmt 
  * that belongs to a loop the body itself opened is that loop's, and is left
  * alone -- which is why this walks with a depth rather than visiting. */
 
-#line 1125 "cc/lower/lower_parallel.cch"
+#line 956 "cc/lower/lower_parallel.cch"
 
 
-#line 1222 "cc/lower/lower_parallel.cch"
+#line 1053 "cc/lower/lower_parallel.cch"
 
-#line 1224 "cc/lower/lower_parallel.cch"
+#line 1055 "cc/lower/lower_parallel.cch"
 /* The walk. One function, called on the caller and on every half the
  * runtime accepts. The leaf loop is emitted once: a span of one skips the
  * split, and a split whose spawn was refused falls through to it. */
 
-#line 1380 "cc/lower/lower_parallel.cch"
+#line 1211 "cc/lower/lower_parallel.cch"
 
 /* The thunk the runtime starts a half through. */
 
-#line 1426 "cc/lower/lower_parallel.cch"
+#line 1257 "cc/lower/lower_parallel.cch"
 
 /* What the exit cell carries: the type the function the arms stand in
  * returns. A `void` one leaves nothing to carry but the fact that an arm
@@ -9043,37 +9039,37 @@ static CcStmt *pl_raise_handler(CcLowerer *L, CCSlice ety, CCSlice cell, CcStmt 
 /* The function the arms stand in returns a Result: its C return type is
  * the box, which no arm return here can spell. */
 
-#line 1441 "cc/lower/lower_parallel.cch"
+#line 1272 "cc/lower/lower_parallel.cch"
 
 
-#line 1461 "cc/lower/lower_parallel.cch"
+#line 1292 "cc/lower/lower_parallel.cch"
 
 /* A capture that is its own identity: an atomic and a `CCParallel` are the
  * object, not a value with a copy. A bound arm outlives the block, so it
  * reads what it captured as it was when the arm started -- except these,
  * which the arm reaches on the caller or does not reach at all. */
 
-#line 1475 "cc/lower/lower_parallel.cch"
+#line 1306 "cc/lower/lower_parallel.cch"
 
 /* The copy a bound arm holds. An array and a pointer carry the caller's
  * own object either way; everything else is a copy the caller never
  * reads back. */
 
-#line 1489 "cc/lower/lower_parallel.cch"
+#line 1320 "cc/lower/lower_parallel.cch"
 
 /* Writing that copy, taking its address, or calling a method on it reads
  * as work on the frame object and is not: the frame moved on before the
  * arm ran. */
 
-#line 1514 "cc/lower/lower_parallel.cch"
+#line 1345 "cc/lower/lower_parallel.cch"
 
 
-#line 1528 "cc/lower/lower_parallel.cch"
+#line 1359 "cc/lower/lower_parallel.cch"
 
 /* The labels a body declares, so a `goto` to one of them is a jump that
  * stays inside it. */
 
-#line 1539 "cc/lower/lower_parallel.cch"
+#line 1370 "cc/lower/lower_parallel.cch"
 
 /* The first statement that leaves a dest body: a `break` or `continue` that
  * no loop or switch inside the body owns, or a `goto` to a label the body
@@ -9082,16 +9078,16 @@ static CcStmt *pl_raise_handler(CcLowerer *L, CCSlice ety, CCSlice cell, CcStmt 
  * outside it for a jump to reach. Walked with a depth, as `pl_for_exits`
  * is: a loop the body opened owns its own `break`. */
 
-#line 1601 "cc/lower/lower_parallel.cch"
+#line 1432 "cc/lower/lower_parallel.cch"
 
 /* Whether a dest body -- an arm of a bound construct, the body of an attach
  * -- ends only by running out or by `return;`. Says so at the statement
  * that leaves it otherwise. */
 
-#line 1633 "cc/lower/lower_parallel.cch"
+#line 1464 "cc/lower/lower_parallel.cch"
 
 
-#line 1676 "cc/lower/lower_parallel.cch"
+#line 1507 "cc/lower/lower_parallel.cch"
 
 /* The arms of a `@parallel` that binds a handle are fibers: the statement
  * ends and the caller walks on while they still run, so each one is handed
@@ -9103,7 +9099,7 @@ static CcStmt *pl_raise_handler(CcLowerer *L, CCSlice ety, CCSlice cell, CcStmt 
  * The `@parallel(h) { ... }` form asks the same question through
  * `pl_dest_body_ok`; this is the bound-handle form of the same site. */
 
-#line 1743 "cc/lower/lower_parallel.cch"
+#line 1574 "cc/lower/lower_parallel.cch"
 
 /* ---- one site ----------------------------------------------------------- */
 
@@ -9112,45 +9108,45 @@ static CcStmt *pl_raise_handler(CcLowerer *L, CCSlice ety, CCSlice cell, CcStmt 
  * `srv->app`. An arm that pauses through the handle reaches the caller's
  * own object, so that name is captured by address rather than copied. */
 
-#line 1763 "cc/lower/lower_parallel.cch"
+#line 1594 "cc/lower/lower_parallel.cch"
 
 /* `!>.wait()!>`: the tail joins the block where it stands, so the handle
  * the block made is consumed by the time the statement ends. A bare `!>`
  * hands that handle back instead, and something has to be holding it. */
 
-#line 1779 "cc/lower/lower_parallel.cch"
+#line 1610 "cc/lower/lower_parallel.cch"
 
 
-#line 1790 "cc/lower/lower_parallel.cch"
+#line 1621 "cc/lower/lower_parallel.cch"
 
 /* `} !> @destroy [{ D }]` after the block: the hook the bind carries. */
 typedef struct PTailDestroy {
-#line 1792 "cc/lower/lower_parallel.cch"
+#line 1623 "cc/lower/lower_parallel.cch"
     bool hit;
-#line 1792 "cc/lower/lower_parallel.cch"
+#line 1623 "cc/lower/lower_parallel.cch"
     CcStmt *body;
-#line 1792 "cc/lower/lower_parallel.cch"
+#line 1623 "cc/lower/lower_parallel.cch"
 } PTailDestroy;
 
 
-#line 1802 "cc/lower/lower_parallel.cch"
+#line 1633 "cc/lower/lower_parallel.cch"
 
 
-#line 1815 "cc/lower/lower_parallel.cch"
+#line 1646 "cc/lower/lower_parallel.cch"
 
 /* The handle a site declares: hoisted above the block, into the list the
  * block sits in, with the `@destroy` the tail wrote on the declaration. */
 
-#line 1828 "cc/lower/lower_parallel.cch"
+#line 1659 "cc/lower/lower_parallel.cch"
 
 /* An arm that waits on the very handle the block is filling. The arms run
  * before the block joins, so the wait is on a block that has not begun to
  * join: it waits for itself. */
 
-#line 1847 "cc/lower/lower_parallel.cch"
+#line 1678 "cc/lower/lower_parallel.cch"
 
 
-#line 1861 "cc/lower/lower_parallel.cch"
+#line 1692 "cc/lower/lower_parallel.cch"
 
 /* How a site names the handle it fills. `CCParallel h = @parallel …`
  * declares one; `h = @parallel …` and `wk.h = @parallel …` name one that
@@ -9159,31 +9155,25 @@ typedef struct PTailDestroy {
  * reaches it the same way either way. Only the declaration differs, and
  * that is what `declared` is for. */
 
-#line 1883 "cc/lower/lower_parallel.cch"
+#line 1714 "cc/lower/lower_parallel.cch"
 
 
-#line 1913 "cc/lower/lower_parallel.cch"
+#line 1744 "cc/lower/lower_parallel.cch"
 
 static CcStmt *pl_unwrap_stmt(CcLowerer *L, CcExpr *call, CcSpan sp);
 
 /* `@err(e);` forwards to the handler in scope the way a bare `!>` does. */
 
-#line 1925 "cc/lower/lower_parallel.cch"
+#line 1756 "cc/lower/lower_parallel.cch"
 
 /* A body whose error reaches nothing of its own -- a bare `!>`, or an
  * `@err(e);` forward -- and so raises through the join. A block that opens
  * with a handler of its own belongs to that one. */
 
-#line 1941 "cc/lower/lower_parallel.cch"
+#line 1772 "cc/lower/lower_parallel.cch"
 
 
-#line 1946 "cc/lower/lower_parallel.cch"
-
-
-#line 1959 "cc/lower/lower_parallel.cch"
-
-
-#line 1968 "cc/lower/lower_parallel.cch"
+#line 1777 "cc/lower/lower_parallel.cch"
 
 /* The error type the exit cell carries: the one the handlers of the
  * function take. The join raises the cell into the innermost handler in scope after
@@ -9191,7 +9181,7 @@ static CcStmt *pl_unwrap_stmt(CcLowerer *L, CcExpr *call, CcSpan sp);
  * type, or the arm could not say which of them the cell is for. Empty when
  * there is none or they disagree, with the diagnostic emitted. */
 
-#line 2003 "cc/lower/lower_parallel.cch"
+#line 1812 "cc/lower/lower_parallel.cch"
 
 /* `@errhandler(E __cc_pe) { <claim>; <leave> }`: the handler an arm that
  * raises opens with. It is not the handler the function carries and holds
@@ -9201,20 +9191,20 @@ static CcStmt *pl_unwrap_stmt(CcLowerer *L, CcExpr *call, CcSpan sp);
  * function emits. `cell` is the pointer the arm reaches the cell through;
  * `leave` is the statement that ends the arm once the cell is claimed. */
 
-#line 2024 "cc/lower/lower_parallel.cch"
+#line 1833 "cc/lower/lower_parallel.cch"
 
 /* The handler goes first in the arm block, ahead of the statement that
  * unwraps. It is added after the exit rewriting has walked the arm, so the
  * `return` it ends in is its own and not an exit the cell records. */
 
-#line 2042 "cc/lower/lower_parallel.cch"
+#line 1851 "cc/lower/lower_parallel.cch"
 
 /* `@errhandler((<cell>.err));` after the join: the error an arm recorded,
  * raised where the block stands, into the handler the function carries. The
  * delegation spelling is the statement form of `!>`: the handler runs and,
  * unless it leaves, the statement after the block follows. */
 
-#line 2058 "cc/lower/lower_parallel.cch"
+#line 1867 "cc/lower/lower_parallel.cch"
 
 /* `e !>;` as an arm, and any arm whose block unwraps.
  *
@@ -9230,10 +9220,10 @@ static CcStmt *pl_unwrap_stmt(CcLowerer *L, CcExpr *call, CcSpan sp);
  * record after the join. Here the arm is only checked for a handler to
  * raise into. */
 
-#line 2094 "cc/lower/lower_parallel.cch"
+#line 1903 "cc/lower/lower_parallel.cch"
 
 
-#line 2104 "cc/lower/lower_parallel.cch"
+#line 1913 "cc/lower/lower_parallel.cch"
 
 /* `@parallel { arms } [tail]` under `#pragma(@parallel) off`: the arms run
  * where the block stands, in the order they were written, on the frame the
@@ -9249,10 +9239,10 @@ static CcStmt *pl_unwrap_stmt(CcLowerer *L, CcExpr *call, CcSpan sp);
  * The tail goes with the statement it was written on. There is no task to
  * wait for, so there is nothing for `!>.wait()!>` to join. */
 
-#line 2160 "cc/lower/lower_parallel.cch"
+#line 1969 "cc/lower/lower_parallel.cch"
 
 
-#line 2724 "cc/lower/lower_parallel.cch"
+#line 2367 "cc/lower/lower_parallel.cch"
 
 /* `@parallel(h) { body }`: one more arm on a handle that already exists.
  *
@@ -9265,43 +9255,43 @@ static CcStmt *pl_unwrap_stmt(CcLowerer *L, CcExpr *call, CcSpan sp);
  * The captures are the bound shape: a copy taken when the arm starts,
  * except the handle itself, which is the caller's own. */
 
-#line 2739 "cc/lower/lower_parallel.cch"
+#line 2382 "cc/lower/lower_parallel.cch"
 
 /* `cc_parallel_admit_ok(&h)` before the admit: a dest that was cancelled
  * takes no more work, and the refusal is `CC_ERR_CANCELLED`. On the frame
  * it is the unwrap the site was written as, into the enclosing handler.
  * Inside a dest body it is a seam, not a user `!>`: the fiber ends. */
 
-#line 2777 "cc/lower/lower_parallel.cch"
+#line 2420 "cc/lower/lower_parallel.cch"
 
 
-#line 2861 "cc/lower/lower_parallel.cch"
+#line 2504 "cc/lower/lower_parallel.cch"
 
 /* A `@stage` this step already claimed for the walk it belongs to. */
 
-#line 2870 "cc/lower/lower_parallel.cch"
+#line 2513 "cc/lower/lower_parallel.cch"
 
 /* A `@stage` below the top level of a walk's body: it orders that walk's
  * tickets, so it has to be a statement of the walk, not of something inside
  * it. Reported here because the walk's own statement is about to be dropped
  * and its body with it. */
 
-#line 2889 "cc/lower/lower_parallel.cch"
+#line 2532 "cc/lower/lower_parallel.cch"
 
 
-#line 2911 "cc/lower/lower_parallel.cch"
+#line 2554 "cc/lower/lower_parallel.cch"
 
-#line 2913 "cc/lower/lower_parallel.cch"
+#line 2556 "cc/lower/lower_parallel.cch"
 /* `(T)(e)` as a node. */
 
-#line 2922 "cc/lower/lower_parallel.cch"
+#line 2565 "cc/lower/lower_parallel.cch"
 
 /* The site: build the environment, walk the whole span on the caller, then
  * read back whichever exit arrived first. */
 
-#line 3066 "cc/lower/lower_parallel.cch"
+#line 2709 "cc/lower/lower_parallel.cch"
 
-#line 3068 "cc/lower/lower_parallel.cch"
+#line 2711 "cc/lower/lower_parallel.cch"
 /* ---- `@parallel [seq (c)] wait (gate) for (i in lo..hi)` -----------------
  *
  * A walk whose tickets are handed out under a gate: the turnstile caps how
@@ -9324,14 +9314,14 @@ static CcStmt *pl_unwrap_stmt(CcLowerer *L, CcExpr *call, CcSpan sp);
  * drained and re-raises the first one where the walk stood. */
 
 
-#line 3093 "cc/lower/lower_parallel.cch"
+#line 2736 "cc/lower/lower_parallel.cch"
 
 /* C the later steps have nothing to say about: the pool's own plumbing. */
 
-#line 3098 "cc/lower/lower_parallel.cch"
+#line 2741 "cc/lower/lower_parallel.cch"
 
 
-#line 3114 "cc/lower/lower_parallel.cch"
+#line 2757 "cc/lower/lower_parallel.cch"
 
 /* What the site, the runners and the body all read: the gate and the
  * nursery the pool shares, one slot per runner for the error it saw, the
@@ -9339,20 +9329,20 @@ static CcStmt *pl_unwrap_stmt(CcLowerer *L, CcExpr *call, CcSpan sp);
  * environment the body reaches its captures through. */
 /* Whether `nm` is one of the names a `cache (...)` clause adopts. */
 
-#line 3129 "cc/lower/lower_parallel.cch"
+#line 2772 "cc/lower/lower_parallel.cch"
 
 
-#line 3182 "cc/lower/lower_parallel.cch"
+#line 2825 "cc/lower/lower_parallel.cch"
 
 
-#line 3192 "cc/lower/lower_parallel.cch"
+#line 2835 "cc/lower/lower_parallel.cch"
 
 /* A runner: one ticket at a time off the channel, through the one body,
  * until the site closes the channel behind the last ticket it sent. */
 
-#line 3210 "cc/lower/lower_parallel.cch"
+#line 2853 "cc/lower/lower_parallel.cch"
 
-#line 3212 "cc/lower/lower_parallel.cch"
+#line 2855 "cc/lower/lower_parallel.cch"
 /* ---- `@stage` inside a walked body -------------------------------------- */
 
 static int pl_pw_gate_form(Walker *w, CcExpr *g);
@@ -9363,32 +9353,32 @@ static bool pl_stage_is_face(int gform);
  * arguments are evaluated), 2 passed. The exit reads it, so a ticket that
  * left the body early still hands the phase on to its successor. */
 
-#line 3225 "cc/lower/lower_parallel.cch"
+#line 2868 "cc/lower/lower_parallel.cch"
 
 /* The cell that holds argument `j` of stage `k`, evaluated once per ticket:
  * the wait, the pass and the discharge at the exit all name the cell. */
 
-#line 3232 "cc/lower/lower_parallel.cch"
+#line 2875 "cc/lower/lower_parallel.cch"
 
 /* The three parts of a `@stage`, or false for a statement that is not one. */
 
-#line 3249 "cc/lower/lower_parallel.cch"
+#line 2892 "cc/lower/lower_parallel.cch"
 
 /* The gate as the pointer the turnstile calls take. A gate held by value is
  * taken by address; one that is already a pointer is passed on. The inner
  * node is shared with every other call this stage makes, so the capture
  * rewrite reaches all of them through the one that stays in the body. */
 
-#line 3258 "cc/lower/lower_parallel.cch"
+#line 2901 "cc/lower/lower_parallel.cch"
 
 
-#line 3272 "cc/lower/lower_parallel.cch"
+#line 2915 "cc/lower/lower_parallel.cch"
 
 /* `<call> !>;`: a turn the ticket cannot take fails the way the body's own
  * `!>` does, through the handler this function carries -- the slot, the
  * cancel, and the one exit. */
 
-#line 3287 "cc/lower/lower_parallel.cch"
+#line 2930 "cc/lower/lower_parallel.cch"
 
 /* `@stage (gate, phase, ticket) { body }` in the body of a walk, as the
  * ordered section it is: evaluate the arguments into this ticket's cells,
@@ -9412,7 +9402,7 @@ static bool pl_stage_is_face(int gform);
  * this reaches them, and the exit spells the calls once the names they
  * read are the ones the body sees. */
 
-#line 3389 "cc/lower/lower_parallel.cch"
+#line 3032 "cc/lower/lower_parallel.cch"
 
 /* `@stage (gate, phase, ticket) { body }` in an inert walk: the turn is
  * taken and passed on the frame the caller has, against a turnstile that
@@ -9424,7 +9414,7 @@ static bool pl_stage_is_face(int gform);
  * and dropping them would make an over-subscribed gate look like one that
  * simply let every ticket through. */
 
-#line 3450 "cc/lower/lower_parallel.cch"
+#line 3093 "cc/lower/lower_parallel.cch"
 
 /* `@parallel [wait (gate)] for (i in lo..hi) [worker (w)] { body }` under
  * `#pragma(@parallel) off`: the linear program the walk stands for. One
@@ -9440,29 +9430,29 @@ static bool pl_stage_is_face(int gform);
  * join. A `!>` inside the body reaches the handler this function carries,
  * the same as any other statement of it. */
 
-#line 3503 "cc/lower/lower_parallel.cch"
+#line 3146 "cc/lower/lower_parallel.cch"
 
 /* A name a top-level statement of the body declares: a local of the body,
  * in scope where a `@stage` of that body spells its gate and arguments. A
  * name declared in a nested block is out of scope there, so a stage that
  * spells it reads the enclosing frame's. */
 
-#line 3534 "cc/lower/lower_parallel.cch"
+#line 3177 "cc/lower/lower_parallel.cch"
 
 /* The first name a stage's gate or arguments read that the body declares. */
 typedef struct PTicketQ {
-#line 3536 "cc/lower/lower_parallel.cch"
+#line 3179 "cc/lower/lower_parallel.cch"
     CcStmt *body;
-#line 3536 "cc/lower/lower_parallel.cch"
+#line 3179 "cc/lower/lower_parallel.cch"
     CCSlice hit;
-#line 3536 "cc/lower/lower_parallel.cch"
+#line 3179 "cc/lower/lower_parallel.cch"
 } PTicketQ;
 
 
-#line 3549 "cc/lower/lower_parallel.cch"
+#line 3192 "cc/lower/lower_parallel.cch"
 
 
-#line 3567 "cc/lower/lower_parallel.cch"
+#line 3210 "cc/lower/lower_parallel.cch"
 
 /* What a `@stage` of a walked body may name. The gate is the turnstile the
  * tickets are ordered on, and its `wait`/`pass`/`fail` take a phase and a
@@ -9475,23 +9465,23 @@ typedef struct PTicketQ {
  * variable, the `worker` binder and the enclosing frame's names do; a name
  * the body declares does not, and a successor parked on it would hang. */
 
-#line 3625 "cc/lower/lower_parallel.cch"
+#line 3268 "cc/lower/lower_parallel.cch"
 
 /* The body, once. Called on a runner and on the caller, told which ticket it
  * is and which slot is its own; the ticket is already held when it starts and
  * is given back before it returns, so both schedules keep the gate balanced. */
 
-#line 3833 "cc/lower/lower_parallel.cch"
+#line 3476 "cc/lower/lower_parallel.cch"
 
 /* A bound wait-for names one of two things. A typed `CCParallel` is the live
  * handle the tickets pause and resume through, and outlives the walk. Anything
  * else -- a `bool` the site declares, or an lvalue it assigns -- is the walk's
  * own answer: did every ticket run? */
 
-#line 3845 "cc/lower/lower_parallel.cch"
+#line 3488 "cc/lower/lower_parallel.cch"
 
 
-#line 3850 "cc/lower/lower_parallel.cch"
+#line 3493 "cc/lower/lower_parallel.cch"
 
 /* What `wait (...)` names: 2 a turnstile reached by pointer, 1 one held by
  * value, 0 not a turnstile at all. The pool caps on the caller's own, so a
@@ -9500,18 +9490,18 @@ typedef struct PTicketQ {
 /* The name a gate's type carries, and whether the gate is already a
  * pointer: the same gate reached two ways is the same gate. */
 
-#line 3868 "cc/lower/lower_parallel.cch"
+#line 3511 "cc/lower/lower_parallel.cch"
 
 /* The gate a `@parallel wait (...)` caps its pool on. A `CCTurnstileRW` is
  * two stages around one core, and the pool is capped on that core. */
 
-#line 3879 "cc/lower/lower_parallel.cch"
+#line 3522 "cc/lower/lower_parallel.cch"
 
 /* The gate a `@stage` orders its ticket on. Either the whole turnstile,
  * which names the phase inside it, or one of the stages a `CCTurnstileRW`
  * embeds -- `ts.read` is a stage of its own and takes only the ticket. */
 
-#line 3891 "cc/lower/lower_parallel.cch"
+#line 3534 "cc/lower/lower_parallel.cch"
 
 /* A stage named through a face takes the ticket alone; one named through
  * the whole turnstile takes the phase beside it. */
@@ -9522,50 +9512,50 @@ typedef struct PTicketQ {
 /* The declaration of `nm` in the function the site stands in: the type,
  * initializer and destroy hook the extras take. */
 typedef struct PDeclQ {
-#line 3900 "cc/lower/lower_parallel.cch"
+#line 3543 "cc/lower/lower_parallel.cch"
     CCSlice name;
-#line 3900 "cc/lower/lower_parallel.cch"
+#line 3543 "cc/lower/lower_parallel.cch"
     CcVarDecl v;
-#line 3900 "cc/lower/lower_parallel.cch"
+#line 3543 "cc/lower/lower_parallel.cch"
     CcDecl *at;
-#line 3900 "cc/lower/lower_parallel.cch"
+#line 3543 "cc/lower/lower_parallel.cch"
     bool hit;
-#line 3900 "cc/lower/lower_parallel.cch"
+#line 3543 "cc/lower/lower_parallel.cch"
 } PDeclQ;
 
 
-#line 3920 "cc/lower/lower_parallel.cch"
+#line 3563 "cc/lower/lower_parallel.cch"
 
 
-#line 3942 "cc/lower/lower_parallel.cch"
+#line 3585 "cc/lower/lower_parallel.cch"
 
 
-#line 3946 "cc/lower/lower_parallel.cch"
+#line 3589 "cc/lower/lower_parallel.cch"
 
 /* The names `cache (...)` adopts, as written. */
 
-#line 3961 "cc/lower/lower_parallel.cch"
+#line 3604 "cc/lower/lower_parallel.cch"
 
 /* The extras of a cached name, as the site declares them. */
 
-#line 3967 "cc/lower/lower_parallel.cch"
+#line 3610 "cc/lower/lower_parallel.cch"
 
 /* Whether `nm` is read inside an `@stage` block of the body. A stage is
  * loop-carried identity; a cached name is an instance no ticket can name,
  * and the spec keeps the two apart. */
 typedef struct PNameQ {
-#line 3971 "cc/lower/lower_parallel.cch"
+#line 3614 "cc/lower/lower_parallel.cch"
     CCSlice name;
-#line 3971 "cc/lower/lower_parallel.cch"
+#line 3614 "cc/lower/lower_parallel.cch"
     bool hit;
-#line 3971 "cc/lower/lower_parallel.cch"
+#line 3614 "cc/lower/lower_parallel.cch"
 } PNameQ;
 
 
-#line 3983 "cc/lower/lower_parallel.cch"
+#line 3626 "cc/lower/lower_parallel.cch"
 
 
-#line 4014 "cc/lower/lower_parallel.cch"
+#line 3657 "cc/lower/lower_parallel.cch"
 
 /* ---- the drop of a cached name ------------------------------------------
  *
@@ -9580,48 +9570,48 @@ typedef struct PNameQ {
  * scope at the declaration, which is where D forwarded to before. */
 
 
-#line 4031 "cc/lower/lower_parallel.cch"
+#line 3674 "cc/lower/lower_parallel.cch"
 
 /* `return;` in a D that hands back a Result: the exit is `return cc_ok();`. */
 
-#line 4048 "cc/lower/lower_parallel.cch"
+#line 3691 "cc/lower/lower_parallel.cch"
 
 /* The drop function of `cn`, appended to the unit like a thunk, its
  * prototype beside the forward block; the declaration then destroys through
  * it. `*raises` says whether the call sites unwrap. */
 
-#line 4180 "cc/lower/lower_parallel.cch"
+#line 3823 "cc/lower/lower_parallel.cch"
 
 /* ---- the cache extras: allocated per runner slot past the first, cold-
  * initialized, checked out exclusively by the runner, destroyed at the
  * join ------------------------------------------------------------------ */
 
 
-#line 4216 "cc/lower/lower_parallel.cch"
+#line 3859 "cc/lower/lower_parallel.cch"
 
 
-#line 4265 "cc/lower/lower_parallel.cch"
+#line 3908 "cc/lower/lower_parallel.cch"
 
 
-#line 4340 "cc/lower/lower_parallel.cch"
+#line 3983 "cc/lower/lower_parallel.cch"
 
 /* The site: open the pool, hand out the tickets under the gate, then read
  * what the pool left behind. */
 
-#line 4729 "cc/lower/lower_parallel.cch"
+#line 4372 "cc/lower/lower_parallel.cch"
 
 /* `} !>` after the body: the tail that says a ticket error leaves the site.
  * A join that keeps its Result says something else, and the site has nowhere
  * to put the error it collected. */
 
-#line 4744 "cc/lower/lower_parallel.cch"
+#line 4387 "cc/lower/lower_parallel.cch"
 
 /* A `break` that belongs to the walk itself, not to a loop the body opened.
  * It makes the site's join answer a question -- did every ticket run? -- so
  * the walk is the bound form (`bool fin = ${"@"}parallel ... !>.wait()!>`) and
  * a site with nowhere to put that answer is refused. */
 
-#line 4784 "cc/lower/lower_parallel.cch"
+#line 4427 "cc/lower/lower_parallel.cch"
 
 /* A `goto` in a walked body that leaves it. The body becomes a function of
  * its own, so a label the site can see is one the body cannot jump to; C
@@ -9635,36 +9625,36 @@ typedef struct PGoto {
 } PGoto;
 
 
-#line 4806 "cc/lower/lower_parallel.cch"
+#line 4449 "cc/lower/lower_parallel.cch"
 
 
-#line 4833 "cc/lower/lower_parallel.cch"
+#line 4476 "cc/lower/lower_parallel.cch"
 
 
-#line 4851 "cc/lower/lower_parallel.cch"
+#line 4494 "cc/lower/lower_parallel.cch"
 
 /* One name, asked of a body: is it declared there, is it read there. */
 typedef struct PCacheQ {
-#line 4853 "cc/lower/lower_parallel.cch"
+#line 4496 "cc/lower/lower_parallel.cch"
     CCSlice want;
-#line 4853 "cc/lower/lower_parallel.cch"
+#line 4496 "cc/lower/lower_parallel.cch"
     bool found;
-#line 4853 "cc/lower/lower_parallel.cch"
+#line 4496 "cc/lower/lower_parallel.cch"
 } PCacheQ;
 
 
-#line 4871 "cc/lower/lower_parallel.cch"
+#line 4514 "cc/lower/lower_parallel.cch"
 
 
-#line 4882 "cc/lower/lower_parallel.cch"
+#line 4525 "cc/lower/lower_parallel.cch"
 
 /* Does the walk's body declare `nm` itself? */
 
-#line 4896 "cc/lower/lower_parallel.cch"
+#line 4539 "cc/lower/lower_parallel.cch"
 
 /* Does an `@stage` of this body name `nm`? */
 
-#line 4926 "cc/lower/lower_parallel.cch"
+#line 4569 "cc/lower/lower_parallel.cch"
 
 /* `cache (name)` adopts a declaration of the enclosing scope so every ticket
  * of the walk shares one object instead of each getting its own.
@@ -9676,7 +9666,7 @@ typedef struct PCacheQ {
  * lowering the walk, so they are answered here rather than behind the refusal
  * below, which is about this emit and not about the program. */
 
-#line 4994 "cc/lower/lower_parallel.cch"
+#line 4637 "cc/lower/lower_parallel.cch"
 
 /* `@parallel [seq (c)] [wait (ts)] for (i in lo..hi) [worker (w)] [cache (…)]`.
  *
@@ -9687,35 +9677,35 @@ typedef struct PCacheQ {
  * says nothing about what is wrong. So every path out of this function
  * replaces the statement with an empty block, which takes the tail with it. */
 
-#line 5127 "cc/lower/lower_parallel.cch"
+#line 4770 "cc/lower/lower_parallel.cch"
 
 /* The walk records a `return` into a cell typed by the function it leaves. */
 
-#line 5174 "cc/lower/lower_parallel.cch"
+#line 4817 "cc/lower/lower_parallel.cch"
 
 
-#line 5215 "cc/lower/lower_parallel.cch"
+#line 4858 "cc/lower/lower_parallel.cch"
 
 /* The handle a bound site fills is the caller's, so its declaration goes
  * before the block, in the list the block sits in. */
 
-#line 5228 "cc/lower/lower_parallel.cch"
+#line 4871 "cc/lower/lower_parallel.cch"
 
 static void pl_declare_binds(PStep *st, CcStmtList *list);
 
 
-#line 5246 "cc/lower/lower_parallel.cch"
+#line 4889 "cc/lower/lower_parallel.cch"
 
 
-#line 5288 "cc/lower/lower_parallel.cch"
+#line 4931 "cc/lower/lower_parallel.cch"
 
 
-#line 5392 "cc/lower/lower_parallel.cch"
+#line 5035 "cc/lower/lower_parallel.cch"
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_parallel.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_parallel.cch*/
 #line 298 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_variants.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_variants.cch*/
 #line 1 "cc/lower/lower_variants.cch"
 
 /* Clean lowerer, step: variants. A variant declaration lowers to its tag
@@ -10491,9 +10481,9 @@ void CcLowerer_variants(CcLowerer *L);
 #line 2647 "cc/lower/lower_variants.cch"
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_variants.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_variants.cch*/
 #line 299 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_ufcs.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_ufcs.cch*/
 #line 1 "cc/lower/lower_ufcs.cch"
 
 /* Clean lowerer, step: UFCS. `x.m(args)` and `p->m(args)` become the call
@@ -11315,9 +11305,9 @@ void CcLowerer_ufcs(CcLowerer *L);
 #line 3121 "cc/lower/lower_ufcs.cch"
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_ufcs.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_ufcs.cch*/
 #line 300 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_results.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_results.cch*/
 #line 1 "cc/lower/lower_results.cch"
 
 /* Results: `T!>(E)` types, cc_ok / cc_err, the `!>` and `?>` forms,
@@ -11942,9 +11932,9 @@ void CcLowerer_results(CcLowerer *L);
 #line 2378 "cc/lower/lower_results.cch"
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_results.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_results.cch*/
 #line 301 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_asargs.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_asargs.cch*/
 #line 1 "cc/lower/lower_asargs.cch"
 
 /* Clean lowerer, step: `as:` coercion at a call.
@@ -12008,9 +11998,9 @@ void CcLowerer_asargs(CcLowerer *L);
 #line 220 "cc/lower/lower_asargs.cch"
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_asargs.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_asargs.cch*/
 #line 302 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_strswitch.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_strswitch.cch*/
 #line 1 "cc/lower/lower_strswitch.cch"
 
 /* String case labels: `switch (slice) { case "GET": ... }`.
@@ -12089,9 +12079,9 @@ void CcLowerer_strswitch(CcLowerer *L);
 #line 242 "cc/lower/lower_strswitch.cch"
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_strswitch.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_strswitch.cch*/
 #line 303 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_cleanup.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_cleanup.cch*/
 #line 1 "cc/lower/lower_cleanup.cch"
 
 /* Clean lowerer, step: scope-exit cleanup. `@defer stmt;`, `@defer(ok|err)`,
@@ -12331,9 +12321,9 @@ void CcLowerer_cleanup(CcLowerer *L);
 #line 693 "cc/lower/lower_cleanup.cch"
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_cleanup.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_cleanup.cch*/
 #line 304 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_own.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_own.cch*/
 #line 1 "cc/lower/lower_own.cch"
 
 /* Clean lowerer, step: ownership and borrow safety.
@@ -12846,7 +12836,7 @@ void CcLowerer_own(CcLowerer *L);
 #line 1548 "cc/lower/lower_own.cch"
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_own.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_own.cch*/
 #line 305 "cc/lower/lower_impl.cch"
 
 /* The banner every lowered TU starts with: the generator, and the two
@@ -13031,33 +13021,38 @@ void CcLowerer_includes(CcLowerer *L);
  * `_Static_assert`. Left as written they are a member of a call to
  * `cc_type_of`, which returns a pointer: the host explains a `.` on a
  * pointer, about a line that has no pointer in it. */
-
-#line 1019 "cc/lower/lower_impl.cch"
+typedef struct TofEnv {
+    CcLowerer *L;
+    bool in_block; /* inside a `@comptime { }` block: the executor's reflection answers */
+} TofEnv;
 
 
 #line 1027 "cc/lower/lower_impl.cch"
+
+
+#line 1053 "cc/lower/lower_impl.cch"
 
 /* ---- forward typedefs -------------------------------------------------- */
 
 /* The name a `Name*` field type spells; empty when the field is not a
  * pointer to a named type. */
 
-#line 1045 "cc/lower/lower_impl.cch"
+#line 1071 "cc/lower/lower_impl.cch"
 
 /* Every name a record body reaches through a pointer. */
 
-#line 1068 "cc/lower/lower_impl.cch"
+#line 1094 "cc/lower/lower_impl.cch"
 
 /* The tag of a `struct Tag { ... }` / `union Tag { ... }` written as a
  * definition; empty when the type is not one, or is anonymous. */
 
-#line 1085 "cc/lower/lower_impl.cch"
+#line 1111 "cc/lower/lower_impl.cch"
 
 
-#line 1095 "cc/lower/lower_impl.cch"
+#line 1121 "cc/lower/lower_impl.cch"
 
 
-#line 1105 "cc/lower/lower_impl.cch"
+#line 1131 "cc/lower/lower_impl.cch"
 
 /* `typedef struct RtxNode { RtxNode* next; } RtxNode;`
  *
@@ -13069,13 +13064,13 @@ void CcLowerer_includes(CcLowerer *L);
  * `typedef struct { ... } Name;` has no forward to write, and no body can
  * reach it before it closes either. */
 
-#line 1162 "cc/lower/lower_impl.cch"
+#line 1188 "cc/lower/lower_impl.cch"
 
 void CcLowerer_lower_unit(CcLowerer *L);
-#line 1191 "cc/lower/lower_impl.cch"
+#line 1219 "cc/lower/lower_impl.cch"
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_impl.cch*/
-#line 123 "cc/lower/lower.cch"
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_impl.cch*/
+#line 128 "cc/lower/lower.cch"
 
 #endif

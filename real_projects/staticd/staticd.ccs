@@ -5,10 +5,10 @@
  * Sessions are rows. Dest is the worker (`CCServer`: poll → step →
  * accept → reap). A ready fd fills, then one HTTP request or WS frames
  * (no dest-per-conn). A file body is a cursor on the row; a step sends
- * one chunk. POLLOUT waits while left. Workers: start 2 (1 if the cap
- * is 1), grow with live conns (one accept per poll). Cap is ncpu/2
- * (`--workers 0`) or N. `--workers 1` stays one dest — the isolate
- * receipt. `Cfg` is policy (root/pages/index/list/extra).
+ * one chunk. POLLOUT waits while left. Workers: the engine's own level
+ * (saturation and stalls), capped at ncpu; `--workers N` lowers the cap
+ * for experiments and `--workers 1` stays one dest — the isolate receipt.
+ * `Cfg` is policy (root/pages/index/list/extra).
  * `CCIoAct` is wait|wait_out|close; TLS wraps once at accept (`srv.tls_fail`
  * counts drops). Pages are an early arm (`pages_serve`; MISS → static).
  *
@@ -214,47 +214,28 @@ typedef @typeview Encode on Enc {
     txt: void;
 };
 
-/* static_map value is the MimeTagKind ordinal (arm order above).
- * Comptime cannot name variant kind tags yet — keep ints in sync with arms. */
-typedef struct MimeSpec {
-    int kind;
-} MimeSpec;
-
+/* The extension table: the value is the tag itself. */
 typedef struct MimeEntry {
     const char* key;
-    MimeSpec value;
+    MimeTag value;
 } MimeEntry;
 
 @comptime {
     MimeEntry mime_entries[] = {
-        { ".html", { 1 } },
-        { ".htm",  { 1 } },
-        { ".css",  { 2 } },
-        { ".js",   { 3 } },
-        { ".json", { 4 } },
-        { ".png",  { 5 } },
-        { ".jpg",  { 6 } },
-        { ".jpeg", { 6 } },
-        { ".gif",  { 7 } },
-        { ".svg",  { 8 } },
-        { ".txt",  { 9 } },
-        { ".bin",  { 0 } },
+        { ".html", (MimeTag){ .html = {} } },
+        { ".htm",  (MimeTag){ .html = {} } },
+        { ".css",  (MimeTag){ .css = {} } },
+        { ".js",   (MimeTag){ .js = {} } },
+        { ".json", (MimeTag){ .json = {} } },
+        { ".png",  (MimeTag){ .png = {} } },
+        { ".jpg",  (MimeTag){ .jpeg = {} } },
+        { ".jpeg", (MimeTag){ .jpeg = {} } },
+        { ".gif",  (MimeTag){ .gif = {} } },
+        { ".svg",  (MimeTag){ .svg = {} } },
+        { ".txt",  (MimeTag){ .txt = {} } },
+        { ".bin",  (MimeTag){ .octet = {} } },
     };
     static_map("mime_ext", mime_entries, CC_STATIC_MAP_ASCII_CI);
-}
-
-/* Arm order matches MimeTagKind (0..). */
-static MimeTag mime_from_kind(int kind) {
-    if (kind == 1) return (MimeTag){ .html = {} };
-    if (kind == 2) return (MimeTag){ .css = {} };
-    if (kind == 3) return (MimeTag){ .js = {} };
-    if (kind == 4) return (MimeTag){ .json = {} };
-    if (kind == 5) return (MimeTag){ .png = {} };
-    if (kind == 6) return (MimeTag){ .jpeg = {} };
-    if (kind == 7) return (MimeTag){ .gif = {} };
-    if (kind == 8) return (MimeTag){ .svg = {} };
-    if (kind == 9) return (MimeTag){ .txt = {} };
-    return (MimeTag){ .octet = {} };
 }
 
 static const char* mime_cstr(MimeTag t) {
@@ -301,8 +282,8 @@ static void session_touch_headers(Session* s, time_t now) {
     s->io->deadline = dl;
 }
 
-/* The session row (`srv.row_size`): zeroed at accept, initialized on the
- * first step, cleared by session_drop when the session ends. */
+/* The session row (`srv.row(sizeof(Session), session_drop)`): zeroed at
+ * accept, initialized on the first step, cleared when the session ends. */
 static Session* session_of(CCIoSess* io) {
     Session* s = (Session*)io->app;
     if (s->io) return s;
@@ -500,12 +481,12 @@ static Method method_of(char[:] name) {
     }
 }
 
-static const MimeSpec mime_octet_spec = { 0 }; /* MimeTag_octet */
+static const MimeTag mime_octet = { .octet = {} };
 
 static const char* content_type_for(char[:] path) {
     char[:] ext = path_ext(path);
-    const MimeSpec* spec = mime_ext_get(ext) ?> &mime_octet_spec;
-    return mime_cstr(mime_from_kind(spec->kind));
+    const MimeTag* t = mime_ext_get(ext) ?> &mime_octet;
+    return mime_cstr(*t);
 }
 
 static bool !>(CCError) enc_date_ka(Enc* c, int ka) {
@@ -848,16 +829,16 @@ static CCIoAct !>(CCError) handle_http(Session* s, Enc* conn, Cfg* cfg) {
 
     /* Pages arm: MISS falls through to static. */
     if (cfg->pages_fd >= 0) {
-        PagesKind kind = PAGES_MISS;
+        Pages found = { .miss = {} };
         ScriptReply reply = pages_serve(cfg->pages_fd, url, req.method, url,
-                                        query_s, empty, conn->arena, &kind)
+                                        query_s, empty, conn->arena, &found)
                 !>(e) {
             int code = 500;
             const char* msg = "pages failed\n";
-            if (kind == PAGES_NO_ENGINE) {
+            if (found.kind == .no_engine) {
                 code = 501;
                 msg = "pages: engine not attached\n";
-            } else if (kind == PAGES_BOTH) {
+            } else if (found.kind == .both) {
                 msg = "pages: both .js and .py\n";
             } else if (e.message && e.message[0]) {
                 msg = e.message;
@@ -867,7 +848,7 @@ static CCIoAct !>(CCError) handle_http(Session* s, Enc* conn, Cfg* cfg) {
                                          : "Internal Server Error",
                              msg, method_sends_body(meth), ka);
         };
-        if (kind == PAGES_JS || kind == PAGES_PY)
+        if (found.kind == .js || found.kind == .py)
             return pages_send(s, conn, &reply, meth, ka);
     }
 
@@ -1190,11 +1171,16 @@ int main(int argc, char** argv) {
         .extra = cc_slice_empty(),
     };
 
-    CCServer srv;
-    srv.init(nworkers);
+    CCServer srv = cc_server_listen(listen) !>(err) {
+        const char* msg = cc_error_str(err);
+        eprintln(@string(`listen: ${msg}`, @scratch));
+        return 1;
+    };
+    @defer srv.close();
+    if (nworkers > 0) srv.workers_max = nworkers;   /* --workers: a ceiling for experiments */
     srv.sec_tls_hs = g_sec_tls_hs;
     srv.sec_first_byte = g_sec_header_total;
-    @defer srv.close();
+    srv.row(sizeof(Session), session_drop);
 
     char[:] root_view = opts.root;
     if (root_view.len == 0) {
@@ -1324,11 +1310,6 @@ int main(int argc, char** argv) {
         cfg.extra = extra.as_slice();
     }
 
-    srv.listen(listen) !>(err) {
-        const char* msg = cc_error_str(err);
-        eprintln(@string(`listen: ${msg}`, @scratch));
-        return 1;
-    };
     {
         int start = srv.start_n();
         int cap = srv.workers_max;
@@ -1342,11 +1323,8 @@ int main(int argc, char** argv) {
             println(@string(`staticd on ${listen} root=${root_c} workers=${start}..${cap}`, @scratch));
     }
     CCSignal stop = cc_signal_watch2(SIGINT, SIGTERM) !> @destroy;
-    Cfg* cfgp = &cfg;
-    srv.row_size = sizeof(Session);
-    srv.row_drop = session_drop;
-    srv.serve(&stop, (CCIoSess* io) => [cfgp] {
-        @errhandler(CCError e) { (void)e; io->apply((CCIoAct){ .close = {} }); }
+    srv.serve(&stop, (CCIoSess* io) => [cfgp = &cfg] {
+        @errhandler(CCError e) { (void)e; io->close(); }
         Session* s = session_of(io);
         cc_arena_stack(enc_a, K_OUT_BUF);
         Enc enc = (Enc){ .arena = enc_a, .out = cc_string_new(), .extra = cfgp->extra };

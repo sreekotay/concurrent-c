@@ -222,9 +222,9 @@ except nginx `10mb.bin` @ c=100 (empty — Darwin `sendfile` wedge).
 ## Shape
 
 ```
-main → open cfg → srv.listen / load_tls → serve
-  srv.serve(stop, (io) => [cfg] { session_app(io->app) ; io->apply(a) })
-  worker × 2..cap               // grow every 64 conns; cap ncpu/2
+main → srv = cc_server_listen(addr) → load_tls → srv.row(Session) → serve
+  srv.serve(&stop, (io) => [cfgp = &cfg] { session_app(io->app) ; io->apply(a) })
+  worker × 2..cap               // grow on saturation / stall; cap ncpu
     wait.poll → fill → step → drain queue → arm → accept → reap
     session_app: send chunk | handle_http | WS frame
     handle_http: pages arm (MISS→static) | file | upgrade
@@ -233,7 +233,7 @@ main → open cfg → srv.listen / load_tls → serve
 Keep-alive and WebSocket keep the row in the table. Workers share the
 listen fd; one above its share of live sessions leaves it to a lighter
 one. Each session slot carries the engine row, the read window, and
-`Session` (`srv.row_size`), zeroed at accept and cleared by `session_drop`
+`Session` (`srv.row(...)`), zeroed at accept and cleared by `session_drop`
 at the end. The waiter tape holds interest; readiness is `CCReady`. TLS
 wraps at `bind_conn`. `CCIoAct` is `wait` / `wait_out` / `close`; a step
 that does not answer is a counted fault. Handshake drops increment

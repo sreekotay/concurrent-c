@@ -3,24 +3,35 @@
  * <ccc/std/server.cch> — a socket server: listen, accept, poll, and hand
  * each ready session to one closure, one step at a time. No protocol.
  *
+ *   CCServer srv = cc_server_listen(addr) !>;
+ *   @defer srv.close();
+ *   srv.serve(&stop, (CCIoSess* io) => [] {
+ *       char[:] in = io->window();
+ *       io->write(in) !>(e) { (void)e; io->close(); return; };
+ *       io->consume(in.len);
+ *       io->wait();
+ *   }) !>;
+ *
  *   CCIoSess  — a session: socket, optional TLS, read window, output
  *               queue, and the page's row behind `app`
- *   CCServer  — listen, tls mats, dest, stop, live / worker ratchet
+ *   CCServer  — the listen socket, TLS mats, the workers, stop
  *   CCIoAct   — wait | wait_out | close: what the step wants next
  *
  * The step. `serve` calls the closure with a session whose window holds
  * bytes the page has not consumed. The page parses what it can, queues
- * its reply with `write`, consumes what it used, and answers with
- * `apply`: `wait` for more input, `wait_out` when it streams its own
- * bytes with `try_write` and was told BUSY, `close` to end the session
- * once everything queued has drained. A step that returns without
- * answering is a page fault: the engine closes the session and counts
- * it (`step_faults`), never carries the previous answer forward.
+ * its reply with `write`, consumes what it used, and answers: `wait` for
+ * more input, `wait_out` when it streams its own bytes with `try_write`
+ * and was told BUSY, `close` to end the session once everything queued
+ * has drained. `apply(a)` answers with a `CCIoAct` a helper returned. A
+ * step that returns without answering is a page fault: the engine closes
+ * the session and counts it (`step_faults`), never carries the previous
+ * answer forward.
  *
- * The row. `row_size` bytes of page state travel with every session,
- * zeroed at accept and reachable as `app`; `row_drop` runs once when the
- * session ends, on a row that may never have been stepped. The page
- * allocates nothing per connection and never sees a dead session.
+ * The row. A page whose sessions carry state says so once, before serve:
+ * `srv.row(sizeof(Row), row_drop)`. The engine keeps that many bytes with
+ * every session, zeroed at accept and reachable as `app`; `row_drop` runs
+ * once when the session ends, on a row that may never have been stepped.
+ * A page whose step needs nothing between steps has no row.
  *
  * Output. `write` queues; the engine drains the queue after the step and
  * on every writable wake, and does not step the page again until it is
@@ -34,24 +45,29 @@
  * Interest is want_out || pending_out. `.wait` clears only the page bit;
  * `.close` becomes `closing` until pending_out drains, then dead.
  *
- * Workers. The engine finds its own level: init(0) caps at the processor
- * count; every worker accepts and a heavier one leaves the listen socket
+ * Stop. `serve(&stop, …)` runs until the `CCSignal` delivers (or `NULL`:
+ * until `shutdown`), then admits nothing more and returns once every
+ * session is gone.
+ *
+ * Workers. The engine finds its own level, capped at the processor
+ * count: every worker accepts and a heavier one leaves the listen socket
  * to a lighter peer. Busy wakes under load are not saturation — a worker
  * grows only when a prior batch was slow (a step over 200 us) with no idle
  * peer, or when a peer is stalled with steps queued behind it; grows are
  * spaced so steal feedback cannot climb the cap. A poked idle peer takes
  * steps behind a stalled worker. A page sets nothing.
  *
+ * Deadlines. `deadline` on the session is absolute `time_t`; 0 = none.
+ * `sec_first_byte` (default 0 = none) closes a session that sends nothing
+ * for that long after accept; `sec_tls_hs` (default 10) bounds the TLS
+ * handshake. Expired rows are reaped on the 50ms wait wake.
+ *
+ * TLS: `load_tls` loads the process certificate chain and key; sessions
+ * accepted after it are wrapped, and the handshake steps from waiter
+ * readiness before the page first sees the session.
+ *
  * `serve` lives in server_serve.ccs, a member of this module: workers,
  * wait, grow, and the step. Tape interest is server_poll.cch / .ccs.
- *
- * TLS: bind starts the engine (`tls_hs`); handshake steps from waiter
- * readiness (WANT_READ / WANT_WRITE) before on_app sees the row.
- *
- * Deadlines: absolute `time_t` on the session (`deadline`); 0 = none.
- * Dest reaps expired rows on the 50ms wait wake.
- *
- * Certs are process mats (`cc_tls_server_load`) before dest wraps TLS.
  */
 #ifndef CC_STD_SERVER_CCH
 #define CC_STD_SERVER_CCH
@@ -105,12 +121,12 @@ typedef struct CCServer {
     CCListener ln;
     int tls;
     int tls_owned;
-    int workers_max;      /* init(0): the host's processor count */
-    int workers_start;    /* workers at serve; 0 = 2, grown by connection count */
-    size_t row_size;      /* page row bytes per session; 0 = none */
+    int workers_max;      /* the host's processor count */
+    int workers_start;    /* workers at serve; 0 = 2 */
+    size_t row_size;      /* page row bytes per session; 0 = none (srv.row) */
     void (*row_drop)(void* row); /* runs once per session at its end; may see a zeroed row */
     int sec_tls_hs;       /* first-byte budget during TLS HS (default 10) */
-    int sec_first_byte;   /* first HTTP byte after bind/HS (default 15) */
+    int sec_first_byte;   /* first-byte budget after accept / HS (default 0 = none) */
     cc_atomic_u64 accept_backoff_until_ms; /* listen interest off until mono ms */
     cc_atomic_int stop;
     cc_atomic_int live;
@@ -146,8 +162,11 @@ int cc_io_sess_flush(CCIoSess* io);
  * ciphertext. Not the page's own cursor. */
 int cc_io_sess_pending_out(CCIoSess* io);
 
-/* Body in server_serve.ccs — keeps TLS pending_out out of the published face. */
+/* The step's answer. Bodies in server_serve.ccs. */
 void cc_io_sess_apply(CCIoSess* io, CCIoAct a);
+void cc_io_sess_wait(CCIoSess* io);
+void cc_io_sess_wait_out(CCIoSess* io);
+void cc_io_sess_close(CCIoSess* io);
 
 /* The waiter, a member (spec 1.7), ahead of every body in the unit: its
  * table alias is defined before any prototype the lowering hoists could
@@ -190,22 +209,28 @@ void cc_io_sess_touch(CCIoSess* io, time_t now, int secs) {
     io->deadline = now + (time_t)secs;
 }
 
-/* workers_max 0: as many workers as the host has processors. */
-void cc_server_init(CCServer* srv, int workers_max) {
-    if (workers_max <= 0) {
-        long n = sysconf(_SC_NPROCESSORS_ONLN);
-        workers_max = n < 1 ? 1 : (n > 256 ? 256 : (int)n);
-    }
+/* Workers cap at the host's processor count. */
+void cc_server_init(CCServer* srv) {
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    int workers_max = n < 1 ? 1 : (n > 256 ? 256 : (int)n);
     *srv = (CCServer){
         .ln = { .fd = -1 },
         .workers_max = workers_max,
         .sec_tls_hs = 10,
-        .sec_first_byte = 15,
+        .sec_first_byte = 0,
     };
     {
         int i;
         for (i = 0; i < 64; i++) cc_atomic_store_release(&srv->tape_conns[i], -1);
     }
+}
+
+/* The page's per-session state: `size` bytes zeroed at accept, `drop`
+ * once at the end of every session (on a row that may never have been
+ * stepped). */
+void cc_server_row(CCServer* srv, size_t size, void (*drop)(void* row)) {
+    srv->row_size = size;
+    srv->row_drop = drop;
 }
 
 /* The fewest sessions any other live tape holds; -1 when there is none. */
@@ -237,13 +262,16 @@ int cc_server_start_n(CCServer* srv) {
     return n < start ? n : start;
 }
 
-void !>(CCError) cc_server_listen(CCServer* srv, CCSlice addr) {
+/* A server listening on `addr` ("host:port"). */
+CCServer !>(CCError) cc_server_listen(CCSlice addr) {
     @errhandler(CCError e) { return cc_err(e); }
-    srv->ln = cc_tcp_listen(addr) !>(e) {
+    CCServer srv;
+    cc_server_init(&srv);
+    srv.ln = cc_tcp_listen(addr) !>(e) {
         return cc_err(cc_net_to_io_error(e).base);
     };
-    (void)cc_fd_nonblock(srv->ln.fd);
-    return cc_ok();
+    (void)cc_fd_nonblock(srv.ln.fd);
+    return cc_ok(srv);
 }
 
 /* Load the process-wide certificate chain and key; sessions this dest

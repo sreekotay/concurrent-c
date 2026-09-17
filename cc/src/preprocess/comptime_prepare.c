@@ -133,12 +133,20 @@ char* cc_comptime_blank_blocks_ex(const char* src, size_t n, unsigned keep) {
                 char marker[64];
                 int mlen;
                 if (!cc_find_matching_brace(src, n, body_l, &body_r)) {
+                    /* a file-scope block the caller lowers itself is the
+                     * lowerer's to diagnose: it names what left the block
+                     * open (a template that never closed), not the block */
+                    if ((keep & CC_BLANK_KEEP_FILE_SCOPE) && file_scope) break;
                     cc__blank_unterminated(src, i, "@comptime {…}");
                     free(out);
                     return NULL;
                 }
                 if ((keep & CC_BLANK_KEEP_HOOKS) && file_scope &&
                     cc__block_registers_hooks(src, body_l, body_r)) {
+                    i = body_r + 1;
+                    continue;
+                }
+                if ((keep & CC_BLANK_KEEP_FILE_SCOPE) && file_scope) {
                     i = body_r + 1;
                     continue;
                 }

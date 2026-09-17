@@ -7448,9 +7448,11 @@ A `@comptime { ... }` block runs during compilation and may be used to initializ
 
 **Pipeline note (informative):** One valid implementation strategy is:
 
-1. Canonicalize/preprocess CC for compile-time discovery.
-2. Execute compile-time code and collect registrations for the whole translation unit, including included local headers.
-3. Lower the translation unit to ordinary C using the collected registrations.
+1. Canonicalize/preprocess CC for compile-time discovery, and read the
+   registrations off the translation unit, including included local headers.
+2. Lower the translation unit to ordinary C, each `@comptime {}` block among
+   it as a function.
+3. Execute the blocks and splice what they emit into that C.
 
 **Rule:** A `@comptime {}` block may assign only to:
 
@@ -7462,12 +7464,21 @@ A `@comptime { ... }` block runs during compilation and may be used to initializ
 String-literal case labels (§11) are valid in `@comptime {}` with the same
 surface rules as at runtime.
 
-**Rule (`type_of` in an executed block):** The body of `@comptime {}` is compiled
-as host C. Structural `type_of(T)` members that appear there are lowered to host
-calls before that compile — `type_of(T).nfields` is `cc_reflect_field_count("T")`
-for a user type, the same count `@comptime for (f in type_of(T).fields)` walks.
-`@comptime for` in the main translation unit is a compile-time unroll, not host C,
-and keeps the `type_of` spelling.
+**Rule (the body is the language):** The body of a file-scope `@comptime {}`
+block is written in Concurrent-C and lowered as the body of a function of its
+translation unit: a `@variant` literal, `@string`, a method call, a string
+`@switch` and a Result unwrap mean there what they mean in any function, and
+the block names the unit's types, a `@variant` among them, as it names any
+type, calls the unit's functions and reads its file-scope variables as any
+function does. What a block may not carry is a closure, a dest, a spawn or a deadline:
+a block is straight-line compile-time code, and a program that writes one
+of those in a block is ill-formed. `@emit` templates keep their template
+form in the block. Structural `type_of(T)` members in a block are the
+compile-time reflection's answers — `type_of(T).nfields` is
+`cc_reflect_field_count("T")` for a user type, the same count
+`@comptime for (f in type_of(T).fields)` walks. `@comptime for` in the main
+translation unit is a compile-time unroll, not a block, and keeps the
+`type_of` spelling.
 
 ---
 
@@ -7697,6 +7708,8 @@ type_of(T).kind        // cc_type_kind
 type_of(T).nfields     // field count (in `@comptime {}`, the host reflect count)
 type_of(T).name        // const char* display spelling
 ```
+
+Reflection reads the unit's own declarations and those of the quoted `.cch` headers it includes. A `@variant` reflects as the struct it lowers to: a tag and the union of its arms.
 
 `@comptime for` unrolls a body once per declared field of a struct `T`:
 

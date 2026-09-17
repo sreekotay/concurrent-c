@@ -1,9 +1,8 @@
 /*
  * redis_std.ccs — the redis_idiomatic command surface on <ccc/std/server.cch>.
  *
- * The std server owns listen, accept, poll, the read window, the output
- * queue and the session row; this page owns the protocol. One step per
- * ready session:
+ * The std server owns listen, accept, poll, the read window and the
+ * output queue; this page owns the protocol. One step per ready session:
  *   parse every whole command in the window → execute(hold → exec →
  *   encode into the session queue) → consume → wait | close
  *
@@ -12,9 +11,9 @@
  *                    vector on a per-command cc_arena_stack. The window is
  *                    consumed only for the bytes a command used, so a
  *                    partial command stays for the next fill.
- *   RedisConn      → the session row (`srv.row_size`): reply_arena for DB
- *                    scratch (APPEND, CONFIG, KEYS hit list), reset per
- *                    step; created on the first step, destroyed by row_drop
+ *   RedisConn      → one step's frame: the session and a stack arena for DB
+ *                    scratch (APPEND, CONFIG, KEYS hit list). Nothing is
+ *                    kept between steps, so the server carries no row.
  *   RedisConnEnc   → @typeview Encode; write goes to the session queue
  *   CCExclHold     → shards.hold(si) @destroy inside execute; release at
  *                    scope exit before the next command
@@ -116,20 +115,20 @@ typedef @typeview Encode on RedisConn {
 
 #include "redis_reply.cch"
 
-static RespParseStatus gen_try_read_args_buffered(RespReader* r,
+static RespParse gen_try_read_args_buffered(RespReader* r,
                                                   CCArena arena,
                                                   char[:]** out_args,
                                                   size_t* out_argc,
                                                   CCError* err) {
     @errhandler(CCError e) {
         *err = e;
-        return RESP_PARSE_ERROR;
+        return (RespParse){ .error = {} };
     }
     while (1) {
         const char* src = (const char*)(r->data + r->start);
         size_t avail = r->end - r->start;
         size_t pos = 0;
-        if (avail == 0) return RESP_PARSE_INCOMPLETE;
+        if (avail == 0) return (RespParse){ .incomplete = {} };
         if (src[0] == '*') {
             size_t n, i;
             char[:]* args = NULL;
@@ -138,14 +137,14 @@ static RespParseStatus gen_try_read_args_buffered(RespReader* r,
                 RespGArrayHdr_try_read(src, avail, &pos, arena, &hdr);
             if (hr.is_err()) {
                 if (hr.error().kind == CC_ERR_WOULD_BLOCK)
-                    return RESP_PARSE_INCOMPLETE;
+                    return (RespParse){ .incomplete = {} };
                 *err = hr.error();
-                return RESP_PARSE_ERROR;
+                return (RespParse){ .error = {} };
             }
-            if (!hr.value()) return RESP_PARSE_INCOMPLETE;
+            if (!hr.value()) return (RespParse){ .incomplete = {} };
             if (hdr.n < 0) {
                 *err = CC_ERROR(CC_ERR_PARSE, "bad argc");
-                return RESP_PARSE_ERROR;
+                return (RespParse){ .error = {} };
             }
             n = (size_t)hdr.n;
             if (n == 0) {
@@ -155,7 +154,7 @@ static RespParseStatus gen_try_read_args_buffered(RespReader* r,
             args = cc_arena_alloc_T_count(CCSlice, arena, n);
             if (!args) {
                 *err = CC_ERROR(CC_ERR_OUT_OF_MEMORY, "argv");
-                return RESP_PARSE_ERROR;
+                return (RespParse){ .error = {} };
             }
             @for (i in 0..n) {
                 RespGArg a;
@@ -163,17 +162,17 @@ static RespParseStatus gen_try_read_args_buffered(RespReader* r,
                     RespGArg_try_read(src, avail, &pos, arena, &a);
                 if (ar.is_err()) {
                     if (ar.error().kind == CC_ERR_WOULD_BLOCK)
-                        return RESP_PARSE_INCOMPLETE;
+                        return (RespParse){ .incomplete = {} };
                     *err = ar.error();
-                    return RESP_PARSE_ERROR;
+                    return (RespParse){ .error = {} };
                 }
-                if (!ar.value()) return RESP_PARSE_INCOMPLETE;
+                if (!ar.value()) return (RespParse){ .incomplete = {} };
                 args[i] = a.data.as_slice();
             }
             r->start += pos;
             *out_args = args;
             *out_argc = n;
-            return RESP_PARSE_OK;
+            return (RespParse){ .ok = {} };
         }
         {
             RespGInline line;
@@ -181,62 +180,26 @@ static RespParseStatus gen_try_read_args_buffered(RespReader* r,
                 RespGInline_try_read(src, avail, &pos, arena, &line);
             if (tr.is_err()) {
                 if (tr.error().kind == CC_ERR_WOULD_BLOCK)
-                    return RESP_PARSE_INCOMPLETE;
+                    return (RespParse){ .incomplete = {} };
                 *err = tr.error();
-                return RESP_PARSE_ERROR;
+                return (RespParse){ .error = {} };
             }
-            if (!tr.value()) return RESP_PARSE_INCOMPLETE;
+            if (!tr.value()) return (RespParse){ .incomplete = {} };
             {
                 size_t !>(CCError) pargs =
                     parse_inline_args_arena(line.text, arena, out_args);
                 if (pargs.is_err()) {
                     *err = pargs.error();
-                    return RESP_PARSE_ERROR;
+                    return (RespParse){ .error = {} };
                 }
                 r->start += pos;
                 if (pargs.value() == 0) continue;
                 *out_argc = pargs.value();
-                return RESP_PARSE_OK;
+                return (RespParse){ .ok = {} };
             }
         }
     }
 }
-
-/* Parsed once from the folded command name; int-switched thereafter. */
-typedef enum RedisOp {
-    REDIS_OP_NONE = 0,
-    REDIS_OP_PING,
-    REDIS_OP_ECHO,
-    REDIS_OP_CONFIG,
-    REDIS_OP_GET,
-    REDIS_OP_SET,
-    REDIS_OP_SETNX,
-    REDIS_OP_SETEX,
-    REDIS_OP_PSETEX,
-    REDIS_OP_APPEND,
-    REDIS_OP_STRLEN,
-    REDIS_OP_TYPE,
-    REDIS_OP_INCR,
-    REDIS_OP_DECR,
-    REDIS_OP_INCRBY,
-    REDIS_OP_DECRBY,
-    REDIS_OP_EXPIRE,
-    REDIS_OP_PEXPIRE,
-    REDIS_OP_TTL,
-    REDIS_OP_PTTL,
-    REDIS_OP_PERSIST,
-    REDIS_OP_DEL,
-    REDIS_OP_EXISTS,
-    REDIS_OP_MGET,
-    REDIS_OP_MSET,
-    REDIS_OP_DBSIZE,
-    REDIS_OP_FLUSHDB,
-    REDIS_OP_FLUSHALL,
-    REDIS_OP_KEYS,
-    REDIS_OP_CC_MEMLOG,
-} RedisOp;
-
-#include "redis_db.cch"
 
 /* args[0] = folded command name (name_fold); args[1..] borrow the
  * current read window. Slot vector on the per-command arena. */
@@ -244,8 +207,9 @@ typedef struct RedisCmd {
     char[:]* args;
     size_t argc;
     char name_fold[16];
-    /* Single-key hold group: key + hash word (same as db_set / lookup). */
-    RedisKey rk;
+    /* Hash of args[1] for the single-key hold group. Same word as
+     * db_set / db_lookup_live so we do not hash the key twice. */
+    size_t key_hash;
 } RedisCmd;
 
 @typehooks on RedisCmd {
@@ -281,11 +245,11 @@ static bool !>(CCError) rr_cmd_next(RespReader* reader, RedisCmd* out,
                                    CCArena arena) {
     size_t raw_argc = 0;
     CCError perr = {0};
-    RespParseStatus st =
+    RespParse st =
         gen_try_read_args_buffered(reader, arena, &out->args,
                                    &raw_argc, &perr);
-    if (st == RESP_PARSE_INCOMPLETE) return cc_ok(0);
-    if (st == RESP_PARSE_ERROR) return cc_err(perr);
+    if (st.kind == .incomplete) return cc_ok(0);
+    if (st.kind == .error) return cc_err(perr);
     if (raw_argc < 1)
         return cc_err(CC_ERROR(CC_ERR_PARSE, "empty command"));
     out->argc = raw_argc;
@@ -300,68 +264,72 @@ static bool !>(CCError) rr_cmd_next(RespReader* reader, RedisCmd* out,
     return cc_ok(1);
 }
 
-static RedisOp redis_op(char[:] name) {
+#include "redis_db.cch"
+
+/* The command word, parsed once from the folded name. Unknown words are
+ * the error, not a sentinel arm. */
+static RedisCommand !>(CCError) redis_op(char[:] name) {
     @switch (name) {
     case "PING":
-        return REDIS_OP_PING;
+        return cc_ok((RedisCommand){ .ping = {} });
     case "ECHO":
-        return REDIS_OP_ECHO;
+        return cc_ok((RedisCommand){ .echo = {} });
     case "CONFIG":
-        return REDIS_OP_CONFIG;
+        return cc_ok((RedisCommand){ .config_get = {} });
     case "GET":
-        return REDIS_OP_GET;
+        return cc_ok((RedisCommand){ .get = {} });
     case "SET":
-        return REDIS_OP_SET;
+        return cc_ok((RedisCommand){ .set = {} });
     case "SETNX":
-        return REDIS_OP_SETNX;
+        return cc_ok((RedisCommand){ .setnx = {} });
     case "SETEX":
-        return REDIS_OP_SETEX;
+        return cc_ok((RedisCommand){ .setex = {} });
     case "PSETEX":
-        return REDIS_OP_PSETEX;
+        return cc_ok((RedisCommand){ .psetex = {} });
     case "APPEND":
-        return REDIS_OP_APPEND;
+        return cc_ok((RedisCommand){ .append = {} });
     case "STRLEN":
-        return REDIS_OP_STRLEN;
+        return cc_ok((RedisCommand){ .strlen = {} });
     case "TYPE":
-        return REDIS_OP_TYPE;
+        return cc_ok((RedisCommand){ .type = {} });
     case "INCR":
-        return REDIS_OP_INCR;
+        return cc_ok((RedisCommand){ .incr = {} });
     case "DECR":
-        return REDIS_OP_DECR;
+        return cc_ok((RedisCommand){ .decr = {} });
     case "INCRBY":
-        return REDIS_OP_INCRBY;
+        return cc_ok((RedisCommand){ .incrby = {} });
     case "DECRBY":
-        return REDIS_OP_DECRBY;
+        return cc_ok((RedisCommand){ .decrby = {} });
     case "EXPIRE":
-        return REDIS_OP_EXPIRE;
+        return cc_ok((RedisCommand){ .expire = {} });
     case "PEXPIRE":
-        return REDIS_OP_PEXPIRE;
+        return cc_ok((RedisCommand){ .pexpire = {} });
     case "TTL":
-        return REDIS_OP_TTL;
+        return cc_ok((RedisCommand){ .ttl = {} });
     case "PTTL":
-        return REDIS_OP_PTTL;
+        return cc_ok((RedisCommand){ .pttl = {} });
     case "PERSIST":
-        return REDIS_OP_PERSIST;
+        return cc_ok((RedisCommand){ .persist = {} });
     case "DEL":
-        return REDIS_OP_DEL;
+        return cc_ok((RedisCommand){ .del = {} });
     case "EXISTS":
-        return REDIS_OP_EXISTS;
+        return cc_ok((RedisCommand){ .exists = {} });
     case "MGET":
-        return REDIS_OP_MGET;
+        return cc_ok((RedisCommand){ .mget = {} });
     case "MSET":
-        return REDIS_OP_MSET;
+        return cc_ok((RedisCommand){ .mset = {} });
     case "DBSIZE":
-        return REDIS_OP_DBSIZE;
+        return cc_ok((RedisCommand){ .dbsize = {} });
     case "FLUSHDB":
-        return REDIS_OP_FLUSHDB;
+        return cc_ok((RedisCommand){ .flushdb = {} });
     case "FLUSHALL":
-        return REDIS_OP_FLUSHALL;
+        return cc_ok((RedisCommand){ .flushall = {} });
     case "KEYS":
-        return REDIS_OP_KEYS;
+        return cc_ok((RedisCommand){ .keys = {} });
     case "CC.MEMLOG":
-        return REDIS_OP_CC_MEMLOG;
+        return cc_ok((RedisCommand){ .cc_memlog = {} });
     default:
-        return REDIS_OP_NONE;
+        return cc_err(CC_ERR_NOT_FOUND, "unsupported command");
     }
 }
 
@@ -459,26 +427,25 @@ static bool !>(CCIoError) redis_conn_write_reply(RedisConn* c,
     @errhandler(CCIoError e) { return cc_err(e); }
     if (!c || !reply)
         return cc_err(cc_io_error(CC_ERROR(CC_ERR_INVALID_ARG, "conn write_reply: null")));
-    switch (reply->kind) {
-    case REDIS_REPLY_SIMPLE_STRING:
+    @switch (*reply) {
+    case .simple(s):
         c->lit("+") !>;
-        c->write(reply->data) !>;
+        c->write(s) !>;
         return c->lit("\r\n");
-    case REDIS_REPLY_ERROR:
+    case .error(msg):
         c->lit("-") !>;
-        c->write(reply->data) !>;
+        c->write(msg) !>;
         return c->lit("\r\n");
-    case REDIS_REPLY_INTEGER:
-        return c->integer(reply->int_value);
-    case REDIS_REPLY_NULL_BULK:
+    case .integer(v):
+        return c->integer(v);
+    case .null_bulk:
         return c->null();
-    case REDIS_REPLY_BULK_STRING:
-        return c->bulk(reply->data);
-    case REDIS_REPLY_WIRE:
-        return c->write(reply->data);
-    default:
-        return cc_err(cc_io_error(CC_ERROR(CC_ERR_INTERNAL, "conn write_reply: unknown kind")));
+    case .bulk(b):
+        return c->bulk(b);
+    case .wire(w):
+        return c->write(w);
     }
+    return cc_err(cc_io_error(CC_ERROR(CC_ERR_INTERNAL, "conn write_reply: unknown kind")));
 }
 
 /* DB/command Err → Redis -ERR on the wire (Ok); connection stays open.
@@ -490,17 +457,10 @@ static bool !>(CCIoError) enc_fail(RedisConnEnc enc, CCError e) {
     return enc->err(msg);
 }
 
-static bool !>(CCIoError) enc_int_result(RedisConnEnc enc,
-                                         RedisReply !>(CCError) built) {
-    RedisReply r;
-    if (built.is_err()) return enc_fail(enc, built.error());
-    r = built.value();
-    return enc->integer(r.int_value);
-}
-
-/* CONFIG: still staged as RedisReply WIRE in reply_arena. */
-static bool !>(CCIoError) enc_wire_result(RedisConnEnc enc,
-                                          RedisReply !>(CCError) built) {
+/* A built RedisReply (integer, or CONFIG's WIRE staged in reply_arena)
+ * → the wire; a build Err → -ERR. */
+static bool !>(CCIoError) enc_result(RedisConnEnc enc,
+                                     RedisReply !>(CCError) built) {
     RedisReply r;
     if (built.is_err()) return enc_fail(enc, built.error());
     r = built.value();
@@ -522,7 +482,7 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
 /* --- exec under hold: leaf → Conn; arrays stay WIRE --------------------- */
 
 @noblock static bool !>(CCIoError) exec(RedisDb* db, RedisCmd* cmd,
-                                        RedisConnEnc enc, RedisOp op) {
+                                        RedisConnEnc enc, RedisCommand op) {
     /* Command/db CCError → -ERR (Ok). Result Err is encode/IO only. */
     @errhandler(CCError e) { return enc_fail(enc, e); }
     char[:]* keys = cmd->args + 1;
@@ -530,25 +490,25 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
     CCArena reply_arena = enc->reply_arena;
     DbCmdClock clock = {0};
     @switch (op) {
-    case REDIS_OP_GET: {
+    case .get: {
         RedisEntry* cell;
         if (!payload_ok(cmd->argc, 1, 1, 0))
             return enc->err("wrong number of arguments");
-        cell = db_lookup_live(db, cmd->rk, &clock);
+        cell = db_lookup_live_h(db, keys[0], &clock, cmd->key_hash);
         if (!cell) return enc->null();
         return enc_redis_value(enc, &cell->val);
     }
-    case REDIS_OP_SET:
+    case .set:
         /* Clone under hold (sketch/go). Prep/install races under load. */
         if (!payload_ok(cmd->argc, 2, 2, 0))
             return enc->err("wrong number of arguments");
-        db_set(db, cmd->rk, keys[1], 0) !>;
+        db_set_h(db, keys[0], keys[1], 0, cmd->key_hash) !>;
         return enc->ok();
-    case REDIS_OP_SETNX:
+    case .setnx:
         if (!payload_ok(cmd->argc, 2, 2, 0))
             return enc->err("wrong number of arguments");
-        return enc_int_result(enc, db_setnx(db, keys[0], keys[1], &clock));
-    case REDIS_OP_SETEX: {
+        return enc_result(enc, db_setnx(db, keys[0], keys[1], &clock));
+    case .setex: {
         char[:] secs_arg;
         int64_t seconds;
         if (!payload_ok(cmd->argc, 3, 3, 0))
@@ -559,7 +519,7 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
                         expire_seconds_to_rel_ms(seconds), &clock) !>;
         return enc->ok();
     }
-    case REDIS_OP_PSETEX: {
+    case .psetex: {
         char[:] ms_arg;
         int64_t ms;
         if (!payload_ok(cmd->argc, 3, 3, 0))
@@ -569,17 +529,17 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
         db_set_with_ttl(db, keys[0], keys[2], ms, &clock) !>;
         return enc->ok();
     }
-    case REDIS_OP_APPEND:
+    case .append:
         if (!payload_ok(cmd->argc, 2, 2, 0))
             return enc->err("wrong number of arguments");
-        return enc_int_result(
+        return enc_result(
             enc, db_append(db, keys[0], keys[1], reply_arena, &clock));
-    case REDIS_OP_STRLEN: {
+    case .strlen: {
         RedisEntry* cell;
         RedisValue* val;
         if (!payload_ok(cmd->argc, 1, 1, 0))
             return enc->err("wrong number of arguments");
-        cell = db_lookup_live(db, cmd->rk, &clock);
+        cell = db_lookup_live(db, keys[0], &clock);
         if (!cell) return enc->integer(0);
         val = &cell->val;
         @switch (val) {
@@ -593,29 +553,32 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
         }
         return enc->integer(0);
     }
-    case REDIS_OP_TYPE:
+    case .type:
         if (!payload_ok(cmd->argc, 1, 1, 0))
             return enc->err("wrong number of arguments");
-        return enc->simple(db_lookup_live(db, cmd->rk, &clock) ? "string"
+        return enc->simple(db_lookup_live(db, keys[0], &clock) ? "string"
                                                                : "none");
-    case REDIS_OP_INCR:
+    case .incr:
         if (!payload_ok(cmd->argc, 1, 1, 0))
             return enc->err("wrong number of arguments");
-        return enc_int_result(enc, db_incrby(db, cmd->rk, 1, &clock));
-    case REDIS_OP_DECR:
+        return enc_result(enc, db_incrby_h(db, keys[0], 1, &clock,
+                                              cmd->key_hash));
+    case .decr:
         if (!payload_ok(cmd->argc, 1, 1, 0))
             return enc->err("wrong number of arguments");
-        return enc_int_result(enc, db_incrby(db, cmd->rk, -1, &clock));
-    case REDIS_OP_INCRBY: {
+        return enc_result(enc, db_incrby_h(db, keys[0], -1, &clock,
+                                              cmd->key_hash));
+    case .incrby: {
         char[:] delta_arg;
         int64_t delta;
         if (!payload_ok(cmd->argc, 2, 2, 0))
             return enc->err("wrong number of arguments");
         delta_arg = keys[1];
         delta = delta_arg.to_i64() !>;
-        return enc_int_result(enc, db_incrby(db, cmd->rk, delta, &clock));
+        return enc_result(enc, db_incrby_h(db, keys[0], delta, &clock,
+                                              cmd->key_hash));
     }
-    case REDIS_OP_DECRBY: {
+    case .decrby: {
         char[:] delta_arg;
         int64_t delta;
         int64_t neg;
@@ -626,64 +589,71 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
         neg = cc_sub_i64_checked(0, delta) !> {
             return enc->err("decrement would overflow");
         };
-        return enc_int_result(enc, db_incrby(db, cmd->rk, neg, &clock));
+        return enc_result(enc, db_incrby_h(db, keys[0], neg, &clock,
+                                              cmd->key_hash));
     }
-    case REDIS_OP_EXPIRE: {
+    case .expire: {
         char[:] secs_arg;
         int64_t seconds;
         if (!payload_ok(cmd->argc, 2, 2, 0))
             return enc->err("wrong number of arguments");
         secs_arg = keys[1];
         seconds = secs_arg.to_i64() !>;
-        return enc_int_result(
+        return enc_result(
             enc, db_expire_rel_ms(db, keys[0],
                                   expire_seconds_to_rel_ms(seconds), &clock));
     }
-    case REDIS_OP_PEXPIRE: {
+    case .pexpire: {
         char[:] ms_arg;
         int64_t ms;
         if (!payload_ok(cmd->argc, 2, 2, 0))
             return enc->err("wrong number of arguments");
         ms_arg = keys[1];
         ms = ms_arg.to_i64() !>;
-        return enc_int_result(enc, db_expire_rel_ms(db, keys[0], ms, &clock));
+        return enc_result(enc, db_expire_rel_ms(db, keys[0], ms, &clock));
     }
-    case REDIS_OP_TTL:
+    case .ttl:
         if (!payload_ok(cmd->argc, 1, 1, 0))
             return enc->err("wrong number of arguments");
-        return enc->integer(db_ttl(db, keys[0], 0, &clock).int_value);
-    case REDIS_OP_PTTL:
+        {
+            RedisReply r = db_ttl(db, keys[0], 0, &clock);
+            return enc->write_reply(&r);
+        }
+    case .pttl:
         if (!payload_ok(cmd->argc, 1, 1, 0))
             return enc->err("wrong number of arguments");
-        return enc->integer(db_ttl(db, keys[0], 1, &clock).int_value);
-    case REDIS_OP_PERSIST:
+        {
+            RedisReply r = db_ttl(db, keys[0], 1, &clock);
+            return enc->write_reply(&r);
+        }
+    case .persist:
         if (!payload_ok(cmd->argc, 1, 1, 0))
             return enc->err("wrong number of arguments");
-        return enc_int_result(enc, db_persist(db, keys[0], &clock));
-    case REDIS_OP_DEL: {
+        return enc_result(enc, db_persist(db, keys[0], &clock));
+    case .del: {
         size_t i;
         int64_t removed = 0;
         if (!payload_ok(cmd->argc, 1, -1, 0))
             return enc->err("wrong number of arguments");
         @for (i in 0..nkeys) {
-            RedisEntry* cell = db_lookup_live(db, db_key(keys[i]), &clock);
+            RedisEntry* cell = db_lookup_live(db, keys[i], &clock);
             if (!cell) continue;
             db_remove_entry(db, keys[i], cell);
             removed++;
         }
         return enc->integer(removed);
     }
-    case REDIS_OP_EXISTS: {
+    case .exists: {
         size_t i;
         int64_t found = 0;
         if (!payload_ok(cmd->argc, 1, -1, 0))
             return enc->err("wrong number of arguments");
         @for (i in 0..nkeys) {
-            if (db_lookup_live(db, db_key(keys[i]), &clock)) found++;
+            if (db_lookup_live(db, keys[i], &clock)) found++;
         }
         return enc->integer(found);
     }
-    case REDIS_OP_MGET: {
+    case .mget: {
         size_t i;
         if (!payload_ok(cmd->argc, 1, -1, 0))
             return enc->err("wrong number of arguments");
@@ -691,7 +661,7 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
          * array on the wire (conn closes) — same caveat as the sketch. */
         enc->array_len(nkeys) !>;
         @for (i in 0..nkeys) {
-            RedisEntry* cell = db_lookup_live(db, db_key(keys[i]), &clock);
+            RedisEntry* cell = db_lookup_live(db, keys[i], &clock);
             if (!cell) {
                 enc->null() !>;
                 continue;
@@ -700,22 +670,25 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
         }
         return cc_ok(true);
     }
-    case REDIS_OP_MSET:
+    case .mset:
         if (!payload_ok(cmd->argc, 2, -1, 2))
             return enc->err("wrong number of arguments");
         db_mset(db, keys, nkeys) !>;
         return enc->ok();
-    case REDIS_OP_DBSIZE:
+    case .dbsize:
         if (!payload_ok(cmd->argc, 0, 0, 0))
             return enc->err("wrong number of arguments");
-        return enc->integer(db_dbsize(db, &clock).int_value);
-    case REDIS_OP_FLUSHDB:
-    case REDIS_OP_FLUSHALL:
+        {
+            RedisReply r = db_dbsize(db, &clock);
+            return enc->write_reply(&r);
+        }
+    case .flushdb:
+    case .flushall:
         if (!payload_ok(cmd->argc, 0, 1, 0))
             return enc->err("wrong number of arguments");
         (void)db_flush(db);
         return enc->ok();
-    case REDIS_OP_KEYS: {
+    case .keys: {
         /* One walk under HOLD_ALL: collect borrows, then array_len + bulks.
          * Holds every writer, so the packed key slices stay valid. */
         enum { k_keys_pattern_max = 512 };
@@ -764,7 +737,7 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
             enc->bulk(hits[i]) !>;
         return cc_ok(true);
     }
-    case REDIS_OP_CC_MEMLOG: {
+    case .cc_memlog: {
         const char* phase = "cc-memlog";
         char phase_buf[64];
         if (!payload_ok(cmd->argc, 0, 1, 0))
@@ -785,6 +758,13 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
     }
 }
 
+/* Unknown command: -ERR on the wire, then close after flush. */
+static bool !>(CCIoError) enc_unsupported(RedisConnEnc enc) {
+    @errhandler(CCIoError e) { return cc_err(e); }
+    enc->err("unsupported command") !>;
+    return cc_ok(false);
+}
+
 /* Hold + work + encode (redis.go / sketch execute).
  * redis_op() is the only string-switch; case groups are the hold class.
  * Result E is CCIoError only (encode/socket). Command/db CCError is mapped
@@ -794,22 +774,20 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
 @noblock static bool !>(CCIoError) execute(RedisDb* db, CCShardDomain* shards,
                                            RedisCmd* cmd, RedisConnEnc enc) {
     @errhandler(CCIoError e) { return cc_err(e); }
-    RedisOp op;
-
     if (cmd->argc == 0) return enc->err("empty command");
-    op = redis_op(cmd->args[0]);
+    RedisCommand op = redis_op(cmd->args[0]) !> { return enc_unsupported(enc); };
 
     @switch (op) {
-    case REDIS_OP_PING:
+    case .ping:
         if (!payload_ok(cmd->argc, 0, 1, 0))
             return enc->err("wrong number of arguments");
         if (cmd->argc == 2) return enc->bulk(cmd->args[1]);
         return enc->pong();
-    case REDIS_OP_ECHO:
+    case .echo:
         if (!payload_ok(cmd->argc, 1, 1, 0))
             return enc->err("wrong number of arguments");
         return enc->bulk(cmd->args[1]);
-    case REDIS_OP_CONFIG: {
+    case .config_get: {
         char sub[8];
         char[:] get;
         if (cmd->argc != 3) return enc->err("wrong number of arguments");
@@ -820,41 +798,41 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
         default:
             return enc->err("unsupported command");
         }
-        return enc_wire_result(
+        return enc_result(
             enc, config_get_reply(cmd->args[2], enc->reply_arena));
     }
 
-    case REDIS_OP_GET:
-    case REDIS_OP_SET:
-    case REDIS_OP_SETNX:
-    case REDIS_OP_SETEX:
-    case REDIS_OP_PSETEX:
-    case REDIS_OP_APPEND:
-    case REDIS_OP_STRLEN:
-    case REDIS_OP_TYPE:
-    case REDIS_OP_INCR:
-    case REDIS_OP_DECR:
-    case REDIS_OP_INCRBY:
-    case REDIS_OP_DECRBY:
-    case REDIS_OP_EXPIRE:
-    case REDIS_OP_PEXPIRE:
-    case REDIS_OP_TTL:
-    case REDIS_OP_PTTL:
-    case REDIS_OP_PERSIST: {
+    case .get:
+    case .set:
+    case .setnx:
+    case .setex:
+    case .psetex:
+    case .append:
+    case .strlen:
+    case .type:
+    case .incr:
+    case .decr:
+    case .incrby:
+    case .decrby:
+    case .expire:
+    case .pexpire:
+    case .ttl:
+    case .pttl:
+    case .persist: {
         if (cmd->argc < 2) return enc->err("wrong number of arguments");
-        cmd->rk = db_key(cmd->args[1]);
+        cmd->key_hash = db_hash_key(cmd->args[1]);
         CCExclHold hold = shards->hold(
-            (uint64_t)db_shard_index_for_hash(db, cmd->rk.h)) @destroy;
+            (uint64_t)db_shard_index_for_hash(db, cmd->key_hash)) @destroy;
         if (!hold.held()) return enc->err("shard admission failed");
         return exec(db, cmd, enc, op);
     }
 
-    case REDIS_OP_DEL:
-    case REDIS_OP_EXISTS:
-    case REDIS_OP_MGET:
-    case REDIS_OP_MSET: {
+    case .del:
+    case .exists:
+    case .mget:
+    case .mset: {
         uint64_t names[REDIS_DB_MAX_SHARDS];
-        size_t stride = (op == REDIS_OP_MSET) ? 2u : 1u;
+        size_t stride = (op.kind == .mset) ? 2u : 1u;
         size_t nkeys;
         size_t nnames;
         if (cmd->argc < 2) return enc->err("wrong number of arguments");
@@ -866,21 +844,18 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
         return exec(db, cmd, enc, op);
     }
 
-    case REDIS_OP_DBSIZE:
-    case REDIS_OP_FLUSHDB:
-    case REDIS_OP_FLUSHALL:
-    case REDIS_OP_KEYS:
-    case REDIS_OP_CC_MEMLOG: {
+    case .dbsize:
+    case .flushdb:
+    case .flushall:
+    case .keys:
+    case .cc_memlog: {
         CCExclHold hold = shards->hold_all() @destroy;
         if (!hold.held()) return enc->err("shard admission failed");
         return exec(db, cmd, enc, op);
     }
 
-    case REDIS_OP_NONE:
-    default:
-        enc->err("unsupported command") !>;
-        return cc_ok(false);
     }
+    return enc_unsupported(enc);
 }
 
 /* !> binders on CCIoError results project the as: CCError face into `e`. */
@@ -890,15 +865,9 @@ static void redis_client_drop_log(const char* phase, CCError e) {
             cc_error_str(e));
 }
 
-/* --- the session row ----------------------------------------------------- */
+/* --- one step ------------------------------------------------------------ */
 
 enum { k_reply_arena = 16 * 1024 };
-
-/* Runs once per session at its end; the row is zeroed if it was never stepped. */
-static void redis_conn_drop(void* row) {
-    RedisConn* conn = (RedisConn*)row;
-    if (conn && cc_arena_is_live(conn->reply_arena)) conn->reply_arena.destroy();
-}
 
 /* Queue -ERR for a decode failure; the caller closes. */
 static void redis_conn_fail(RedisConn* conn, CCError e) {
@@ -912,19 +881,13 @@ static void redis_conn_fail(RedisConn* conn, CCError e) {
     };
 }
 
-/* One ready step: parse and execute every whole command in the window. */
-static void redis_step(RedisConn* conn, CCIoSess* io, RedisDb* db,
-                       CCShardDomain* shards) {
-    if (!cc_arena_is_live(conn->reply_arena)) {
-        conn->reply_arena = cc_arena_heap(k_reply_arena);
-        if (!cc_arena_is_live(conn->reply_arena)) {
-            io->apply((CCIoAct){ .close = {} });
-            return;
-        }
-        conn->reply_arena.a->block_max = 0;
-        conn->io = io;
-    }
-    @defer conn->reply_arena.reset();
+/* One ready step: parse and execute every whole command in the window.
+ * Nothing lives between steps: the frame is the session plus a stack
+ * arena for what the DB stages while the replies are queued. */
+static void redis_step(CCIoSess* io, RedisDb* db, CCShardDomain* shards) {
+    cc_arena_stack(reply_a, k_reply_arena);
+    RedisConn frame = { .reply_arena = reply_a, .io = io };
+    RedisConn* conn = &frame;
     char[:] win = io->window();
     RespReader reader = {
         .data = (char*)win.ptr, .start = 0, .end = win.len, .cap = win.len,
@@ -935,30 +898,30 @@ static void redis_step(RedisConn* conn, CCIoSess* io, RedisDb* db,
         bool has = rr_cmd_next(&reader, &cmd, cmd_a) !>(e) {
             redis_client_drop_log("parse", e);
             redis_conn_fail(conn, e);
-            io->apply((CCIoAct){ .close = {} });
+            io->close();
             return;
         };
         if (!has) break;
         bool keep = execute(db, shards, &cmd, conn) !>(e) {
             redis_client_drop_log("execute", e.base);
-            io->apply((CCIoAct){ .close = {} });
+            io->close();
             return;
         };
         if (!keep) {
             redis_client_drop_log(
                 "execute", CC_ERROR(CC_ERR_INVALID_ARG, "unsupported command"));
             io->consume(reader.start);
-            io->apply((CCIoAct){ .close = {} });
+            io->close();
             return;
         }
     }
     io->consume(reader.start);
     if (reader.start == 0 && io->full()) {
         redis_conn_fail(conn, CC_ERROR(CC_ERR_PARSE, "command exceeds the read window"));
-        io->apply((CCIoAct){ .close = {} });
+        io->close();
         return;
     }
-    io->apply((CCIoAct){ .wait = {} });
+    io->wait();
 }
 
 static bool db_setup(RedisDb* db, size_t shard_count, const char* shard_src) {
@@ -1021,12 +984,7 @@ int main(int argc, char** argv) {
     CCExclusive excl = cc_exclusive_create(excl_arena, mask.count * 2u) !> @destroy;
     CCShardDomain shards = cc_shard_domain(excl, mask);
 
-    CCServer srv;
-    srv.init(0);          /* workers: the engine's own water level */
-    srv.sec_first_byte = 0;
-    srv.row_size = sizeof(RedisConn);
-    srv.row_drop = redis_conn_drop;
-    srv.listen(addr.as_slice()) !>(e) {
+    CCServer srv = cc_server_listen(addr.as_slice()) !>(e) {
         const char* msg = cc_error_str(e);
         eprintln(@string(`redis_std: listen ${addr}: ${msg}`, @scratch));
         return 1;
@@ -1036,14 +994,10 @@ int main(int argc, char** argv) {
     size_t nshards = db.shard_count;
     eprintln(@string(`redis_std listening on ${addr} shards=${nshards}`, @scratch));
 
-    /* Stop = stop admission, drain what is left: SIGINT/SIGTERM reach the
-     * server's stop fiber through CCSignal; serve returns once every
-     * session is gone. */
+    /* SIGINT/SIGTERM stop admission; serve returns once every session is gone. */
     CCSignal stop = cc_signal_watch2(SIGINT, SIGTERM) !> @destroy;
-    RedisDb* dbp = &db;
-    CCShardDomain* shardsp = &shards;
-    srv.serve(&stop, (CCIoSess* io) => [dbp, shardsp] {
-        redis_step((RedisConn*)io->app, io, dbp, shardsp);
+    srv.serve(&stop, (CCIoSess* io) => [dbp = &db, shardsp = &shards] {
+        redis_step(io, dbp, shardsp);
     }) !>;
     {
         int nsteal = srv.step_steals();

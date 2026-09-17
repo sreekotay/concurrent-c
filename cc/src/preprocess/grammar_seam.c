@@ -53,42 +53,19 @@ static const char* cc__find_bytes(const char* hay, size_t hay_len,
     return NULL;
 }
 
-/* Resolve pos -> (file,line) honoring cpp-style line directives ("#line N" or
- * "# N \"file\"") that earlier passes may have inserted (mirrors executor.c's
- * cc__resolve_origin). */
+/* The user line and file of `at`: the ledger's `#line N "F"` (or masked
+ * CC_LN marker) renumbers the line after it as N, as text.h reads it. */
 static void cc__grammar_origin(const char* src, size_t at, const char* input_path,
                                char* out_file, size_t out_file_sz, int* out_line) {
-    int line = 1;
-    size_t i = 0;
+    const char* lp = NULL;
+    size_t lpl = 0;
+    int line;
     if (out_file_sz) out_file[0] = '\0';
-    while (i < at) {
-        if (src[i] == '\n') {
-            line++;
-            size_t j = i + 1;
-            while (j < at && (src[j] == ' ' || src[j] == '\t')) j++;
-            if (j < at && src[j] == '#') {
-                size_t k = j + 1;
-                while (k < at && (src[k] == ' ' || src[k] == '\t')) k++;
-                if (k + 4 < at && strncmp(src + k, "line", 4) == 0) k += 4;
-                while (k < at && (src[k] == ' ' || src[k] == '\t')) k++;
-                if (k < at && src[k] >= '0' && src[k] <= '9') {
-                    int n = 0;
-                    while (k < at && src[k] >= '0' && src[k] <= '9') n = n * 10 + (src[k++] - '0');
-                    while (k < at && (src[k] == ' ' || src[k] == '\t')) k++;
-                    if (k < at && src[k] == '"') {
-                        size_t fs = ++k, o = 0;
-                        while (k < at && src[k] != '"') k++;
-                        for (size_t m = fs; m < k && o + 1 < out_file_sz; m++) out_file[o++] = src[m];
-                        if (out_file_sz) out_file[o] = '\0';
-                    }
-                    /* The directive names the NEXT line's number. */
-                    size_t e = j;
-                    while (e < at && src[e] != '\n') e++;
-                    if (e < at) { line = n; i = e; /* '\n' handled next loop */ continue; }
-                }
-            }
-        }
-        i++;
+    line = cc_user_line_for_offset(src, at, at, 1, &lp, &lpl);
+    if (lp && lpl && out_file_sz) {
+        size_t o = lpl < out_file_sz - 1 ? lpl : out_file_sz - 1;
+        memcpy(out_file, lp, o);
+        out_file[o] = '\0';
     }
     if (out_file_sz && !out_file[0] && input_path)
         snprintf(out_file, out_file_sz, "%s", input_path);

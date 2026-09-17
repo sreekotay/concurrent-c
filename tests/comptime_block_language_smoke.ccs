@@ -1,0 +1,33 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+
+/* The body of a block is the language: a `@string` template, a string
+ * switch, and a `@variant` literal lower there as in any function. */
+@variant Op { add: void; mul: void; };
+
+@comptime {
+    cc_arena_stack(a, 512);
+    Op o = (Op){ .mul = {} };
+    const char* w = "?";
+    @switch (o) {
+    case .add: w = "add"; break;
+    case .mul: w = "mul"; break;
+    }
+    CCSlice m = CC_SLICE_LIT("put");
+    int v = 0;
+    @switch (m) {
+    case "get": v = 1; break;
+    case "put": v = 2; break;
+    default: v = -1; break;
+    }
+    CCString line = @string(`enum { CT_V = ${v} };`, a);
+    const char* line_c = line.cstr(a) !> { cc_emit_error("cstr"); return; };
+    cc_emit_format(CC_EMIT_AFTER_PRELUDE, "%s\nstatic const char* ct_word = \"%s\";\n", line_c, w);
+}
+
+int main(void) {
+    if (CT_V != 2) return 1;
+    printf("comptime_block_language_smoke ok v=%d word=%s\n", CT_V, ct_word);
+    return 0;
+}

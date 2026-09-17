@@ -400,6 +400,9 @@ typedef struct CcLowerer {
 #line 75 "cc/lower/lower.cch"
     bool factories_ready; /* the compiled factories have been bound to their handlers */
     bool factories_ok; /* and the binding worked */
+#line 80 "cc/lower/lower.cch"
+    CcDeclList ct_fns;
+    CCVec_CCSlice ct_markers;
 } CcLowerer;
 
 CcLowerer cc_lowerer_new(CcUnit *u, CcIndex *ix, CcLowerOpts opts, CcDiags *ds);
@@ -432,7 +435,7 @@ uint32_t CcLowerer_temp_id(CcLowerer *L); /* the next N */
 /* The members of module `lower` (spec 1.7). A tool includes this face and
  * links the one object the members lower into; what a tool calls is the
  * exported surface the faces above declare. */
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lex_impl.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lex_impl.cch*/
 #line 1 "cc/lower/lex_impl.cch"
 
 /* Lexer: bodies for lex.cch. Included by the unit that owns the tape (a
@@ -1465,9 +1468,9 @@ bool CcToken_is_at(const CcToken *t, const char *word) {
 }
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lex_impl.cch*/
-#line 145 "out/.cc-build/modules/lower_cch.e37159c939efaeb9.ccs"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/diag_impl.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lex_impl.cch*/
+#line 150 "out/.cc-build/modules/lower_cch.c8f8cf2eb817ae5a.ccs"
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/diag_impl.cch*/
 #line 1 "cc/lower/diag_impl.cch"
 
 /* Diagnostics: bodies for diag.cch. Included by the unit that owns the
@@ -1774,9 +1777,9 @@ void CcDiags_print(const CcDiags *ds, FILE *out, CcSourceFn source, void *ctx) {
 }
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/diag_impl.cch*/
-#line 146 "out/.cc-build/modules/lower_cch.e37159c939efaeb9.ccs"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/ast_impl.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/diag_impl.cch*/
+#line 151 "out/.cc-build/modules/lower_cch.c8f8cf2eb817ae5a.ccs"
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/ast_impl.cch*/
 #line 1 "cc/lower/ast_impl.cch"
 
 /* AST support: constructors, kind names, predicates, span and location
@@ -2523,9 +2526,9 @@ CCSlice CcUnit_text(const CcUnit *u, CcSpan span) {
 }
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/ast_impl.cch*/
-#line 147 "out/.cc-build/modules/lower_cch.e37159c939efaeb9.ccs"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/parse_state.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/ast_impl.cch*/
+#line 152 "out/.cc-build/modules/lower_cch.c8f8cf2eb817ae5a.ccs"
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/parse_state.cch*/
 #line 1 "cc/lower/parse_state.cch"
 
 /* Parser state shared by every section of the parser: the token cursor,
@@ -4541,9 +4544,9 @@ static P parser_new(CcUnit *u, CcParseOpts opts, CcDiags *ds, CCArena a) {
 }
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/parse_state.cch*/
-#line 148 "out/.cc-build/modules/lower_cch.e37159c939efaeb9.ccs"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/parse_fwd.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/parse_state.cch*/
+#line 153 "out/.cc-build/modules/lower_cch.c8f8cf2eb817ae5a.ccs"
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/parse_fwd.cch*/
 #line 1 "cc/lower/parse_fwd.cch"
 
 /* Forward declarations across the parser's sections. The sections are
@@ -4589,9 +4592,9 @@ static CcStmt *parse_parallel(P *p);
 static void parse_stmt_into(P *p, CcStmtList *list);
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/parse_fwd.cch*/
-#line 149 "out/.cc-build/modules/lower_cch.e37159c939efaeb9.ccs"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/parse_exprs.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/parse_fwd.cch*/
+#line 154 "out/.cc-build/modules/lower_cch.c8f8cf2eb817ae5a.ccs"
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/parse_exprs.cch*/
 #line 1 "cc/lower/parse_exprs.cch"
 
 /* Parser section 3: expressions, templates, closures and initializers.
@@ -7350,9 +7353,9 @@ static CcInit *parse_initializer(P *p) {
 }
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/parse_exprs.cch*/
-#line 150 "out/.cc-build/modules/lower_cch.e37159c939efaeb9.ccs"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/parse_stmts.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/parse_exprs.cch*/
+#line 155 "out/.cc-build/modules/lower_cch.c8f8cf2eb817ae5a.ccs"
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/parse_stmts.cch*/
 #line 1 "cc/lower/parse_stmts.cch"
 
 /* Parser section 4: statements.
@@ -9672,9 +9675,9 @@ static CcStmt *parse_block(P *p) {
 }
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/parse_stmts.cch*/
-#line 151 "out/.cc-build/modules/lower_cch.e37159c939efaeb9.ccs"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/parse_types.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/parse_stmts.cch*/
+#line 156 "out/.cc-build/modules/lower_cch.c8f8cf2eb817ae5a.ccs"
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/parse_types.cch*/
 #line 1 "cc/lower/parse_types.cch"
 
 /* Parser section 2: types. Declaration specifiers, the builtin keyword
@@ -11695,9 +11698,9 @@ static CcType *parse_enum(P *p) {
 }
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/parse_types.cch*/
-#line 152 "out/.cc-build/modules/lower_cch.e37159c939efaeb9.ccs"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/parse_decls.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/parse_types.cch*/
+#line 157 "out/.cc-build/modules/lower_cch.c8f8cf2eb817ae5a.ccs"
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/parse_decls.cch*/
 #line 1 "cc/lower/parse_decls.cch"
 
 /* Parser section 5: declarations and the unit. One declaration at a time
@@ -13666,9 +13669,9 @@ CcStmt *cc_parse_stmt_at(CcUnit *u, uint32_t first, CcParseOpts opts, CcDiags *d
 }
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/parse_decls.cch*/
-#line 153 "out/.cc-build/modules/lower_cch.e37159c939efaeb9.ccs"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/parse_walk.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/parse_decls.cch*/
+#line 158 "out/.cc-build/modules/lower_cch.c8f8cf2eb817ae5a.ccs"
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/parse_walk.cch*/
 #line 1 "cc/lower/parse_walk.cch"
 
 /* The generic walk (CcUnit_walk / CcStmt_walk / CcExpr_walk), the debug
@@ -17292,9 +17295,9 @@ CCResult_CcExprptr_CcDiag cc_parse_expr(CCSlice text, CcLoc at, CcUnit *u) {
 }
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/parse_walk.cch*/
-#line 154 "out/.cc-build/modules/lower_cch.e37159c939efaeb9.ccs"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/print_impl.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/parse_walk.cch*/
+#line 159 "out/.cc-build/modules/lower_cch.c8f8cf2eb817ae5a.ccs"
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/print_impl.cch*/
 #line 1 "cc/lower/print_impl.cch"
 
 /* Printer: bodies for print.cch. Included by the unit that owns the tape
@@ -20908,9 +20911,9 @@ CCString CcStmt_spell(const CcStmt *s, const CcTape *tape, CCArena a) {
 }
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/print_impl.cch*/
-#line 155 "out/.cc-build/modules/lower_cch.e37159c939efaeb9.ccs"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/index_impl.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/print_impl.cch*/
+#line 160 "out/.cc-build/modules/lower_cch.c8f8cf2eb817ae5a.ccs"
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/index_impl.cch*/
 #line 1 "cc/lower/index_impl.cch"
 
 /* Declaration index: bodies for index.cch.
@@ -27396,9 +27399,9 @@ int CcIndex_arena_param(CcIndex *ix, CcSym *f) {
 }
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/index_impl.cch*/
-#line 156 "out/.cc-build/modules/lower_cch.e37159c939efaeb9.ccs"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/typing.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/index_impl.cch*/
+#line 161 "out/.cc-build/modules/lower_cch.c8f8cf2eb817ae5a.ccs"
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/typing.cch*/
 #line 1 "cc/lower/typing.cch"
 
 /* Receiver typing for UFCS call sites, shared by the index tool (which
@@ -30109,9 +30112,9 @@ void tw_unit(Walker *w) {
 }
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/typing.cch*/
-#line 157 "out/.cc-build/modules/lower_cch.e37159c939efaeb9.ccs"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_impl.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/typing.cch*/
+#line 162 "out/.cc-build/modules/lower_cch.c8f8cf2eb817ae5a.ccs"
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_impl.cch*/
 #line 1 "cc/lower/lower_impl.cch"
 
 /* Lowering: the pipeline and the node builders the steps share. Every
@@ -30430,7 +30433,7 @@ static CCSlice lw_closest(CcNameList names, CCSlice name) {
  * needs this one before it is defined. */
 static void lw_drop_cc_only(CcLowerer *L);
 
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_comptime.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_comptime.cch*/
 #line 1 "cc/lower/lower_comptime.cch"
 
 /* Clean lowerer, step: `@comptime(expr)` in value position.
@@ -30740,10 +30743,356 @@ static void CcLowerer_comptime(CcLowerer *L) {
     CcUnit_walk(L->unit, v);
 }
 
+/* ---- `@comptime { }` blocks: the language, lowered, run by the executor --
+ *
+ * A block is written in the language: it declares variants, spells
+ * `@string`, calls methods, switches on strings. The executor compiles C.
+ * So the block becomes a function of this unit, `static void
+ * __cc_ct_block_<k>(void) { ... }`, and every step lowers its body as it
+ * lowers any other. The printer sets the function between two marker
+ * comments and follows it with the anchor the driver splices the block's
+ * emits at; the driver cuts the region out of the C, hands it to the
+ * executor, and the unit the host compiles never sees it.
+ *
+ * A block is straight-line compile-time code: a closure, a dest or a task
+ * in it is refused, since their lowering hoists declarations to the end
+ * of the unit, outside the region the executor is handed.
+ *
+ * A block that registers type hooks (`cc_type_register(...)`) is the
+ * index's: read as it was written and dropped, as before. */
+
+typedef struct CtScan {
+    CcLowerer *L;
+    bool hooks; /* the block calls a hook registrar */
+    bool emits; /* the block spells an `@emit` */
+    CcSpan bad; /* a construct a block may not carry; last=0 when none */
+    CCSlice bad_what;
+} CtScan;
+
+static bool ct_call_named(CcExpr *e, const char *name) {
+    CCSlice fn = cc_slice_empty();
+    CcExpr *callee = NULL;
+    switch ((e->k).kind) {
+        case CcExprK_call: {
+#line 264 "cc/lower/lower_comptime.cch"
+            CcCall c = (e->k).u.call;
+#line 264 "cc/lower/lower_comptime.cch"
+            callee = c.callee;
+#line 264 "cc/lower/lower_comptime.cch"
+            break;
+#line 264 "cc/lower/lower_comptime.cch"
+        }
+        default:
+#line 265 "cc/lower/lower_comptime.cch"
+            return false;
+    }
+    if (!callee)
+#line 267 "cc/lower/lower_comptime.cch"
+        return false;
+    switch ((callee->k).kind) {
+        case CcExprK_ident: {
+#line 269 "cc/lower/lower_comptime.cch"
+            CCSlice nm = (callee->k).u.ident;
+#line 269 "cc/lower/lower_comptime.cch"
+            fn = nm;
+#line 269 "cc/lower/lower_comptime.cch"
+            break;
+#line 269 "cc/lower/lower_comptime.cch"
+        }
+        default:
+#line 270 "cc/lower/lower_comptime.cch"
+            return false;
+    }
+    return slice_eq(fn, cstr_slice((char *)(name)));
+}
+
+static bool ct_scan_expr(CcExpr *e, void *env) {
+    CtScan *sc = (CtScan *)(env);
+    if (ct_call_named(e, "cc_type_register") || ct_call_named(e, "cc_type_define") || ct_call_named(e, "cc_ufcs_register"))
+#line 279 "cc/lower/lower_comptime.cch"
+        sc->hooks = true;
+    switch ((e->k).kind) {
+        case CcExprK_emit:
+#line 281 "cc/lower/lower_comptime.cch"
+            sc->emits = true;
+#line 281 "cc/lower/lower_comptime.cch"
+            break;
+        case CcExprK_closure:
+#line 282 "cc/lower/lower_comptime.cch"
+            sc->bad = e->span;
+#line 282 "cc/lower/lower_comptime.cch"
+            sc->bad_what = cstr_slice("a closure");
+#line 282 "cc/lower/lower_comptime.cch"
+            break;
+        case CcExprK_await_:
+#line 283 "cc/lower/lower_comptime.cch"
+            sc->bad = e->span;
+#line 283 "cc/lower/lower_comptime.cch"
+            sc->bad_what = cstr_slice("an await");
+#line 283 "cc/lower/lower_comptime.cch"
+            break;
+        case CcExprK_create:
+#line 284 "cc/lower/lower_comptime.cch"
+            sc->bad = e->span;
+#line 284 "cc/lower/lower_comptime.cch"
+            sc->bad_what = cstr_slice("a nursery");
+#line 284 "cc/lower/lower_comptime.cch"
+            break;
+        default:
+#line 285 "cc/lower/lower_comptime.cch"
+            break;
+    }
+    return true;
+}
+
+static bool ct_scan_stmt(CcStmt *s, void *env) {
+    CtScan *sc = (CtScan *)(env);
+    switch ((s->k).kind) {
+        case CcStmtK_parallel:
+#line 293 "cc/lower/lower_comptime.cch"
+            sc->bad = s->span;
+#line 293 "cc/lower/lower_comptime.cch"
+            sc->bad_what = cstr_slice("a parallel block");
+#line 293 "cc/lower/lower_comptime.cch"
+            break;
+        case CcStmtK_parallel_for:
+#line 294 "cc/lower/lower_comptime.cch"
+            sc->bad = s->span;
+#line 294 "cc/lower/lower_comptime.cch"
+            sc->bad_what = cstr_slice("a parallel loop");
+#line 294 "cc/lower/lower_comptime.cch"
+            break;
+        case CcStmtK_parallel_dest:
+#line 295 "cc/lower/lower_comptime.cch"
+            sc->bad = s->span;
+#line 295 "cc/lower/lower_comptime.cch"
+            sc->bad_what = cstr_slice("a dest");
+#line 295 "cc/lower/lower_comptime.cch"
+            break;
+        case CcStmtK_spawn_block:
+#line 296 "cc/lower/lower_comptime.cch"
+            sc->bad = s->span;
+#line 296 "cc/lower/lower_comptime.cch"
+            sc->bad_what = cstr_slice("a spawn");
+#line 296 "cc/lower/lower_comptime.cch"
+            break;
+        case CcStmtK_with_deadline:
+#line 297 "cc/lower/lower_comptime.cch"
+            sc->bad = s->span;
+#line 297 "cc/lower/lower_comptime.cch"
+            sc->bad_what = cstr_slice("a deadline");
+#line 297 "cc/lower/lower_comptime.cch"
+            break;
+        default:
+#line 298 "cc/lower/lower_comptime.cch"
+            break;
+    }
+    return true;
+}
+
+/* The byte offset of the block's `{` in the unit's text: what the driver's
+ * blanking wrote into the anchor it looks for. */
+static size_t ct_brace_off(CcLowerer *L, CcSpan sp) {
+    CcTape *tp = &L->unit->tape;
+    uint32_t i;
+    for (i = sp.first; i <= sp.last; i++) {
+        const CcToken *tk = CcTape_at(tp, i);
+        if (tk->kind == CC_TK_PUNCT && tk->punct == CC_P_LBRACE)
+            return (size_t)(tk->text.ptr - tp->src.ptr);
+    }
+    return (size_t)(CcTape_at(tp, sp.first)->text.ptr - tp->src.ptr);
+}
+
+static void ct_block_to_fn(CcLowerer *L, CcDecl *d, CcBlock b, uint32_t k) {
+    CcSpan sp = d->span;
+    CcStmt *body = lw_block(L, sp);
+    CcType *fn_type = cc__type_blank(sp, L->arena);
+    CcFuncType ft;
+    CcFuncDecl fd;
+    CCString name = cc_string_new();
+#line 322 "cc/lower/lower_comptime.cch"
+    cc_string_push_buffer(&name, "__cc_ct_block_", 14, L->arena);
+#line 322 "cc/lower/lower_comptime.cch"
+    cc__string_slot_push(&name, (k), L->arena);
+    CCString marker;
+    size_t off = ct_brace_off(L, sp);
+    {
+        CcStmtList *into = lw_block_stmts(body);
+        size_t n = CCVec_CcStmtRef_len(&b.stmts);
+        size_t i;
+        for (i = 0; i < n; i++)
+#line 329 "cc/lower/lower_comptime.cch"
+            CCVec_CcStmtRef_push(into, *CCVec_CcStmtRef_get_ptr(&b.stmts, i));
+    }
+    memset(&ft, 0, sizeof(ft));
+    ft.ret = cc_type_named(cstr_slice("void"), sp, L->arena);
+    ft.params = CCVec_CcParam_new(L->arena);
+    ft.has_prototype = true;
+    {
+#line 335 "cc/lower/lower_comptime.cch"
+        CcTypeK tk = { .kind = CcTypeK_func, .u.func = ft };
+#line 335 "cc/lower/lower_comptime.cch"
+        fn_type->k = tk;
+#line 335 "cc/lower/lower_comptime.cch"
+    }
+    memset(&fd, 0, sizeof(fd));
+    fd.type = fn_type;
+    fd.name = lw_keep(L, &name);
+    fd.body = body;
+    d->specs = CC_SPEC_STATIC;
+    {
+#line 341 "cc/lower/lower_comptime.cch"
+        CcDeclK dk = { .kind = CcDeclK_func, .u.func = fd };
+#line 341 "cc/lower/lower_comptime.cch"
+        d->k = dk;
+#line 341 "cc/lower/lower_comptime.cch"
+    }
+    marker = ({
+#line 342 "cc/lower/lower_comptime.cch"
+        CCString __cc_str_5 = cc_string_new();
+#line 342 "cc/lower/lower_comptime.cch"
+        cc_string_push_buffer(&__cc_str_5, "enum{__ccs", 10, L->arena);
+#line 342 "cc/lower/lower_comptime.cch"
+        cc__string_slot_push(&__cc_str_5, (off), L->arena);
+#line 342 "cc/lower/lower_comptime.cch"
+        cc_string_push_buffer(&__cc_str_5, "=0};", 4, L->arena);
+#line 342 "cc/lower/lower_comptime.cch"
+        __cc_str_5;
+#line 342 "cc/lower/lower_comptime.cch"
+    });
+    CCVec_CcDeclRef_push(&L->ct_fns, d);
+    CCVec_CCSlice_push(&L->ct_markers, lw_keep(L, &marker));
+}
+
+static void CcLowerer_ct_blocks(CcLowerer *L) {
+    CcDeclList *decls = &L->unit->decls;
+    size_t n = CCVec_CcDeclRef_len(decls);
+    size_t i;
+    uint32_t k = 0;
+    L->ct_fns = CCVec_CcDeclRef_new(L->arena);
+    L->ct_markers = CCVec_CCSlice_new(L->arena);
+    if (L->header_mode || L->fragment)
+#line 354 "cc/lower/lower_comptime.cch"
+        return;
+    for (i = 0; i < n; i++) {
+        CcDecl *d = *CCVec_CcDeclRef_get_ptr(decls, i);
+        CcBlock b;
+        bool is_block = false;
+        switch ((d->k).kind) {
+            case CcDeclK_comptime_block: {
+#line 360 "cc/lower/lower_comptime.cch"
+                CcBlock cb = (d->k).u.comptime_block;
+#line 360 "cc/lower/lower_comptime.cch"
+                b = cb;
+#line 360 "cc/lower/lower_comptime.cch"
+                is_block = true;
+#line 360 "cc/lower/lower_comptime.cch"
+                break;
+#line 360 "cc/lower/lower_comptime.cch"
+            }
+            default:
+#line 361 "cc/lower/lower_comptime.cch"
+                break;
+        }
+        if (!is_block)
+#line 363 "cc/lower/lower_comptime.cch"
+            continue;
+        {
+            CtScan sc;
+            CcVisitor v;
+            CcStmt *probe = lw_block(L, d->span);
+            CcStmtList *into = lw_block_stmts(probe);
+            size_t m = CCVec_CcStmtRef_len(&b.stmts);
+            size_t j;
+            for (j = 0; j < m; j++)
+#line 371 "cc/lower/lower_comptime.cch"
+                CCVec_CcStmtRef_push(into, *CCVec_CcStmtRef_get_ptr(&b.stmts, j));
+            memset(&sc, 0, sizeof(sc));
+            sc.L = L;
+            memset(&v, 0, sizeof(v));
+            v.expr = ct_scan_expr;
+            v.stmt = ct_scan_stmt;
+            v.env = &sc;
+            CcStmt_walk(probe, v);
+            if (sc.hooks && !sc.emits)
+#line 379 "cc/lower/lower_comptime.cch"
+                continue; /* the index's: dropped as written */
+            if (sc.bad.last) {
+                CCSlice what = sc.bad_what;
+                CCString m2 = cc_string_new();
+#line 382 "cc/lower/lower_comptime.cch"
+                cc__string_slot_push(&m2, (what), L->arena);
+#line 382 "cc/lower/lower_comptime.cch"
+                cc_string_push_buffer(&m2, " does not belong in a ", 22, L->arena);
+#line 382 "cc/lower/lower_comptime.cch"
+                cc__string_slot_push(&m2, ("@"), L->arena);
+#line 382 "cc/lower/lower_comptime.cch"
+                cc_string_push_buffer(&m2, "comptime block: a block is straight-line compile-time code", 58, L->arena);
+                lw_error(L, sc.bad, m2);
+                continue;
+            }
+        }
+        ct_block_to_fn(L, d, b, k++);
+    }
+}
+
+/* After the steps: each block's function between its markers, its anchor
+ * after it. The driver reads the region out of the C by the markers. */
+static void lw_ct_regions(CcLowerer *L) {
+    CcDeclList *decls = &L->unit->decls;
+    CcDeclList with = CCVec_CcDeclRef_new(L->arena);
+    size_t n = CCVec_CcDeclRef_len(decls);
+    size_t nf = CCVec_CcDeclRef_len(&L->ct_fns);
+    size_t i;
+    if (!nf)
+#line 399 "cc/lower/lower_comptime.cch"
+        return;
+    for (i = 0; i < n; i++) {
+        CcDecl *d = *CCVec_CcDeclRef_get_ptr(decls, i);
+        size_t f;
+        bool hit = false;
+        for (f = 0; f < nf; f++) {
+            if (*CCVec_CcDeclRef_get_ptr(&L->ct_fns, f) != d)
+#line 405 "cc/lower/lower_comptime.cch"
+                continue;
+            {
+                CcUnit *u = L->unit;
+                CcLoc at = CcUnit_loc(u, d->span);
+                CCSlice marker = *CCVec_CCSlice_get_ptr(&L->ct_markers, f);
+                CCString open = cc_string_new();
+#line 410 "cc/lower/lower_comptime.cch"
+                cc_string_push_buffer(&open, "/*__cc_ct_block ", 16, L->arena);
+#line 410 "cc/lower/lower_comptime.cch"
+                cc__string_slot_push(&open, ((int)(f)), L->arena);
+#line 410 "cc/lower/lower_comptime.cch"
+                cc_string_push_buffer(&open, " begin line=", 12, L->arena);
+#line 410 "cc/lower/lower_comptime.cch"
+                cc__string_slot_push(&open, ((int)(at.line)), L->arena);
+#line 410 "cc/lower/lower_comptime.cch"
+                cc_string_push_buffer(&open, "*/", 2, L->arena);
+                CCString close = cc_string_new();
+                CCString anchor = cc_string_new();
+                cc_string_push_cstr(&close, "/*__cc_ct_block end*/", L->arena);
+                cc_string_push_slice(&anchor, marker, L->arena);
+                CCVec_CcDeclRef_push(&with, lw_raw_decl(L, open, d->span));
+                CCVec_CcDeclRef_push(&with, d);
+                CCVec_CcDeclRef_push(&with, lw_raw_decl(L, close, d->span));
+                CCVec_CcDeclRef_push(&with, lw_raw_decl(L, anchor, d->span));
+            }
+            hit = true;
+            break;
+        }
+        if (!hit)
+#line 423 "cc/lower/lower_comptime.cch"
+            CCVec_CcDeclRef_push(&with, d);
+    }
+    *decls = with;
+}
+
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_comptime.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_comptime.cch*/
 #line 288 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_generics.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_generics.cch*/
 #line 1 "cc/lower/lower_generics.cch"
 
 /* Clean lowerer, step: generic instances. `Vec::[T]` in a type position is
@@ -32026,13 +32375,13 @@ static CCSlice gn_factory_note(CcLowerer *L, CCSlice fam) {
                 continue;
             nm2 = ({
 #line 923 "cc/lower/lower_generics.cch"
-                CCString __cc_str_5 = cc_string_new();
+                CCString __cc_str_6 = cc_string_new();
 #line 923 "cc/lower/lower_generics.cch"
-                cc_string_push_buffer(&__cc_str_5, "__cc_gfac_", 10, L->arena);
+                cc_string_push_buffer(&__cc_str_6, "__cc_gfac_", 10, L->arena);
 #line 923 "cc/lower/lower_generics.cch"
-                cc__string_slot_push(&__cc_str_5, (fam), L->arena);
+                cc__string_slot_push(&__cc_str_6, (fam), L->arena);
 #line 923 "cc/lower/lower_generics.cch"
-                __cc_str_5;
+                __cc_str_6;
 #line 923 "cc/lower/lower_generics.cch"
             });
             fname = lw_keep(L, &nm2);
@@ -32864,13 +33213,13 @@ static bool gn_lower_fragment(CcLowerer *L, CCString text, CcSpan sp, CCString *
                 CCSlice why = e.msg;
                 CCString m = ({
 #line 1442 "cc/lower/lower_generics.cch"
-                    CCString __cc_str_6 = cc_string_new();
+                    CCString __cc_str_7 = cc_string_new();
 #line 1442 "cc/lower/lower_generics.cch"
-                    cc_string_push_buffer(&__cc_str_6, "the expansion of this unit's generic instances does not print: ", 63, L->arena);
+                    cc_string_push_buffer(&__cc_str_7, "the expansion of this unit's generic instances does not print: ", 63, L->arena);
 #line 1442 "cc/lower/lower_generics.cch"
-                    cc__string_slot_push(&__cc_str_6, (why), L->arena);
+                    cc__string_slot_push(&__cc_str_7, (why), L->arena);
 #line 1442 "cc/lower/lower_generics.cch"
-                    __cc_str_6;
+                    __cc_str_7;
 #line 1442 "cc/lower/lower_generics.cch"
                 });
                 lw_error(L, sp, m);
@@ -33423,9 +33772,9 @@ void CcLowerer_generics(CcLowerer *L) {
 }
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_generics.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_generics.cch*/
 #line 289 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_slices.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_slices.cch*/
 #line 1 "cc/lower/lower_slices.cch"
 
 /* Clean lowerer, step: slice values. The slice types themselves are an
@@ -33607,20 +33956,20 @@ static bool sl_canon_is_slice(CCSlice cn) {
  * family spells it `cc_slice_from_buffer`. */
 static CcExpr *sl_from_buffer(CcLowerer *L, CCSlice instance, CCSlice arr, CcSpan sp) {
     CCString fn = cc_slice_eq_cstr(&instance, "CCSlice") ? ({
-        CCString __cc_str_7 = cc_string_new();
+        CCString __cc_str_8 = cc_string_new();
 #line 130 "cc/lower/lower_slices.cch"
-        cc_string_push_buffer(&__cc_str_7, "cc_slice_from_buffer", 20, L->arena);
+        cc_string_push_buffer(&__cc_str_8, "cc_slice_from_buffer", 20, L->arena);
 #line 130 "cc/lower/lower_slices.cch"
-        __cc_str_7;
+        __cc_str_8;
 #line 130 "cc/lower/lower_slices.cch"
     }) : ({
-        CCString __cc_str_8 = cc_string_new();
+        CCString __cc_str_9 = cc_string_new();
 #line 131 "cc/lower/lower_slices.cch"
-        cc__string_slot_push(&__cc_str_8, (instance), L->arena);
+        cc__string_slot_push(&__cc_str_9, (instance), L->arena);
 #line 131 "cc/lower/lower_slices.cch"
-        cc_string_push_buffer(&__cc_str_8, "_from_buffer", 12, L->arena);
+        cc_string_push_buffer(&__cc_str_9, "_from_buffer", 12, L->arena);
 #line 131 "cc/lower/lower_slices.cch"
-        __cc_str_8;
+        __cc_str_9;
 #line 131 "cc/lower/lower_slices.cch"
     });
     CCString count = cc_string_new();
@@ -34382,9 +34731,9 @@ void CcLowerer_slice_args(CcLowerer *L) {
 }
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_slices.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_slices.cch*/
 #line 290 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_strings.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_strings.cch*/
 #line 1 "cc/lower/lower_strings.cch"
 
 /* Clean lowerer, step: string templates. `@string(`...`, arena)` builds a
@@ -34590,15 +34939,15 @@ static CcExpr *sr_tag_expr(CcLowerer *L, CCSlice tag, CcSpan sp) {
         return lw_call0(L, cstr_slice("cc_slice_empty"), sp);
     t = ({
 #line 156 "cc/lower/lower_strings.cch"
-        CCString __cc_str_9 = cc_string_new();
+        CCString __cc_str_10 = cc_string_new();
 #line 156 "cc/lower/lower_strings.cch"
-        cc_string_push_buffer(&__cc_str_9, "CC_SLICE_LIT(\"", 14, L->arena);
+        cc_string_push_buffer(&__cc_str_10, "CC_SLICE_LIT(\"", 14, L->arena);
 #line 156 "cc/lower/lower_strings.cch"
-        cc__string_slot_push(&__cc_str_9, (tag), L->arena);
+        cc__string_slot_push(&__cc_str_10, (tag), L->arena);
 #line 156 "cc/lower/lower_strings.cch"
-        cc_string_push_buffer(&__cc_str_9, "\")", 2, L->arena);
+        cc_string_push_buffer(&__cc_str_10, "\")", 2, L->arena);
 #line 156 "cc/lower/lower_strings.cch"
-        __cc_str_9;
+        __cc_str_10;
 #line 156 "cc/lower/lower_strings.cch"
     });
     return lw_text(L, t, sp);
@@ -35898,9 +36247,9 @@ void CcLowerer_strings(CcLowerer *L) {
 }
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_strings.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_strings.cch*/
 #line 291 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_closures.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_closures.cch*/
 #line 1 "cc/lower/lower_closures.cch"
 
 /* Clean lowerer, step: closures. `(params) => body` becomes three C
@@ -36936,11 +37285,11 @@ static bool kl_box_stmt(CcStmt *s, void *env) {
     if (!value) {
         CcStmt *r = cc_stmt_return(lw_text(b->L, ({
 #line 704 "cc/lower/lower_closures.cch"
-            CCString __cc_str_10 = cc_string_new();
+            CCString __cc_str_11 = cc_string_new();
 #line 704 "cc/lower/lower_closures.cch"
-            cc_string_push_buffer(&__cc_str_10, "NULL", 4, b->L->arena);
+            cc_string_push_buffer(&__cc_str_11, "NULL", 4, b->L->arena);
 #line 704 "cc/lower/lower_closures.cch"
-            __cc_str_10;
+            __cc_str_11;
 #line 704 "cc/lower/lower_closures.cch"
         }), s->span), s->span, b->L->arena);
         s->k = r->k;
@@ -37082,11 +37431,11 @@ static CcDecl *kl_entry_decl(KStep *st, uint32_t id, KCapList *caps, CcClosure c
         } else {
             lw_push(body, cc_stmt_return(lw_text(L, ({
 #line 814 "cc/lower/lower_closures.cch"
-                CCString __cc_str_11 = cc_string_new();
+                CCString __cc_str_12 = cc_string_new();
 #line 814 "cc/lower/lower_closures.cch"
-                cc_string_push_buffer(&__cc_str_11, "NULL", 4, L->arena);
+                cc_string_push_buffer(&__cc_str_12, "NULL", 4, L->arena);
 #line 814 "cc/lower/lower_closures.cch"
-                __cc_str_11;
+                __cc_str_12;
 #line 814 "cc/lower/lower_closures.cch"
             }), sp), sp, L->arena));
         }
@@ -38516,11 +38865,11 @@ void CcLowerer_closures(CcLowerer *L) {
             size_t nm2 = CCVec_CcDeclRef_len(madev);
             CCVec_CcDeclRef_push(&with, lw_raw_decl(L, ({
 #line 1751 "cc/lower/lower_closures.cch"
-                CCString __cc_str_12 = cc_string_new();
+                CCString __cc_str_13 = cc_string_new();
 #line 1751 "cc/lower/lower_closures.cch"
-                cc_string_push_buffer(&__cc_str_12, "/* --- CC generated closures --- */", 35, L->arena);
+                cc_string_push_buffer(&__cc_str_13, "/* --- CC generated closures --- */", 35, L->arena);
 #line 1751 "cc/lower/lower_closures.cch"
-                __cc_str_12;
+                __cc_str_13;
 #line 1751 "cc/lower/lower_closures.cch"
             }), sp));
             for (k = 0; k < nm2; k++) {
@@ -38542,9 +38891,9 @@ void CcLowerer_closures(CcLowerer *L) {
 }
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_closures.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_closures.cch*/
 #line 292 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_create.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_create.cch*/
 #line 1 "cc/lower/lower_create.cch"
 
 /* Clean lowerer, step: `@create`. `T x = @create(args);` calls whatever
@@ -39133,9 +39482,9 @@ void CcLowerer_create(CcLowerer *L) {
 }
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_create.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_create.cch*/
 #line 293 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_forin.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_forin.cch*/
 #line 1 "cc/lower/lower_forin.cch"
 
 /* Clean lowerer, step: walks. `@for (x in xs)` is an index loop over the
@@ -40783,9 +41132,9 @@ void CcLowerer_forin(CcLowerer *L) {
 }
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_forin.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_forin.cch*/
 #line 294 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_deadline.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_deadline.cch*/
 #line 1 "cc/lower/lower_deadline.cch"
 
 /* Clean lowerer, step: deadline scopes. `@with_deadline(d) { ... }` runs
@@ -40906,9 +41255,9 @@ void CcLowerer_deadline(CcLowerer *L) {
 }
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_deadline.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_deadline.cch*/
 #line 295 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_chan.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_chan.cch*/
 #line 1 "cc/lower/lower_chan.cch"
 
 /* Clean lowerer, step: channels. An endpoint is declared by what travels
@@ -41306,35 +41655,35 @@ static CCString hc_elem_size(CcLowerer *L, CcType *elem, CCSlice canon) {
 #line 237 "cc/lower/lower_chan.cch"
         return ({
 #line 237 "cc/lower/lower_chan.cch"
-            CCString __cc_str_13 = cc_string_new();
+            CCString __cc_str_14 = cc_string_new();
 #line 237 "cc/lower/lower_chan.cch"
-            cc_string_push_buffer(&__cc_str_13, "sizeof(void*)", 13, L->arena);
+            cc_string_push_buffer(&__cc_str_14, "sizeof(void*)", 13, L->arena);
 #line 237 "cc/lower/lower_chan.cch"
-            __cc_str_13;
+            __cc_str_14;
 #line 237 "cc/lower/lower_chan.cch"
         });
     if (hc_elem_takes(L, elem))
 #line 238 "cc/lower/lower_chan.cch"
         return ({
 #line 238 "cc/lower/lower_chan.cch"
-            CCString __cc_str_14 = cc_string_new();
+            CCString __cc_str_15 = cc_string_new();
 #line 238 "cc/lower/lower_chan.cch"
-            cc_string_push_buffer(&__cc_str_14, "sizeof(CCSlice)", 15, L->arena);
+            cc_string_push_buffer(&__cc_str_15, "sizeof(CCSlice)", 15, L->arena);
 #line 238 "cc/lower/lower_chan.cch"
-            __cc_str_14;
+            __cc_str_15;
 #line 238 "cc/lower/lower_chan.cch"
         });
     return ({
 #line 239 "cc/lower/lower_chan.cch"
-        CCString __cc_str_15 = cc_string_new();
+        CCString __cc_str_16 = cc_string_new();
 #line 239 "cc/lower/lower_chan.cch"
-        cc_string_push_buffer(&__cc_str_15, "sizeof(", 7, L->arena);
+        cc_string_push_buffer(&__cc_str_16, "sizeof(", 7, L->arena);
 #line 239 "cc/lower/lower_chan.cch"
-        cc__string_slot_push(&__cc_str_15, (canon), L->arena);
+        cc__string_slot_push(&__cc_str_16, (canon), L->arena);
 #line 239 "cc/lower/lower_chan.cch"
-        cc_string_push_buffer(&__cc_str_15, ")", 1, L->arena);
+        cc_string_push_buffer(&__cc_str_16, ")", 1, L->arena);
 #line 239 "cc/lower/lower_chan.cch"
-        __cc_str_15;
+        __cc_str_16;
 #line 239 "cc/lower/lower_chan.cch"
     });
 }
@@ -41724,54 +42073,54 @@ static void hc_pair(HStep *st, CcExpr *e, CcCall cl) {
         bool take = !task && hc_elem_takes(L, a->elem);
         CCString capt = a->cap ? lw_spell_expr(L, a->cap) : ({
 #line 515 "cc/lower/lower_chan.cch"
-            CCString __cc_str_16 = cc_string_new();
+            CCString __cc_str_17 = cc_string_new();
 #line 515 "cc/lower/lower_chan.cch"
-            cc_string_push_buffer(&__cc_str_16, "0", 1, L->arena);
+            cc_string_push_buffer(&__cc_str_17, "0", 1, L->arena);
 #line 515 "cc/lower/lower_chan.cch"
-            __cc_str_16;
+            __cc_str_17;
 #line 515 "cc/lower/lower_chan.cch"
         });
         CCString szt = task ? ({
 #line 516 "cc/lower/lower_chan.cch"
-            CCString __cc_str_17 = cc_string_new();
+            CCString __cc_str_18 = cc_string_new();
 #line 516 "cc/lower/lower_chan.cch"
-            cc_string_push_buffer(&__cc_str_17, "sizeof(CCTask)", 14, L->arena);
+            cc_string_push_buffer(&__cc_str_18, "sizeof(CCTask)", 14, L->arena);
 #line 516 "cc/lower/lower_chan.cch"
-            __cc_str_17;
+            __cc_str_18;
 #line 516 "cc/lower/lower_chan.cch"
         }) : hc_elem_size(L, a->elem, elem);
         CCString ord = ordered ? ({
 #line 517 "cc/lower/lower_chan.cch"
-            CCString __cc_str_18 = cc_string_new();
+            CCString __cc_str_19 = cc_string_new();
 #line 517 "cc/lower/lower_chan.cch"
-            cc_string_push_buffer(&__cc_str_18, "1", 1, L->arena);
+            cc_string_push_buffer(&__cc_str_19, "1", 1, L->arena);
 #line 517 "cc/lower/lower_chan.cch"
-            __cc_str_18;
+            __cc_str_19;
 #line 517 "cc/lower/lower_chan.cch"
         }) : ({
 #line 517 "cc/lower/lower_chan.cch"
-            CCString __cc_str_19 = cc_string_new();
+            CCString __cc_str_20 = cc_string_new();
 #line 517 "cc/lower/lower_chan.cch"
-            cc_string_push_buffer(&__cc_str_19, "0", 1, L->arena);
+            cc_string_push_buffer(&__cc_str_20, "0", 1, L->arena);
 #line 517 "cc/lower/lower_chan.cch"
-            __cc_str_19;
+            __cc_str_20;
 #line 517 "cc/lower/lower_chan.cch"
         });
         CCString tk = take ? ({
 #line 518 "cc/lower/lower_chan.cch"
-            CCString __cc_str_20 = cc_string_new();
+            CCString __cc_str_21 = cc_string_new();
 #line 518 "cc/lower/lower_chan.cch"
-            cc_string_push_buffer(&__cc_str_20, "1", 1, L->arena);
+            cc_string_push_buffer(&__cc_str_21, "1", 1, L->arena);
 #line 518 "cc/lower/lower_chan.cch"
-            __cc_str_20;
+            __cc_str_21;
 #line 518 "cc/lower/lower_chan.cch"
         }) : ({
 #line 518 "cc/lower/lower_chan.cch"
-            CCString __cc_str_21 = cc_string_new();
+            CCString __cc_str_22 = cc_string_new();
 #line 518 "cc/lower/lower_chan.cch"
-            cc_string_push_buffer(&__cc_str_21, "0", 1, L->arena);
+            cc_string_push_buffer(&__cc_str_22, "0", 1, L->arena);
 #line 518 "cc/lower/lower_chan.cch"
-            __cc_str_21;
+            __cc_str_22;
 #line 518 "cc/lower/lower_chan.cch"
         });
         CCString names = cc_string_new();
@@ -41794,11 +42143,11 @@ static void hc_pair(HStep *st, CcExpr *e, CcCall cl) {
         CCVec_CcExprRef_push(&out.args, lw_text(L, szt, sp));
         CCVec_CcExprRef_push(&out.args, lw_text(L, ({
 #line 527 "cc/lower/lower_chan.cch"
-            CCString __cc_str_22 = cc_string_new();
+            CCString __cc_str_23 = cc_string_new();
 #line 527 "cc/lower/lower_chan.cch"
-            cc_string_push_buffer(&__cc_str_22, "0", 1, L->arena);
+            cc_string_push_buffer(&__cc_str_23, "0", 1, L->arena);
 #line 527 "cc/lower/lower_chan.cch"
-            __cc_str_22;
+            __cc_str_23;
 #line 527 "cc/lower/lower_chan.cch"
         }), sp));
         CCVec_CcExprRef_push(&out.args, lw_ident(L, a->topo, sp));
@@ -41808,20 +42157,20 @@ static void hc_pair(HStep *st, CcExpr *e, CcCall cl) {
         CCVec_CcExprRef_push(&out.args, lw_text(L, names, sp));
         CCVec_CcExprRef_push(&out.args, lw_text(L, ({
 #line 533 "cc/lower/lower_chan.cch"
-            CCString __cc_str_23 = cc_string_new();
+            CCString __cc_str_24 = cc_string_new();
 #line 533 "cc/lower/lower_chan.cch"
-            cc_string_push_buffer(&__cc_str_23, "__FILE__", 8, L->arena);
+            cc_string_push_buffer(&__cc_str_24, "__FILE__", 8, L->arena);
 #line 533 "cc/lower/lower_chan.cch"
-            __cc_str_23;
+            __cc_str_24;
 #line 533 "cc/lower/lower_chan.cch"
         }), sp));
         CCVec_CcExprRef_push(&out.args, lw_text(L, ({
 #line 534 "cc/lower/lower_chan.cch"
-            CCString __cc_str_24 = cc_string_new();
+            CCString __cc_str_25 = cc_string_new();
 #line 534 "cc/lower/lower_chan.cch"
-            cc_string_push_buffer(&__cc_str_24, "__LINE__", 8, L->arena);
+            cc_string_push_buffer(&__cc_str_25, "__LINE__", 8, L->arena);
 #line 534 "cc/lower/lower_chan.cch"
-            __cc_str_24;
+            __cc_str_25;
 #line 534 "cc/lower/lower_chan.cch"
         }), sp));
         e->k = (CcExprK){ .kind = CcExprK_call, .u.call = out };
@@ -42156,11 +42505,11 @@ static CcExpr *hc_await_surface(CcLowerer *L, CcUfcs uf, CcSpan sp) {
     }
     width = lw_text(L, ({
 #line 759 "cc/lower/lower_chan.cch"
-        CCString __cc_str_25 = cc_string_new();
+        CCString __cc_str_26 = cc_string_new();
 #line 759 "cc/lower/lower_chan.cch"
-        cc_string_push_buffer(&__cc_str_25, "intptr_t", 8, L->arena);
+        cc_string_push_buffer(&__cc_str_26, "intptr_t", 8, L->arena);
 #line 759 "cc/lower/lower_chan.cch"
-        __cc_str_25;
+        __cc_str_26;
 #line 759 "cc/lower/lower_chan.cch"
     }), sp);
     wait = lw_call2(L, cstr_slice("cc_block_on"), width, task, sp);
@@ -42524,9 +42873,9 @@ void CcLowerer_chan(CcLowerer *L) {
 }
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_chan.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_chan.cch*/
 #line 296 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_async.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_async.cch*/
 #line 1 "cc/lower/lower_async.cch"
 
 /* Clean lowerer, step: asynchronous functions. `@async Ret f(a)` is a
@@ -42817,13 +43166,13 @@ static CCString as_frame_fields(CcLowerer *L, CcParamList *ps) {
             continue;
         slot = ({
 #line 209 "cc/lower/lower_async.cch"
-            CCString __cc_str_26 = cc_string_new();
+            CCString __cc_str_27 = cc_string_new();
 #line 209 "cc/lower/lower_async.cch"
-            cc_string_push_buffer(&__cc_str_26, "__p_", 4, L->arena);
+            cc_string_push_buffer(&__cc_str_27, "__p_", 4, L->arena);
 #line 209 "cc/lower/lower_async.cch"
-            cc__string_slot_push(&__cc_str_26, (p->name), L->arena);
+            cc__string_slot_push(&__cc_str_27, (p->name), L->arena);
 #line 209 "cc/lower/lower_async.cch"
-            __cc_str_26;
+            __cc_str_27;
 #line 209 "cc/lower/lower_async.cch"
         });
         one = as_spell(L, p->type, cc_string_as_slice(&slot));
@@ -42848,19 +43197,19 @@ static CCString as_frame_fills(CcLowerer *L, CcParamList *ps) {
             continue;
         one = ({
 #line 228 "cc/lower/lower_async.cch"
-            CCString __cc_str_27 = cc_string_new();
+            CCString __cc_str_28 = cc_string_new();
 #line 228 "cc/lower/lower_async.cch"
-            cc_string_push_buffer(&__cc_str_27, "    __f->__p_", 13, L->arena);
+            cc_string_push_buffer(&__cc_str_28, "    __f->__p_", 13, L->arena);
 #line 228 "cc/lower/lower_async.cch"
-            cc__string_slot_push(&__cc_str_27, (nm), L->arena);
+            cc__string_slot_push(&__cc_str_28, (nm), L->arena);
 #line 228 "cc/lower/lower_async.cch"
-            cc_string_push_buffer(&__cc_str_27, " = ", 3, L->arena);
+            cc_string_push_buffer(&__cc_str_28, " = ", 3, L->arena);
 #line 228 "cc/lower/lower_async.cch"
-            cc__string_slot_push(&__cc_str_27, (nm), L->arena);
+            cc__string_slot_push(&__cc_str_28, (nm), L->arena);
 #line 228 "cc/lower/lower_async.cch"
-            cc_string_push_buffer(&__cc_str_27, ";\n", 2, L->arena);
+            cc_string_push_buffer(&__cc_str_28, ";\n", 2, L->arena);
 #line 228 "cc/lower/lower_async.cch"
-            __cc_str_27;
+            __cc_str_28;
 #line 228 "cc/lower/lower_async.cch"
         });
 #line 230 "cc/lower/lower_async.cch"
@@ -42895,13 +43244,13 @@ static CcDecl *as_body_decl(CcLowerer *L, CcFuncDecl fd, CcParamList *ps, CCSlic
             continue;
         slot = ({
 #line 253 "cc/lower/lower_async.cch"
-            CCString __cc_str_28 = cc_string_new();
+            CCString __cc_str_29 = cc_string_new();
 #line 253 "cc/lower/lower_async.cch"
-            cc_string_push_buffer(&__cc_str_28, "__p_", 4, L->arena);
+            cc_string_push_buffer(&__cc_str_29, "__p_", 4, L->arena);
 #line 253 "cc/lower/lower_async.cch"
-            cc__string_slot_push(&__cc_str_28, (p->name), L->arena);
+            cc__string_slot_push(&__cc_str_29, (p->name), L->arena);
 #line 253 "cc/lower/lower_async.cch"
-            __cc_str_28;
+            __cc_str_29;
 #line 253 "cc/lower/lower_async.cch"
         });
         read = cc_expr_member(lw_ident(L, cstr_slice("__f"), sp), lw_keep(L, &slot), true, sp, L->arena);
@@ -44269,11 +44618,11 @@ static int as_await_type(AStep *st, CcExpr *operand, CCString *out, CCSlice *rna
         if (rn.len >= 6 && memcmp(rn.ptr, "CCTask", 6) == 0) {
             *out = ({
 #line 1123 "cc/lower/lower_async.cch"
-                CCString __cc_str_29 = cc_string_new();
+                CCString __cc_str_30 = cc_string_new();
 #line 1123 "cc/lower/lower_async.cch"
-                cc_string_push_buffer(&__cc_str_29, "intptr_t", 8, L->arena);
+                cc_string_push_buffer(&__cc_str_30, "intptr_t", 8, L->arena);
 #line 1123 "cc/lower/lower_async.cch"
-                __cc_str_29;
+                __cc_str_30;
 #line 1123 "cc/lower/lower_async.cch"
             });
             return AS_AWAIT_VALUE;
@@ -44580,9 +44929,9 @@ void CcLowerer_async(CcLowerer *L) {
 }
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_async.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_async.cch*/
 #line 297 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_parallel.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_parallel.cch*/
 #line 1 "cc/lower/lower_parallel.cch"
 
 /* Clean lowerer, step: `@parallel`. The arms of
@@ -44598,9 +44947,8 @@ void CcLowerer_async(CcLowerer *L) {
  * addresses.
  *
  * The runtime may refuse to spawn (`cc_parallel_deny_fast`), and a spawn
- * may fail. A wait-for expression arm is then spelled on the caller — the
- * assignment as written, not a trip through the thunk. A serial or
- * raising arm still runs the thunk, so those bodies are emitted once.
+ * may fail. Both fall back to running the thunk inline, so the arms run
+ * either way and the difference is only whether they overlapped.
  *
  * `spawn` is the same block with one promise added: every arm but the
  * first is running while the block is, so the runtime may not deny one and
@@ -44616,7 +44964,7 @@ void CcLowerer_async(CcLowerer *L) {
 #ifndef CC_LOWER_PARALLEL_CCH
 #define CC_LOWER_PARALLEL_CCH
 
-#line 35 "cc/lower/lower_parallel.cch"
+#line 34 "cc/lower/lower_parallel.cch"
 typedef struct PCap {
     CCSlice name;
     CcType *type;
@@ -44644,35 +44992,10 @@ static __attribute__((constructor)) void cc__ti_reg_CCVec_PCapRef(void) {
     cc_type_info_register(&__cc_ti_CCVec_PCapRef);
 }
 #endif
-#line 41 "cc/lower/lower_parallel.cch"
+#line 40 "cc/lower/lower_parallel.cch"
 
-#line 41 "cc/lower/lower_parallel.cch"
+#line 40 "cc/lower/lower_parallel.cch"
 typedef CCVec_PCapRef PCapList;
-
-#ifndef CC_HEADER_VEC_CCVec_PCapList
-#define CC_HEADER_VEC_CCVec_PCapList
-/* generic CCVec_PCapList */
-
-#ifdef CC_HAS_CCSLICE_PCapList
-CC_VEC_DECL_ARENA_TSLICE(PCapList, CCVec_PCapList, CCSlice_PCapList)
-#else
-CC_VEC_DECL_ARENA(PCapList, CCVec_PCapList)
-#endif
-static inline CCVec_PCapList cc__CCVec_PCapList_new(CCArena __a) {
-    return CCVec_PCapList_init(__a, 0);
-}
-#define CCVec_PCapList_new(ar) cc__CCVec_PCapList_new(CC__ARENA_HANDLE(ar))
-
-/* cc_type_info for CCVec_PCapList (serdes) */
-static const cc_type_info __cc_ti_CCVec_PCapList = { .name = "CCVec_PCapList", .mangled = "CCVec_PCapList", .id = 0, .size = (uint32_t)(sizeof(CCVec_PCapList)), .align = (uint32_t)(_Alignof(CCVec_PCapList)), .kind = (uint16_t)(CC_TK_GENERIC_INST), .nfields = 0, .flags = (uint16_t)(CC_TF_ERASABLE), ._reserved = 0, .fields = NULL, .copy_fn = NULL, .drop_fn = NULL };
-static __attribute__((constructor)) void cc__ti_reg_CCVec_PCapList(void) {
-    cc_type_info_register(&__cc_ti_CCVec_PCapList);
-}
-#endif
-#line 42 "cc/lower/lower_parallel.cch"
-
-#line 42 "cc/lower/lower_parallel.cch"
-typedef CCVec_PCapList PCapLists;
 
 /* A site that binds a handle: the handle outlives the block, so its
  * declaration goes before it, in the list the block sits in. */
@@ -44681,7 +45004,7 @@ typedef struct PBind {
     CCSlice name;
     CcType *type;
     bool destroy;
-#line 52 "cc/lower/lower_parallel.cch"
+#line 50 "cc/lower/lower_parallel.cch"
     CcStmt *destroy_body;
 } PBind;
 typedef PBind *PBindRef;
@@ -44706,9 +45029,9 @@ static __attribute__((constructor)) void cc__ti_reg_CCVec_PBindRef(void) {
     cc_type_info_register(&__cc_ti_CCVec_PBindRef);
 }
 #endif
-#line 55 "cc/lower/lower_parallel.cch"
+#line 53 "cc/lower/lower_parallel.cch"
 
-#line 55 "cc/lower/lower_parallel.cch"
+#line 53 "cc/lower/lower_parallel.cch"
 typedef CCVec_PBindRef PBindList;
 
 typedef struct PStep {
@@ -44717,24 +45040,24 @@ typedef struct PStep {
     uint32_t next_id;
     CcDeclList made; /* the thunks, in order */
     CcDeclList protos;
-#line 65 "cc/lower/lower_parallel.cch"
+#line 63 "cc/lower/lower_parallel.cch"
     CCString fwd; /* their forward declarations */
     PBindList binds; /* sites whose handle is declared before the block */
     CcStmtList stages; /* `@stage` statements a `@parallel wait for` claimed */
     CcDecl *at_decl; /* the unit declaration the walk is inside */
     CcDecl *first_host; /* the first one that needed a forward declaration */
     CcType *fn_ret;
-#line 72 "cc/lower/lower_parallel.cch"
+#line 70 "cc/lower/lower_parallel.cch"
     CcStmtList eh_top;
-#line 75 "cc/lower/lower_parallel.cch"
+#line 73 "cc/lower/lower_parallel.cch"
     bool eh_any;
     int dest_depth;
-#line 78 "cc/lower/lower_parallel.cch"
+#line 76 "cc/lower/lower_parallel.cch"
     size_t eh_in_scope;
-#line 80 "cc/lower/lower_parallel.cch"
+#line 78 "cc/lower/lower_parallel.cch"
     CCVec_size_t eh_marks; /* `eh_in_scope` as it was on entering each open statement */
     bool any;
-#line 85 "cc/lower/lower_parallel.cch"
+#line 83 "cc/lower/lower_parallel.cch"
     CCVec_uint32_t off_from;
     CCVec_uint32_t off_to;
 } PStep;
@@ -44753,32 +45076,32 @@ static bool pl_pragma_par(CCSlice text, bool *is_off, bool *is_on, bool *bad) {
     static const char *head = "#pragma(@parallel)";
     size_t hn = 18;
     while (i < n && (p[i] == ' ' || p[i] == '\t'))
-#line 102 "cc/lower/lower_parallel.cch"
+#line 100 "cc/lower/lower_parallel.cch"
         i++;
     if (n - i < hn)
-#line 103 "cc/lower/lower_parallel.cch"
+#line 101 "cc/lower/lower_parallel.cch"
         return false;
     for (k = 0; k < hn; k++)
         if (p[i + k] != head[k])
-#line 105 "cc/lower/lower_parallel.cch"
+#line 103 "cc/lower/lower_parallel.cch"
             return false;
     i += hn;
     while (i < n && (p[i] == ' ' || p[i] == '\t'))
-#line 107 "cc/lower/lower_parallel.cch"
+#line 105 "cc/lower/lower_parallel.cch"
         i++;
     if (n - i >= 3 && p[i] == 'o' && p[i + 1] == 'f' && p[i + 2] == 'f') {
-#line 108 "cc/lower/lower_parallel.cch"
+#line 106 "cc/lower/lower_parallel.cch"
         *is_off = true;
-#line 108 "cc/lower/lower_parallel.cch"
+#line 106 "cc/lower/lower_parallel.cch"
         return true;
-#line 108 "cc/lower/lower_parallel.cch"
+#line 106 "cc/lower/lower_parallel.cch"
     }
     if (n - i >= 2 && p[i] == 'o' && p[i + 1] == 'n') {
-#line 109 "cc/lower/lower_parallel.cch"
+#line 107 "cc/lower/lower_parallel.cch"
         *is_on = true;
-#line 109 "cc/lower/lower_parallel.cch"
+#line 107 "cc/lower/lower_parallel.cch"
         return true;
-#line 109 "cc/lower/lower_parallel.cch"
+#line 107 "cc/lower/lower_parallel.cch"
     }
     *bad = true;
     return false;
@@ -44803,17 +45126,17 @@ static void pl_read_par_off(PStep *st) {
         bool is_on = false;
         bool bad = false;
         if (t->kind != CC_TK_PP)
-#line 132 "cc/lower/lower_parallel.cch"
+#line 130 "cc/lower/lower_parallel.cch"
             continue;
         if (!pl_pragma_par(tx, &is_off, &is_on, &bad)) {
             if (bad) {
                 CcSpan sp;
                 CCString msg = cc_string_new();
-#line 136 "cc/lower/lower_parallel.cch"
+#line 134 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&msg, "#pragma(", 8, st->L->arena);
-#line 136 "cc/lower/lower_parallel.cch"
+#line 134 "cc/lower/lower_parallel.cch"
                 cc__string_slot_push(&msg, ("@"), st->L->arena);
-#line 136 "cc/lower/lower_parallel.cch"
+#line 134 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&msg, "parallel) takes 'off' or 'on'", 29, st->L->arena);
                 sp.first = (uint32_t)(i);
                 sp.last = (uint32_t)(i);
@@ -44843,13 +45166,13 @@ static bool pl_par_off_at(PStep *st, uint32_t tok) {
     size_t n = CCVec_uint32_t_len(fv);
     size_t i;
     if (CCVec_uint32_t_len(tv) < n)
-#line 164 "cc/lower/lower_parallel.cch"
+#line 162 "cc/lower/lower_parallel.cch"
         n = CCVec_uint32_t_len(tv);
     for (i = 0; i < n; i++) {
         uint32_t a = *CCVec_uint32_t_get_ptr(fv, i);
         uint32_t b = *CCVec_uint32_t_get_ptr(tv, i);
         if (tok >= a && tok <= b)
-#line 168 "cc/lower/lower_parallel.cch"
+#line 166 "cc/lower/lower_parallel.cch"
             return true;
     }
     return false;
@@ -44857,26 +45180,26 @@ static bool pl_par_off_at(PStep *st, uint32_t tok) {
 
 static CCSlice pl_name(CcLowerer *L, uint32_t id, uint32_t k, const char *suffix) {
     CCString s = cc_string_new();
-#line 174 "cc/lower/lower_parallel.cch"
+#line 172 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&s, "__cc_par_", 9, L->arena);
-#line 174 "cc/lower/lower_parallel.cch"
+#line 172 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&s, (id), L->arena);
-#line 174 "cc/lower/lower_parallel.cch"
+#line 172 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&s, "_", 1, L->arena);
-#line 174 "cc/lower/lower_parallel.cch"
+#line 172 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&s, (k), L->arena);
-#line 174 "cc/lower/lower_parallel.cch"
+#line 172 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&s, (suffix), L->arena);
     return lw_keep(L, &s);
 }
 
 static CCSlice pl_join_type(CcLowerer *L, uint32_t id) {
     CCString s = cc_string_new();
-#line 179 "cc/lower/lower_parallel.cch"
+#line 177 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&s, "__cc_pj_", 8, L->arena);
-#line 179 "cc/lower/lower_parallel.cch"
+#line 177 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&s, (id), L->arena);
-#line 179 "cc/lower/lower_parallel.cch"
+#line 177 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&s, "_t", 2, L->arena);
     return lw_keep(L, &s);
 }
@@ -44886,11 +45209,11 @@ static CCSlice pl_join_type(CcLowerer *L, uint32_t id) {
 /* The local a gated site tests once: true when the arms run in order. */
 static CCSlice pl_gate_name(CcLowerer *L, uint32_t id) {
     CCString g = cc_string_new();
-#line 187 "cc/lower/lower_parallel.cch"
+#line 185 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&g, "__cc_par_", 9, L->arena);
-#line 187 "cc/lower/lower_parallel.cch"
+#line 185 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&g, (id), L->arena);
-#line 187 "cc/lower/lower_parallel.cch"
+#line 185 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&g, "_seq", 4, L->arena);
     return lw_keep(L, &g);
 }
@@ -44910,7 +45233,7 @@ static bool pl_seen(PScan *sc, CCSlice name) {
     for (i = 0; i < n; i++) {
         CCSlice s = *CCVec_CCSlice_get_ptr(v, i);
         if (slice_eq(s, name))
-#line 205 "cc/lower/lower_parallel.cch"
+#line 203 "cc/lower/lower_parallel.cch"
             return true;
     }
     return false;
@@ -44922,27 +45245,27 @@ static bool pl_scan_expr(CcExpr *e, void *env) {
     CcType *t;
     switch ((e->k).kind) {
         case CcExprK_ident: {
-#line 215 "cc/lower/lower_parallel.cch"
+#line 213 "cc/lower/lower_parallel.cch"
             CCSlice x = (e->k).u.ident;
-#line 215 "cc/lower/lower_parallel.cch"
+#line 213 "cc/lower/lower_parallel.cch"
             nm = x;
-#line 215 "cc/lower/lower_parallel.cch"
+#line 213 "cc/lower/lower_parallel.cch"
             break;
-#line 215 "cc/lower/lower_parallel.cch"
+#line 213 "cc/lower/lower_parallel.cch"
         }
         default:
-#line 216 "cc/lower/lower_parallel.cch"
+#line 214 "cc/lower/lower_parallel.cch"
             return true;
     }
     if (!nm.len || pl_seen(sc, nm))
-#line 218 "cc/lower/lower_parallel.cch"
+#line 216 "cc/lower/lower_parallel.cch"
         return true;
     if (sc->skip.len && slice_eq(nm, sc->skip))
-#line 219 "cc/lower/lower_parallel.cch"
+#line 217 "cc/lower/lower_parallel.cch"
         return true;
     t = sc_lookup(sc->w, nm);
     if (!t)
-#line 221 "cc/lower/lower_parallel.cch"
+#line 219 "cc/lower/lower_parallel.cch"
         return true; /* not a local: a function, an enumerator */
     {
         PCap *c = cc_arena_alloc(sc->st->L->arena, sizeof(PCap), _Alignof(PCap));
@@ -44958,11 +45281,11 @@ static bool pl_scan_expr(CcExpr *e, void *env) {
 /* Every use of `name` read through `through` instead. */
 typedef struct PRef {
     CCArena arena;
-#line 235 "cc/lower/lower_parallel.cch"
+#line 233 "cc/lower/lower_parallel.cch"
     CCSlice name;
-#line 235 "cc/lower/lower_parallel.cch"
+#line 233 "cc/lower/lower_parallel.cch"
     CCSlice through;
-#line 235 "cc/lower/lower_parallel.cch"
+#line 233 "cc/lower/lower_parallel.cch"
 } PRef;
 
 /* The captured name, read through the pointer the environment carries.
@@ -44976,20 +45299,20 @@ static bool pl_ref_expr(CcExpr *e, void *env) {
     CCSlice nm;
     switch ((e->k).kind) {
         case CcExprK_ident: {
-#line 247 "cc/lower/lower_parallel.cch"
+#line 245 "cc/lower/lower_parallel.cch"
             CCSlice x = (e->k).u.ident;
-#line 247 "cc/lower/lower_parallel.cch"
+#line 245 "cc/lower/lower_parallel.cch"
             nm = x;
-#line 247 "cc/lower/lower_parallel.cch"
+#line 245 "cc/lower/lower_parallel.cch"
             break;
-#line 247 "cc/lower/lower_parallel.cch"
+#line 245 "cc/lower/lower_parallel.cch"
         }
         default:
-#line 248 "cc/lower/lower_parallel.cch"
+#line 246 "cc/lower/lower_parallel.cch"
             return true;
     }
     if (!slice_eq(nm, r->name))
-#line 250 "cc/lower/lower_parallel.cch"
+#line 248 "cc/lower/lower_parallel.cch"
         return true;
     {
         CcExpr *p = cc_expr_ident(r->through, e->span, r->arena);
@@ -45012,10 +45335,10 @@ static void pl_rewrite(CcLowerer *L, CcExpr *e, CcStmt *s, CCSlice name, CCSlice
     v.expr = pl_ref_expr;
     v.env = &r;
     if (e)
-#line 271 "cc/lower/lower_parallel.cch"
+#line 269 "cc/lower/lower_parallel.cch"
         CcExpr_walk(e, v);
     if (s)
-#line 272 "cc/lower/lower_parallel.cch"
+#line 270 "cc/lower/lower_parallel.cch"
         CcStmt_walk(s, v);
 }
 
@@ -45033,16 +45356,16 @@ static bool pl_shadow_stmt(CcStmt *s, void *env) {
     PAsk *sh = (PAsk *)(env);
     CcDecl *d = NULL;
     if (sh->hit.len)
-#line 288 "cc/lower/lower_parallel.cch"
+#line 286 "cc/lower/lower_parallel.cch"
         return true;
     if (!stmt_is_decl(s, &d) || !d)
-#line 289 "cc/lower/lower_parallel.cch"
+#line 287 "cc/lower/lower_parallel.cch"
         return true;
     switch ((d->k).kind) {
         case CcDeclK_var: {
-#line 291 "cc/lower/lower_parallel.cch"
+#line 289 "cc/lower/lower_parallel.cch"
             CcVarDecl v = (d->k).u.var;
-#line 291 "cc/lower/lower_parallel.cch"
+#line 289 "cc/lower/lower_parallel.cch"
             {
                 PCapList *cv = sh->caps;
                 size_t n = CCVec_PCapRef_len(cv);
@@ -45050,19 +45373,19 @@ static bool pl_shadow_stmt(CcStmt *s, void *env) {
                 for (i = 0; i < n; i++) {
                     PCap *c = *CCVec_PCapRef_get_ptr(cv, i);
                     if (slice_eq(c->name, v.name)) {
-#line 297 "cc/lower/lower_parallel.cch"
+#line 295 "cc/lower/lower_parallel.cch"
                         sh->hit = v.name;
-#line 297 "cc/lower/lower_parallel.cch"
+#line 295 "cc/lower/lower_parallel.cch"
                         return true;
-#line 297 "cc/lower/lower_parallel.cch"
+#line 295 "cc/lower/lower_parallel.cch"
                     }
                 }
                 break;
             }
-#line 300 "cc/lower/lower_parallel.cch"
+#line 298 "cc/lower/lower_parallel.cch"
         }
         default:
-#line 301 "cc/lower/lower_parallel.cch"
+#line 299 "cc/lower/lower_parallel.cch"
             break;
     }
     return true;
@@ -45076,26 +45399,26 @@ static CcStmt *pl_serial_body(CcLowerer *L, CcStmt *s) {
     CcBlock b;
     bool hit = false;
     if (!s)
-#line 313 "cc/lower/lower_parallel.cch"
+#line 311 "cc/lower/lower_parallel.cch"
         return NULL;
     switch ((s->k).kind) {
         case CcStmtK_serial: {
-#line 315 "cc/lower/lower_parallel.cch"
+#line 313 "cc/lower/lower_parallel.cch"
             CcBlock x = (s->k).u.serial;
-#line 315 "cc/lower/lower_parallel.cch"
+#line 313 "cc/lower/lower_parallel.cch"
             b = x;
-#line 315 "cc/lower/lower_parallel.cch"
+#line 313 "cc/lower/lower_parallel.cch"
             hit = true;
-#line 315 "cc/lower/lower_parallel.cch"
+#line 313 "cc/lower/lower_parallel.cch"
             break;
-#line 315 "cc/lower/lower_parallel.cch"
+#line 313 "cc/lower/lower_parallel.cch"
         }
         default:
-#line 316 "cc/lower/lower_parallel.cch"
+#line 314 "cc/lower/lower_parallel.cch"
             break;
     }
     if (!hit)
-#line 318 "cc/lower/lower_parallel.cch"
+#line 316 "cc/lower/lower_parallel.cch"
         return s;
     blk = cc__stmt_blank(s->span, L->arena);
     blk->k = (CcStmtK){ .kind = CcStmtK_block, .u.block = b };
@@ -45107,7 +45430,7 @@ static CcStmt *pl_serial_body(CcLowerer *L, CcStmt *s) {
 /* The environment one arm carries: a pointer per name it reads, and the
  * one it writes. */
 static CCString pl_env_text(PStep *st, uint32_t id, uint32_t k, PCapList *caps, CCSlice out_type, bool snapshot, CCSlice join_ty) {
-#line 330 "cc/lower/lower_parallel.cch"
+#line 328 "cc/lower/lower_parallel.cch"
     CcLowerer *L = st->L;
     CCArena a = L->arena;
     CCString sb = cc_string_new();
@@ -45149,7 +45472,7 @@ static CCString pl_env_text(PStep *st, uint32_t id, uint32_t k, PCapList *caps, 
  * reads is declared -- and nothing before it calls a thunk. */
 static void pl_host(PStep *st) {
     if (!st->first_host)
-#line 370 "cc/lower/lower_parallel.cch"
+#line 368 "cc/lower/lower_parallel.cch"
         st->first_host = st->at_decl;
 }
 
@@ -45193,11 +45516,11 @@ typedef struct PForExit {
 /* The names the block's own exit goes by. */
 static CCSlice pl_pj_name(CcLowerer *L, uint32_t id, const char *suffix) {
     CCString s = cc_string_new();
-#line 412 "cc/lower/lower_parallel.cch"
+#line 410 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&s, "__cc_pj_", 8, L->arena);
-#line 412 "cc/lower/lower_parallel.cch"
+#line 410 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&s, (id), L->arena);
-#line 412 "cc/lower/lower_parallel.cch"
+#line 410 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&s, (suffix), L->arena);
     return lw_keep(L, &s);
 }
@@ -45209,12 +45532,12 @@ static bool pl_arm_closure_stop(CcExpr *e, void *env) {
     (void)(env);
     switch ((e->k).kind) {
         case CcExprK_closure:
-#line 422 "cc/lower/lower_parallel.cch"
+#line 420 "cc/lower/lower_parallel.cch"
             is_closure = true;
-#line 422 "cc/lower/lower_parallel.cch"
+#line 420 "cc/lower/lower_parallel.cch"
             break;
         default:
-#line 423 "cc/lower/lower_parallel.cch"
+#line 421 "cc/lower/lower_parallel.cch"
             break;
     }
     return !is_closure;
@@ -45224,14 +45547,14 @@ static bool pl_ret_any_stmt(CcStmt *s, void *env) {
     CcStmt **at = (CcStmt **)(env);
     switch ((s->k).kind) {
         case CcStmtK_return_:
-#line 431 "cc/lower/lower_parallel.cch"
+#line 429 "cc/lower/lower_parallel.cch"
             if (!*at)
-#line 431 "cc/lower/lower_parallel.cch"
+#line 429 "cc/lower/lower_parallel.cch"
                 *at = s;
-#line 431 "cc/lower/lower_parallel.cch"
+#line 429 "cc/lower/lower_parallel.cch"
             break;
         default:
-#line 432 "cc/lower/lower_parallel.cch"
+#line 430 "cc/lower/lower_parallel.cch"
             break;
     }
     return true;
@@ -45242,18 +45565,18 @@ static bool pl_dest_ret_stmt(CcStmt *s, void *env) {
     CcStmt **at = (CcStmt **)(env);
     switch ((s->k).kind) {
         case CcStmtK_return_: {
-#line 441 "cc/lower/lower_parallel.cch"
+#line 439 "cc/lower/lower_parallel.cch"
             CcReturn r = (s->k).u.return_;
-#line 441 "cc/lower/lower_parallel.cch"
+#line 439 "cc/lower/lower_parallel.cch"
             if (r.value && !*at)
-#line 441 "cc/lower/lower_parallel.cch"
+#line 439 "cc/lower/lower_parallel.cch"
                 *at = s;
-#line 441 "cc/lower/lower_parallel.cch"
+#line 439 "cc/lower/lower_parallel.cch"
             break;
-#line 441 "cc/lower/lower_parallel.cch"
+#line 439 "cc/lower/lower_parallel.cch"
         }
         default:
-#line 442 "cc/lower/lower_parallel.cch"
+#line 440 "cc/lower/lower_parallel.cch"
             break;
     }
     return true;
@@ -45265,18 +45588,18 @@ static CcStmt *pl_arm_first_return(CcExpr *e, CcStmt *s, bool valued) {
     CcStmt *at = NULL;
     memset(&v, 0, sizeof(v));
     if (valued)
-#line 452 "cc/lower/lower_parallel.cch"
+#line 450 "cc/lower/lower_parallel.cch"
         v.stmt = pl_dest_ret_stmt;
-#line 452 "cc/lower/lower_parallel.cch"
+#line 450 "cc/lower/lower_parallel.cch"
     else
         v.stmt = pl_ret_any_stmt;
     v.expr = pl_arm_closure_stop;
     v.env = &at;
     if (e)
-#line 456 "cc/lower/lower_parallel.cch"
+#line 454 "cc/lower/lower_parallel.cch"
         CcExpr_walk(e, v);
     if (s)
-#line 457 "cc/lower/lower_parallel.cch"
+#line 455 "cc/lower/lower_parallel.cch"
         CcStmt_walk(s, v);
     return at;
 }
@@ -45286,12 +45609,12 @@ static bool pl_bare_unwrap_expr(CcExpr *e, void *env) {
     bool *hit = (bool *)(env);
     switch ((e->k).kind) {
         case CcExprK_unwrap:
-#line 465 "cc/lower/lower_parallel.cch"
+#line 463 "cc/lower/lower_parallel.cch"
             *hit = true;
-#line 465 "cc/lower/lower_parallel.cch"
+#line 463 "cc/lower/lower_parallel.cch"
             break;
         default:
-#line 466 "cc/lower/lower_parallel.cch"
+#line 464 "cc/lower/lower_parallel.cch"
             break;
     }
     return true;
@@ -45301,7 +45624,7 @@ static bool pl_has_bare_unwrap(CcStmt *s) {
     CcVisitor v;
     bool hit = false;
     if (!s)
-#line 474 "cc/lower/lower_parallel.cch"
+#line 472 "cc/lower/lower_parallel.cch"
         return false;
     memset(&v, 0, sizeof(v));
     v.expr = pl_bare_unwrap_expr;
@@ -45317,37 +45640,37 @@ static bool pl_block_has_handler(CcStmt *s) {
     size_t i;
     size_t n;
     if (!s)
-#line 488 "cc/lower/lower_parallel.cch"
+#line 486 "cc/lower/lower_parallel.cch"
         return false;
     switch ((s->k).kind) {
         case CcStmtK_serial: {
-#line 490 "cc/lower/lower_parallel.cch"
+#line 488 "cc/lower/lower_parallel.cch"
             CcBlock x = (s->k).u.serial;
-#line 490 "cc/lower/lower_parallel.cch"
+#line 488 "cc/lower/lower_parallel.cch"
             b = x.stmts;
-#line 490 "cc/lower/lower_parallel.cch"
+#line 488 "cc/lower/lower_parallel.cch"
             is_block = true;
-#line 490 "cc/lower/lower_parallel.cch"
+#line 488 "cc/lower/lower_parallel.cch"
             break;
-#line 490 "cc/lower/lower_parallel.cch"
+#line 488 "cc/lower/lower_parallel.cch"
         }
         case CcStmtK_block: {
-#line 491 "cc/lower/lower_parallel.cch"
+#line 489 "cc/lower/lower_parallel.cch"
             CcBlock x = (s->k).u.block;
-#line 491 "cc/lower/lower_parallel.cch"
+#line 489 "cc/lower/lower_parallel.cch"
             b = x.stmts;
-#line 491 "cc/lower/lower_parallel.cch"
+#line 489 "cc/lower/lower_parallel.cch"
             is_block = true;
-#line 491 "cc/lower/lower_parallel.cch"
+#line 489 "cc/lower/lower_parallel.cch"
             break;
-#line 491 "cc/lower/lower_parallel.cch"
+#line 489 "cc/lower/lower_parallel.cch"
         }
         default:
-#line 492 "cc/lower/lower_parallel.cch"
+#line 490 "cc/lower/lower_parallel.cch"
             break;
     }
     if (!is_block)
-#line 494 "cc/lower/lower_parallel.cch"
+#line 492 "cc/lower/lower_parallel.cch"
         return false;
     n = CCVec_CcStmtRef_len(&b);
     for (i = 0; i < n; i++) {
@@ -45355,16 +45678,16 @@ static bool pl_block_has_handler(CcStmt *s) {
         bool is_eh = false;
         switch ((t->k).kind) {
             case CcStmtK_errhandler:
-#line 500 "cc/lower/lower_parallel.cch"
+#line 498 "cc/lower/lower_parallel.cch"
                 is_eh = true;
-#line 500 "cc/lower/lower_parallel.cch"
+#line 498 "cc/lower/lower_parallel.cch"
                 break;
             default:
-#line 501 "cc/lower/lower_parallel.cch"
+#line 499 "cc/lower/lower_parallel.cch"
                 break;
         }
         if (is_eh)
-#line 503 "cc/lower/lower_parallel.cch"
+#line 501 "cc/lower/lower_parallel.cch"
             return true;
     }
     return false;
@@ -45388,22 +45711,22 @@ static bool pl_arm_exit_stmt(CcStmt *s, void *env) {
     bool is_ret = false;
     switch ((s->k).kind) {
         case CcStmtK_return_: {
-#line 525 "cc/lower/lower_parallel.cch"
+#line 523 "cc/lower/lower_parallel.cch"
             CcReturn x = (s->k).u.return_;
-#line 525 "cc/lower/lower_parallel.cch"
+#line 523 "cc/lower/lower_parallel.cch"
             r = x;
-#line 525 "cc/lower/lower_parallel.cch"
+#line 523 "cc/lower/lower_parallel.cch"
             is_ret = true;
-#line 525 "cc/lower/lower_parallel.cch"
+#line 523 "cc/lower/lower_parallel.cch"
             break;
-#line 525 "cc/lower/lower_parallel.cch"
+#line 523 "cc/lower/lower_parallel.cch"
         }
         default:
-#line 526 "cc/lower/lower_parallel.cch"
+#line 524 "cc/lower/lower_parallel.cch"
             break;
     }
     if (!is_ret)
-#line 528 "cc/lower/lower_parallel.cch"
+#line 526 "cc/lower/lower_parallel.cch"
         return true;
     blk = lw_block(L, sp);
     if (fx->cell.len) {
@@ -45413,63 +45736,63 @@ static bool pl_arm_exit_stmt(CcStmt *s, void *env) {
             CCString spelled = lw_spell_expr(L, r.value);
             CCSlice val = lw_keep(L, &spelled);
             CCString sv = cc_string_new();
-#line 536 "cc/lower/lower_parallel.cch"
+#line 534 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&sv, (cell), L->arena);
-#line 536 "cc/lower/lower_parallel.cch"
+#line 534 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&sv, "->rv = (", 8, L->arena);
-#line 536 "cc/lower/lower_parallel.cch"
+#line 534 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&sv, (val), L->arena);
-#line 536 "cc/lower/lower_parallel.cch"
+#line 534 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&sv, ");", 2, L->arena);
             setter = lw_keep(L, &sv);
         }
         {
             CCString t = cc_string_new();
-#line 540 "cc/lower/lower_parallel.cch"
+#line 538 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&t, "{ int __cc_z = 0; while (!cc_atomic_cas(&", 41, L->arena);
-#line 540 "cc/lower/lower_parallel.cch"
+#line 538 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&t, (cell), L->arena);
-#line 540 "cc/lower/lower_parallel.cch"
+#line 538 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&t, "->lock, &__cc_z, 1)) __cc_z = 0; if (cc_atomic_load(&", 53, L->arena);
-#line 540 "cc/lower/lower_parallel.cch"
+#line 538 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&t, (cell), L->arena);
-#line 540 "cc/lower/lower_parallel.cch"
+#line 538 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&t, "->xk) < 2) { ", 13, L->arena);
-#line 540 "cc/lower/lower_parallel.cch"
+#line 538 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&t, (setter), L->arena);
-#line 540 "cc/lower/lower_parallel.cch"
+#line 538 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&t, " cc_atomic_store(&", 18, L->arena);
-#line 540 "cc/lower/lower_parallel.cch"
+#line 538 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&t, (cell), L->arena);
-#line 540 "cc/lower/lower_parallel.cch"
+#line 538 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&t, "->xk, 2); } cc_atomic_store(&", 29, L->arena);
-#line 540 "cc/lower/lower_parallel.cch"
+#line 538 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&t, (cell), L->arena);
-#line 540 "cc/lower/lower_parallel.cch"
+#line 538 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&t, "->lock, 0); }", 13, L->arena);
             lw_push(blk, lw_expr_stmt(L, lw_text(L, t, sp), sp));
         }
     }
     if (fx->leave.len)
-#line 544 "cc/lower/lower_parallel.cch"
+#line 542 "cc/lower/lower_parallel.cch"
         lw_push(blk, lw_goto(L, fx->leave, sp));
-#line 544 "cc/lower/lower_parallel.cch"
+#line 542 "cc/lower/lower_parallel.cch"
     else
         lw_push(blk, cc_stmt_return(lw_text(L, ({
-#line 545 "cc/lower/lower_parallel.cch"
-            CCString __cc_str_30 = cc_string_new();
-#line 545 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_30, "NULL", 4, L->arena);
-#line 545 "cc/lower/lower_parallel.cch"
-            __cc_str_30;
-#line 545 "cc/lower/lower_parallel.cch"
+#line 543 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_31 = cc_string_new();
+#line 543 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_31, "NULL", 4, L->arena);
+#line 543 "cc/lower/lower_parallel.cch"
+            __cc_str_31;
+#line 543 "cc/lower/lower_parallel.cch"
         }), sp), sp, L->arena));
     s->k = blk->k;
     return false;
 }
 
 static void pl_arm_exits(CcLowerer *L, CcExpr *e, CcStmt *s, CCSlice cell, CCSlice leave, bool has_rv) {
-#line 552 "cc/lower/lower_parallel.cch"
+#line 550 "cc/lower/lower_parallel.cch"
     CcVisitor v;
     PForExit fx;
     memset(&fx, 0, sizeof(fx));
@@ -45482,16 +45805,16 @@ static void pl_arm_exits(CcLowerer *L, CcExpr *e, CcStmt *s, CCSlice cell, CCSli
     v.expr = pl_arm_closure_stop;
     v.env = &fx;
     if (e)
-#line 563 "cc/lower/lower_parallel.cch"
+#line 561 "cc/lower/lower_parallel.cch"
         CcExpr_walk(e, v);
     if (s)
-#line 564 "cc/lower/lower_parallel.cch"
+#line 562 "cc/lower/lower_parallel.cch"
         CcStmt_walk(s, v);
 }
 
 /* The thunk: the environment, the names it reads, then the arm. */
 static CcDecl *pl_thunk_decl(PStep *st, uint32_t id, uint32_t k, PCapList *caps, CcExpr *expr, CcStmt *arm_body, CCSlice out_type, CCSlice target, bool snapshot, CCSlice pj_cell, bool pj_rv, CcSpan sp) {
-#line 572 "cc/lower/lower_parallel.cch"
+#line 570 "cc/lower/lower_parallel.cch"
     CcLowerer *L = st->L;
     CCSlice env = pl_name(L, id, k, "_env_t");
     CcStmt *body = lw_block(L, sp);
@@ -45523,9 +45846,9 @@ static CcDecl *pl_thunk_decl(PStep *st, uint32_t id, uint32_t k, PCapList *caps,
         } else {
             CcType *pt = cc_type_pointer(c->type, sp, L->arena);
             CCString rn = cc_string_new();
-#line 602 "cc/lower/lower_parallel.cch"
+#line 600 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&rn, "__cc_ref_", 9, L->arena);
-#line 602 "cc/lower/lower_parallel.cch"
+#line 600 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&rn, (c->name), L->arena);
             CCSlice ref = lw_keep(L, &rn);
             lw_push(body, lw_decl_stmt(L, pt, ref, read, sp));
@@ -45534,7 +45857,7 @@ static CcDecl *pl_thunk_decl(PStep *st, uint32_t id, uint32_t k, PCapList *caps,
     }
     /* a bound site pauses and resumes through the handle */
     lw_push(body, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_honor"), cc_expr_member(lw_ident(L, cstr_slice("__e"), sp), cstr_slice("__cc_par_h"), true, sp, L->arena), sp), sp));
-#line 612 "cc/lower/lower_parallel.cch"
+#line 610 "cc/lower/lower_parallel.cch"
     /* after the captures were rewritten: a returned value is spelled as the
      * thunk reads it, not as the caller wrote it */
     pl_arm_exits(L, expr, arm_body, pj_cell, cc_slice_empty(), pj_rv);
@@ -45561,13 +45884,13 @@ static CcDecl *pl_thunk_decl(PStep *st, uint32_t id, uint32_t k, PCapList *caps,
         lw_push(body, lw_expr_stmt(L, expr, sp));
     }
     lw_push(body, cc_stmt_return(lw_text(L, ({
-#line 637 "cc/lower/lower_parallel.cch"
-        CCString __cc_str_31 = cc_string_new();
-#line 637 "cc/lower/lower_parallel.cch"
-        cc_string_push_buffer(&__cc_str_31, "NULL", 4, L->arena);
-#line 637 "cc/lower/lower_parallel.cch"
-        __cc_str_31;
-#line 637 "cc/lower/lower_parallel.cch"
+#line 635 "cc/lower/lower_parallel.cch"
+        CCString __cc_str_32 = cc_string_new();
+#line 635 "cc/lower/lower_parallel.cch"
+        cc_string_push_buffer(&__cc_str_32, "NULL", 4, L->arena);
+#line 635 "cc/lower/lower_parallel.cch"
+        __cc_str_32;
+#line 635 "cc/lower/lower_parallel.cch"
     }), sp), sp, L->arena));
     {
         CcParam p0;
@@ -45583,11 +45906,11 @@ static CcDecl *pl_thunk_decl(PStep *st, uint32_t id, uint32_t k, PCapList *caps,
     ft.params = params;
     ft.has_prototype = true;
     {
-#line 651 "cc/lower/lower_parallel.cch"
+#line 649 "cc/lower/lower_parallel.cch"
         CcTypeK tk = { .kind = CcTypeK_func, .u.func = ft };
-#line 651 "cc/lower/lower_parallel.cch"
+#line 649 "cc/lower/lower_parallel.cch"
         fn_type->k = tk;
-#line 651 "cc/lower/lower_parallel.cch"
+#line 649 "cc/lower/lower_parallel.cch"
     }
     memset(&fd, 0, sizeof(fd));
     fd.type = fn_type;
@@ -45599,25 +45922,24 @@ static CcDecl *pl_thunk_decl(PStep *st, uint32_t id, uint32_t k, PCapList *caps,
     d->specs = CC_SPEC_STATIC;
     d->attrs = CCVec_CcAttr_new(L->arena);
     {
-#line 661 "cc/lower/lower_parallel.cch"
+#line 659 "cc/lower/lower_parallel.cch"
         CcDeclK dk = { .kind = CcDeclK_func, .u.func = fd };
-#line 661 "cc/lower/lower_parallel.cch"
+#line 659 "cc/lower/lower_parallel.cch"
         d->k = dk;
-#line 661 "cc/lower/lower_parallel.cch"
+#line 659 "cc/lower/lower_parallel.cch"
     }
     return d;
 }
 
-/* The spawn, and the join that always runs: a refused or failed wait-for
- * spawn spells an expression arm on the caller, or runs the thunk for a
- * serial / raising body, so the arm happens either way. */
+/* The spawn, and the join that always runs: a refused or failed spawn
+ * runs the same thunk inline, so the arm happens either way. */
 static CcExpr *pl_sizeof(CcLowerer *L, CCSlice name, CcSpan sp) {
     CCString s = cc_string_new();
-#line 669 "cc/lower/lower_parallel.cch"
+#line 666 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&s, "sizeof(", 7, L->arena);
-#line 669 "cc/lower/lower_parallel.cch"
+#line 666 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&s, (name), L->arena);
-#line 669 "cc/lower/lower_parallel.cch"
+#line 666 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&s, ")", 1, L->arena);
     return lw_text(L, s, sp);
 }
@@ -45625,22 +45947,67 @@ static CcExpr *pl_sizeof(CcLowerer *L, CCSlice name, CcSpan sp) {
 static void pl_zero(CcLowerer *L, CcStmt *blk, CCSlice name, CcSpan sp) {
     CcExpr *addr = cc_expr_unary(CC_OP_ADDR, lw_ident(L, name, sp), sp, L->arena);
     lw_push(blk, lw_expr_stmt(L, lw_call2(L, cstr_slice("cc__bytes_zero"), addr, pl_sizeof(L, name, sp), sp), sp));
-#line 677 "cc/lower/lower_parallel.cch"
+#line 674 "cc/lower/lower_parallel.cch"
 }
 
-/* The fields of the environment, assigned so a wait-for admit can skip
- * zeroing the struct. Dest-live fills at the same time it allocates. */
-static void pl_env_fill(CcLowerer *L, CcStmt *blk, uint32_t id, uint32_t k, PCapList *caps, CCSlice target, CCSlice bind, CCSlice join_cell, CcSpan sp) {
-#line 684 "cc/lower/lower_parallel.cch"
+/* The environment an arm runs from: declared, zeroed and filled. Nothing
+ * here starts anything, so it stands on both schedules -- a gated site
+ * fills the environment once and then decides whether to spawn. */
+static void pl_env_stmts(CcLowerer *L, CcStmt *blk, uint32_t id, uint32_t k, PCapList *caps, CCSlice target, CCSlice bind, CCSlice join_cell, CcSpan sp) {
+#line 682 "cc/lower/lower_parallel.cch"
+    CCSlice env = pl_name(L, id, k, "_env_t");
     CCSlice e = pl_name(L, id, k, "_e");
-    size_t n = caps ? CCVec_PCapRef_len(caps) : 0;
+    CCSlice task = pl_name(L, id, k, "_t");
+    CCSlice denied = pl_name(L, id, k, "_d");
+    size_t n = CCVec_PCapRef_len(caps);
     size_t i;
+    if (bind.len) {
+        /* the arm outlives the block, so its environment does too */
+        CcType *pt = cc_type_pointer(cc_type_named(env, sp, L->arena), sp, L->arena);
+        CCString mk = cc_string_new();
+#line 691 "cc/lower/lower_parallel.cch"
+        cc_string_push_buffer(&mk, "(", 1, L->arena);
+#line 691 "cc/lower/lower_parallel.cch"
+        cc__string_slot_push(&mk, (env), L->arena);
+#line 691 "cc/lower/lower_parallel.cch"
+        cc_string_push_buffer(&mk, "*)cc__heap_alloc(sizeof(", 24, L->arena);
+#line 691 "cc/lower/lower_parallel.cch"
+        cc__string_slot_push(&mk, (env), L->arena);
+#line 691 "cc/lower/lower_parallel.cch"
+        cc_string_push_buffer(&mk, "))", 2, L->arena);
+        lw_push(blk, lw_decl_stmt(L, pt, e, lw_text(L, mk, sp), sp));
+        lw_push(blk, lw_if(L, lw_not(L, lw_ident(L, e, sp), sp), lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_die"), lw_text(L, ({
+#line 695 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_33 = cc_string_new();
+#line 695 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_33, "\"dest-live oom\"", 15, L->arena);
+#line 695 "cc/lower/lower_parallel.cch"
+            __cc_str_33;
+#line 695 "cc/lower/lower_parallel.cch"
+        }), sp), sp), sp), NULL, sp));
+#line 697 "cc/lower/lower_parallel.cch"
+        lw_push(blk, lw_expr_stmt(L, lw_call2(L, cstr_slice("cc__bytes_zero"), lw_ident(L, e, sp), pl_sizeof(L, env, sp), sp), sp));
+#line 699 "cc/lower/lower_parallel.cch"
+    } else {
+        lw_push(blk, lw_decl_stmt(L, cc_type_named(env, sp, L->arena), e, NULL, sp));
+        pl_zero(L, blk, e, sp);
+    }
+    lw_push(blk, lw_decl_stmt(L, cc_type_named(cstr_slice("CCTask"), sp, L->arena), task, NULL, sp));
+    lw_push(blk, lw_decl_stmt(L, cc_type_named(cstr_slice("int"), sp, L->arena), denied, lw_text(L, ({
+        CCString __cc_str_34 = cc_string_new();
+#line 705 "cc/lower/lower_parallel.cch"
+        cc_string_push_buffer(&__cc_str_34, "0", 1, L->arena);
+#line 705 "cc/lower/lower_parallel.cch"
+        __cc_str_34;
+#line 705 "cc/lower/lower_parallel.cch"
+    }), sp), sp));
+    pl_zero(L, blk, task, sp);
     for (i = 0; i < n; i++) {
         PCap *c = *CCVec_PCapRef_get_ptr(caps, i);
         CcExpr *slot = cc_expr_member(lw_ident(L, e, sp), c->name, bind.len != 0, sp, L->arena);
         CcExpr *val = lw_ident(L, c->name, sp);
         if (!bind.len || c->by_addr)
-#line 691 "cc/lower/lower_parallel.cch"
+#line 711 "cc/lower/lower_parallel.cch"
             val = cc_expr_unary(CC_OP_ADDR, val, sp, L->arena);
         lw_push(blk, lw_expr_stmt(L, lw_assign(L, slot, val, sp), sp));
     }
@@ -45656,102 +46023,26 @@ static void pl_env_fill(CcLowerer *L, CcStmt *blk, uint32_t id, uint32_t k, PCap
     {
         CcExpr *slot = cc_expr_member(lw_ident(L, e, sp), cstr_slice("__cc_par_h"), bind.len != 0, sp, L->arena);
         CcExpr *val = lw_text(L, ({
-#line 705 "cc/lower/lower_parallel.cch"
-            CCString __cc_str_32 = cc_string_new();
-#line 705 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_32, "NULL", 4, L->arena);
-#line 705 "cc/lower/lower_parallel.cch"
-            __cc_str_32;
-#line 705 "cc/lower/lower_parallel.cch"
+#line 725 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_35 = cc_string_new();
+#line 725 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_35, "NULL", 4, L->arena);
+#line 725 "cc/lower/lower_parallel.cch"
+            __cc_str_35;
+#line 725 "cc/lower/lower_parallel.cch"
         }), sp);
         if (bind.len)
-#line 706 "cc/lower/lower_parallel.cch"
+#line 726 "cc/lower/lower_parallel.cch"
             val = cc_expr_unary(CC_OP_ADDR, lw_paren(L, lw_ident(L, bind, sp), sp), sp, L->arena);
         lw_push(blk, lw_expr_stmt(L, lw_assign(L, slot, val, sp), sp));
     }
 }
 
-/* The environment an arm runs from. Wait-for declares a compact join
- * handle and leaves the env unfilled until admit: a denied CHURN site
- * never takes a 128-byte CCTask or writes the env. Dest-live / `spawn`
- * still plant CCTask and fill immediately. */
-static void pl_env_stmts(CcLowerer *L, CcStmt *blk, uint32_t id, uint32_t k, PCapList *caps, CCSlice target, CCSlice bind, CCSlice join_cell, bool compact, CcSpan sp) {
-#line 718 "cc/lower/lower_parallel.cch"
-    CCSlice env = pl_name(L, id, k, "_env_t");
-    CCSlice e = pl_name(L, id, k, "_e");
-    CCSlice task = pl_name(L, id, k, "_t");
-    CCSlice denied = pl_name(L, id, k, "_d");
-    if (bind.len) {
-        /* the arm outlives the block, so its environment does too */
-        CcType *pt = cc_type_pointer(cc_type_named(env, sp, L->arena), sp, L->arena);
-        CCString mk = cc_string_new();
-#line 725 "cc/lower/lower_parallel.cch"
-        cc_string_push_buffer(&mk, "(", 1, L->arena);
-#line 725 "cc/lower/lower_parallel.cch"
-        cc__string_slot_push(&mk, (env), L->arena);
-#line 725 "cc/lower/lower_parallel.cch"
-        cc_string_push_buffer(&mk, "*)cc__heap_alloc(sizeof(", 24, L->arena);
-#line 725 "cc/lower/lower_parallel.cch"
-        cc__string_slot_push(&mk, (env), L->arena);
-#line 725 "cc/lower/lower_parallel.cch"
-        cc_string_push_buffer(&mk, "))", 2, L->arena);
-        lw_push(blk, lw_decl_stmt(L, pt, e, lw_text(L, mk, sp), sp));
-        lw_push(blk, lw_if(L, lw_not(L, lw_ident(L, e, sp), sp), lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_die"), lw_text(L, ({
-#line 729 "cc/lower/lower_parallel.cch"
-            CCString __cc_str_33 = cc_string_new();
-#line 729 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_33, "\"dest-live oom\"", 15, L->arena);
-#line 729 "cc/lower/lower_parallel.cch"
-            __cc_str_33;
-#line 729 "cc/lower/lower_parallel.cch"
-        }), sp), sp), sp), NULL, sp));
-#line 731 "cc/lower/lower_parallel.cch"
-        lw_push(blk, lw_expr_stmt(L, lw_call2(L, cstr_slice("cc__bytes_zero"), lw_ident(L, e, sp), pl_sizeof(L, env, sp), sp), sp));
-#line 733 "cc/lower/lower_parallel.cch"
-        compact = false;
-    } else {
-        lw_push(blk, lw_decl_stmt(L, cc_type_named(env, sp, L->arena), e, NULL, sp));
-        if (!compact)
-#line 736 "cc/lower/lower_parallel.cch"
-            pl_zero(L, blk, e, sp);
-    }
-    if (compact) {
-        lw_push(blk, lw_decl_stmt(L, cc_type_named(cstr_slice("CCParJoin"), sp, L->arena), task, lw_text(L, ({
-            CCString __cc_str_34 = cc_string_new();
-#line 740 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_34, "{0}", 3, L->arena);
-#line 740 "cc/lower/lower_parallel.cch"
-            __cc_str_34;
-#line 740 "cc/lower/lower_parallel.cch"
-        }), sp), sp));
-        lw_push(blk, lw_decl_stmt(L, cc_type_named(cstr_slice("int"), sp, L->arena), denied, lw_text(L, ({
-            CCString __cc_str_35 = cc_string_new();
-#line 742 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_35, "0", 1, L->arena);
-#line 742 "cc/lower/lower_parallel.cch"
-            __cc_str_35;
-#line 742 "cc/lower/lower_parallel.cch"
-        }), sp), sp));
-        return;
-    }
-    lw_push(blk, lw_decl_stmt(L, cc_type_named(cstr_slice("CCTask"), sp, L->arena), task, NULL, sp));
-    lw_push(blk, lw_decl_stmt(L, cc_type_named(cstr_slice("int"), sp, L->arena), denied, lw_text(L, ({
-        CCString __cc_str_36 = cc_string_new();
-#line 747 "cc/lower/lower_parallel.cch"
-        cc_string_push_buffer(&__cc_str_36, "0", 1, L->arena);
-#line 747 "cc/lower/lower_parallel.cch"
-        __cc_str_36;
-#line 747 "cc/lower/lower_parallel.cch"
-    }), sp), sp));
-    pl_zero(L, blk, task, sp);
-    pl_env_fill(L, blk, id, k, caps, target, bind, join_cell, sp);
-}
-
 /* Offering the arm to the runtime. This is the half a gate skips: when the
  * site runs its arms in order, nothing is spawned and the thunks are
  * called on the caller instead. */
-static void pl_fire_stmts(CcLowerer *L, CcStmt *blk, uint32_t id, uint32_t k, CCSlice bind, bool spawn, bool compact, PCapList *caps, CCSlice target, CCSlice join_cell, CcSpan sp) {
-#line 758 "cc/lower/lower_parallel.cch"
+static void pl_fire_stmts(CcLowerer *L, CcStmt *blk, uint32_t id, uint32_t k, CCSlice bind, bool spawn, CcSpan sp) {
+#line 736 "cc/lower/lower_parallel.cch"
     CCSlice thunk = pl_name(L, id, k, "_thunk");
     CCSlice e = pl_name(L, id, k, "_e");
     CCSlice site = pl_name(L, id, k, "_site");
@@ -45761,29 +46052,28 @@ static void pl_fire_stmts(CcLowerer *L, CcStmt *blk, uint32_t id, uint32_t k, CC
         /* the handle promised a live arm: a refused or failed spawn is
          * not something to quietly run inline here */
         CcExpr *sp_call = lw_call2(L, cstr_slice("cc_parallel_spawn_admit"), lw_ident(L, thunk, sp), lw_ident(L, e, sp), sp);
-#line 768 "cc/lower/lower_parallel.cch"
+#line 746 "cc/lower/lower_parallel.cch"
         CcExpr *invalid = cc_expr_binary(CC_OP_EQ, cc_expr_member(lw_ident(L, task, sp), cstr_slice("kind"), false, sp, L->arena), lw_ident(L, cstr_slice("CC_TASK_KIND_INVALID"), sp), sp, L->arena);
-#line 771 "cc/lower/lower_parallel.cch"
+#line 749 "cc/lower/lower_parallel.cch"
         CcExpr *admit = lw_call0(L, cstr_slice("cc_parallel_admit"), sp);
         CcExprList *aa = lw_call_args(admit);
         lw_push(blk, lw_expr_stmt(L, lw_assign(L, lw_ident(L, task, sp), sp_call, sp), sp));
         lw_push(blk, lw_if(L, invalid, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_die"), lw_text(L, ({
-#line 776 "cc/lower/lower_parallel.cch"
-            CCString __cc_str_37 = cc_string_new();
-#line 776 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_37, "\"dest-live spawn failed\"", 24, L->arena);
-#line 776 "cc/lower/lower_parallel.cch"
-            __cc_str_37;
-#line 776 "cc/lower/lower_parallel.cch"
+#line 754 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_36 = cc_string_new();
+#line 754 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_36, "\"dest-live spawn failed\"", 24, L->arena);
+#line 754 "cc/lower/lower_parallel.cch"
+            __cc_str_36;
+#line 754 "cc/lower/lower_parallel.cch"
         }), sp), sp), sp), NULL, sp));
-#line 778 "cc/lower/lower_parallel.cch"
+#line 756 "cc/lower/lower_parallel.cch"
         CCVec_CcExprRef_push(aa, cc_expr_unary(CC_OP_ADDR, lw_paren(L, lw_ident(L, bind, sp), sp), sp, L->arena));
         CCVec_CcExprRef_push(aa, lw_ident(L, task, sp));
         CCVec_CcExprRef_push(aa, lw_ident(L, e, sp));
         lw_push(blk, lw_expr_stmt(L, admit, sp));
         (void)(site);
         (void)(denied);
-        (void)(compact);
         return;
     }
     if (spawn) {
@@ -45791,11 +46081,10 @@ static void pl_fire_stmts(CcLowerer *L, CcStmt *blk, uint32_t id, uint32_t k, CC
          * runtime denied and the caller ran instead is a rendezvous waiting
          * on itself, so this site is not one a deny may take */
         CcExpr *sp_call = lw_call2(L, cstr_slice("cc_parallel_spawn_admit"), lw_ident(L, thunk, sp), cc_expr_unary(CC_OP_ADDR, lw_ident(L, e, sp), sp, L->arena), sp);
-#line 793 "cc/lower/lower_parallel.cch"
+#line 770 "cc/lower/lower_parallel.cch"
         lw_push(blk, lw_expr_stmt(L, lw_assign(L, lw_ident(L, task, sp), sp_call, sp), sp));
         (void)(site);
         (void)(denied);
-        (void)(compact);
         return;
     }
     {
@@ -45808,36 +46097,30 @@ static void pl_fire_stmts(CcLowerer *L, CcStmt *blk, uint32_t id, uint32_t k, CC
         CCVec_CcExprRef_push(args, cc_expr_unary(CC_OP_ADDR, lw_ident(L, site, sp), sp, L->arena));
         CCVec_CcExprRef_push(args, lw_ident(L, thunk, sp));
         lw_push(then, lw_expr_stmt(L, lw_assign(L, lw_ident(L, denied, sp), lw_text(L, ({
-            CCString __cc_str_38 = cc_string_new();
-#line 809 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_38, "1", 1, L->arena);
-#line 809 "cc/lower/lower_parallel.cch"
-            __cc_str_38;
-#line 809 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_37 = cc_string_new();
+#line 785 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_37, "1", 1, L->arena);
+#line 785 "cc/lower/lower_parallel.cch"
+            __cc_str_37;
+#line 785 "cc/lower/lower_parallel.cch"
         }), sp), sp), sp));
         lw_push(then, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_note_denied"), lw_ident(L, cstr_slice("__cc_pt"), sp), sp), sp));
-#line 812 "cc/lower/lower_parallel.cch"
-        /* a serial / raising deny still runs the thunk; fill so it does not
-         * read an empty env. Expression deny spells the arm and ignores this. */
-        if (compact) {
-            pl_env_fill(L, then, id, k, caps, target, bind, join_cell, sp);
-            pl_env_fill(L, els, id, k, caps, target, bind, join_cell, sp);
-        }
-        lw_push(els, lw_expr_stmt(L, lw_assign(L, lw_ident(L, task, sp), lw_call2(L, compact ? cstr_slice("cc_parallel_spawn_arm") : cstr_slice("cc_parallel_spawn"), lw_ident(L, thunk, sp), cc_expr_unary(CC_OP_ADDR, lw_ident(L, e, sp), sp, L->arena), sp), sp), sp));
-#line 824 "cc/lower/lower_parallel.cch"
+#line 788 "cc/lower/lower_parallel.cch"
+        lw_push(els, lw_expr_stmt(L, lw_assign(L, lw_ident(L, task, sp), lw_call2(L, cstr_slice("cc_parallel_spawn"), lw_ident(L, thunk, sp), cc_expr_unary(CC_OP_ADDR, lw_ident(L, e, sp), sp, L->arena), sp), sp), sp));
+#line 793 "cc/lower/lower_parallel.cch"
         lw_push(blk, lw_if(L, cond, then, els, sp));
     }
 }
 
 static void pl_spawn_stmts(CcLowerer *L, CcStmt *blk, uint32_t id, uint32_t k, PCapList *caps, CCSlice target, CCSlice bind, CcSpan sp) {
-#line 830 "cc/lower/lower_parallel.cch"
-    pl_env_stmts(L, blk, id, k, caps, target, bind, cc_slice_empty(), false, sp);
-    pl_fire_stmts(L, blk, id, k, bind, false, false, NULL, cc_slice_empty(), cc_slice_empty(), sp);
+#line 799 "cc/lower/lower_parallel.cch"
+    pl_env_stmts(L, blk, id, k, caps, target, bind, cc_slice_empty(), sp);
+    pl_fire_stmts(L, blk, id, k, bind, false, sp);
 }
 
 /* The arm on the caller: the same thunk a spawn would have run, called
- * straight through. Serial / raising wait-for arms still reach here; an
- * expression wait-for is spelled instead. */
+ * straight through. The arms are emitted once and the gate picks the route
+ * to them, so this is how the sequential schedule reaches an arm. */
 static void pl_inline_call(CcLowerer *L, CcStmt *blk, uint32_t id, uint32_t k, CcSpan sp) {
     CCSlice thunk = pl_name(L, id, k, "_thunk");
     CCSlice e = pl_name(L, id, k, "_e");
@@ -45850,18 +46133,7 @@ static void pl_inline_call(CcLowerer *L, CcStmt *blk, uint32_t id, uint32_t k, C
     lw_push(blk, lw_expr_stmt(L, cast, sp));
 }
 
-static void pl_run_inline(CcLowerer *L, CcStmt *blk, uint32_t id, uint32_t k, CCSlice spell, CcSpan sp) {
-#line 851 "cc/lower/lower_parallel.cch"
-    if (spell.len)
-#line 851 "cc/lower/lower_parallel.cch"
-        lw_push(blk, lw_expr_stmt(L, lw_ident(L, spell, sp), sp));
-#line 851 "cc/lower/lower_parallel.cch"
-    else
-        pl_inline_call(L, blk, id, k, sp);
-}
-
-static void pl_join_stmts(CcLowerer *L, CcStmt *blk, uint32_t id, uint32_t k, bool spawn, bool compact, CCSlice spell, CcSpan sp) {
-#line 857 "cc/lower/lower_parallel.cch"
+static void pl_join_stmts(CcLowerer *L, CcStmt *blk, uint32_t id, uint32_t k, bool spawn, CcSpan sp) {
     CCSlice thunk = pl_name(L, id, k, "_thunk");
     CCSlice e = pl_name(L, id, k, "_e");
     CCSlice task = pl_name(L, id, k, "_t");
@@ -45869,7 +46141,7 @@ static void pl_join_stmts(CcLowerer *L, CcStmt *blk, uint32_t id, uint32_t k, bo
     CcStmt *then = lw_block(L, sp);
     CcStmt *els = lw_block(L, sp);
     CcExpr *live = cc_expr_binary(CC_OP_NE, cc_expr_member(lw_ident(L, task, sp), cstr_slice("kind"), false, sp, L->arena), lw_ident(L, cstr_slice("CC_TASK_KIND_INVALID"), sp), sp, L->arena);
-#line 866 "cc/lower/lower_parallel.cch"
+#line 828 "cc/lower/lower_parallel.cch"
     CcExpr *cond = cc_expr_binary(CC_OP_LAND, lw_not(L, lw_ident(L, denied, sp), sp), live, sp, L->arena);
     if (spawn) {
         /* nothing ran here, so there is no inline arm to fall back to: an
@@ -45880,178 +46152,22 @@ static void pl_join_stmts(CcLowerer *L, CcStmt *blk, uint32_t id, uint32_t k, bo
         cc_string_push_cstr(&dm, "\"@parallel spawn failed\"", L->arena);
         lw_push(then, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_join"), lw_ident(L, task, sp), sp), sp));
         lw_push(els, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_die"), lw_text(L, dm, sp), sp), sp));
-#line 877 "cc/lower/lower_parallel.cch"
+#line 839 "cc/lower/lower_parallel.cch"
         lw_push(blk, lw_if(L, live, then, els, sp));
         (void)(thunk);
         (void)(e);
         (void)(denied);
         (void)(cond);
-        (void)(compact);
-        (void)(spell);
         return;
     }
-    lw_push(then, lw_expr_stmt(L, lw_call1(L, compact ? cstr_slice("cc_parallel_join_arm") : cstr_slice("cc_parallel_join"), lw_ident(L, task, sp), sp), sp));
-#line 889 "cc/lower/lower_parallel.cch"
+    lw_push(then, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_join"), lw_ident(L, task, sp), sp), sp));
     lw_push(els, lw_expr_stmt(L, lw_call1(L, cstr_slice("CC_PAR_NOTE_INLINE_ARM"), lw_ident(L, cstr_slice("__cc_pt"), sp), sp), sp));
-#line 891 "cc/lower/lower_parallel.cch"
-    pl_run_inline(L, els, id, k, spell, sp);
+#line 849 "cc/lower/lower_parallel.cch"
+    pl_inline_call(L, els, id, k, sp);
     lw_push(blk, lw_if(L, cond, then, els, sp));
 }
 
-static void pl_splice(CcStmt *dst, CcStmt *src);
-
-/* A dest or capture already on the helper's parameter list. */
-static bool pl_cap_named(PCapList *v, CCSlice name) {
-    size_t n = CCVec_PCapRef_len(v);
-    size_t i;
-    for (i = 0; i < n; i++) {
-        PCap *c = *CCVec_PCapRef_get_ptr(v, i);
-        if (slice_eq(c->name, name))
-#line 903 "cc/lower/lower_parallel.cch"
-            return true;
-    }
-    return false;
-}
-
-static CCSlice pl_gated_dst_name(CcLowerer *L, CCSlice name) {
-    CCString s = cc_string_new();
-#line 909 "cc/lower/lower_parallel.cch"
-    cc_string_push_buffer(&s, "__cc_dst_", 9, L->arena);
-#line 909 "cc/lower/lower_parallel.cch"
-    cc__string_slot_push(&s, (name), L->arena);
-    return lw_keep(L, &s);
-}
-
-/* The spawn/join of a wait-for, off the sequential recursive frame.
- * Locals of this helper must not live in the function that walks skip /
- * `!pred`: that walk is the cheap tree, and a 128-byte frame + TLS there
- * is the tax. */
-static CcDecl *pl_gated_par_decl(PStep *st, uint32_t id, CcStmt *slow, PCapList *dests, PCapList *caps, CcSpan sp) {
-#line 919 "cc/lower/lower_parallel.cch"
-    CcLowerer *L = st->L;
-    CcStmt *body = lw_block(L, sp);
-    CcParamList params = CCVec_CcParam_new(L->arena);
-    CcType *fn_type = cc__type_blank(sp, L->arena);
-    CcFuncType ft;
-    CcFuncDecl fd;
-    CcDecl *d;
-    size_t i;
-    size_t nd = CCVec_PCapRef_len(dests);
-    size_t nc = CCVec_PCapRef_len(caps);
-    for (i = 0; i < nd; i++) {
-        PCap *c = *CCVec_PCapRef_get_ptr(dests, i);
-        CcParam p;
-        CcExpr *slot = cc_expr_unary(CC_OP_DEREF, lw_ident(L, pl_gated_dst_name(L, c->name), sp), sp, L->arena);
-        memset(&p, 0, sizeof(p));
-        p.span = sp;
-        p.type = cc_type_pointer(c->type, sp, L->arena);
-        p.name = pl_gated_dst_name(L, c->name);
-        p.attrs = CCVec_CcAttr_new(L->arena);
-        CCVec_CcParam_push(&params, p);
-        lw_push(body, lw_decl_stmt(L, c->type, c->name, slot, sp));
-    }
-    for (i = 0; i < nc; i++) {
-        PCap *c = *CCVec_PCapRef_get_ptr(caps, i);
-        CcParam p;
-        memset(&p, 0, sizeof(p));
-        p.span = sp;
-        p.type = c->type;
-        p.name = c->name;
-        p.attrs = CCVec_CcAttr_new(L->arena);
-        CCVec_CcParam_push(&params, p);
-    }
-    pl_splice(body, slow);
-    for (i = 0; i < nd; i++) {
-        PCap *c = *CCVec_PCapRef_get_ptr(dests, i);
-        CcExpr *slot = cc_expr_unary(CC_OP_DEREF, lw_ident(L, pl_gated_dst_name(L, c->name), sp), sp, L->arena);
-        lw_push(body, lw_expr_stmt(L, lw_assign(L, slot, lw_ident(L, c->name, sp), sp), sp));
-    }
-    memset(&ft, 0, sizeof(ft));
-    ft.ret = cc_type_named(cstr_slice("void"), sp, L->arena);
-    ft.params = params;
-    ft.has_prototype = true;
-    {
-#line 961 "cc/lower/lower_parallel.cch"
-        CcTypeK tk = { .kind = CcTypeK_func, .u.func = ft };
-#line 961 "cc/lower/lower_parallel.cch"
-        fn_type->k = tk;
-#line 961 "cc/lower/lower_parallel.cch"
-    }
-    memset(&fd, 0, sizeof(fd));
-    fd.type = fn_type;
-    fd.name = pl_name(L, id, 0, "_par");
-    fd.body = body;
-    d = cc_arena_alloc(L->arena, sizeof(CcDecl), _Alignof(CcDecl));
-    memset(d, 0, sizeof(*d));
-    d->span = sp;
-    d->specs = CC_SPEC_STATIC;
-    d->attrs = CCVec_CcAttr_new(L->arena);
-    {
-#line 971 "cc/lower/lower_parallel.cch"
-        CcDeclK dk = { .kind = CcDeclK_func, .u.func = fd };
-#line 971 "cc/lower/lower_parallel.cch"
-        d->k = dk;
-#line 971 "cc/lower/lower_parallel.cch"
-    }
-    return d;
-}
-
-static void pl_gated_par_fwd(PStep *st, uint32_t id, PCapList *dests, PCapList *caps) {
-    CcLowerer *L = st->L;
-    CCArena a = L->arena;
-    CCString t = cc_string_new();
-    size_t i;
-    size_t nd = CCVec_PCapRef_len(dests);
-    size_t nc = CCVec_PCapRef_len(caps);
-    bool any = false;
-    cc_string_push_cstr(&t, "__attribute__((noinline)) static void ", a);
-    cc_string_push_slice(&t, pl_name(L, id, 0, "_par"), a);
-    cc_string_push_cstr(&t, "(", a);
-    for (i = 0; i < nd; i++) {
-        PCap *c = *CCVec_PCapRef_get_ptr(dests, i);
-        CCSlice tn = CcIndex_canon(L->ix, c->type);
-        if (any)
-#line 989 "cc/lower/lower_parallel.cch"
-            cc_string_push_cstr(&t, ", ", a);
-        cc_string_push_slice(&t, tn, a);
-        cc_string_push_cstr(&t, "*", a);
-        any = true;
-    }
-    for (i = 0; i < nc; i++) {
-        PCap *c = *CCVec_PCapRef_get_ptr(caps, i);
-        CCSlice tn = CcIndex_canon(L->ix, c->type);
-        if (any)
-#line 997 "cc/lower/lower_parallel.cch"
-            cc_string_push_cstr(&t, ", ", a);
-        cc_string_push_slice(&t, tn, a);
-        any = true;
-    }
-    if (!any)
-#line 1001 "cc/lower/lower_parallel.cch"
-        cc_string_push_cstr(&t, "void", a);
-    cc_string_push_cstr(&t, ");\n", a);
-    pl_host(st);
-#line 1003 "cc/lower/lower_parallel.cch"
-    cc_string_push_slice(&st->fwd, cc_string_as_slice(&t), L->arena);
-}
-
-static CcStmt *pl_gated_par_call(CcLowerer *L, uint32_t id, PCapList *dests, PCapList *caps, CcSpan sp) {
-#line 1008 "cc/lower/lower_parallel.cch"
-    CcExpr *call = lw_call0(L, pl_name(L, id, 0, "_par"), sp);
-    CcExprList *args = lw_call_args(call);
-    size_t i;
-    for (i = 0; i < CCVec_PCapRef_len(dests); i++) {
-        PCap *c = *CCVec_PCapRef_get_ptr(dests, i);
-        CCVec_CcExprRef_push(args, cc_expr_unary(CC_OP_ADDR, lw_ident(L, c->name, sp), sp, L->arena));
-    }
-    for (i = 0; i < CCVec_PCapRef_len(caps); i++) {
-        PCap *c = *CCVec_PCapRef_get_ptr(caps, i);
-        CCVec_CcExprRef_push(args, lw_ident(L, c->name, sp));
-    }
-    return lw_expr_stmt(L, call, sp);
-}
-
-#line 1023 "cc/lower/lower_parallel.cch"
+#line 854 "cc/lower/lower_parallel.cch"
 /* ---- `@parallel for (i in lo..hi)` --------------------------------------
  *
  * A walk over a range, split rather than queued: the span halves until a
@@ -46069,40 +46185,40 @@ static CcStmt *pl_gated_par_call(CcLowerer *L, uint32_t id, PCapList *dests, PCa
  * its address. */
 static CcType *pl_for_decayed(CcType *t) {
     if (!t)
-#line 1039 "cc/lower/lower_parallel.cch"
+#line 870 "cc/lower/lower_parallel.cch"
         return NULL;
     switch ((t->k).kind) {
         case CcTypeK_array: {
-#line 1041 "cc/lower/lower_parallel.cch"
+#line 872 "cc/lower/lower_parallel.cch"
             CcArrayType ar = (t->k).u.array;
-#line 1041 "cc/lower/lower_parallel.cch"
+#line 872 "cc/lower/lower_parallel.cch"
             return ar.elem;
-#line 1041 "cc/lower/lower_parallel.cch"
+#line 872 "cc/lower/lower_parallel.cch"
         }
         default:
-#line 1042 "cc/lower/lower_parallel.cch"
+#line 873 "cc/lower/lower_parallel.cch"
             return NULL;
     }
 }
 
 static CCSlice pl_for_name(CcLowerer *L, uint32_t id, const char *suffix) {
     CCString s = cc_string_new();
-#line 1047 "cc/lower/lower_parallel.cch"
+#line 878 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&s, "__cc_parfor_", 12, L->arena);
-#line 1047 "cc/lower/lower_parallel.cch"
+#line 878 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&s, (id), L->arena);
-#line 1047 "cc/lower/lower_parallel.cch"
+#line 878 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&s, (suffix), L->arena);
     return lw_keep(L, &s);
 }
 
 static CCSlice pl_for_ex_type(CcLowerer *L, uint32_t id) {
     CCString s = cc_string_new();
-#line 1052 "cc/lower/lower_parallel.cch"
+#line 883 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&s, "__cc_pf_ex_", 11, L->arena);
-#line 1052 "cc/lower/lower_parallel.cch"
+#line 883 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&s, (id), L->arena);
-#line 1052 "cc/lower/lower_parallel.cch"
+#line 883 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&s, "_t", 2, L->arena);
     return lw_keep(L, &s);
 }
@@ -46155,23 +46271,23 @@ static void pl_for_forward(PStep *st, uint32_t id) {
     CCSlice thunk = pl_for_name(L, id, "_thunk");
     CCSlice site = pl_for_name(L, id, "_site");
     CCString t = cc_string_new();
-#line 1103 "cc/lower/lower_parallel.cch"
+#line 934 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&t, "static void ", 12, L->arena);
-#line 1103 "cc/lower/lower_parallel.cch"
+#line 934 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&t, (walk), L->arena);
-#line 1103 "cc/lower/lower_parallel.cch"
+#line 934 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&t, "(int, int, void*);\nstatic void* ", 32, L->arena);
-#line 1103 "cc/lower/lower_parallel.cch"
+#line 934 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&t, (thunk), L->arena);
-#line 1103 "cc/lower/lower_parallel.cch"
+#line 934 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&t, "(void*);\nstatic void* ", 22, L->arena);
-#line 1103 "cc/lower/lower_parallel.cch"
+#line 934 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&t, (site), L->arena);
-#line 1103 "cc/lower/lower_parallel.cch"
+#line 934 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&t, ";\n", 2, L->arena);
-#line 1107 "cc/lower/lower_parallel.cch"
+#line 938 "cc/lower/lower_parallel.cch"
     pl_host(st);
-#line 1107 "cc/lower/lower_parallel.cch"
+#line 938 "cc/lower/lower_parallel.cch"
     cc_string_push_slice(&st->fwd, cc_string_as_slice(&t), L->arena);
 }
 
@@ -46198,7 +46314,7 @@ static void pl_for_exits(PForExit *fx, CcStmt *s, int depth) {
     size_t i;
     CcSpan sp;
     if (!s)
-#line 1132 "cc/lower/lower_parallel.cch"
+#line 963 "cc/lower/lower_parallel.cch"
         return;
     sp = s->span;
     {
@@ -46208,28 +46324,28 @@ static void pl_for_exits(PForExit *fx, CcStmt *s, int depth) {
         CcReturn r;
         switch ((s->k).kind) {
             case CcStmtK_break_:
-#line 1140 "cc/lower/lower_parallel.cch"
+#line 971 "cc/lower/lower_parallel.cch"
                 is_break = true;
-#line 1140 "cc/lower/lower_parallel.cch"
+#line 971 "cc/lower/lower_parallel.cch"
                 break;
             case CcStmtK_continue_:
-#line 1141 "cc/lower/lower_parallel.cch"
+#line 972 "cc/lower/lower_parallel.cch"
                 is_cont = true;
-#line 1141 "cc/lower/lower_parallel.cch"
+#line 972 "cc/lower/lower_parallel.cch"
                 break;
             case CcStmtK_return_: {
-#line 1142 "cc/lower/lower_parallel.cch"
+#line 973 "cc/lower/lower_parallel.cch"
                 CcReturn x = (s->k).u.return_;
-#line 1142 "cc/lower/lower_parallel.cch"
+#line 973 "cc/lower/lower_parallel.cch"
                 r = x;
-#line 1142 "cc/lower/lower_parallel.cch"
+#line 973 "cc/lower/lower_parallel.cch"
                 is_ret = true;
-#line 1142 "cc/lower/lower_parallel.cch"
+#line 973 "cc/lower/lower_parallel.cch"
                 break;
-#line 1142 "cc/lower/lower_parallel.cch"
+#line 973 "cc/lower/lower_parallel.cch"
             }
             default:
-#line 1143 "cc/lower/lower_parallel.cch"
+#line 974 "cc/lower/lower_parallel.cch"
                 break;
         }
         if (is_cont && depth == 0 && fx->leave.len) {
@@ -46243,29 +46359,29 @@ static void pl_for_exits(PForExit *fx, CcStmt *s, int depth) {
         if (is_break && depth == 0) {
             CCSlice ex = cstr_slice("__cc_pf_ex");
             CCString t = cc_string_new();
-#line 1155 "cc/lower/lower_parallel.cch"
+#line 986 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&t, "{ int __cc_z = 0; while (!cc_atomic_cas(&e->", 44, L->arena);
-#line 1155 "cc/lower/lower_parallel.cch"
+#line 986 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&t, (ex), L->arena);
-#line 1155 "cc/lower/lower_parallel.cch"
+#line 986 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&t, "->lock, &__cc_z, 1)) __cc_z = 0; if (cc_atomic_load(&e->", 56, L->arena);
-#line 1155 "cc/lower/lower_parallel.cch"
+#line 986 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&t, (ex), L->arena);
-#line 1155 "cc/lower/lower_parallel.cch"
+#line 986 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&t, "->xk) == 0) cc_atomic_store(&e->", 32, L->arena);
-#line 1155 "cc/lower/lower_parallel.cch"
+#line 986 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&t, (ex), L->arena);
-#line 1155 "cc/lower/lower_parallel.cch"
+#line 986 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&t, "->xk, 1); cc_atomic_store(&e->", 30, L->arena);
-#line 1155 "cc/lower/lower_parallel.cch"
+#line 986 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&t, (ex), L->arena);
-#line 1155 "cc/lower/lower_parallel.cch"
+#line 986 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&t, "->lock, 0); }", 13, L->arena);
             CcStmt *blk = lw_block(L, sp);
             lw_push(blk, lw_expr_stmt(L, lw_text(L, t, sp), sp));
             if (fx->cancel) {
                 CCString c = cc_string_new();
-#line 1159 "cc/lower/lower_parallel.cch"
+#line 990 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&c, "cc_nursery_cancel_host(__cc_pw_sh->nur)", 39, L->arena);
                 lw_push(blk, lw_expr_stmt(L, lw_text(L, c, sp), sp));
             }
@@ -46275,21 +46391,21 @@ static void pl_for_exits(PForExit *fx, CcStmt *s, int depth) {
         }
         if (is_ret) {
             CCString spelled = r.value ? lw_spell_expr(L, r.value) : ({
-#line 1167 "cc/lower/lower_parallel.cch"
-                CCString __cc_str_39 = cc_string_new();
-#line 1167 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&__cc_str_39, "0", 1, L->arena);
-#line 1167 "cc/lower/lower_parallel.cch"
-                __cc_str_39;
-#line 1167 "cc/lower/lower_parallel.cch"
+#line 998 "cc/lower/lower_parallel.cch"
+                CCString __cc_str_38 = cc_string_new();
+#line 998 "cc/lower/lower_parallel.cch"
+                cc_string_push_buffer(&__cc_str_38, "0", 1, L->arena);
+#line 998 "cc/lower/lower_parallel.cch"
+                __cc_str_38;
+#line 998 "cc/lower/lower_parallel.cch"
             });
             CCSlice v = lw_keep(L, &spelled);
             CCString t = cc_string_new();
-#line 1169 "cc/lower/lower_parallel.cch"
+#line 1000 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&t, "{ int __cc_z = 0; while (!cc_atomic_cas(&e->__cc_pf_ex->lock, &__cc_z, 1)) __cc_z = 0; if (cc_atomic_load(&e->__cc_pf_ex->xk) < 2) { e->__cc_pf_ex->rv = (", 154, L->arena);
-#line 1169 "cc/lower/lower_parallel.cch"
+#line 1000 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&t, (v), L->arena);
-#line 1169 "cc/lower/lower_parallel.cch"
+#line 1000 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&t, "); cc_atomic_store(&e->__cc_pf_ex->xk, 2); } cc_atomic_store(&e->__cc_pf_ex->lock, 0); }", 88, L->arena);
             CcStmt *blk = lw_block(L, sp);
             lw_push(blk, lw_expr_stmt(L, lw_text(L, t, sp), sp));
@@ -46298,7 +46414,7 @@ static void pl_for_exits(PForExit *fx, CcStmt *s, int depth) {
                  * ones in flight skip their ordered sections: the walk the
                  * caller returns out of has no work left to do */
                 CCString c = cc_string_new();
-#line 1176 "cc/lower/lower_parallel.cch"
+#line 1007 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&c, "cc_nursery_cancel_host(__cc_pw_sh->nur)", 39, L->arena);
                 lw_push(blk, lw_expr_stmt(L, lw_text(L, c, sp), sp));
             }
@@ -46313,31 +46429,31 @@ static void pl_for_exits(PForExit *fx, CcStmt *s, int depth) {
         bool opens = false;
         switch ((s->k).kind) {
             case CcStmtK_for_:
-#line 1189 "cc/lower/lower_parallel.cch"
+#line 1020 "cc/lower/lower_parallel.cch"
                 opens = true;
-#line 1189 "cc/lower/lower_parallel.cch"
+#line 1020 "cc/lower/lower_parallel.cch"
                 break;
             case CcStmtK_while_:
-#line 1190 "cc/lower/lower_parallel.cch"
+#line 1021 "cc/lower/lower_parallel.cch"
                 opens = true;
-#line 1190 "cc/lower/lower_parallel.cch"
+#line 1021 "cc/lower/lower_parallel.cch"
                 break;
             case CcStmtK_do_:
-#line 1191 "cc/lower/lower_parallel.cch"
+#line 1022 "cc/lower/lower_parallel.cch"
                 opens = true;
-#line 1191 "cc/lower/lower_parallel.cch"
+#line 1022 "cc/lower/lower_parallel.cch"
                 break;
             case CcStmtK_switch_:
-#line 1192 "cc/lower/lower_parallel.cch"
+#line 1023 "cc/lower/lower_parallel.cch"
                 opens = true;
-#line 1192 "cc/lower/lower_parallel.cch"
+#line 1023 "cc/lower/lower_parallel.cch"
                 break;
             default:
-#line 1193 "cc/lower/lower_parallel.cch"
+#line 1024 "cc/lower/lower_parallel.cch"
                 break;
         }
         if (opens)
-#line 1195 "cc/lower/lower_parallel.cch"
+#line 1026 "cc/lower/lower_parallel.cch"
             inner = depth + 1;
         bs = lw_block_stmts(s);
         if (bs) {
@@ -46353,81 +46469,81 @@ static void pl_for_exits(PForExit *fx, CcStmt *s, int depth) {
             CcStmt *b = NULL;
             switch ((s->k).kind) {
                 case CcStmtK_if_: {
-#line 1209 "cc/lower/lower_parallel.cch"
+#line 1040 "cc/lower/lower_parallel.cch"
                     CcIf x = (s->k).u.if_;
-#line 1209 "cc/lower/lower_parallel.cch"
+#line 1040 "cc/lower/lower_parallel.cch"
                     a = x.then;
-#line 1209 "cc/lower/lower_parallel.cch"
+#line 1040 "cc/lower/lower_parallel.cch"
                     b = x.els;
-#line 1209 "cc/lower/lower_parallel.cch"
+#line 1040 "cc/lower/lower_parallel.cch"
                     break;
-#line 1209 "cc/lower/lower_parallel.cch"
+#line 1040 "cc/lower/lower_parallel.cch"
                 }
                 case CcStmtK_for_: {
-#line 1210 "cc/lower/lower_parallel.cch"
+#line 1041 "cc/lower/lower_parallel.cch"
                     CcFor x = (s->k).u.for_;
-#line 1210 "cc/lower/lower_parallel.cch"
+#line 1041 "cc/lower/lower_parallel.cch"
                     a = x.body;
-#line 1210 "cc/lower/lower_parallel.cch"
+#line 1041 "cc/lower/lower_parallel.cch"
                     break;
-#line 1210 "cc/lower/lower_parallel.cch"
+#line 1041 "cc/lower/lower_parallel.cch"
                 }
                 case CcStmtK_while_: {
-#line 1211 "cc/lower/lower_parallel.cch"
+#line 1042 "cc/lower/lower_parallel.cch"
                     CcWhile x = (s->k).u.while_;
-#line 1211 "cc/lower/lower_parallel.cch"
+#line 1042 "cc/lower/lower_parallel.cch"
                     a = x.body;
-#line 1211 "cc/lower/lower_parallel.cch"
+#line 1042 "cc/lower/lower_parallel.cch"
                     break;
-#line 1211 "cc/lower/lower_parallel.cch"
+#line 1042 "cc/lower/lower_parallel.cch"
                 }
                 case CcStmtK_do_: {
-#line 1212 "cc/lower/lower_parallel.cch"
+#line 1043 "cc/lower/lower_parallel.cch"
                     CcWhile x = (s->k).u.do_;
-#line 1212 "cc/lower/lower_parallel.cch"
+#line 1043 "cc/lower/lower_parallel.cch"
                     a = x.body;
-#line 1212 "cc/lower/lower_parallel.cch"
+#line 1043 "cc/lower/lower_parallel.cch"
                     break;
-#line 1212 "cc/lower/lower_parallel.cch"
+#line 1043 "cc/lower/lower_parallel.cch"
                 }
                 case CcStmtK_switch_: {
-#line 1213 "cc/lower/lower_parallel.cch"
+#line 1044 "cc/lower/lower_parallel.cch"
                     CcSwitch x = (s->k).u.switch_;
-#line 1213 "cc/lower/lower_parallel.cch"
+#line 1044 "cc/lower/lower_parallel.cch"
                     a = x.body;
-#line 1213 "cc/lower/lower_parallel.cch"
+#line 1044 "cc/lower/lower_parallel.cch"
                     break;
-#line 1213 "cc/lower/lower_parallel.cch"
+#line 1044 "cc/lower/lower_parallel.cch"
                 }
                 case CcStmtK_label: {
-#line 1214 "cc/lower/lower_parallel.cch"
+#line 1045 "cc/lower/lower_parallel.cch"
                     CcLabel x = (s->k).u.label;
-#line 1214 "cc/lower/lower_parallel.cch"
+#line 1045 "cc/lower/lower_parallel.cch"
                     a = x.inner;
-#line 1214 "cc/lower/lower_parallel.cch"
+#line 1045 "cc/lower/lower_parallel.cch"
                     break;
-#line 1214 "cc/lower/lower_parallel.cch"
+#line 1045 "cc/lower/lower_parallel.cch"
                 }
                 default:
-#line 1215 "cc/lower/lower_parallel.cch"
+#line 1046 "cc/lower/lower_parallel.cch"
                     break;
             }
             if (a)
-#line 1217 "cc/lower/lower_parallel.cch"
+#line 1048 "cc/lower/lower_parallel.cch"
                 pl_for_exits(fx, a, inner);
             if (b)
-#line 1218 "cc/lower/lower_parallel.cch"
+#line 1049 "cc/lower/lower_parallel.cch"
                 pl_for_exits(fx, b, inner);
         }
     }
 }
 
-#line 1224 "cc/lower/lower_parallel.cch"
+#line 1055 "cc/lower/lower_parallel.cch"
 /* The walk. One function, called on the caller and on every half the
  * runtime accepts. The leaf loop is emitted once: a span of one skips the
  * split, and a split whose spawn was refused falls through to it. */
 static CcDecl *pl_for_walk_decl(PStep *st, uint32_t id, PCapList *caps, CcForIn loop, CcExpr *lo, CcExpr *hi, bool has_ex, CCSlice err_ty, CcSpan sp) {
-#line 1229 "cc/lower/lower_parallel.cch"
+#line 1060 "cc/lower/lower_parallel.cch"
     CcLowerer *L = st->L;
     CCSlice env = pl_for_name(L, id, "_env_t");
     CCSlice walk = pl_for_name(L, id, "_walk");
@@ -46445,7 +46561,7 @@ static CcDecl *pl_for_walk_decl(PStep *st, uint32_t id, PCapList *caps, CcForIn 
     size_t i;
     CCSlice bind = loop.bind;
     (void)(lo);
-#line 1245 "cc/lower/lower_parallel.cch"
+#line 1076 "cc/lower/lower_parallel.cch"
     (void)(hi);
     {
         CcType *pt = cc_type_pointer(cc_type_named(env, sp, L->arena), sp, L->arena);
@@ -46466,9 +46582,9 @@ static CcDecl *pl_for_walk_decl(PStep *st, uint32_t id, PCapList *caps, CcForIn 
         } else {
             CcType *pt = cc_type_pointer(c->type, sp, L->arena);
             CCString rn = cc_string_new();
-#line 1264 "cc/lower/lower_parallel.cch"
+#line 1095 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&rn, "__cc_ref_", 9, L->arena);
-#line 1264 "cc/lower/lower_parallel.cch"
+#line 1095 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&rn, (cn), L->arena);
             CCSlice ref = lw_keep(L, &rn);
             lw_push(fnbody, lw_decl_stmt(L, pt, ref, read, sp));
@@ -46477,20 +46593,20 @@ static CcDecl *pl_for_walk_decl(PStep *st, uint32_t id, PCapList *caps, CcForIn 
     }
     {
         CCString t = cc_string_new();
-#line 1271 "cc/lower/lower_parallel.cch"
+#line 1102 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&t, "if (__cc_lo >= __cc_hi) return", 30, L->arena);
         lw_push(fnbody, lw_expr_stmt(L, lw_text(L, t, sp), sp));
     }
     lw_push(fnbody, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_honor"), cc_expr_member(lw_ident(L, cstr_slice("e"), sp), cstr_slice("__cc_par_h"), true, sp, L->arena), sp), sp));
-#line 1276 "cc/lower/lower_parallel.cch"
+#line 1107 "cc/lower/lower_parallel.cch"
     {
         /* the split: offer the right half, take the left */
         CcStmt *split = lw_block(L, sp);
         CCString head = cc_string_new();
-#line 1279 "cc/lower/lower_parallel.cch"
+#line 1110 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&head, "CCParTls* __cc_pt = cc__par_tls()", 33, L->arena);
         CCString mid = cc_string_new();
-#line 1280 "cc/lower/lower_parallel.cch"
+#line 1111 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&mid, "int __cc_mid = __cc_lo + (__cc_hi - __cc_lo) / 2", 48, L->arena);
         CcStmt *offer = lw_block(L, sp);
         CCString ch = cc_string_new();
@@ -46500,120 +46616,120 @@ static CcDecl *pl_for_walk_decl(PStep *st, uint32_t id, PCapList *caps, CcForIn 
         cc_string_push_slice(&ch, env.len ? env : cstr_slice(""), L->arena);
         {
             CCString decl = cc_string_new();
-#line 1288 "cc/lower/lower_parallel.cch"
+#line 1119 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&decl, (env), L->arena);
-#line 1288 "cc/lower/lower_parallel.cch"
+#line 1119 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&decl, " __cc_child", 11, L->arena);
             lw_push(offer, lw_expr_stmt(L, lw_text(L, decl, sp), sp));
         }
         lw_push(offer, lw_expr_stmt(L, lw_text(L, ({
-#line 1291 "cc/lower/lower_parallel.cch"
-            CCString __cc_str_40 = cc_string_new();
-#line 1291 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_40, "CCTask __cc_t", 13, L->arena);
-#line 1291 "cc/lower/lower_parallel.cch"
-            __cc_str_40;
-#line 1291 "cc/lower/lower_parallel.cch"
+#line 1122 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_39 = cc_string_new();
+#line 1122 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_39, "CCTask __cc_t", 13, L->arena);
+#line 1122 "cc/lower/lower_parallel.cch"
+            __cc_str_39;
+#line 1122 "cc/lower/lower_parallel.cch"
         }), sp), sp));
         for (k = 0; k < n; k++) {
             PCap *c = *CCVec_PCapRef_get_ptr(caps, k);
             CCSlice cn = c->name;
             CCString as = cc_string_new();
-#line 1295 "cc/lower/lower_parallel.cch"
+#line 1126 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&as, "__cc_child.", 11, L->arena);
-#line 1295 "cc/lower/lower_parallel.cch"
+#line 1126 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&as, (cn), L->arena);
-#line 1295 "cc/lower/lower_parallel.cch"
+#line 1126 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&as, " = e->", 6, L->arena);
-#line 1295 "cc/lower/lower_parallel.cch"
+#line 1126 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&as, (cn), L->arena);
             lw_push(offer, lw_expr_stmt(L, lw_text(L, as, sp), sp));
         }
         lw_push(offer, lw_expr_stmt(L, lw_text(L, ({
-#line 1298 "cc/lower/lower_parallel.cch"
+#line 1129 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_40 = cc_string_new();
+#line 1129 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_40, "__cc_child.lo = __cc_mid", 24, L->arena);
+#line 1129 "cc/lower/lower_parallel.cch"
+            __cc_str_40;
+#line 1129 "cc/lower/lower_parallel.cch"
+        }), sp), sp));
+        lw_push(offer, lw_expr_stmt(L, lw_text(L, ({
+#line 1130 "cc/lower/lower_parallel.cch"
             CCString __cc_str_41 = cc_string_new();
-#line 1298 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_41, "__cc_child.lo = __cc_mid", 24, L->arena);
-#line 1298 "cc/lower/lower_parallel.cch"
+#line 1130 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_41, "__cc_child.hi = __cc_hi", 23, L->arena);
+#line 1130 "cc/lower/lower_parallel.cch"
             __cc_str_41;
-#line 1298 "cc/lower/lower_parallel.cch"
+#line 1130 "cc/lower/lower_parallel.cch"
         }), sp), sp));
         lw_push(offer, lw_expr_stmt(L, lw_text(L, ({
-#line 1299 "cc/lower/lower_parallel.cch"
+#line 1131 "cc/lower/lower_parallel.cch"
             CCString __cc_str_42 = cc_string_new();
-#line 1299 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_42, "__cc_child.hi = __cc_hi", 23, L->arena);
-#line 1299 "cc/lower/lower_parallel.cch"
+#line 1131 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_42, "__cc_child.__cc_pf_ex = e->__cc_pf_ex", 37, L->arena);
+#line 1131 "cc/lower/lower_parallel.cch"
             __cc_str_42;
-#line 1299 "cc/lower/lower_parallel.cch"
+#line 1131 "cc/lower/lower_parallel.cch"
         }), sp), sp));
         lw_push(offer, lw_expr_stmt(L, lw_text(L, ({
-#line 1300 "cc/lower/lower_parallel.cch"
+#line 1132 "cc/lower/lower_parallel.cch"
             CCString __cc_str_43 = cc_string_new();
-#line 1300 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_43, "__cc_child.__cc_pf_ex = e->__cc_pf_ex", 37, L->arena);
-#line 1300 "cc/lower/lower_parallel.cch"
+#line 1132 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_43, "__cc_child.__cc_par_h = e->__cc_par_h", 37, L->arena);
+#line 1132 "cc/lower/lower_parallel.cch"
             __cc_str_43;
-#line 1300 "cc/lower/lower_parallel.cch"
-        }), sp), sp));
-        lw_push(offer, lw_expr_stmt(L, lw_text(L, ({
-#line 1301 "cc/lower/lower_parallel.cch"
-            CCString __cc_str_44 = cc_string_new();
-#line 1301 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_44, "__cc_child.__cc_par_h = e->__cc_par_h", 37, L->arena);
-#line 1301 "cc/lower/lower_parallel.cch"
-            __cc_str_44;
-#line 1301 "cc/lower/lower_parallel.cch"
+#line 1132 "cc/lower/lower_parallel.cch"
         }), sp), sp));
         {
             CCString spawn = cc_string_new();
-#line 1303 "cc/lower/lower_parallel.cch"
+#line 1134 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&spawn, "__cc_t = cc_parallel_spawn(", 27, L->arena);
-#line 1303 "cc/lower/lower_parallel.cch"
+#line 1134 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&spawn, (thunk), L->arena);
-#line 1303 "cc/lower/lower_parallel.cch"
+#line 1134 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&spawn, ", &__cc_child)", 14, L->arena);
             CCString took = cc_string_new();
-#line 1304 "cc/lower/lower_parallel.cch"
+#line 1135 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&took, "if (__cc_t.kind != CC_TASK_KIND_INVALID) { ", 43, L->arena);
-#line 1304 "cc/lower/lower_parallel.cch"
+#line 1135 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&took, (walk), L->arena);
-#line 1304 "cc/lower/lower_parallel.cch"
+#line 1135 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&took, "(__cc_lo, __cc_mid, __p); cc_parallel_join(__cc_t); return; }", 61, L->arena);
             lw_push(offer, lw_expr_stmt(L, lw_text(L, spawn, sp), sp));
             lw_push(offer, lw_expr_stmt(L, lw_text(L, took, sp), sp));
         }
         {
             CCString cond = cc_string_new();
-#line 1309 "cc/lower/lower_parallel.cch"
+#line 1140 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&cond, "!cc_parallel_deny_fast(__cc_pt, &", 33, L->arena);
-#line 1309 "cc/lower/lower_parallel.cch"
+#line 1140 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&cond, (site), L->arena);
-#line 1309 "cc/lower/lower_parallel.cch"
+#line 1140 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&cond, ", ", 2, L->arena);
-#line 1309 "cc/lower/lower_parallel.cch"
+#line 1140 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&cond, (thunk), L->arena);
-#line 1309 "cc/lower/lower_parallel.cch"
+#line 1140 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&cond, ")", 1, L->arena);
             lw_push(split, lw_if(L, lw_text(L, cond, sp), offer, NULL, sp));
         }
         lw_push(split, lw_expr_stmt(L, lw_text(L, ({
-#line 1312 "cc/lower/lower_parallel.cch"
-            CCString __cc_str_45 = cc_string_new();
-#line 1312 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_45, "CC_PAR_NOTE_INLINE_ARM(__cc_pt)", 31, L->arena);
-#line 1312 "cc/lower/lower_parallel.cch"
-            __cc_str_45;
-#line 1312 "cc/lower/lower_parallel.cch"
+#line 1143 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_44 = cc_string_new();
+#line 1143 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_44, "CC_PAR_NOTE_INLINE_ARM(__cc_pt)", 31, L->arena);
+#line 1143 "cc/lower/lower_parallel.cch"
+            __cc_str_44;
+#line 1143 "cc/lower/lower_parallel.cch"
         }), sp), sp));
         lw_push(fnbody, lw_if(L, lw_text(L, ({
-#line 1313 "cc/lower/lower_parallel.cch"
-            CCString __cc_str_46 = cc_string_new();
-#line 1313 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_46, "(__cc_hi - __cc_lo) > 1", 23, L->arena);
-#line 1313 "cc/lower/lower_parallel.cch"
-            __cc_str_46;
-#line 1313 "cc/lower/lower_parallel.cch"
+#line 1144 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_45 = cc_string_new();
+#line 1144 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_45, "(__cc_hi - __cc_lo) > 1", 23, L->arena);
+#line 1144 "cc/lower/lower_parallel.cch"
+            __cc_str_45;
+#line 1144 "cc/lower/lower_parallel.cch"
         }), sp), split, NULL, sp));
     }
     {
@@ -46623,16 +46739,16 @@ static CcDecl *pl_for_walk_decl(PStep *st, uint32_t id, PCapList *caps, CcForIn 
         CcStmt *fs;
         if (has_ex) {
             CCString ck = cc_string_new();
-#line 1321 "cc/lower/lower_parallel.cch"
+#line 1152 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&ck, "if (e->__cc_pf_ex) { int __cc_xk = cc_atomic_load(&e->__cc_pf_ex->xk); if (__cc_xk) break; }", 92, L->arena);
             lw_push(lbody, lw_expr_stmt(L, lw_text(L, ck, sp), sp));
         }
         lw_push(lbody, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_honor"), cc_expr_member(lw_ident(L, cstr_slice("e"), sp), cstr_slice("__cc_par_h"), true, sp, L->arena), sp), sp));
-#line 1326 "cc/lower/lower_parallel.cch"
+#line 1157 "cc/lower/lower_parallel.cch"
         if (loop.body) {
-#line 1326 "cc/lower/lower_parallel.cch"
+#line 1157 "cc/lower/lower_parallel.cch"
             lw_push(lbody, loop.body);
-#line 1326 "cc/lower/lower_parallel.cch"
+#line 1157 "cc/lower/lower_parallel.cch"
         }
         memset(&fl, 0, sizeof(fl));
         fl.init_decl = NULL;
@@ -46643,11 +46759,11 @@ static CcDecl *pl_for_walk_decl(PStep *st, uint32_t id, PCapList *caps, CcForIn 
         fl.more = CCVec_CcStmtRef_new(L->arena);
         fs = cc__stmt_blank(sp, L->arena);
         {
-#line 1335 "cc/lower/lower_parallel.cch"
+#line 1166 "cc/lower/lower_parallel.cch"
             CcStmtK sk = { .kind = CcStmtK_for_, .u.for_ = fl };
-#line 1335 "cc/lower/lower_parallel.cch"
+#line 1166 "cc/lower/lower_parallel.cch"
             fs->k = sk;
-#line 1335 "cc/lower/lower_parallel.cch"
+#line 1166 "cc/lower/lower_parallel.cch"
         }
         lw_push(fnbody, lw_decl_stmt(L, intt, bind, NULL, sp));
         if (err_ty.len) {
@@ -46658,7 +46774,7 @@ static CcDecl *pl_for_walk_decl(PStep *st, uint32_t id, PCapList *caps, CcForIn 
              * Added after the exit rewriting walked the body, so the
              * `return` it ends in is its own. */
             lw_push(fnbody, pl_raise_handler(L, err_ty, cstr_slice("e->__cc_pf_ex"), cc_stmt_return(NULL, sp, L->arena), sp));
-#line 1346 "cc/lower/lower_parallel.cch"
+#line 1177 "cc/lower/lower_parallel.cch"
         }
         lw_push(fnbody, fs);
     }
@@ -46670,25 +46786,25 @@ static CcDecl *pl_for_walk_decl(PStep *st, uint32_t id, PCapList *caps, CcForIn 
         memset(&p1, 0, sizeof(p1));
         memset(&p2, 0, sizeof(p2));
         p0.span = sp;
-#line 1356 "cc/lower/lower_parallel.cch"
+#line 1187 "cc/lower/lower_parallel.cch"
         p0.type = intt;
-#line 1356 "cc/lower/lower_parallel.cch"
+#line 1187 "cc/lower/lower_parallel.cch"
         p0.name = cstr_slice("__cc_lo");
-#line 1356 "cc/lower/lower_parallel.cch"
+#line 1187 "cc/lower/lower_parallel.cch"
         p0.attrs = CCVec_CcAttr_new(L->arena);
         p1.span = sp;
-#line 1357 "cc/lower/lower_parallel.cch"
+#line 1188 "cc/lower/lower_parallel.cch"
         p1.type = intt;
-#line 1357 "cc/lower/lower_parallel.cch"
+#line 1188 "cc/lower/lower_parallel.cch"
         p1.name = cstr_slice("__cc_hi");
-#line 1357 "cc/lower/lower_parallel.cch"
+#line 1188 "cc/lower/lower_parallel.cch"
         p1.attrs = CCVec_CcAttr_new(L->arena);
         p2.span = sp;
-#line 1358 "cc/lower/lower_parallel.cch"
+#line 1189 "cc/lower/lower_parallel.cch"
         p2.type = voidp;
-#line 1358 "cc/lower/lower_parallel.cch"
+#line 1189 "cc/lower/lower_parallel.cch"
         p2.name = cstr_slice("__p");
-#line 1358 "cc/lower/lower_parallel.cch"
+#line 1189 "cc/lower/lower_parallel.cch"
         p2.attrs = CCVec_CcAttr_new(L->arena);
         CCVec_CcParam_push(&params, p0);
         CCVec_CcParam_push(&params, p1);
@@ -46699,11 +46815,11 @@ static CcDecl *pl_for_walk_decl(PStep *st, uint32_t id, PCapList *caps, CcForIn 
     ft.params = params;
     ft.has_prototype = true;
     {
-#line 1367 "cc/lower/lower_parallel.cch"
+#line 1198 "cc/lower/lower_parallel.cch"
         CcTypeK tk = { .kind = CcTypeK_func, .u.func = ft };
-#line 1367 "cc/lower/lower_parallel.cch"
+#line 1198 "cc/lower/lower_parallel.cch"
         fn_type->k = tk;
-#line 1367 "cc/lower/lower_parallel.cch"
+#line 1198 "cc/lower/lower_parallel.cch"
     }
     memset(&fd, 0, sizeof(fd));
     fd.name = walk;
@@ -46715,11 +46831,11 @@ static CcDecl *pl_for_walk_decl(PStep *st, uint32_t id, PCapList *caps, CcForIn 
     d->specs = CC_SPEC_STATIC;
     d->attrs = CCVec_CcAttr_new(L->arena);
     {
-#line 1377 "cc/lower/lower_parallel.cch"
+#line 1208 "cc/lower/lower_parallel.cch"
         CcDeclK dk = { .kind = CcDeclK_func, .u.func = fd };
-#line 1377 "cc/lower/lower_parallel.cch"
+#line 1208 "cc/lower/lower_parallel.cch"
         d->k = dk;
-#line 1377 "cc/lower/lower_parallel.cch"
+#line 1208 "cc/lower/lower_parallel.cch"
     }
     return d;
 }
@@ -46739,42 +46855,42 @@ static CcDecl *pl_for_thunk_decl(PStep *st, uint32_t id, CcSpan sp) {
     CcDecl *d;
     {
         CCString t = cc_string_new();
-#line 1395 "cc/lower/lower_parallel.cch"
+#line 1226 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&t, (env), L->arena);
-#line 1395 "cc/lower/lower_parallel.cch"
+#line 1226 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&t, "* e = (", 7, L->arena);
-#line 1395 "cc/lower/lower_parallel.cch"
+#line 1226 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&t, (env), L->arena);
-#line 1395 "cc/lower/lower_parallel.cch"
+#line 1226 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&t, "*)__p", 5, L->arena);
         lw_push(body, lw_expr_stmt(L, lw_text(L, t, sp), sp));
     }
     {
         CCString t = cc_string_new();
-#line 1399 "cc/lower/lower_parallel.cch"
+#line 1230 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&t, (walk), L->arena);
-#line 1399 "cc/lower/lower_parallel.cch"
+#line 1230 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&t, "(e->lo, e->hi, __p)", 19, L->arena);
         lw_push(body, lw_expr_stmt(L, lw_text(L, t, sp), sp));
     }
     lw_push(body, cc_stmt_return(lw_text(L, ({
-#line 1402 "cc/lower/lower_parallel.cch"
-        CCString __cc_str_47 = cc_string_new();
-#line 1402 "cc/lower/lower_parallel.cch"
-        cc_string_push_buffer(&__cc_str_47, "NULL", 4, L->arena);
-#line 1402 "cc/lower/lower_parallel.cch"
-        __cc_str_47;
-#line 1402 "cc/lower/lower_parallel.cch"
+#line 1233 "cc/lower/lower_parallel.cch"
+        CCString __cc_str_46 = cc_string_new();
+#line 1233 "cc/lower/lower_parallel.cch"
+        cc_string_push_buffer(&__cc_str_46, "NULL", 4, L->arena);
+#line 1233 "cc/lower/lower_parallel.cch"
+        __cc_str_46;
+#line 1233 "cc/lower/lower_parallel.cch"
     }), sp), sp, L->arena));
     {
         CcParam p0;
         memset(&p0, 0, sizeof(p0));
         p0.span = sp;
-#line 1406 "cc/lower/lower_parallel.cch"
+#line 1237 "cc/lower/lower_parallel.cch"
         p0.type = voidp;
-#line 1406 "cc/lower/lower_parallel.cch"
+#line 1237 "cc/lower/lower_parallel.cch"
         p0.name = cstr_slice("__p");
-#line 1406 "cc/lower/lower_parallel.cch"
+#line 1237 "cc/lower/lower_parallel.cch"
         p0.attrs = CCVec_CcAttr_new(L->arena);
         CCVec_CcParam_push(&params, p0);
     }
@@ -46783,11 +46899,11 @@ static CcDecl *pl_for_thunk_decl(PStep *st, uint32_t id, CcSpan sp) {
     ft.params = params;
     ft.has_prototype = true;
     {
-#line 1413 "cc/lower/lower_parallel.cch"
+#line 1244 "cc/lower/lower_parallel.cch"
         CcTypeK tk = { .kind = CcTypeK_func, .u.func = ft };
-#line 1413 "cc/lower/lower_parallel.cch"
+#line 1244 "cc/lower/lower_parallel.cch"
         fn_type->k = tk;
-#line 1413 "cc/lower/lower_parallel.cch"
+#line 1244 "cc/lower/lower_parallel.cch"
     }
     memset(&fd, 0, sizeof(fd));
     fd.name = thunk;
@@ -46799,11 +46915,11 @@ static CcDecl *pl_for_thunk_decl(PStep *st, uint32_t id, CcSpan sp) {
     d->specs = CC_SPEC_STATIC;
     d->attrs = CCVec_CcAttr_new(L->arena);
     {
-#line 1423 "cc/lower/lower_parallel.cch"
+#line 1254 "cc/lower/lower_parallel.cch"
         CcDeclK dk = { .kind = CcDeclK_func, .u.func = fd };
-#line 1423 "cc/lower/lower_parallel.cch"
+#line 1254 "cc/lower/lower_parallel.cch"
         d->k = dk;
-#line 1423 "cc/lower/lower_parallel.cch"
+#line 1254 "cc/lower/lower_parallel.cch"
     }
     return d;
 }
@@ -46817,14 +46933,14 @@ static CcDecl *pl_for_thunk_decl(PStep *st, uint32_t id, CcSpan sp) {
  * the box, which no arm return here can spell. */
 static bool pl_fn_returns_result(PStep *st) {
     if (!st->fn_ret)
-#line 1435 "cc/lower/lower_parallel.cch"
+#line 1266 "cc/lower/lower_parallel.cch"
         return false;
     switch ((st->fn_ret->k).kind) {
         case CcTypeK_result:
-#line 1437 "cc/lower/lower_parallel.cch"
+#line 1268 "cc/lower/lower_parallel.cch"
             return true;
         default:
-#line 1438 "cc/lower/lower_parallel.cch"
+#line 1269 "cc/lower/lower_parallel.cch"
             return false;
     }
 }
@@ -46835,16 +46951,16 @@ static CCSlice pl_ret_type(PStep *st) {
     CCSlice v = cstr_slice("void");
     bool is_result = false;
     if (!st->fn_ret)
-#line 1447 "cc/lower/lower_parallel.cch"
+#line 1278 "cc/lower/lower_parallel.cch"
         return cc_slice_empty();
     switch ((st->fn_ret->k).kind) {
         case CcTypeK_result:
-#line 1449 "cc/lower/lower_parallel.cch"
+#line 1280 "cc/lower/lower_parallel.cch"
             is_result = true;
-#line 1449 "cc/lower/lower_parallel.cch"
+#line 1280 "cc/lower/lower_parallel.cch"
             break;
         default:
-#line 1450 "cc/lower/lower_parallel.cch"
+#line 1281 "cc/lower/lower_parallel.cch"
             break;
     }
     /* A Result return would type the cell as `CCResult_T_E`, but the value an
@@ -46853,10 +46969,10 @@ static CCSlice pl_ret_type(PStep *st) {
      * in a thunk, is the thunk. Until that is settled the site says so rather
      * than emit a cell the arm cannot fill. */
     if (is_result)
-#line 1457 "cc/lower/lower_parallel.cch"
+#line 1288 "cc/lower/lower_parallel.cch"
         return cc_slice_empty();
     if (type_named_name(st->fn_ret, &nm) && slice_eq(nm, v))
-#line 1458 "cc/lower/lower_parallel.cch"
+#line 1289 "cc/lower/lower_parallel.cch"
         return cc_slice_empty();
     return CcIndex_canon(L->ix, st->fn_ret);
 }
@@ -46870,13 +46986,13 @@ static bool pl_cap_identity(CcType *t) {
     CCSlice par = cstr_slice("CCParallel");
     CCSlice at = cstr_slice("cc_atomic");
     if (!t)
-#line 1470 "cc/lower/lower_parallel.cch"
+#line 1301 "cc/lower/lower_parallel.cch"
         return false;
     if (!type_named_name(t, &nm))
-#line 1471 "cc/lower/lower_parallel.cch"
+#line 1302 "cc/lower/lower_parallel.cch"
         return false;
     if (slice_eq(nm, par))
-#line 1472 "cc/lower/lower_parallel.cch"
+#line 1303 "cc/lower/lower_parallel.cch"
         return true;
     return CCSlice_starts_with(&nm, at);
 }
@@ -46887,21 +47003,21 @@ static bool pl_cap_identity(CcType *t) {
 static bool pl_cap_byvalue(PCap *c) {
     bool aggregate = false;
     if (!c || c->by_addr || !c->type)
-#line 1481 "cc/lower/lower_parallel.cch"
+#line 1312 "cc/lower/lower_parallel.cch"
         return false;
     switch ((c->type->k).kind) {
         case CcTypeK_pointer:
-#line 1483 "cc/lower/lower_parallel.cch"
+#line 1314 "cc/lower/lower_parallel.cch"
             aggregate = true;
-#line 1483 "cc/lower/lower_parallel.cch"
+#line 1314 "cc/lower/lower_parallel.cch"
             break;
         case CcTypeK_array:
-#line 1484 "cc/lower/lower_parallel.cch"
+#line 1315 "cc/lower/lower_parallel.cch"
             aggregate = true;
-#line 1484 "cc/lower/lower_parallel.cch"
+#line 1315 "cc/lower/lower_parallel.cch"
             break;
         default:
-#line 1485 "cc/lower/lower_parallel.cch"
+#line 1316 "cc/lower/lower_parallel.cch"
             break;
     }
     return !aggregate;
@@ -46917,22 +47033,22 @@ static bool pl_byval_named(PAsk *q, CcExpr *e) {
     size_t n;
     size_t i;
     if (!e || !expr_ident(strip_parens_expr(e), &nm) || !nm.len)
-#line 1499 "cc/lower/lower_parallel.cch"
+#line 1330 "cc/lower/lower_parallel.cch"
         return false;
     /* this is a rule about what the page says: a name a lowering minted is
      * not one the page wrote, and it is reached the way its lowering meant */
     if (CCSlice_starts_with(&nm, minted))
-#line 1502 "cc/lower/lower_parallel.cch"
+#line 1333 "cc/lower/lower_parallel.cch"
         return false;
     cv = q->caps;
     n = CCVec_PCapRef_len(cv);
     for (i = 0; i < n; i++) {
         PCap *c = *CCVec_PCapRef_get_ptr(cv, i);
         if (!pl_cap_byvalue(c))
-#line 1507 "cc/lower/lower_parallel.cch"
+#line 1338 "cc/lower/lower_parallel.cch"
             continue;
         if (!slice_eq(c->name, nm))
-#line 1508 "cc/lower/lower_parallel.cch"
+#line 1339 "cc/lower/lower_parallel.cch"
             continue;
         q->hit = c->name;
         return true;
@@ -46944,44 +47060,44 @@ static bool pl_byval_expr(CcExpr *e, void *env) {
     PAsk *q = (PAsk *)(env);
     CcExpr *touched = NULL;
     if (q->hit.len)
-#line 1518 "cc/lower/lower_parallel.cch"
+#line 1349 "cc/lower/lower_parallel.cch"
         return true;
     switch ((e->k).kind) {
         case CcExprK_assign: {
-#line 1520 "cc/lower/lower_parallel.cch"
+#line 1351 "cc/lower/lower_parallel.cch"
             CcBinary b = (e->k).u.assign;
-#line 1520 "cc/lower/lower_parallel.cch"
+#line 1351 "cc/lower/lower_parallel.cch"
             touched = b.a;
-#line 1520 "cc/lower/lower_parallel.cch"
+#line 1351 "cc/lower/lower_parallel.cch"
             break;
-#line 1520 "cc/lower/lower_parallel.cch"
+#line 1351 "cc/lower/lower_parallel.cch"
         }
         case CcExprK_unary: {
-#line 1521 "cc/lower/lower_parallel.cch"
+#line 1352 "cc/lower/lower_parallel.cch"
             CcUnary u = (e->k).u.unary;
-#line 1521 "cc/lower/lower_parallel.cch"
+#line 1352 "cc/lower/lower_parallel.cch"
             if (u.op == CC_OP_ADDR)
-#line 1521 "cc/lower/lower_parallel.cch"
+#line 1352 "cc/lower/lower_parallel.cch"
                 touched = u.a;
-#line 1521 "cc/lower/lower_parallel.cch"
+#line 1352 "cc/lower/lower_parallel.cch"
             break;
-#line 1521 "cc/lower/lower_parallel.cch"
+#line 1352 "cc/lower/lower_parallel.cch"
         }
         case CcExprK_ufcs: {
-#line 1522 "cc/lower/lower_parallel.cch"
+#line 1353 "cc/lower/lower_parallel.cch"
             CcUfcs uf = (e->k).u.ufcs;
-#line 1522 "cc/lower/lower_parallel.cch"
+#line 1353 "cc/lower/lower_parallel.cch"
             touched = uf.recv;
-#line 1522 "cc/lower/lower_parallel.cch"
+#line 1353 "cc/lower/lower_parallel.cch"
             break;
-#line 1522 "cc/lower/lower_parallel.cch"
+#line 1353 "cc/lower/lower_parallel.cch"
         }
         default:
-#line 1523 "cc/lower/lower_parallel.cch"
+#line 1354 "cc/lower/lower_parallel.cch"
             break;
     }
     if (touched)
-#line 1525 "cc/lower/lower_parallel.cch"
+#line 1356 "cc/lower/lower_parallel.cch"
         (void)(pl_byval_named(q, touched));
     return true;
 }
@@ -46992,16 +47108,16 @@ static bool pl_label_stmt(CcStmt *s, void *env) {
     CcNameList *names = (CcNameList *)(env);
     switch ((s->k).kind) {
         case CcStmtK_label: {
-#line 1534 "cc/lower/lower_parallel.cch"
+#line 1365 "cc/lower/lower_parallel.cch"
             CcLabel x = (s->k).u.label;
-#line 1534 "cc/lower/lower_parallel.cch"
+#line 1365 "cc/lower/lower_parallel.cch"
             CCVec_CCSlice_push(names, x.name);
-#line 1534 "cc/lower/lower_parallel.cch"
+#line 1365 "cc/lower/lower_parallel.cch"
             break;
-#line 1534 "cc/lower/lower_parallel.cch"
+#line 1365 "cc/lower/lower_parallel.cch"
         }
         default:
-#line 1535 "cc/lower/lower_parallel.cch"
+#line 1366 "cc/lower/lower_parallel.cch"
             break;
     }
     return true;
@@ -47025,96 +47141,96 @@ static CcStmt *pl_dest_body_leaves(CcStmt *s, int depth, CcNameList *labels) {
     CcStmt *a = NULL;
     CcStmt *b = NULL;
     if (!s)
-#line 1557 "cc/lower/lower_parallel.cch"
+#line 1388 "cc/lower/lower_parallel.cch"
         return NULL;
     switch ((s->k).kind) {
         case CcStmtK_break_:
-#line 1559 "cc/lower/lower_parallel.cch"
+#line 1390 "cc/lower/lower_parallel.cch"
             leaves = depth == 0;
-#line 1559 "cc/lower/lower_parallel.cch"
+#line 1390 "cc/lower/lower_parallel.cch"
             break;
         case CcStmtK_continue_:
-#line 1560 "cc/lower/lower_parallel.cch"
+#line 1391 "cc/lower/lower_parallel.cch"
             leaves = depth == 0;
-#line 1560 "cc/lower/lower_parallel.cch"
+#line 1391 "cc/lower/lower_parallel.cch"
             break;
         case CcStmtK_goto_: {
-#line 1561 "cc/lower/lower_parallel.cch"
+#line 1392 "cc/lower/lower_parallel.cch"
             CcGoto g = (s->k).u.goto_;
-#line 1561 "cc/lower/lower_parallel.cch"
+#line 1392 "cc/lower/lower_parallel.cch"
             gt = g;
-#line 1561 "cc/lower/lower_parallel.cch"
+#line 1392 "cc/lower/lower_parallel.cch"
             is_goto = true;
-#line 1561 "cc/lower/lower_parallel.cch"
+#line 1392 "cc/lower/lower_parallel.cch"
             break;
-#line 1561 "cc/lower/lower_parallel.cch"
+#line 1392 "cc/lower/lower_parallel.cch"
         }
         case CcStmtK_for_: {
-#line 1562 "cc/lower/lower_parallel.cch"
+#line 1393 "cc/lower/lower_parallel.cch"
             CcFor x = (s->k).u.for_;
-#line 1562 "cc/lower/lower_parallel.cch"
+#line 1393 "cc/lower/lower_parallel.cch"
             opens = true;
-#line 1562 "cc/lower/lower_parallel.cch"
+#line 1393 "cc/lower/lower_parallel.cch"
             a = x.body;
-#line 1562 "cc/lower/lower_parallel.cch"
+#line 1393 "cc/lower/lower_parallel.cch"
             break;
-#line 1562 "cc/lower/lower_parallel.cch"
+#line 1393 "cc/lower/lower_parallel.cch"
         }
         case CcStmtK_while_: {
-#line 1563 "cc/lower/lower_parallel.cch"
+#line 1394 "cc/lower/lower_parallel.cch"
             CcWhile x = (s->k).u.while_;
-#line 1563 "cc/lower/lower_parallel.cch"
+#line 1394 "cc/lower/lower_parallel.cch"
             opens = true;
-#line 1563 "cc/lower/lower_parallel.cch"
+#line 1394 "cc/lower/lower_parallel.cch"
             a = x.body;
-#line 1563 "cc/lower/lower_parallel.cch"
+#line 1394 "cc/lower/lower_parallel.cch"
             break;
-#line 1563 "cc/lower/lower_parallel.cch"
+#line 1394 "cc/lower/lower_parallel.cch"
         }
         case CcStmtK_do_: {
-#line 1564 "cc/lower/lower_parallel.cch"
+#line 1395 "cc/lower/lower_parallel.cch"
             CcWhile x = (s->k).u.do_;
-#line 1564 "cc/lower/lower_parallel.cch"
+#line 1395 "cc/lower/lower_parallel.cch"
             opens = true;
-#line 1564 "cc/lower/lower_parallel.cch"
+#line 1395 "cc/lower/lower_parallel.cch"
             a = x.body;
-#line 1564 "cc/lower/lower_parallel.cch"
+#line 1395 "cc/lower/lower_parallel.cch"
             break;
-#line 1564 "cc/lower/lower_parallel.cch"
+#line 1395 "cc/lower/lower_parallel.cch"
         }
         case CcStmtK_switch_: {
-#line 1565 "cc/lower/lower_parallel.cch"
+#line 1396 "cc/lower/lower_parallel.cch"
             CcSwitch x = (s->k).u.switch_;
-#line 1565 "cc/lower/lower_parallel.cch"
+#line 1396 "cc/lower/lower_parallel.cch"
             opens = true;
-#line 1565 "cc/lower/lower_parallel.cch"
+#line 1396 "cc/lower/lower_parallel.cch"
             a = x.body;
-#line 1565 "cc/lower/lower_parallel.cch"
+#line 1396 "cc/lower/lower_parallel.cch"
             break;
-#line 1565 "cc/lower/lower_parallel.cch"
+#line 1396 "cc/lower/lower_parallel.cch"
         }
         case CcStmtK_if_: {
-#line 1566 "cc/lower/lower_parallel.cch"
+#line 1397 "cc/lower/lower_parallel.cch"
             CcIf x = (s->k).u.if_;
-#line 1566 "cc/lower/lower_parallel.cch"
+#line 1397 "cc/lower/lower_parallel.cch"
             a = x.then;
-#line 1566 "cc/lower/lower_parallel.cch"
+#line 1397 "cc/lower/lower_parallel.cch"
             b = x.els;
-#line 1566 "cc/lower/lower_parallel.cch"
+#line 1397 "cc/lower/lower_parallel.cch"
             break;
-#line 1566 "cc/lower/lower_parallel.cch"
+#line 1397 "cc/lower/lower_parallel.cch"
         }
         case CcStmtK_label: {
-#line 1567 "cc/lower/lower_parallel.cch"
+#line 1398 "cc/lower/lower_parallel.cch"
             CcLabel x = (s->k).u.label;
-#line 1567 "cc/lower/lower_parallel.cch"
+#line 1398 "cc/lower/lower_parallel.cch"
             a = x.inner;
-#line 1567 "cc/lower/lower_parallel.cch"
+#line 1398 "cc/lower/lower_parallel.cch"
             break;
-#line 1567 "cc/lower/lower_parallel.cch"
+#line 1398 "cc/lower/lower_parallel.cch"
         }
         default:
-#line 1568 "cc/lower/lower_parallel.cch"
+#line 1399 "cc/lower/lower_parallel.cch"
             break;
     }
     if (is_goto) {
@@ -47126,16 +47242,16 @@ static CcStmt *pl_dest_body_leaves(CcStmt *s, int depth, CcNameList *labels) {
         for (li = 0; li < nl; li++) {
             CCSlice nm = *CCVec_CCSlice_get_ptr(labels, li);
             if (want.len && slice_eq(nm, want))
-#line 1578 "cc/lower/lower_parallel.cch"
+#line 1409 "cc/lower/lower_parallel.cch"
                 known = true;
         }
         leaves = !known;
     }
     if (leaves)
-#line 1582 "cc/lower/lower_parallel.cch"
+#line 1413 "cc/lower/lower_parallel.cch"
         return s;
     if (opens)
-#line 1583 "cc/lower/lower_parallel.cch"
+#line 1414 "cc/lower/lower_parallel.cch"
         inner = depth + 1;
     bs = lw_block_stmts(s);
     if (bs) {
@@ -47144,7 +47260,7 @@ static CcStmt *pl_dest_body_leaves(CcStmt *s, int depth, CcNameList *labels) {
             CcStmt *k = *CCVec_CcStmtRef_get_ptr(bs, i);
             CcStmt *hit = pl_dest_body_leaves(k, inner, labels);
             if (hit)
-#line 1590 "cc/lower/lower_parallel.cch"
+#line 1421 "cc/lower/lower_parallel.cch"
                 return hit;
         }
         return NULL;
@@ -47152,11 +47268,11 @@ static CcStmt *pl_dest_body_leaves(CcStmt *s, int depth, CcNameList *labels) {
     if (a) {
         CcStmt *hit = pl_dest_body_leaves(a, inner, labels);
         if (hit)
-#line 1596 "cc/lower/lower_parallel.cch"
+#line 1427 "cc/lower/lower_parallel.cch"
             return hit;
     }
     if (b)
-#line 1598 "cc/lower/lower_parallel.cch"
+#line 1429 "cc/lower/lower_parallel.cch"
         return pl_dest_body_leaves(b, inner, labels);
     return NULL;
 }
@@ -47172,7 +47288,7 @@ static bool pl_dest_body_stays(PStep *st, CcStmt *body) {
     bool is_goto = false;
     bool is_cont = false;
     if (!body)
-#line 1612 "cc/lower/lower_parallel.cch"
+#line 1443 "cc/lower/lower_parallel.cch"
         return true;
     memset(&v, 0, sizeof(v));
     v.stmt = pl_label_stmt;
@@ -47180,32 +47296,32 @@ static bool pl_dest_body_stays(PStep *st, CcStmt *body) {
     CcStmt_walk(body, v);
     hit = pl_dest_body_leaves(body, 0, &labels);
     if (!hit)
-#line 1618 "cc/lower/lower_parallel.cch"
+#line 1449 "cc/lower/lower_parallel.cch"
         return true;
     switch ((hit->k).kind) {
         case CcStmtK_goto_:
-#line 1620 "cc/lower/lower_parallel.cch"
+#line 1451 "cc/lower/lower_parallel.cch"
             is_goto = true;
-#line 1620 "cc/lower/lower_parallel.cch"
+#line 1451 "cc/lower/lower_parallel.cch"
             break;
         case CcStmtK_continue_:
-#line 1621 "cc/lower/lower_parallel.cch"
+#line 1452 "cc/lower/lower_parallel.cch"
             is_cont = true;
-#line 1621 "cc/lower/lower_parallel.cch"
+#line 1452 "cc/lower/lower_parallel.cch"
             break;
         default:
-#line 1622 "cc/lower/lower_parallel.cch"
+#line 1453 "cc/lower/lower_parallel.cch"
             break;
     }
     {
         CCString m = cc_string_new();
         if (is_goto)
-#line 1626 "cc/lower/lower_parallel.cch"
+#line 1457 "cc/lower/lower_parallel.cch"
             cc_string_push_cstr(&m, "'goto' to a label outside a dest body: the body is a fiber of the dest and the frame that wrote it has moved on; write 'return;' to end the fiber, or put the label inside the body", L->arena);
-#line 1626 "cc/lower/lower_parallel.cch"
+#line 1457 "cc/lower/lower_parallel.cch"
         else if (is_cont)
             cc_string_push_cstr(&m, "'continue' leaves a dest body: the body is a fiber of the dest, not an iteration of a loop outside it; write 'return;' to end the fiber", L->arena);
-#line 1627 "cc/lower/lower_parallel.cch"
+#line 1458 "cc/lower/lower_parallel.cch"
         else
             cc_string_push_cstr(&m, "'break' leaves a dest body: the body is a fiber of the dest, not a loop outside it; write 'return;' to end the fiber", L->arena);
         lw_error(L, hit->span, m);
@@ -47216,7 +47332,7 @@ static bool pl_dest_body_stays(PStep *st, CcStmt *body) {
 static bool pl_dest_body_ok(PStep *st, CcStmt *body, PCapList *caps, CcSpan sp) {
     CcLowerer *L = st->L;
     if (!pl_dest_body_stays(st, body))
-#line 1636 "cc/lower/lower_parallel.cch"
+#line 1467 "cc/lower/lower_parallel.cch"
         return false;
     {
         CcVisitor v;
@@ -47288,9 +47404,9 @@ static bool pl_dest_caps_ok(PStep *st, Walker *w, CcParallel p, CCSlice hbase, C
         v.expr = pl_scan_expr;
         v.env = &sc;
         if (arm->serial)
-#line 1706 "cc/lower/lower_parallel.cch"
+#line 1537 "cc/lower/lower_parallel.cch"
             CcStmt_walk(arm->serial, v);
-#line 1706 "cc/lower/lower_parallel.cch"
+#line 1537 "cc/lower/lower_parallel.cch"
         else if (arm->expr)
             CcExpr_walk(arm->expr, v);
         caps = sc.caps;
@@ -47301,9 +47417,9 @@ static bool pl_dest_caps_ok(PStep *st, Walker *w, CcParallel p, CCSlice hbase, C
             for (ci = 0; ci < nc; ci++) {
                 PCap *c = *CCVec_PCapRef_get_ptr(cv, ci);
                 if (hbase.len && slice_eq(c->name, hbase))
-#line 1715 "cc/lower/lower_parallel.cch"
+#line 1546 "cc/lower/lower_parallel.cch"
                     c->by_addr = true;
-#line 1715 "cc/lower/lower_parallel.cch"
+#line 1546 "cc/lower/lower_parallel.cch"
                 else if (pl_cap_identity(c->type))
                     c->by_addr = true;
             }
@@ -47314,13 +47430,13 @@ static bool pl_dest_caps_ok(PStep *st, Walker *w, CcParallel p, CCSlice hbase, C
         v.expr = pl_byval_expr;
         v.env = &q;
         if (arm->serial)
-#line 1724 "cc/lower/lower_parallel.cch"
+#line 1555 "cc/lower/lower_parallel.cch"
             CcStmt_walk(arm->serial, v);
-#line 1724 "cc/lower/lower_parallel.cch"
+#line 1555 "cc/lower/lower_parallel.cch"
         else if (arm->expr)
             CcExpr_walk(arm->expr, v);
         if (!q.hit.len)
-#line 1726 "cc/lower/lower_parallel.cch"
+#line 1557 "cc/lower/lower_parallel.cch"
             continue;
         {
             CCSlice nm = q.hit;
@@ -47348,56 +47464,56 @@ static bool pl_dest_caps_ok(PStep *st, Walker *w, CcParallel p, CCSlice hbase, C
 static bool pl_base_name(CcExpr *e, CCSlice *out) {
     CcExpr *inner = NULL;
     if (!e)
-#line 1752 "cc/lower/lower_parallel.cch"
+#line 1583 "cc/lower/lower_parallel.cch"
         return false;
     switch ((e->k).kind) {
         case CcExprK_ident: {
-#line 1754 "cc/lower/lower_parallel.cch"
+#line 1585 "cc/lower/lower_parallel.cch"
             CCSlice x = (e->k).u.ident;
-#line 1754 "cc/lower/lower_parallel.cch"
+#line 1585 "cc/lower/lower_parallel.cch"
             *out = x;
-#line 1754 "cc/lower/lower_parallel.cch"
+#line 1585 "cc/lower/lower_parallel.cch"
             return true;
-#line 1754 "cc/lower/lower_parallel.cch"
+#line 1585 "cc/lower/lower_parallel.cch"
         }
         case CcExprK_paren: {
-#line 1755 "cc/lower/lower_parallel.cch"
+#line 1586 "cc/lower/lower_parallel.cch"
             CcUnary u = (e->k).u.paren;
-#line 1755 "cc/lower/lower_parallel.cch"
+#line 1586 "cc/lower/lower_parallel.cch"
             inner = u.a;
-#line 1755 "cc/lower/lower_parallel.cch"
+#line 1586 "cc/lower/lower_parallel.cch"
             break;
-#line 1755 "cc/lower/lower_parallel.cch"
+#line 1586 "cc/lower/lower_parallel.cch"
         }
         case CcExprK_unary: {
-#line 1756 "cc/lower/lower_parallel.cch"
+#line 1587 "cc/lower/lower_parallel.cch"
             CcUnary u = (e->k).u.unary;
-#line 1756 "cc/lower/lower_parallel.cch"
+#line 1587 "cc/lower/lower_parallel.cch"
             inner = u.a;
-#line 1756 "cc/lower/lower_parallel.cch"
+#line 1587 "cc/lower/lower_parallel.cch"
             break;
-#line 1756 "cc/lower/lower_parallel.cch"
+#line 1587 "cc/lower/lower_parallel.cch"
         }
         case CcExprK_member: {
-#line 1757 "cc/lower/lower_parallel.cch"
+#line 1588 "cc/lower/lower_parallel.cch"
             CcMember m = (e->k).u.member;
-#line 1757 "cc/lower/lower_parallel.cch"
+#line 1588 "cc/lower/lower_parallel.cch"
             inner = m.a;
-#line 1757 "cc/lower/lower_parallel.cch"
+#line 1588 "cc/lower/lower_parallel.cch"
             break;
-#line 1757 "cc/lower/lower_parallel.cch"
+#line 1588 "cc/lower/lower_parallel.cch"
         }
         case CcExprK_index: {
-#line 1758 "cc/lower/lower_parallel.cch"
+#line 1589 "cc/lower/lower_parallel.cch"
             CcIndexExpr ix = (e->k).u.index;
-#line 1758 "cc/lower/lower_parallel.cch"
+#line 1589 "cc/lower/lower_parallel.cch"
             inner = ix.a;
-#line 1758 "cc/lower/lower_parallel.cch"
+#line 1589 "cc/lower/lower_parallel.cch"
             break;
-#line 1758 "cc/lower/lower_parallel.cch"
+#line 1589 "cc/lower/lower_parallel.cch"
         }
         default:
-#line 1759 "cc/lower/lower_parallel.cch"
+#line 1590 "cc/lower/lower_parallel.cch"
             return false;
     }
     return pl_base_name(inner, out);
@@ -47412,29 +47528,29 @@ static bool pl_tail_wait_expr(CcExpr *e, void *env) {
     CCSlice want = cstr_slice("wait");
     switch ((e->k).kind) {
         case CcExprK_ufcs: {
-#line 1772 "cc/lower/lower_parallel.cch"
+#line 1603 "cc/lower/lower_parallel.cch"
             CcUfcs u = (e->k).u.ufcs;
-#line 1772 "cc/lower/lower_parallel.cch"
+#line 1603 "cc/lower/lower_parallel.cch"
             nm = u.method;
-#line 1772 "cc/lower/lower_parallel.cch"
+#line 1603 "cc/lower/lower_parallel.cch"
             break;
-#line 1772 "cc/lower/lower_parallel.cch"
+#line 1603 "cc/lower/lower_parallel.cch"
         }
         case CcExprK_member: {
-#line 1773 "cc/lower/lower_parallel.cch"
+#line 1604 "cc/lower/lower_parallel.cch"
             CcMember m = (e->k).u.member;
-#line 1773 "cc/lower/lower_parallel.cch"
+#line 1604 "cc/lower/lower_parallel.cch"
             nm = m.name;
-#line 1773 "cc/lower/lower_parallel.cch"
+#line 1604 "cc/lower/lower_parallel.cch"
             break;
-#line 1773 "cc/lower/lower_parallel.cch"
+#line 1604 "cc/lower/lower_parallel.cch"
         }
         default:
-#line 1774 "cc/lower/lower_parallel.cch"
+#line 1605 "cc/lower/lower_parallel.cch"
             break;
     }
     if (nm.len && slice_eq(nm, want))
-#line 1776 "cc/lower/lower_parallel.cch"
+#line 1607 "cc/lower/lower_parallel.cch"
         *hit = true;
     return true;
 }
@@ -47443,7 +47559,7 @@ static bool pl_tail_waits(CcExpr *tail) {
     CcVisitor v;
     bool hit = false;
     if (!tail)
-#line 1783 "cc/lower/lower_parallel.cch"
+#line 1614 "cc/lower/lower_parallel.cch"
         return false;
     memset(&v, 0, sizeof(v));
     v.expr = pl_tail_wait_expr;
@@ -47454,29 +47570,29 @@ static bool pl_tail_waits(CcExpr *tail) {
 
 /* `} !> @destroy [{ D }]` after the block: the hook the bind carries. */
 typedef struct PTailDestroy {
-#line 1792 "cc/lower/lower_parallel.cch"
+#line 1623 "cc/lower/lower_parallel.cch"
     bool hit;
-#line 1792 "cc/lower/lower_parallel.cch"
+#line 1623 "cc/lower/lower_parallel.cch"
     CcStmt *body;
-#line 1792 "cc/lower/lower_parallel.cch"
+#line 1623 "cc/lower/lower_parallel.cch"
 } PTailDestroy;
 
 static bool pl_tail_destroy_expr(CcExpr *e, void *env) {
     PTailDestroy *td = (PTailDestroy *)(env);
     switch ((e->k).kind) {
         case CcExprK_unwrap_destroy: {
-#line 1797 "cc/lower/lower_parallel.cch"
+#line 1628 "cc/lower/lower_parallel.cch"
             CcUnwrapDestroy ud = (e->k).u.unwrap_destroy;
-#line 1797 "cc/lower/lower_parallel.cch"
+#line 1628 "cc/lower/lower_parallel.cch"
             td->hit = true;
-#line 1797 "cc/lower/lower_parallel.cch"
+#line 1628 "cc/lower/lower_parallel.cch"
             td->body = ud.destroy_body;
-#line 1797 "cc/lower/lower_parallel.cch"
+#line 1628 "cc/lower/lower_parallel.cch"
             break;
-#line 1797 "cc/lower/lower_parallel.cch"
+#line 1628 "cc/lower/lower_parallel.cch"
         }
         default:
-#line 1798 "cc/lower/lower_parallel.cch"
+#line 1629 "cc/lower/lower_parallel.cch"
             break;
     }
     return true;
@@ -47486,7 +47602,7 @@ static bool pl_tail_destroys(CcExpr *tail, CcStmt **body) {
     CcVisitor v;
     PTailDestroy td;
     if (!tail)
-#line 1806 "cc/lower/lower_parallel.cch"
+#line 1637 "cc/lower/lower_parallel.cch"
         return false;
     memset(&td, 0, sizeof(td));
     memset(&v, 0, sizeof(v));
@@ -47494,7 +47610,7 @@ static bool pl_tail_destroys(CcExpr *tail, CcStmt **body) {
     v.env = &td;
     CcExpr_walk(tail, v);
     if (body)
-#line 1812 "cc/lower/lower_parallel.cch"
+#line 1643 "cc/lower/lower_parallel.cch"
         *body = td.body;
     return td.hit;
 }
@@ -47523,28 +47639,28 @@ static bool pl_self_wait_expr(CcExpr *e, void *env) {
     CcExpr *recv = NULL;
     switch ((e->k).kind) {
         case CcExprK_ufcs: {
-#line 1839 "cc/lower/lower_parallel.cch"
+#line 1670 "cc/lower/lower_parallel.cch"
             CcUfcs u = (e->k).u.ufcs;
-#line 1839 "cc/lower/lower_parallel.cch"
+#line 1670 "cc/lower/lower_parallel.cch"
             nm = u.method;
-#line 1839 "cc/lower/lower_parallel.cch"
+#line 1670 "cc/lower/lower_parallel.cch"
             recv = u.recv;
-#line 1839 "cc/lower/lower_parallel.cch"
+#line 1670 "cc/lower/lower_parallel.cch"
             break;
-#line 1839 "cc/lower/lower_parallel.cch"
+#line 1670 "cc/lower/lower_parallel.cch"
         }
         default:
-#line 1840 "cc/lower/lower_parallel.cch"
+#line 1671 "cc/lower/lower_parallel.cch"
             break;
     }
     if (!recv || !slice_eq(nm, want))
-#line 1842 "cc/lower/lower_parallel.cch"
+#line 1673 "cc/lower/lower_parallel.cch"
         return true;
     if (!pl_base_name(recv, &base))
-#line 1843 "cc/lower/lower_parallel.cch"
+#line 1674 "cc/lower/lower_parallel.cch"
         return true;
     if (slice_eq(base, q->want))
-#line 1844 "cc/lower/lower_parallel.cch"
+#line 1675 "cc/lower/lower_parallel.cch"
         q->hit = base;
     return true;
 }
@@ -47553,7 +47669,7 @@ static bool pl_arm_self_waits(CcExpr *e, CcStmt *s, CCSlice name) {
     CcVisitor v;
     PAsk q;
     if (!name.len)
-#line 1851 "cc/lower/lower_parallel.cch"
+#line 1682 "cc/lower/lower_parallel.cch"
         return false;
     memset(&q, 0, sizeof(q));
     q.want = name;
@@ -47561,10 +47677,10 @@ static bool pl_arm_self_waits(CcExpr *e, CcStmt *s, CCSlice name) {
     v.expr = pl_self_wait_expr;
     v.env = &q;
     if (e)
-#line 1857 "cc/lower/lower_parallel.cch"
+#line 1688 "cc/lower/lower_parallel.cch"
         CcExpr_walk(e, v);
     if (s)
-#line 1858 "cc/lower/lower_parallel.cch"
+#line 1689 "cc/lower/lower_parallel.cch"
         CcStmt_walk(s, v);
     return q.hit.len != 0;
 }
@@ -47597,34 +47713,34 @@ static bool pl_reject(CcLowerer *L, CcParallel p, CcSpan sp) {
         /* a gate that denies runs the arms on the caller in order, which is
          * the one schedule `spawn` says this site does not have */
         m = ({
-#line 1889 "cc/lower/lower_parallel.cch"
-            CCString __cc_str_48 = cc_string_new();
-#line 1889 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_48, "'", 1, L->arena);
-#line 1889 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_48, ("@"), L->arena);
-#line 1889 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_48, "parallel spawn' does not take a gate: a denied site runs its arms in order, which is what 'spawn' rules out", 107, L->arena);
-#line 1889 "cc/lower/lower_parallel.cch"
-            __cc_str_48;
-#line 1889 "cc/lower/lower_parallel.cch"
+#line 1720 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_47 = cc_string_new();
+#line 1720 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_47, "'", 1, L->arena);
+#line 1720 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_47, ("@"), L->arena);
+#line 1720 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_47, "parallel spawn' does not take a gate: a denied site runs its arms in order, which is what 'spawn' rules out", 107, L->arena);
+#line 1720 "cc/lower/lower_parallel.cch"
+            __cc_str_47;
+#line 1720 "cc/lower/lower_parallel.cch"
         });
         lw_error(L, sp, m);
         return true;
     }
     if ((p.pred || p.seq) && (p.bind.len || p.target)) {
         m = ({
-#line 1894 "cc/lower/lower_parallel.cch"
-            CCString __cc_str_49 = cc_string_new();
-#line 1894 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_49, "a gated '", 9, L->arena);
-#line 1894 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_49, ("@"), L->arena);
-#line 1894 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_49, "parallel' that also binds a handle is not lowered by the clean lowerer yet: the sequential schedule has nothing to hand back", 124, L->arena);
-#line 1894 "cc/lower/lower_parallel.cch"
-            __cc_str_49;
-#line 1894 "cc/lower/lower_parallel.cch"
+#line 1725 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_48 = cc_string_new();
+#line 1725 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_48, "a gated '", 9, L->arena);
+#line 1725 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_48, ("@"), L->arena);
+#line 1725 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_48, "parallel' that also binds a handle is not lowered by the clean lowerer yet: the sequential schedule has nothing to hand back", 124, L->arena);
+#line 1725 "cc/lower/lower_parallel.cch"
+            __cc_str_48;
+#line 1725 "cc/lower/lower_parallel.cch"
         });
         lw_error(L, sp, m);
         return true;
@@ -47639,17 +47755,17 @@ static bool pl_reject(CcLowerer *L, CcParallel p, CcSpan sp) {
     }
     if (p.worker.len) {
         m = ({
-#line 1907 "cc/lower/lower_parallel.cch"
-            CCString __cc_str_50 = cc_string_new();
-#line 1907 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_50, "'", 1, L->arena);
-#line 1907 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_50, ("@"), L->arena);
-#line 1907 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_50, "parallel' with 'worker' is not lowered by the clean lowerer yet", 63, L->arena);
-#line 1907 "cc/lower/lower_parallel.cch"
-            __cc_str_50;
-#line 1907 "cc/lower/lower_parallel.cch"
+#line 1738 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_49 = cc_string_new();
+#line 1738 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_49, "'", 1, L->arena);
+#line 1738 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_49, ("@"), L->arena);
+#line 1738 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_49, "parallel' with 'worker' is not lowered by the clean lowerer yet", 63, L->arena);
+#line 1738 "cc/lower/lower_parallel.cch"
+            __cc_str_49;
+#line 1738 "cc/lower/lower_parallel.cch"
         });
         lw_error(L, sp, m);
         return true;
@@ -47664,12 +47780,12 @@ static bool pl_err_fwd_stmt(CcStmt *s, void *env) {
     bool *hit = (bool *)(env);
     switch ((s->k).kind) {
         case CcStmtK_err_fwd:
-#line 1920 "cc/lower/lower_parallel.cch"
+#line 1751 "cc/lower/lower_parallel.cch"
             *hit = true;
-#line 1920 "cc/lower/lower_parallel.cch"
+#line 1751 "cc/lower/lower_parallel.cch"
             break;
         default:
-#line 1921 "cc/lower/lower_parallel.cch"
+#line 1752 "cc/lower/lower_parallel.cch"
             break;
     }
     return true;
@@ -47682,10 +47798,10 @@ static bool pl_body_raises(CcStmt *body) {
     CcVisitor v;
     bool hit = false;
     if (!body)
-#line 1932 "cc/lower/lower_parallel.cch"
+#line 1763 "cc/lower/lower_parallel.cch"
         return false;
     if (pl_block_has_handler(body))
-#line 1933 "cc/lower/lower_parallel.cch"
+#line 1764 "cc/lower/lower_parallel.cch"
         return false;
     memset(&v, 0, sizeof(v));
     v.expr = pl_bare_unwrap_expr;
@@ -47697,41 +47813,9 @@ static bool pl_body_raises(CcStmt *body) {
 
 static bool pl_arm_raises(CcParallelArm *arm) {
     if (!arm->serial)
-#line 1943 "cc/lower/lower_parallel.cch"
+#line 1774 "cc/lower/lower_parallel.cch"
         return false;
     return pl_body_raises(arm->serial);
-}
-
-static CCSlice pl_spell_arm(CcLowerer *L, CcParallelArm *arm) {
-    CCString t;
-    if (!arm || !arm->expr || arm->serial || pl_arm_raises(arm))
-        return cc_slice_empty();
-    t = lw_spell_expr(L, arm->expr);
-    if (arm->target.len) {
-        CCSlice tgt = arm->target;
-        CCString s = cc_string_new();
-#line 1954 "cc/lower/lower_parallel.cch"
-        cc__string_slot_push(&s, (tgt), L->arena);
-#line 1954 "cc/lower/lower_parallel.cch"
-        cc_string_push_buffer(&s, " = ", 3, L->arena);
-#line 1954 "cc/lower/lower_parallel.cch"
-        cc__string_slot_push(&s, (t), L->arena);
-        return lw_keep(L, &s);
-    }
-    return lw_keep(L, &t);
-}
-
-static void pl_splice(CcStmt *dst, CcStmt *src) {
-    CcStmtList *from = lw_block_stmts(src);
-    size_t n;
-    size_t i;
-    if (!from)
-#line 1964 "cc/lower/lower_parallel.cch"
-        return;
-    n = CCVec_CcStmtRef_len(from);
-    for (i = 0; i < n; i++)
-#line 1966 "cc/lower/lower_parallel.cch"
-        lw_push(dst, *CCVec_CcStmtRef_get_ptr(from, i));
 }
 
 /* The error type the exit cell carries: the one the handlers of the
@@ -47750,38 +47834,38 @@ static CCSlice pl_eh_type(PStep *st, CcSpan sp) {
         CCSlice c;
         switch ((t->k).kind) {
             case CcStmtK_errhandler: {
-#line 1984 "cc/lower/lower_parallel.cch"
+#line 1793 "cc/lower/lower_parallel.cch"
                 CcErrhandler x = (t->k).u.errhandler;
-#line 1984 "cc/lower/lower_parallel.cch"
+#line 1793 "cc/lower/lower_parallel.cch"
                 et = x.err_type;
-#line 1984 "cc/lower/lower_parallel.cch"
+#line 1793 "cc/lower/lower_parallel.cch"
                 break;
-#line 1984 "cc/lower/lower_parallel.cch"
+#line 1793 "cc/lower/lower_parallel.cch"
             }
             default:
-#line 1985 "cc/lower/lower_parallel.cch"
+#line 1794 "cc/lower/lower_parallel.cch"
                 break;
         }
         if (!et)
-#line 1987 "cc/lower/lower_parallel.cch"
+#line 1796 "cc/lower/lower_parallel.cch"
             continue;
         c = CcIndex_canon(L->ix, et);
         if (!canon.len)
-#line 1989 "cc/lower/lower_parallel.cch"
+#line 1798 "cc/lower/lower_parallel.cch"
             canon = c;
-#line 1989 "cc/lower/lower_parallel.cch"
+#line 1798 "cc/lower/lower_parallel.cch"
         else if (!slice_eq(canon, c)) {
-#line 1991 "cc/lower/lower_parallel.cch"
+#line 1800 "cc/lower/lower_parallel.cch"
             CCString m = cc_string_new();
-#line 1991 "cc/lower/lower_parallel.cch"
+#line 1800 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&m, "a bare '!>' in this arm raises after the join into the handler of the function it stands in, and that function declares handlers for both '", 139, L->arena);
-#line 1991 "cc/lower/lower_parallel.cch"
+#line 1800 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&m, (canon), L->arena);
-#line 1991 "cc/lower/lower_parallel.cch"
+#line 1800 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&m, "' and '", 7, L->arena);
-#line 1991 "cc/lower/lower_parallel.cch"
+#line 1800 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&m, (c), L->arena);
-#line 1991 "cc/lower/lower_parallel.cch"
+#line 1800 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&m, "'; handle the Result in the arm with '!>(e) { ... }'", 52, L->arena);
             lw_error(L, sp, m);
             return cc_slice_empty();
@@ -47807,27 +47891,27 @@ static CcStmt *pl_raise_handler(CcLowerer *L, CCSlice ety, CCSlice cell, CcStmt 
     CcStmt *body = lw_block(L, sp);
     CcErrhandler eh;
     CCString claim = cc_string_new();
-#line 2015 "cc/lower/lower_parallel.cch"
+#line 1824 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&claim, "{ int __cc_z = 0; while (!cc_atomic_cas(&", 41, L->arena);
-#line 2015 "cc/lower/lower_parallel.cch"
+#line 1824 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&claim, (cell), L->arena);
-#line 2015 "cc/lower/lower_parallel.cch"
+#line 1824 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&claim, "->lock, &__cc_z, 1)) __cc_z = 0; if (cc_atomic_load(&", 53, L->arena);
-#line 2015 "cc/lower/lower_parallel.cch"
+#line 1824 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&claim, (cell), L->arena);
-#line 2015 "cc/lower/lower_parallel.cch"
+#line 1824 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&claim, "->xk) < 2) { ", 13, L->arena);
-#line 2015 "cc/lower/lower_parallel.cch"
+#line 1824 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&claim, (cell), L->arena);
-#line 2015 "cc/lower/lower_parallel.cch"
+#line 1824 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&claim, "->err = __cc_pe; cc_atomic_store(&", 34, L->arena);
-#line 2015 "cc/lower/lower_parallel.cch"
+#line 1824 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&claim, (cell), L->arena);
-#line 2015 "cc/lower/lower_parallel.cch"
+#line 1824 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&claim, "->xk, 3); } cc_atomic_store(&", 29, L->arena);
-#line 2015 "cc/lower/lower_parallel.cch"
+#line 1824 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&claim, (cell), L->arena);
-#line 2015 "cc/lower/lower_parallel.cch"
+#line 1824 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&claim, "->lock, 0); }", 13, L->arena);
     lw_push(body, lw_expr_stmt(L, lw_text(L, claim, sp), sp));
     lw_push(body, leave);
@@ -47835,11 +47919,11 @@ static CcStmt *pl_raise_handler(CcLowerer *L, CCSlice ety, CCSlice cell, CcStmt 
     eh.binder = cstr_slice("__cc_pe");
     eh.body = body;
     {
-#line 2021 "cc/lower/lower_parallel.cch"
+#line 1830 "cc/lower/lower_parallel.cch"
         CcStmtK sk = { .kind = CcStmtK_errhandler, .u.errhandler = eh };
-#line 2021 "cc/lower/lower_parallel.cch"
+#line 1830 "cc/lower/lower_parallel.cch"
         s->k = sk;
-#line 2021 "cc/lower/lower_parallel.cch"
+#line 1830 "cc/lower/lower_parallel.cch"
     }
     return s;
 }
@@ -47853,7 +47937,7 @@ static void pl_arm_open_with(CcLowerer *L, CcStmt *body, CcStmt *handler) {
     size_t n;
     size_t i;
     if (!bs)
-#line 2033 "cc/lower/lower_parallel.cch"
+#line 1842 "cc/lower/lower_parallel.cch"
         return;
     n = CCVec_CcStmtRef_len(bs);
     CCVec_CcStmtRef_push(&joined, handler);
@@ -47873,20 +47957,20 @@ static CcStmt *pl_raise_after_join(CcLowerer *L, CCSlice cellv, CcSpan sp) {
     CcStmt *fw = cc__stmt_blank(sp, L->arena);
     CcErrFwd fe;
     CCString cnd = cc_string_new();
-#line 2051 "cc/lower/lower_parallel.cch"
+#line 1860 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&cnd, "cc_atomic_load(&", 16, L->arena);
-#line 2051 "cc/lower/lower_parallel.cch"
+#line 1860 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&cnd, (cellv), L->arena);
-#line 2051 "cc/lower/lower_parallel.cch"
+#line 1860 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&cnd, ".xk) == 3", 9, L->arena);
     fe.err = lw_paren(L, lw_member(L, lw_ident(L, cellv, sp), "err", sp), sp);
     fe.delegate = true;
     {
-#line 2054 "cc/lower/lower_parallel.cch"
+#line 1863 "cc/lower/lower_parallel.cch"
         CcStmtK sk = { .kind = CcStmtK_err_fwd, .u.err_fwd = fe };
-#line 2054 "cc/lower/lower_parallel.cch"
+#line 1863 "cc/lower/lower_parallel.cch"
         fw->k = sk;
-#line 2054 "cc/lower/lower_parallel.cch"
+#line 1863 "cc/lower/lower_parallel.cch"
     }
     lw_push(then, fw);
     return lw_if(L, lw_text(L, cnd, sp), then, NULL, sp);
@@ -47914,18 +47998,18 @@ static bool pl_arm_unfold_unwrap(PStep *st, CcParallelArm *arm) {
         CCVec_CcStmtRef_push(&sb.stmts, pl_unwrap_stmt(L, arm->expr, arm->span));
         ser = cc__stmt_blank(arm->span, L->arena);
         {
-#line 2080 "cc/lower/lower_parallel.cch"
+#line 1889 "cc/lower/lower_parallel.cch"
             CcStmtK sk = { .kind = CcStmtK_serial, .u.serial = sb };
-#line 2080 "cc/lower/lower_parallel.cch"
+#line 1889 "cc/lower/lower_parallel.cch"
             ser->k = sk;
-#line 2080 "cc/lower/lower_parallel.cch"
+#line 1889 "cc/lower/lower_parallel.cch"
         }
         arm->serial = ser;
         arm->expr = NULL;
         arm->unwrap = false;
     }
     if (!pl_arm_raises(arm))
-#line 2085 "cc/lower/lower_parallel.cch"
+#line 1894 "cc/lower/lower_parallel.cch"
         return true;
     if (!st->eh_any) {
         CCString m = cc_string_new();
@@ -47940,17 +48024,17 @@ static bool pl_arm_ok(CcLowerer *L, CcParallelArm *arm, CcSpan sp) {
     CCString m;
     if (!arm->expr && !arm->serial) {
         m = ({
-#line 2098 "cc/lower/lower_parallel.cch"
-            CCString __cc_str_51 = cc_string_new();
-#line 2098 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_51, "an empty '", 10, L->arena);
-#line 2098 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_51, ("@"), L->arena);
-#line 2098 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_51, "parallel' arm", 13, L->arena);
-#line 2098 "cc/lower/lower_parallel.cch"
-            __cc_str_51;
-#line 2098 "cc/lower/lower_parallel.cch"
+#line 1907 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_50 = cc_string_new();
+#line 1907 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_50, "an empty '", 10, L->arena);
+#line 1907 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_50, ("@"), L->arena);
+#line 1907 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_50, "parallel' arm", 13, L->arena);
+#line 1907 "cc/lower/lower_parallel.cch"
+            __cc_str_50;
+#line 1907 "cc/lower/lower_parallel.cch"
         });
         lw_error(L, sp, m);
         return false;
@@ -47983,7 +48067,7 @@ static void pl_lower_inert(PStep *st, CcStmt *s, CcParallel p) {
     CCSlice hspell = pl_handle_spell(L, p, &hdeclared, &hbase);
     if (hspell.len)
         lw_push(blk, lw_expr_stmt(L, lw_assign(L, lw_ident(L, hspell, sp), lw_call0(L, cstr_slice("cc_parallel_dest"), sp), sp), sp));
-#line 2131 "cc/lower/lower_parallel.cch"
+#line 1940 "cc/lower/lower_parallel.cch"
     for (i = 0; i < n; i++) {
         CcParallelArm *arm = CCVec_CcParallelArm_get_ptr(armv, i);
         if (arm->serial) {
@@ -47995,7 +48079,7 @@ static void pl_lower_inert(PStep *st, CcStmt *s, CcParallel p) {
         } else {
             CcExpr *e0 = arm->expr;
             if (arm->target.len)
-#line 2141 "cc/lower/lower_parallel.cch"
+#line 1950 "cc/lower/lower_parallel.cch"
                 e0 = lw_assign(L, lw_ident(L, arm->target, sp), e0, sp);
             lw_push(blk, lw_expr_stmt(L, e0, sp));
         }
@@ -48004,11 +48088,11 @@ static void pl_lower_inert(PStep *st, CcStmt *s, CcParallel p) {
         /* parenthesised because the handle may be written `*hp`, and the
          * member would otherwise bind before the dereference */
         CCString j = cc_string_new();
-#line 2148 "cc/lower/lower_parallel.cch"
+#line 1957 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&j, "(", 1, L->arena);
-#line 2148 "cc/lower/lower_parallel.cch"
+#line 1957 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&j, (hspell), L->arena);
-#line 2148 "cc/lower/lower_parallel.cch"
+#line 1957 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&j, ").joined = 1", 12, L->arena);
         lw_push(blk, lw_expr_stmt(L, lw_text(L, j, sp), sp));
     }
@@ -48037,14 +48121,7 @@ static void pl_lower(PStep *st, CcStmt *s, CcParallel p) {
     bool hdeclared;
     CcExpr *gate;
     bool gated;
-    bool compact;
-    bool try_skip;
-    bool gate_fast;
     CCSlice gname;
-    CcNameList inlines;
-    PCapLists capsv;
-    CcStmt *body;
-    CcStmt *slow;
     CCSlice pj_ty = cc_slice_empty(); /* the exit cell's type, when there is one */
     CCSlice pj_var = cc_slice_empty(); /* the cell itself, on the caller */
     CCSlice pj_ptr = cc_slice_empty(); /* what the caller's arm claims through */
@@ -48057,15 +48134,15 @@ static void pl_lower(PStep *st, CcStmt *s, CcParallel p) {
      * schedule the arms run on, not which forms are legal. */
     bool inert = pl_par_off_at(st, sp.first);
     if (pl_reject(L, p, sp))
-#line 2195 "cc/lower/lower_parallel.cch"
+#line 1997 "cc/lower/lower_parallel.cch"
         return;
     if (!n) {
         /* an empty block would run and join nothing, which is what the
          * caller asked for only by accident */
         CCString m = cc_string_new();
-#line 2199 "cc/lower/lower_parallel.cch"
+#line 2001 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&m, ("@"), L->arena);
-#line 2199 "cc/lower/lower_parallel.cch"
+#line 2001 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&m, "parallel needs at least one arm", 31, L->arena);
         lw_error(L, sp, m);
         return;
@@ -48075,10 +48152,10 @@ static void pl_lower(PStep *st, CcStmt *s, CcParallel p) {
         /* an inert arm runs where it stands, so it reaches the handler
          * this function carries and needs no cell to raise through */
         if (!inert && !pl_arm_unfold_unwrap(st, arm))
-#line 2207 "cc/lower/lower_parallel.cch"
+#line 2009 "cc/lower/lower_parallel.cch"
             return;
         if (!pl_arm_ok(L, arm, sp))
-#line 2208 "cc/lower/lower_parallel.cch"
+#line 2010 "cc/lower/lower_parallel.cch"
             return;
     }
     {
@@ -48125,18 +48202,18 @@ static void pl_lower(PStep *st, CcStmt *s, CcParallel p) {
              * worker, spawned and attached, and the dest is live on the
              * caller from the binding on (spec 8.11.1) */
             if (n == 1)
-#line 2253 "cc/lower/lower_parallel.cch"
+#line 2055 "cc/lower/lower_parallel.cch"
                 first = 0;
             if (p.bind.len)
-#line 2254 "cc/lower/lower_parallel.cch"
+#line 2056 "cc/lower/lower_parallel.cch"
                 hb = p.bind;
-#line 2254 "cc/lower/lower_parallel.cch"
+#line 2056 "cc/lower/lower_parallel.cch"
             else
                 (void)(pl_base_name(p.target, &hb));
             for (i = 0; i < n; i++) {
                 CcParallelArm *arm = CCVec_CcParallelArm_get_ptr(armv, i);
                 if (!pl_arm_self_waits(arm->expr, arm->serial, hb))
-#line 2258 "cc/lower/lower_parallel.cch"
+#line 2060 "cc/lower/lower_parallel.cch"
                     continue;
                 {
                     CCString m = cc_string_new();
@@ -48162,20 +48239,20 @@ static void pl_lower(PStep *st, CcStmt *s, CcParallel p) {
     for (i = 0; i < n; i++) {
         CcParallelArm *arm = CCVec_CcParallelArm_get_ptr(armv, i);
         if (!arm->serial)
-#line 2282 "cc/lower/lower_parallel.cch"
+#line 2084 "cc/lower/lower_parallel.cch"
             continue;
         if (i < first && !hspell.len)
-#line 2283 "cc/lower/lower_parallel.cch"
+#line 2085 "cc/lower/lower_parallel.cch"
             continue;
         if (hspell.len)
-#line 2284 "cc/lower/lower_parallel.cch"
+#line 2086 "cc/lower/lower_parallel.cch"
             st->dest_depth++;
         tw_stmt(w, arm->serial);
         if (hspell.len)
-#line 2286 "cc/lower/lower_parallel.cch"
+#line 2088 "cc/lower/lower_parallel.cch"
             st->dest_depth--;
         if (hspell.len && !pl_dest_body_stays(st, pl_serial_body(L, arm->serial)))
-#line 2287 "cc/lower/lower_parallel.cch"
+#line 2089 "cc/lower/lower_parallel.cch"
             return;
     }
     for (i = 0; i < n; i++) {
@@ -48191,7 +48268,7 @@ static void pl_lower(PStep *st, CcStmt *s, CcParallel p) {
             return;
         }
         if (pl_arm_first_return(arm->expr, arm->serial, false))
-#line 2301 "cc/lower/lower_parallel.cch"
+#line 2103 "cc/lower/lower_parallel.cch"
             pj_any = true;
         if (pl_arm_raises(arm)) {
             if (hspell.len) {
@@ -48207,12 +48284,12 @@ static void pl_lower(PStep *st, CcStmt *s, CcParallel p) {
         }
     }
     if (hspell.len && !pl_dest_caps_ok(st, w, p, hbase, sp))
-#line 2315 "cc/lower/lower_parallel.cch"
+#line 2117 "cc/lower/lower_parallel.cch"
         return;
     if (raise_any) {
         pj_ety = pl_eh_type(st, sp);
         if (!pj_ety.len)
-#line 2318 "cc/lower/lower_parallel.cch"
+#line 2120 "cc/lower/lower_parallel.cch"
             return;
     }
     if ((pj_any || raise_any) && first == 1) {
@@ -48231,7 +48308,7 @@ static void pl_lower(PStep *st, CcStmt *s, CcParallel p) {
             CcParallelArm *arm = CCVec_CcParallelArm_get_ptr(armv, i);
             CcStmt *valued = pl_arm_first_return(arm->expr, arm->serial, true);
             if (!valued)
-#line 2335 "cc/lower/lower_parallel.cch"
+#line 2137 "cc/lower/lower_parallel.cch"
                 continue;
             {
                 CCString m = cc_string_new();
@@ -48251,73 +48328,75 @@ static void pl_lower(PStep *st, CcStmt *s, CcParallel p) {
         /* `xk`: 0 nothing yet, 2 an arm returned (`rv`), 3 an arm raised
          * (`err`); whichever claims first is the exit the block takes */
         if (ev.len)
-#line 2353 "cc/lower/lower_parallel.cch"
+#line 2155 "cc/lower/lower_parallel.cch"
             ef = ({
-#line 2353 "cc/lower/lower_parallel.cch"
-                CCString __cc_str_52 = cc_string_new();
-#line 2353 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&__cc_str_52, " ", 1, L->arena);
-#line 2353 "cc/lower/lower_parallel.cch"
-                cc__string_slot_push(&__cc_str_52, (ev), L->arena);
-#line 2353 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&__cc_str_52, " err;", 5, L->arena);
-#line 2353 "cc/lower/lower_parallel.cch"
-                __cc_str_52;
-#line 2353 "cc/lower/lower_parallel.cch"
+#line 2155 "cc/lower/lower_parallel.cch"
+                CCString __cc_str_51 = cc_string_new();
+#line 2155 "cc/lower/lower_parallel.cch"
+                cc_string_push_buffer(&__cc_str_51, " ", 1, L->arena);
+#line 2155 "cc/lower/lower_parallel.cch"
+                cc__string_slot_push(&__cc_str_51, (ev), L->arena);
+#line 2155 "cc/lower/lower_parallel.cch"
+                cc_string_push_buffer(&__cc_str_51, " err;", 5, L->arena);
+#line 2155 "cc/lower/lower_parallel.cch"
+                __cc_str_51;
+#line 2155 "cc/lower/lower_parallel.cch"
             });
         if (rv.len)
-#line 2354 "cc/lower/lower_parallel.cch"
+#line 2156 "cc/lower/lower_parallel.cch"
             t = ({
-#line 2354 "cc/lower/lower_parallel.cch"
-                CCString __cc_str_53 = cc_string_new();
-#line 2354 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&__cc_str_53, "typedef struct { cc_atomic_int lock; cc_atomic_int xk; ", 55, L->arena);
-#line 2354 "cc/lower/lower_parallel.cch"
-                cc__string_slot_push(&__cc_str_53, (rv), L->arena);
-#line 2354 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&__cc_str_53, " rv;", 4, L->arena);
-#line 2354 "cc/lower/lower_parallel.cch"
-                cc__string_slot_push(&__cc_str_53, (ef), L->arena);
-#line 2354 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&__cc_str_53, " } ", 3, L->arena);
-#line 2354 "cc/lower/lower_parallel.cch"
-                cc__string_slot_push(&__cc_str_53, (pj_ty), L->arena);
-#line 2354 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&__cc_str_53, ";\n", 2, L->arena);
-#line 2354 "cc/lower/lower_parallel.cch"
-                __cc_str_53;
-#line 2354 "cc/lower/lower_parallel.cch"
+#line 2156 "cc/lower/lower_parallel.cch"
+                CCString __cc_str_52 = cc_string_new();
+#line 2156 "cc/lower/lower_parallel.cch"
+                cc_string_push_buffer(&__cc_str_52, "typedef struct { cc_atomic_int lock; cc_atomic_int xk; ", 55, L->arena);
+#line 2156 "cc/lower/lower_parallel.cch"
+                cc__string_slot_push(&__cc_str_52, (rv), L->arena);
+#line 2156 "cc/lower/lower_parallel.cch"
+                cc_string_push_buffer(&__cc_str_52, " rv;", 4, L->arena);
+#line 2156 "cc/lower/lower_parallel.cch"
+                cc__string_slot_push(&__cc_str_52, (ef), L->arena);
+#line 2156 "cc/lower/lower_parallel.cch"
+                cc_string_push_buffer(&__cc_str_52, " } ", 3, L->arena);
+#line 2156 "cc/lower/lower_parallel.cch"
+                cc__string_slot_push(&__cc_str_52, (pj_ty), L->arena);
+#line 2156 "cc/lower/lower_parallel.cch"
+                cc_string_push_buffer(&__cc_str_52, ";\n", 2, L->arena);
+#line 2156 "cc/lower/lower_parallel.cch"
+                __cc_str_52;
+#line 2156 "cc/lower/lower_parallel.cch"
             });
-#line 2354 "cc/lower/lower_parallel.cch"
+#line 2156 "cc/lower/lower_parallel.cch"
         else
-#line 2356 "cc/lower/lower_parallel.cch"
+#line 2158 "cc/lower/lower_parallel.cch"
             t = ({
-#line 2356 "cc/lower/lower_parallel.cch"
-                CCString __cc_str_54 = cc_string_new();
-#line 2356 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&__cc_str_54, "typedef struct { cc_atomic_int lock; cc_atomic_int xk;", 54, L->arena);
-#line 2356 "cc/lower/lower_parallel.cch"
-                cc__string_slot_push(&__cc_str_54, (ef), L->arena);
-#line 2356 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&__cc_str_54, " } ", 3, L->arena);
-#line 2356 "cc/lower/lower_parallel.cch"
-                cc__string_slot_push(&__cc_str_54, (pj_ty), L->arena);
-#line 2356 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&__cc_str_54, ";\n", 2, L->arena);
-#line 2356 "cc/lower/lower_parallel.cch"
-                __cc_str_54;
-#line 2356 "cc/lower/lower_parallel.cch"
+#line 2158 "cc/lower/lower_parallel.cch"
+                CCString __cc_str_53 = cc_string_new();
+#line 2158 "cc/lower/lower_parallel.cch"
+                cc_string_push_buffer(&__cc_str_53, "typedef struct { cc_atomic_int lock; cc_atomic_int xk;", 54, L->arena);
+#line 2158 "cc/lower/lower_parallel.cch"
+                cc__string_slot_push(&__cc_str_53, (ef), L->arena);
+#line 2158 "cc/lower/lower_parallel.cch"
+                cc_string_push_buffer(&__cc_str_53, " } ", 3, L->arena);
+#line 2158 "cc/lower/lower_parallel.cch"
+                cc__string_slot_push(&__cc_str_53, (pj_ty), L->arena);
+#line 2158 "cc/lower/lower_parallel.cch"
+                cc_string_push_buffer(&__cc_str_53, ";\n", 2, L->arena);
+#line 2158 "cc/lower/lower_parallel.cch"
+                __cc_str_53;
+#line 2158 "cc/lower/lower_parallel.cch"
             });
-#line 2358 "cc/lower/lower_parallel.cch"
+#line 2160 "cc/lower/lower_parallel.cch"
         pl_host(st);
-#line 2358 "cc/lower/lower_parallel.cch"
+#line 2160 "cc/lower/lower_parallel.cch"
         cc_string_push_slice(&st->fwd, cc_string_as_slice(&t), L->arena);
     }
     if (hspell.len) {
         /* the handle is the caller's: the block fills it and leaves it live */
         lw_push(blk, lw_expr_stmt(L, lw_assign(L, lw_ident(L, hspell, sp), lw_call0(L, cstr_slice("cc_parallel_dest"), sp), sp), sp));
-#line 2364 "cc/lower/lower_parallel.cch"
+#line 2166 "cc/lower/lower_parallel.cch"
     }
+    lw_push(blk, lw_decl_stmt(L, cc_type_pointer(cc_type_named(cstr_slice("CCParTls"), sp, L->arena), sp, L->arena), cstr_slice("__cc_pt"), lw_call0(L, cstr_slice("cc__par_tls"), sp), sp));
+#line 2169 "cc/lower/lower_parallel.cch"
     if (pj_ty.len) {
         CcType *pt = cc_type_pointer(cc_type_named(pj_ty, sp, L->arena), sp, L->arena);
         CcExpr *addr = cc_expr_unary(CC_OP_ADDR, lw_ident(L, pj_var, sp), sp, L->arena);
@@ -48328,48 +48407,21 @@ static void pl_lower(PStep *st, CcStmt *s, CcParallel p) {
     gate = p.pred ? p.pred : p.seq;
     gated = gate != NULL;
     gname = gated ? pl_gate_name(L, id) : cc_slice_empty();
-    /* wait-for: compact join, env filled only on admit, expression arms
-     * spelled on deny / seq rather than run through the thunk */
-    compact = !hspell.len && !p.spawn;
-    inlines = CCVec_CCSlice_new(L->arena);
-    capsv = CCVec_PCapList_new(L->arena);
-    /* skip names the first spawned arm's site/thunk; a one-arm wait-for
-     * has neither, and the only arm already runs on the caller */
-    try_skip = compact && !gated && first == 1 && n > first && !pj_ty.len;
-    gate_fast = compact && gated && first == 1 && !pj_ty.len;
-    if (gate_fast) {
-        if (!pl_spell_arm(L, CCVec_CcParallelArm_get_ptr(armv, 0)).len)
-#line 2385 "cc/lower/lower_parallel.cch"
-            gate_fast = false;
-        for (i = first; i < n && gate_fast; i++) {
-            if (!pl_spell_arm(L, CCVec_CcParallelArm_get_ptr(armv, i)).len)
-#line 2387 "cc/lower/lower_parallel.cch"
-                gate_fast = false;
-        }
-    }
-    slow = NULL;
-    body = blk;
-    if (try_skip || gate_fast) {
-        slow = lw_block(L, sp);
-        body = slow;
-    }
-    lw_push(body, lw_decl_stmt(L, cc_type_pointer(cc_type_named(cstr_slice("CCParTls"), sp, L->arena), sp, L->arena), cstr_slice("__cc_pt"), lw_call0(L, cstr_slice("cc__par_tls"), sp), sp));
-#line 2398 "cc/lower/lower_parallel.cch"
     if (!gated) {
         CcExpr *who = lw_text(L, ({
-#line 2399 "cc/lower/lower_parallel.cch"
-            CCString __cc_str_55 = cc_string_new();
-#line 2399 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_55, "NULL", 4, L->arena);
-#line 2399 "cc/lower/lower_parallel.cch"
-            __cc_str_55;
-#line 2399 "cc/lower/lower_parallel.cch"
+#line 2180 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_54 = cc_string_new();
+#line 2180 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_54, "NULL", 4, L->arena);
+#line 2180 "cc/lower/lower_parallel.cch"
+            __cc_str_54;
+#line 2180 "cc/lower/lower_parallel.cch"
         }), sp);
         if (hspell.len)
-#line 2400 "cc/lower/lower_parallel.cch"
+#line 2181 "cc/lower/lower_parallel.cch"
             who = cc_expr_unary(CC_OP_ADDR, lw_paren(L, lw_ident(L, hspell, sp), sp), sp, L->arena);
-        lw_push(body, lw_expr_stmt(L, lw_call2(L, cstr_slice("cc_parallel_deny_enter"), lw_ident(L, cstr_slice("__cc_pt"), sp), who, sp), sp));
-#line 2403 "cc/lower/lower_parallel.cch"
+        lw_push(blk, lw_expr_stmt(L, lw_call2(L, cstr_slice("cc_parallel_deny_enter"), lw_ident(L, cstr_slice("__cc_pt"), sp), who, sp), sp));
+#line 2184 "cc/lower/lower_parallel.cch"
     }
     /* every arm but the first is offered to the runtime -- the first too,
      * when it is the one worker of a dest-live construct */
@@ -48390,9 +48442,9 @@ static void pl_lower(PStep *st, CcStmt *s, CcParallel p) {
             v.expr = pl_scan_expr;
             v.env = &sc;
             if (arm->serial)
-#line 2422 "cc/lower/lower_parallel.cch"
+#line 2203 "cc/lower/lower_parallel.cch"
                 CcStmt_walk(arm->serial, v);
-#line 2422 "cc/lower/lower_parallel.cch"
+#line 2203 "cc/lower/lower_parallel.cch"
             else
                 CcExpr_walk(arm->expr, v);
         }
@@ -48408,9 +48460,9 @@ static void pl_lower(PStep *st, CcStmt *s, CcParallel p) {
             for (ci = 0; ci < nc; ci++) {
                 PCap *c = *CCVec_PCapRef_get_ptr(cv, ci);
                 if (hbase.len && slice_eq(c->name, hbase))
-#line 2436 "cc/lower/lower_parallel.cch"
+#line 2217 "cc/lower/lower_parallel.cch"
                     c->by_addr = true;
-#line 2436 "cc/lower/lower_parallel.cch"
+#line 2217 "cc/lower/lower_parallel.cch"
                 else if (pl_cap_identity(c->type))
                     c->by_addr = true;
             }
@@ -48427,11 +48479,11 @@ static void pl_lower(PStep *st, CcStmt *s, CcParallel p) {
             if (sh.hit.len) {
                 CCSlice nm = sh.hit;
                 CCString m = cc_string_new();
-#line 2451 "cc/lower/lower_parallel.cch"
+#line 2232 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&m, "the arm reads '", 15, L->arena);
-#line 2451 "cc/lower/lower_parallel.cch"
+#line 2232 "cc/lower/lower_parallel.cch"
                 cc__string_slot_push(&m, (nm), L->arena);
-#line 2451 "cc/lower/lower_parallel.cch"
+#line 2232 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&m, "' from the enclosing scope and declares one of its own; the clean lowerer does not lower an arm that shadows what it captures", 125, L->arena);
                 lw_error(L, sp, m);
                 return;
@@ -48442,11 +48494,11 @@ static void pl_lower(PStep *st, CcStmt *s, CcParallel p) {
             if (!t) {
                 CCSlice nm = arm->target;
                 CCString m = cc_string_new();
-#line 2460 "cc/lower/lower_parallel.cch"
+#line 2241 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&m, "the arm assigns to '", 20, L->arena);
-#line 2460 "cc/lower/lower_parallel.cch"
+#line 2241 "cc/lower/lower_parallel.cch"
                 cc__string_slot_push(&m, (nm), L->arena);
-#line 2460 "cc/lower/lower_parallel.cch"
+#line 2241 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&m, "', which is not declared in the enclosing scope", 47, L->arena);
                 lw_error(L, sp, m);
                 return;
@@ -48458,36 +48510,29 @@ static void pl_lower(PStep *st, CcStmt *s, CcParallel p) {
              * with the forwards, above every function that fills one */
             CCString et = pl_env_text(st, id, (uint32_t)(i), &caps, out_type, hspell.len != 0, pj_ty);
             pl_host(st);
-#line 2470 "cc/lower/lower_parallel.cch"
+#line 2251 "cc/lower/lower_parallel.cch"
             cc_string_push_slice(&st->fwd, cc_string_as_slice(&et), L->arena);
         }
         pl_forward(st, id, (uint32_t)(i));
         {
-            CCSlice spell = cc_slice_empty();
             CCSlice pj_cell = cc_slice_empty();
-            CcStmt *ab;
+            CcStmt *ab = pl_serial_body(L, arm->serial);
             CcDecl *th;
-            /* spelled before the thunk rewrite mutates the arm */
-            if (compact && arm->expr && !arm->serial && !pl_arm_raises(arm))
-                spell = pl_spell_arm(L, arm);
-            CCVec_CCSlice_push(&inlines, spell);
-            CCVec_PCapList_push(&capsv, caps);
-            ab = pl_serial_body(L, arm->serial);
             if (pj_ty.len)
-#line 2484 "cc/lower/lower_parallel.cch"
+#line 2258 "cc/lower/lower_parallel.cch"
                 pj_cell = cstr_slice("__e->__cc_pj_ex");
             th = pl_thunk_decl(st, id, (uint32_t)(i), &caps, arm->expr, ab, out_type, arm->target, hspell.len != 0, pj_cell, pj_rty.len != 0, sp);
-#line 2488 "cc/lower/lower_parallel.cch"
+#line 2262 "cc/lower/lower_parallel.cch"
             /* a bare `!>` in the thunk records its error in the cell and
              * ends the thunk; the join raises it on the caller */
             if (pl_arm_raises(arm))
                 pl_arm_open_with(L, ab, pl_raise_handler(L, pj_ety, pj_cell, cc_stmt_return(lw_text(L, ({
-                    CCString __cc_str_56 = cc_string_new();
-#line 2492 "cc/lower/lower_parallel.cch"
-                    cc_string_push_buffer(&__cc_str_56, "NULL", 4, L->arena);
-#line 2492 "cc/lower/lower_parallel.cch"
-                    __cc_str_56;
-#line 2492 "cc/lower/lower_parallel.cch"
+                    CCString __cc_str_55 = cc_string_new();
+#line 2266 "cc/lower/lower_parallel.cch"
+                    cc_string_push_buffer(&__cc_str_55, "NULL", 4, L->arena);
+#line 2266 "cc/lower/lower_parallel.cch"
+                    __cc_str_55;
+#line 2266 "cc/lower/lower_parallel.cch"
                 }), sp), sp, L->arena), sp));
             CCVec_CcDeclRef_push(&st->made, th);
             /* a bound handle makes the arms fibers of a dest */
@@ -48496,54 +48541,32 @@ static void pl_lower(PStep *st, CcStmt *s, CcParallel p) {
                 CCVec_CcDeclRef_push(dv, th);
             }
         }
-        pl_env_stmts(L, body, id, (uint32_t)(i), &caps, arm->target, hspell, pj_ptr, compact, sp);
+        pl_env_stmts(L, blk, id, (uint32_t)(i), &caps, arm->target, hspell, pj_ptr, sp);
         if (!gated)
-#line 2501 "cc/lower/lower_parallel.cch"
-            pl_fire_stmts(L, body, id, (uint32_t)(i), hspell, p.spawn, compact, &caps, arm->target, pj_ptr, sp);
-#line 2503 "cc/lower/lower_parallel.cch"
+#line 2275 "cc/lower/lower_parallel.cch"
+            pl_fire_stmts(L, blk, id, (uint32_t)(i), hspell, p.spawn, sp);
     }
     if (gated) {
-        /* One test, once: true when the arms run in order. Expression arms
-         * are spelled on the sequential path; the thunk is only the spawn
-         * route, because the body has already been rewritten in place. */
+        /* One test, once: true when the arms run in order. The arms
+         * themselves are emitted once either way -- this chooses the route
+         * to them, not a second copy of them, because the bodies have
+         * already been rewritten in place for the thunk. */
+        CcStmt *fire = lw_block(L, sp);
         lw_push(blk, lw_decl_stmt(L, cc_type_named(cstr_slice("int"), sp, L->arena), gname, lw_not(L, lw_paren(L, gate, sp), sp), sp));
-#line 2510 "cc/lower/lower_parallel.cch"
-        if (gate_fast) {
-            /* spawn/join lives in the noinline helper (`body` / `slow`) */
-            lw_push(body, lw_expr_stmt(L, lw_call2(L, cstr_slice("cc_parallel_deny_enter"), lw_ident(L, cstr_slice("__cc_pt"), sp), lw_text(L, ({
-#line 2514 "cc/lower/lower_parallel.cch"
-                CCString __cc_str_57 = cc_string_new();
-#line 2514 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&__cc_str_57, "NULL", 4, L->arena);
-#line 2514 "cc/lower/lower_parallel.cch"
-                __cc_str_57;
-#line 2514 "cc/lower/lower_parallel.cch"
-            }), sp), sp), sp));
-            for (i = first; i < n; i++) {
-                CcParallelArm *arm = CCVec_CcParallelArm_get_ptr(armv, i);
-                PCapList *cp = CCVec_PCapList_get_ptr(&capsv, i - first);
-                pl_fire_stmts(L, body, id, (uint32_t)(i), hspell, false, compact, cp, arm->target, pj_ptr, sp);
-#line 2520 "cc/lower/lower_parallel.cch"
-            }
-        } else {
-            CcStmt *fire = lw_block(L, sp);
-            lw_push(fire, lw_expr_stmt(L, lw_call2(L, cstr_slice("cc_parallel_deny_enter"), lw_ident(L, cstr_slice("__cc_pt"), sp), lw_text(L, ({
-#line 2525 "cc/lower/lower_parallel.cch"
-                CCString __cc_str_58 = cc_string_new();
-#line 2525 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&__cc_str_58, "NULL", 4, L->arena);
-#line 2525 "cc/lower/lower_parallel.cch"
-                __cc_str_58;
-#line 2525 "cc/lower/lower_parallel.cch"
-            }), sp), sp), sp));
-            for (i = first; i < n; i++) {
-                CcParallelArm *arm = CCVec_CcParallelArm_get_ptr(armv, i);
-                PCapList *cp = CCVec_PCapList_get_ptr(&capsv, i - first);
-                pl_fire_stmts(L, fire, id, (uint32_t)(i), hspell, false, compact, cp, arm->target, pj_ptr, sp);
-#line 2531 "cc/lower/lower_parallel.cch"
-            }
-            lw_push(blk, lw_if(L, lw_not(L, lw_ident(L, gname, sp), sp), fire, NULL, sp));
-        }
+#line 2285 "cc/lower/lower_parallel.cch"
+        lw_push(fire, lw_expr_stmt(L, lw_call2(L, cstr_slice("cc_parallel_deny_enter"), lw_ident(L, cstr_slice("__cc_pt"), sp), lw_text(L, ({
+#line 2287 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_56 = cc_string_new();
+#line 2287 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_56, "NULL", 4, L->arena);
+#line 2287 "cc/lower/lower_parallel.cch"
+            __cc_str_56;
+#line 2287 "cc/lower/lower_parallel.cch"
+        }), sp), sp), sp));
+        for (i = first; i < n; i++)
+#line 2288 "cc/lower/lower_parallel.cch"
+            pl_fire_stmts(L, fire, id, (uint32_t)(i), hspell, false, sp);
+        lw_push(blk, lw_if(L, lw_not(L, lw_ident(L, gname, sp), sp), fire, NULL, sp));
     }
     /* the first arm stays here -- unless it is the one worker of a
      * dest-live construct, which has no kick: that arm was spawned and
@@ -48554,7 +48577,7 @@ static void pl_lower(PStep *st, CcStmt *s, CcParallel p) {
          * written -- and it leaves through the join, not out of the
          * function, because the arms behind it are still running */
         if (pj_any)
-#line 2543 "cc/lower/lower_parallel.cch"
+#line 2299 "cc/lower/lower_parallel.cch"
             pl_arm_exits(L, arm->expr, arm->serial, pj_ptr, pj_leave, pj_rty.len != 0);
         if (arm->serial) {
             CcStmt *ab = pl_serial_body(L, arm->serial);
@@ -48564,181 +48587,56 @@ static void pl_lower(PStep *st, CcStmt *s, CcParallel p) {
              * this one run */
             if (pl_arm_raises(arm))
                 pl_arm_open_with(L, ab, pl_raise_handler(L, pj_ety, pj_ptr, lw_goto(L, pj_leave, sp), sp));
-            lw_push(body, ab);
+            lw_push(blk, ab);
         } else {
             CcExpr *e0 = arm->expr;
             if (arm->target.len)
-#line 2555 "cc/lower/lower_parallel.cch"
+#line 2311 "cc/lower/lower_parallel.cch"
                 e0 = lw_assign(L, lw_ident(L, arm->target, sp), e0, sp);
-            lw_push(body, lw_expr_stmt(L, e0, sp));
+            lw_push(blk, lw_expr_stmt(L, e0, sp));
         }
     }
     if (pj_leave.len)
-#line 2559 "cc/lower/lower_parallel.cch"
-        lw_push(body, lw_label(L, pj_leave, lw_block(L, sp), sp));
+#line 2315 "cc/lower/lower_parallel.cch"
+        lw_push(blk, lw_label(L, pj_leave, lw_block(L, sp), sp));
     if (gated) {
-        if (gate_fast) {
-            for (i = first; i < n; i++)
-                pl_join_stmts(L, body, id, (uint32_t)(i), false, compact, *CCVec_CCSlice_get_ptr(&inlines, i - first), sp);
-            lw_push(body, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_deny_leave"), lw_ident(L, cstr_slice("__cc_pt"), sp), sp), sp));
-#line 2566 "cc/lower/lower_parallel.cch"
-        } else {
-            CcStmt *joins = lw_block(L, sp);
-            CcStmt *order = lw_block(L, sp);
-            for (i = first; i < n; i++)
-                pl_join_stmts(L, joins, id, (uint32_t)(i), false, compact, *CCVec_CCSlice_get_ptr(&inlines, i - first), sp);
-            lw_push(joins, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_deny_leave"), lw_ident(L, cstr_slice("__cc_pt"), sp), sp), sp));
-#line 2573 "cc/lower/lower_parallel.cch"
-            /* nothing was denied on this schedule, so no note: the arms simply
-             * run after the first, in the order they were written */
-            for (i = first; i < n; i++) {
-                CCSlice spell = *CCVec_CCSlice_get_ptr(&inlines, i - first);
-                if (!spell.len) {
-                    /* compact admit never filled the env; a serial thunk still needs it */
-                    CcParallelArm *arm = CCVec_CcParallelArm_get_ptr(armv, i);
-                    PCapList *cp = CCVec_PCapList_get_ptr(&capsv, i - first);
-                    pl_env_fill(L, order, id, (uint32_t)(i), cp, arm->target, hspell, pj_ptr, sp);
-                }
-                pl_run_inline(L, order, id, (uint32_t)(i), spell, sp);
-            }
-            if (pj_ty.len) {
-                /* an arm that left ended the block, and on this schedule the
-                 * arms behind it were never started: they do not start now */
-                CCSlice cellv = pj_var;
-                CCString c = cc_string_new();
-#line 2589 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&c, "cc_atomic_load(&", 16, L->arena);
-#line 2589 "cc/lower/lower_parallel.cch"
-                cc__string_slot_push(&c, (cellv), L->arena);
-#line 2589 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&c, ".xk) < 2", 8, L->arena);
-                order = lw_if(L, lw_text(L, c, sp), order, NULL, sp);
-            }
-            lw_push(blk, lw_if(L, lw_not(L, lw_ident(L, gname, sp), sp), joins, order, sp));
+        CcStmt *joins = lw_block(L, sp);
+        CcStmt *order = lw_block(L, sp);
+        for (i = first; i < n; i++)
+#line 2319 "cc/lower/lower_parallel.cch"
+            pl_join_stmts(L, joins, id, (uint32_t)(i), false, sp);
+        lw_push(joins, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_deny_leave"), lw_ident(L, cstr_slice("__cc_pt"), sp), sp), sp));
+#line 2322 "cc/lower/lower_parallel.cch"
+        /* nothing was denied on this schedule, so no note: the arms simply
+         * run after the first, in the order they were written */
+        for (i = first; i < n; i++)
+#line 2324 "cc/lower/lower_parallel.cch"
+            pl_inline_call(L, order, id, (uint32_t)(i), sp);
+        if (pj_ty.len) {
+            /* an arm that left ended the block, and on this schedule the
+             * arms behind it were never started: they do not start now */
+            CCSlice cellv = pj_var;
+            CCString c = cc_string_new();
+#line 2329 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&c, "cc_atomic_load(&", 16, L->arena);
+#line 2329 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&c, (cellv), L->arena);
+#line 2329 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&c, ".xk) < 2", 8, L->arena);
+            order = lw_if(L, lw_text(L, c, sp), order, NULL, sp);
         }
+        lw_push(blk, lw_if(L, lw_not(L, lw_ident(L, gname, sp), sp), joins, order, sp));
     } else if (!hspell.len) {
         /* the block joins before it ends; a bound handle joins later */
         for (i = first; i < n; i++)
-            pl_join_stmts(L, body, id, (uint32_t)(i), p.spawn, compact, *CCVec_CCSlice_get_ptr(&inlines, i - first), sp);
-        lw_push(body, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_deny_leave"), lw_ident(L, cstr_slice("__cc_pt"), sp), sp), sp));
-#line 2600 "cc/lower/lower_parallel.cch"
+#line 2335 "cc/lower/lower_parallel.cch"
+            pl_join_stmts(L, blk, id, (uint32_t)(i), p.spawn, sp);
+        lw_push(blk, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_deny_leave"), lw_ident(L, cstr_slice("__cc_pt"), sp), sp), sp));
+#line 2338 "cc/lower/lower_parallel.cch"
     } else if (hdeclared) {
         /* the block declares it, so it is hoisted above the block */
         PBind *b = pl_bind_new(st, s, p, sp);
         CCVec_PBindRef_push(&st->binds, b);
-    }
-    if ((try_skip || gate_fast) && slow) {
-        /* Sequential recursive calls stay in this function (tiny frame).
-         * Spawn/join runs in a noinline helper so its TLS and env do not
-         * enlarge that walk — the same split for CHURN skip and for a
-         * false gated predicate. */
-        bool ok = true;
-        CCSlice fs = pl_spell_arm(L, CCVec_CcParallelArm_get_ptr(armv, 0));
-        PCapList dests = CCVec_PCapRef_new(L->arena);
-        PCapList pcaps = CCVec_PCapRef_new(L->arena);
-        PScan sc;
-        if (!fs.len)
-#line 2615 "cc/lower/lower_parallel.cch"
-            ok = false;
-        for (i = 0; i < CCVec_CCSlice_len(&inlines); i++) {
-            if (!(*CCVec_CCSlice_get_ptr(&inlines, i)).len)
-#line 2617 "cc/lower/lower_parallel.cch"
-                ok = false;
-        }
-        for (i = 0; i < n && ok; i++) {
-            CcParallelArm *arm = CCVec_CcParallelArm_get_ptr(armv, i);
-            CcType *t;
-            PCap *c;
-            if (!arm->target.len)
-#line 2623 "cc/lower/lower_parallel.cch"
-                continue;
-            t = sc_lookup(w, arm->target);
-            if (!t) {
-#line 2625 "cc/lower/lower_parallel.cch"
-                ok = false;
-#line 2625 "cc/lower/lower_parallel.cch"
-                break;
-#line 2625 "cc/lower/lower_parallel.cch"
-            }
-            c = cc_arena_alloc(L->arena, sizeof(PCap), _Alignof(PCap));
-            memset(c, 0, sizeof(*c));
-            c->name = arm->target;
-            c->type = t;
-            CCVec_PCapRef_push(&dests, c);
-        }
-        memset(&sc, 0, sizeof(sc));
-        sc.st = st;
-        sc.w = w;
-        sc.caps = CCVec_PCapRef_new(L->arena);
-        sc.seen = CCVec_CCSlice_new(L->arena);
-        sc.skip = CCVec_CcParallelArm_get_ptr(armv, 0)->target;
-        {
-            CcVisitor v;
-            CcParallelArm *a0 = CCVec_CcParallelArm_get_ptr(armv, 0);
-            memset(&v, 0, sizeof(v));
-            v.expr = pl_scan_expr;
-            v.env = &sc;
-            if (a0->serial)
-#line 2644 "cc/lower/lower_parallel.cch"
-                CcStmt_walk(a0->serial, v);
-#line 2644 "cc/lower/lower_parallel.cch"
-            else if (a0->expr)
-                CcExpr_walk(a0->expr, v);
-        }
-        for (i = 0; i < CCVec_PCapRef_len(&sc.caps); i++) {
-            PCap *c = *CCVec_PCapRef_get_ptr(&sc.caps, i);
-            if (!pl_cap_named(&dests, c->name))
-#line 2649 "cc/lower/lower_parallel.cch"
-                CCVec_PCapRef_push(&pcaps, c);
-        }
-        for (i = 0; i < CCVec_PCapList_len(&capsv); i++) {
-            PCapList *cp = CCVec_PCapList_get_ptr(&capsv, i);
-            size_t ci;
-            for (ci = 0; ci < CCVec_PCapRef_len(cp); ci++) {
-                PCap *c = *CCVec_PCapRef_get_ptr(cp, ci);
-                if (pl_cap_named(&dests, c->name) || pl_cap_named(&pcaps, c->name))
-#line 2656 "cc/lower/lower_parallel.cch"
-                    continue;
-                CCVec_PCapRef_push(&pcaps, c);
-            }
-        }
-        bool helper_ok = ok && CCVec_PCapRef_len(&dests) == n;
-        if (helper_ok) {
-            CcStmt *skipb = lw_block(L, sp);
-            CcStmt *parb = lw_block(L, sp);
-            CcExpr *cond;
-            CcDecl *par = pl_gated_par_decl(st, id, slow, &dests, &pcaps, sp);
-            pl_gated_par_fwd(st, id, &dests, &pcaps);
-            CCVec_CcDeclRef_push(&st->made, par);
-            lw_push(skipb, lw_expr_stmt(L, lw_ident(L, fs, sp), sp));
-            for (i = first; i < n; i++)
-                pl_run_inline(L, skipb, id, (uint32_t)(i), *CCVec_CCSlice_get_ptr(&inlines, i - first), sp);
-            lw_push(parb, pl_gated_par_call(L, id, &dests, &pcaps, sp));
-            if (try_skip) {
-                CCSlice site = pl_name(L, id, (uint32_t)(first), "_site");
-                CCSlice thunk = pl_name(L, id, (uint32_t)(first), "_thunk");
-                cond = lw_call2(L, cstr_slice("cc_parallel_churn_skip"), cc_expr_unary(CC_OP_ADDR, lw_ident(L, site, sp), sp, L->arena), lw_ident(L, thunk, sp), sp);
-#line 2678 "cc/lower/lower_parallel.cch"
-            } else {
-                cond = lw_ident(L, gname, sp);
-            }
-            lw_push(blk, lw_if(L, cond, skipb, parb, sp));
-        } else if (try_skip && ok) {
-            /* Expression arms with no dest mutate outer names through
-             * their addresses: a by-value helper would write copies.
-             * Skip stays in this function. */
-            CcStmt *skipb = lw_block(L, sp);
-            CCSlice site = pl_name(L, id, (uint32_t)(first), "_site");
-            CCSlice thunk = pl_name(L, id, (uint32_t)(first), "_thunk");
-            CcExpr *cond = lw_call2(L, cstr_slice("cc_parallel_churn_skip"), cc_expr_unary(CC_OP_ADDR, lw_ident(L, site, sp), sp, L->arena), lw_ident(L, thunk, sp), sp);
-#line 2692 "cc/lower/lower_parallel.cch"
-            lw_push(skipb, lw_expr_stmt(L, lw_ident(L, fs, sp), sp));
-            for (i = first; i < n; i++)
-                pl_run_inline(L, skipb, id, (uint32_t)(i), *CCVec_CCSlice_get_ptr(&inlines, i - first), sp);
-            lw_push(blk, lw_if(L, cond, skipb, slow, sp));
-        } else {
-            pl_splice(blk, slow);
-        }
     }
     if (pj_ty.len) {
         /* every arm has finished, so whichever exit arrived first is the
@@ -48746,7 +48644,7 @@ static void pl_lower(PStep *st, CcStmt *s, CcParallel p) {
         CCSlice cellv = pj_var;
         CCString t;
         if (pj_ety.len)
-#line 2705 "cc/lower/lower_parallel.cch"
+#line 2348 "cc/lower/lower_parallel.cch"
             lw_push(blk, pl_raise_after_join(L, cellv, sp));
         /* the return an arm claimed, when any arm returns: a cell that only
          * carries a raise has no value to hand back, and a function that
@@ -48754,49 +48652,49 @@ static void pl_lower(PStep *st, CcStmt *s, CcParallel p) {
          * returned as nothing */
         if (pj_any && pl_fn_returns_result(st)) {
             CCString m = cc_string_new();
-#line 2711 "cc/lower/lower_parallel.cch"
+#line 2354 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&m, "a 'return' from a '", 19, L->arena);
-#line 2711 "cc/lower/lower_parallel.cch"
+#line 2354 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&m, ("@"), L->arena);
-#line 2711 "cc/lower/lower_parallel.cch"
+#line 2354 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&m, "parallel' arm in a function returning a Result is not lowered: hand the value back through an arm destination and return it after the join", 138, L->arena);
             lw_error(L, sp, m);
             return;
         }
         if (pj_any) {
             if (pj_rty.len)
-#line 2716 "cc/lower/lower_parallel.cch"
+#line 2359 "cc/lower/lower_parallel.cch"
                 t = ({
-#line 2716 "cc/lower/lower_parallel.cch"
-                    CCString __cc_str_59 = cc_string_new();
-#line 2716 "cc/lower/lower_parallel.cch"
-                    cc_string_push_buffer(&__cc_str_59, "if (cc_atomic_load(&", 20, L->arena);
-#line 2716 "cc/lower/lower_parallel.cch"
-                    cc__string_slot_push(&__cc_str_59, (cellv), L->arena);
-#line 2716 "cc/lower/lower_parallel.cch"
-                    cc_string_push_buffer(&__cc_str_59, ".xk) == 2) return ", 18, L->arena);
-#line 2716 "cc/lower/lower_parallel.cch"
-                    cc__string_slot_push(&__cc_str_59, (cellv), L->arena);
-#line 2716 "cc/lower/lower_parallel.cch"
-                    cc_string_push_buffer(&__cc_str_59, ".rv", 3, L->arena);
-#line 2716 "cc/lower/lower_parallel.cch"
-                    __cc_str_59;
-#line 2716 "cc/lower/lower_parallel.cch"
+#line 2359 "cc/lower/lower_parallel.cch"
+                    CCString __cc_str_57 = cc_string_new();
+#line 2359 "cc/lower/lower_parallel.cch"
+                    cc_string_push_buffer(&__cc_str_57, "if (cc_atomic_load(&", 20, L->arena);
+#line 2359 "cc/lower/lower_parallel.cch"
+                    cc__string_slot_push(&__cc_str_57, (cellv), L->arena);
+#line 2359 "cc/lower/lower_parallel.cch"
+                    cc_string_push_buffer(&__cc_str_57, ".xk) == 2) return ", 18, L->arena);
+#line 2359 "cc/lower/lower_parallel.cch"
+                    cc__string_slot_push(&__cc_str_57, (cellv), L->arena);
+#line 2359 "cc/lower/lower_parallel.cch"
+                    cc_string_push_buffer(&__cc_str_57, ".rv", 3, L->arena);
+#line 2359 "cc/lower/lower_parallel.cch"
+                    __cc_str_57;
+#line 2359 "cc/lower/lower_parallel.cch"
                 });
-#line 2716 "cc/lower/lower_parallel.cch"
+#line 2359 "cc/lower/lower_parallel.cch"
             else
                 t = ({
-#line 2717 "cc/lower/lower_parallel.cch"
-                    CCString __cc_str_60 = cc_string_new();
-#line 2717 "cc/lower/lower_parallel.cch"
-                    cc_string_push_buffer(&__cc_str_60, "if (cc_atomic_load(&", 20, L->arena);
-#line 2717 "cc/lower/lower_parallel.cch"
-                    cc__string_slot_push(&__cc_str_60, (cellv), L->arena);
-#line 2717 "cc/lower/lower_parallel.cch"
-                    cc_string_push_buffer(&__cc_str_60, ".xk) == 2) return", 17, L->arena);
-#line 2717 "cc/lower/lower_parallel.cch"
-                    __cc_str_60;
-#line 2717 "cc/lower/lower_parallel.cch"
+#line 2360 "cc/lower/lower_parallel.cch"
+                    CCString __cc_str_58 = cc_string_new();
+#line 2360 "cc/lower/lower_parallel.cch"
+                    cc_string_push_buffer(&__cc_str_58, "if (cc_atomic_load(&", 20, L->arena);
+#line 2360 "cc/lower/lower_parallel.cch"
+                    cc__string_slot_push(&__cc_str_58, (cellv), L->arena);
+#line 2360 "cc/lower/lower_parallel.cch"
+                    cc_string_push_buffer(&__cc_str_58, ".xk) == 2) return", 17, L->arena);
+#line 2360 "cc/lower/lower_parallel.cch"
+                    __cc_str_58;
+#line 2360 "cc/lower/lower_parallel.cch"
                 });
             lw_push(blk, lw_expr_stmt(L, lw_text(L, t, sp), sp));
         }
@@ -48817,7 +48715,7 @@ static void pl_lower(PStep *st, CcStmt *s, CcParallel p) {
  * except the handle itself, which is the caller's own. */
 static CcExpr *pl_admit_call(CcLowerer *L, CCSlice bind, CcSpan sp) {
     return lw_call1(L, cstr_slice("cc_parallel_admit_ok"), cc_expr_unary(CC_OP_ADDR, lw_paren(L, lw_ident(L, bind, sp), sp), sp, L->arena), sp);
-#line 2738 "cc/lower/lower_parallel.cch"
+#line 2381 "cc/lower/lower_parallel.cch"
 }
 
 /* `cc_parallel_admit_ok(&h)` before the admit: a dest that was cancelled
@@ -48834,11 +48732,11 @@ static void pl_admit_gate(PStep *st, CcStmt *blk, CCSlice bind, CcSpan sp) {
         tf.expr = pl_admit_call(L, bind, sp);
         tf.type = NULL;
         {
-#line 2753 "cc/lower/lower_parallel.cch"
+#line 2396 "cc/lower/lower_parallel.cch"
             CcTypeK tk = { .kind = CcTypeK_typeof_, .u.typeof_ = tf };
-#line 2753 "cc/lower/lower_parallel.cch"
+#line 2396 "cc/lower/lower_parallel.cch"
             t->k = tk;
-#line 2753 "cc/lower/lower_parallel.cch"
+#line 2396 "cc/lower/lower_parallel.cch"
         }
         lw_push(blk, lw_decl_stmt(L, t, adm, pl_admit_call(L, bind, sp), sp));
         lw_push(then, cc_stmt_return(NULL, sp, L->arena));
@@ -48856,11 +48754,11 @@ static void pl_admit_gate(PStep *st, CcStmt *blk, CCSlice bind, CcSpan sp) {
         tf.expr = pl_admit_call(L, bind, sp);
         tf.type = NULL;
         {
-#line 2769 "cc/lower/lower_parallel.cch"
+#line 2412 "cc/lower/lower_parallel.cch"
             CcTypeK tk = { .kind = CcTypeK_typeof_, .u.typeof_ = tf };
-#line 2769 "cc/lower/lower_parallel.cch"
+#line 2412 "cc/lower/lower_parallel.cch"
             t->k = tk;
-#line 2769 "cc/lower/lower_parallel.cch"
+#line 2412 "cc/lower/lower_parallel.cch"
         }
         lw_push(blk, lw_decl_stmt(L, t, adm, pl_admit_call(L, bind, sp), sp));
         lw_push(then, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_error_exit"), err, sp), sp));
@@ -48883,15 +48781,15 @@ static void pl_dest(PStep *st, CcStmt *s, CcParallelDest pd) {
     PCapList caps;
     if (!pd.dest || !pl_base_name(pd.dest, &hbase) || !hbase.len) {
         CCString m = cc_string_new();
-#line 2790 "cc/lower/lower_parallel.cch"
+#line 2433 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&m, "'", 1, L->arena);
-#line 2790 "cc/lower/lower_parallel.cch"
+#line 2433 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&m, ("@"), L->arena);
-#line 2790 "cc/lower/lower_parallel.cch"
+#line 2433 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&m, "parallel(h)' needs a handle a name reaches: bind it with 'CCParallel h = ", 73, L->arena);
-#line 2790 "cc/lower/lower_parallel.cch"
+#line 2433 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&m, ("@"), L->arena);
-#line 2790 "cc/lower/lower_parallel.cch"
+#line 2433 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&m, "parallel spawn { ... } !>;'", 27, L->arena);
         lw_error(L, sp, m);
         return;
@@ -48941,26 +48839,26 @@ static void pl_dest(PStep *st, CcStmt *s, CcParallelDest pd) {
         for (ci = 0; ci < nc; ci++) {
             PCap *c = *CCVec_PCapRef_get_ptr(cv, ci);
             if (slice_eq(c->name, hbase))
-#line 2838 "cc/lower/lower_parallel.cch"
+#line 2481 "cc/lower/lower_parallel.cch"
                 c->by_addr = true;
-#line 2838 "cc/lower/lower_parallel.cch"
+#line 2481 "cc/lower/lower_parallel.cch"
             else if (pl_cap_identity(c->type))
                 c->by_addr = true;
         }
     }
     if (!pl_dest_body_ok(st, body, &caps, sp))
-#line 2842 "cc/lower/lower_parallel.cch"
+#line 2485 "cc/lower/lower_parallel.cch"
         return;
     {
         CCString et = pl_env_text(st, id, 0, &caps, cc_slice_empty(), true, cc_slice_empty());
         pl_host(st);
-#line 2845 "cc/lower/lower_parallel.cch"
+#line 2488 "cc/lower/lower_parallel.cch"
         cc_string_push_slice(&st->fwd, cc_string_as_slice(&et), L->arena);
     }
     pl_forward(st, id, 0);
     {
         CcDecl *th = pl_thunk_decl(st, id, 0, &caps, NULL, body, cc_slice_empty(), cc_slice_empty(), true, cc_slice_empty(), false, sp);
-#line 2851 "cc/lower/lower_parallel.cch"
+#line 2494 "cc/lower/lower_parallel.cch"
         CcDeclList *dv = &L->dest_bodies;
         CCVec_CcDeclRef_push(&st->made, th);
         CCVec_CcDeclRef_push(dv, th);
@@ -48978,9 +48876,9 @@ static bool pl_stage_owned(PStep *st, CcStmt *s) {
     size_t n = CCVec_CcStmtRef_len(v);
     size_t i;
     for (i = 0; i < n; i++)
-#line 2867 "cc/lower/lower_parallel.cch"
+#line 2510 "cc/lower/lower_parallel.cch"
         if (*CCVec_CcStmtRef_get_ptr(v, i) == s)
-#line 2867 "cc/lower/lower_parallel.cch"
+#line 2510 "cc/lower/lower_parallel.cch"
             return true;
     return false;
 }
@@ -48994,12 +48892,12 @@ static bool pl_stage_visit(CcStmt *s, void *env) {
     bool is_stage = false;
     switch ((s->k).kind) {
         case CcStmtK_stage:
-#line 2879 "cc/lower/lower_parallel.cch"
+#line 2522 "cc/lower/lower_parallel.cch"
             is_stage = true;
-#line 2879 "cc/lower/lower_parallel.cch"
+#line 2522 "cc/lower/lower_parallel.cch"
             break;
         default:
-#line 2880 "cc/lower/lower_parallel.cch"
+#line 2523 "cc/lower/lower_parallel.cch"
             break;
     }
     if (is_stage) {
@@ -49015,7 +48913,7 @@ static void pl_stray_stages(PStep *st, CcStmt *body) {
     size_t n;
     size_t i;
     if (!bs)
-#line 2894 "cc/lower/lower_parallel.cch"
+#line 2537 "cc/lower/lower_parallel.cch"
         return;
     n = CCVec_CcStmtRef_len(bs);
     for (i = 0; i < n; i++) {
@@ -49024,16 +48922,16 @@ static void pl_stray_stages(PStep *st, CcStmt *body) {
         CcVisitor v;
         switch ((k->k).kind) {
             case CcStmtK_stage:
-#line 2901 "cc/lower/lower_parallel.cch"
+#line 2544 "cc/lower/lower_parallel.cch"
                 is_stage = true;
-#line 2901 "cc/lower/lower_parallel.cch"
+#line 2544 "cc/lower/lower_parallel.cch"
                 break;
             default:
-#line 2902 "cc/lower/lower_parallel.cch"
+#line 2545 "cc/lower/lower_parallel.cch"
                 break;
         }
         if (is_stage)
-#line 2904 "cc/lower/lower_parallel.cch"
+#line 2547 "cc/lower/lower_parallel.cch"
             continue; /* a statement of the walk: that is where it belongs */
         memset(&v, 0, sizeof(v));
         v.stmt = pl_stage_visit;
@@ -49042,7 +48940,7 @@ static void pl_stray_stages(PStep *st, CcStmt *body) {
     }
 }
 
-#line 2913 "cc/lower/lower_parallel.cch"
+#line 2556 "cc/lower/lower_parallel.cch"
 /* `(T)(e)` as a node. */
 static CcExpr *pl_cast(CcLowerer *L, CcType *t, CcExpr *a, CcSpan sp) {
     CcExpr *e = cc__expr_blank(sp, L->arena);
@@ -49050,11 +48948,11 @@ static CcExpr *pl_cast(CcLowerer *L, CcType *t, CcExpr *a, CcSpan sp) {
     ca.type = t;
     ca.a = a;
     {
-#line 2919 "cc/lower/lower_parallel.cch"
+#line 2562 "cc/lower/lower_parallel.cch"
         CcExprK ek = { .kind = CcExprK_cast, .u.cast = ca };
-#line 2919 "cc/lower/lower_parallel.cch"
+#line 2562 "cc/lower/lower_parallel.cch"
         e->k = ek;
-#line 2919 "cc/lower/lower_parallel.cch"
+#line 2562 "cc/lower/lower_parallel.cch"
     }
     return e;
 }
@@ -49102,7 +49000,7 @@ static void pl_for_lower(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
         }
         err_ty = pl_eh_type(st, sp);
         if (!err_ty.len)
-#line 2965 "cc/lower/lower_parallel.cch"
+#line 2608 "cc/lower/lower_parallel.cch"
             return;
     }
     memset(&sc, 0, sizeof(sc));
@@ -49117,7 +49015,7 @@ static void pl_for_lower(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
         v.expr = pl_scan_expr;
         v.env = &sc;
         if (pf.loop.body)
-#line 2978 "cc/lower/lower_parallel.cch"
+#line 2621 "cc/lower/lower_parallel.cch"
             CcStmt_walk(pf.loop.body, v);
     }
     caps = sc.caps;
@@ -49132,9 +49030,9 @@ static void pl_for_lower(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
         CCSlice rn = CcIndex_canon(L->ix, st->fn_ret);
         CCSlice vd = cstr_slice("void");
         if (rn.len && slice_eq(rn, vd))
-#line 2991 "cc/lower/lower_parallel.cch"
+#line 2634 "cc/lower/lower_parallel.cch"
             fn_void = true;
-#line 2991 "cc/lower/lower_parallel.cch"
+#line 2634 "cc/lower/lower_parallel.cch"
         else if (rn.len)
             ret_ty = rn;
     }
@@ -49146,14 +49044,14 @@ static void pl_for_lower(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
         fx.cancel = false; /* no pool: the halves stop by the cell alone */
         fx.leave = cc_slice_empty(); /* the split walk returns, and that is all */
         if (pf.loop.body)
-#line 3001 "cc/lower/lower_parallel.cch"
+#line 2644 "cc/lower/lower_parallel.cch"
             pl_for_exits(&fx, pf.loop.body, 0);
         has_ret = true;
     }
     {
         CCString et = pl_for_env_text(st, id, &caps, ret_ty, err_ty);
         pl_host(st);
-#line 3006 "cc/lower/lower_parallel.cch"
+#line 2649 "cc/lower/lower_parallel.cch"
         cc_string_push_slice(&st->fwd, cc_string_as_slice(&et), L->arena);
     }
     pl_for_forward(st, id);
@@ -49161,18 +49059,18 @@ static void pl_for_lower(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
     CCVec_CcDeclRef_push(&st->made, pl_for_walk_decl(st, id, &caps, pf.loop, rg.lo, rg.hi, has_ret, err_ty, sp));
     {
         CCString d1 = cc_string_new();
-#line 3012 "cc/lower/lower_parallel.cch"
+#line 2655 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&d1, (env), L->arena);
-#line 3012 "cc/lower/lower_parallel.cch"
+#line 2655 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&d1, " ", 1, L->arena);
-#line 3012 "cc/lower/lower_parallel.cch"
+#line 2655 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&d1, (ev), L->arena);
         CCString d2 = cc_string_new();
-#line 3013 "cc/lower/lower_parallel.cch"
+#line 2656 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&d2, (ex), L->arena);
-#line 3013 "cc/lower/lower_parallel.cch"
+#line 2656 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&d2, " ", 1, L->arena);
-#line 3013 "cc/lower/lower_parallel.cch"
+#line 2656 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&d2, (cell), L->arena);
         lw_push(blk, lw_expr_stmt(L, lw_text(L, d1, sp), sp));
         lw_push(blk, lw_expr_stmt(L, lw_text(L, d2, sp), sp));
@@ -49186,33 +49084,33 @@ static void pl_for_lower(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
         CcExpr *slot = cc_expr_member(lw_ident(L, ev, sp), cn, false, sp, L->arena);
         CcExpr *what = lw_paren(L, lw_ident(L, cn, sp), sp);
         if (!pl_for_decayed(c->type))
-#line 3025 "cc/lower/lower_parallel.cch"
+#line 2668 "cc/lower/lower_parallel.cch"
             what = cc_expr_unary(CC_OP_ADDR, what, sp, L->arena);
         lw_push(blk, lw_expr_stmt(L, lw_assign(L, slot, what, sp), sp));
     }
     {
         CCString z = cc_string_new();
-#line 3029 "cc/lower/lower_parallel.cch"
+#line 2672 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&z, "cc__bytes_zero(&", 16, L->arena);
-#line 3029 "cc/lower/lower_parallel.cch"
+#line 2672 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&z, (cell), L->arena);
-#line 3029 "cc/lower/lower_parallel.cch"
+#line 2672 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&z, ", sizeof(", 9, L->arena);
-#line 3029 "cc/lower/lower_parallel.cch"
+#line 2672 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&z, (cell), L->arena);
-#line 3029 "cc/lower/lower_parallel.cch"
+#line 2672 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&z, "))", 2, L->arena);
         CCString a1 = cc_string_new();
-#line 3030 "cc/lower/lower_parallel.cch"
+#line 2673 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&a1, (ev), L->arena);
-#line 3030 "cc/lower/lower_parallel.cch"
+#line 2673 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&a1, ".__cc_pf_ex = &", 15, L->arena);
-#line 3030 "cc/lower/lower_parallel.cch"
+#line 2673 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&a1, (cell), L->arena);
         CCString a2 = cc_string_new();
-#line 3031 "cc/lower/lower_parallel.cch"
+#line 2674 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&a2, (ev), L->arena);
-#line 3031 "cc/lower/lower_parallel.cch"
+#line 2674 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&a2, ".__cc_par_h = 0", 15, L->arena);
         lw_push(blk, lw_expr_stmt(L, lw_text(L, z, sp), sp));
         lw_push(blk, lw_expr_stmt(L, lw_text(L, a1, sp), sp));
@@ -49237,24 +49135,24 @@ static void pl_for_lower(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
         /* a `return` inside the walk is the caller's to make */
         CcStmt *then = lw_block(L, sp);
         CCString rv = cc_string_new();
-#line 3054 "cc/lower/lower_parallel.cch"
+#line 2697 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&rv, (cell), L->arena);
-#line 3054 "cc/lower/lower_parallel.cch"
+#line 2697 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&rv, ".rv", 3, L->arena);
         CCString cond = cc_string_new();
-#line 3055 "cc/lower/lower_parallel.cch"
+#line 2698 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&cond, "cc_atomic_load(&", 16, L->arena);
-#line 3055 "cc/lower/lower_parallel.cch"
+#line 2698 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&cond, (cell), L->arena);
-#line 3055 "cc/lower/lower_parallel.cch"
+#line 2698 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&cond, ".xk) == 2", 9, L->arena);
         /* inside a dest body the walk stands in a fiber, and the value a
          * `return` there could carry is refused above it: ending the fiber
          * is the whole of the exit */
         if (fn_void || st->dest_depth > 0)
-#line 3059 "cc/lower/lower_parallel.cch"
+#line 2702 "cc/lower/lower_parallel.cch"
             lw_push(then, cc_stmt_return(NULL, sp, L->arena));
-#line 3059 "cc/lower/lower_parallel.cch"
+#line 2702 "cc/lower/lower_parallel.cch"
         else
             lw_push(then, cc_stmt_return(lw_text(L, rv, sp), sp, L->arena));
         lw_push(blk, lw_if(L, lw_text(L, cond, sp), then, NULL, sp));
@@ -49263,7 +49161,7 @@ static void pl_for_lower(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
     st->any = true;
 }
 
-#line 3068 "cc/lower/lower_parallel.cch"
+#line 2711 "cc/lower/lower_parallel.cch"
 /* ---- `@parallel [seq (c)] wait (gate) for (i in lo..hi)` -----------------
  *
  * A walk whose tickets are handed out under a gate: the turnstile caps how
@@ -49287,11 +49185,11 @@ static void pl_for_lower(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
 
 static CCSlice pl_pw_name(CcLowerer *L, uint32_t id, const char *suffix) {
     CCString s = cc_string_new();
-#line 3090 "cc/lower/lower_parallel.cch"
+#line 2733 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&s, "__cc_pw_", 8, L->arena);
-#line 3090 "cc/lower/lower_parallel.cch"
+#line 2733 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&s, (id), L->arena);
-#line 3090 "cc/lower/lower_parallel.cch"
+#line 2733 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&s, (suffix), L->arena);
     return lw_keep(L, &s);
 }
@@ -49302,7 +49200,7 @@ static void pl_pw_text(CcLowerer *L, CcStmt *blk, CCString t, CcSpan sp) {
 }
 
 static CcStmt *pl_pw_for(CcLowerer *L, CCString init, CCString cond, CCString step, CcStmt *body, CcSpan sp) {
-#line 3101 "cc/lower/lower_parallel.cch"
+#line 2744 "cc/lower/lower_parallel.cch"
     CcFor fl;
     CcStmt *fs;
     memset(&fl, 0, sizeof(fl));
@@ -49314,11 +49212,11 @@ static CcStmt *pl_pw_for(CcLowerer *L, CCString init, CCString cond, CCString st
     fl.more = CCVec_CcStmtRef_new(L->arena);
     fs = cc__stmt_blank(sp, L->arena);
     {
-#line 3111 "cc/lower/lower_parallel.cch"
+#line 2754 "cc/lower/lower_parallel.cch"
         CcStmtK sk = { .kind = CcStmtK_for_, .u.for_ = fl };
-#line 3111 "cc/lower/lower_parallel.cch"
+#line 2754 "cc/lower/lower_parallel.cch"
         fs->k = sk;
-#line 3111 "cc/lower/lower_parallel.cch"
+#line 2754 "cc/lower/lower_parallel.cch"
     }
     return fs;
 }
@@ -49334,7 +49232,7 @@ static bool pl_pw_is_cache(CcNameList *cache, CCSlice nm) {
     for (i = 0; i < n; i++) {
         CCSlice c = *CCVec_CCSlice_get_ptr(cache, i);
         if (slice_eq(c, nm))
-#line 3125 "cc/lower/lower_parallel.cch"
+#line 2768 "cc/lower/lower_parallel.cch"
             return true;
     }
     return false;
@@ -49398,19 +49296,19 @@ static void pl_pw_forward(PStep *st, uint32_t id) {
     CCSlice run = pl_pw_name(L, id, "_run");
     CCSlice worker = pl_pw_name(L, id, "_worker");
     CCString t = cc_string_new();
-#line 3187 "cc/lower/lower_parallel.cch"
+#line 2830 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&t, "static void ", 12, L->arena);
-#line 3187 "cc/lower/lower_parallel.cch"
+#line 2830 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&t, (run), L->arena);
-#line 3187 "cc/lower/lower_parallel.cch"
+#line 2830 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&t, "(void*, int, int);\nstatic void* ", 32, L->arena);
-#line 3187 "cc/lower/lower_parallel.cch"
+#line 2830 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&t, (worker), L->arena);
-#line 3187 "cc/lower/lower_parallel.cch"
+#line 2830 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&t, "(void*);\n", 9, L->arena);
-#line 3190 "cc/lower/lower_parallel.cch"
+#line 2833 "cc/lower/lower_parallel.cch"
     pl_host(st);
-#line 3190 "cc/lower/lower_parallel.cch"
+#line 2833 "cc/lower/lower_parallel.cch"
     cc_string_push_slice(&st->fwd, cc_string_as_slice(&t), L->arena);
 }
 
@@ -49422,29 +49320,29 @@ static CcDecl *pl_pw_worker_decl(PStep *st, uint32_t id, CcSpan sp) {
     CCSlice worker = pl_pw_name(L, id, "_worker");
     CCSlice agt = pl_pw_name(L, id, "_arg_t");
     CCString t = cc_string_new();
-#line 3200 "cc/lower/lower_parallel.cch"
+#line 2843 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&t, "static void* ", 13, L->arena);
-#line 3200 "cc/lower/lower_parallel.cch"
+#line 2843 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&t, (worker), L->arena);
-#line 3200 "cc/lower/lower_parallel.cch"
+#line 2843 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&t, "(void* __p) {\n    ", 18, L->arena);
-#line 3200 "cc/lower/lower_parallel.cch"
+#line 2843 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&t, (agt), L->arena);
-#line 3200 "cc/lower/lower_parallel.cch"
+#line 2843 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&t, "* __cc_pw_a = (", 15, L->arena);
-#line 3200 "cc/lower/lower_parallel.cch"
+#line 2843 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&t, (agt), L->arena);
-#line 3200 "cc/lower/lower_parallel.cch"
+#line 2843 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&t, "*)__p;\n    int __cc_pw_i;\n    while (cc_chan_recv(__cc_pw_a->work, &__cc_pw_i, sizeof(__cc_pw_i)) == 0)\n        ", 112, L->arena);
-#line 3200 "cc/lower/lower_parallel.cch"
+#line 2843 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&t, (run), L->arena);
-#line 3200 "cc/lower/lower_parallel.cch"
+#line 2843 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&t, "(__cc_pw_a->env, __cc_pw_i, __cc_pw_a->slot);\n    return NULL;\n}\n", 65, L->arena);
-#line 3208 "cc/lower/lower_parallel.cch"
+#line 2851 "cc/lower/lower_parallel.cch"
     return lw_raw_decl(L, t, sp);
 }
 
-#line 3212 "cc/lower/lower_parallel.cch"
+#line 2855 "cc/lower/lower_parallel.cch"
 /* ---- `@stage` inside a walked body -------------------------------------- */
 
 static int pl_pw_gate_form(Walker *w, CcExpr *g);
@@ -49456,13 +49354,13 @@ static bool pl_stage_is_face(int gform);
  * left the body early still hands the phase on to its successor. */
 static CCSlice pl_pw_stg_name(CcLowerer *L, uint32_t id, uint32_t k) {
     CCString s = cc_string_new();
-#line 3222 "cc/lower/lower_parallel.cch"
+#line 2865 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&s, "__cc_pw_", 8, L->arena);
-#line 3222 "cc/lower/lower_parallel.cch"
+#line 2865 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&s, (id), L->arena);
-#line 3222 "cc/lower/lower_parallel.cch"
+#line 2865 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&s, "_stg_", 5, L->arena);
-#line 3222 "cc/lower/lower_parallel.cch"
+#line 2865 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&s, (k), L->arena);
     return lw_keep(L, &s);
 }
@@ -49471,17 +49369,17 @@ static CCSlice pl_pw_stg_name(CcLowerer *L, uint32_t id, uint32_t k) {
  * the wait, the pass and the discharge at the exit all name the cell. */
 static CCSlice pl_pw_stg_cell(CcLowerer *L, uint32_t id, uint32_t k, uint32_t j) {
     CCString s = cc_string_new();
-#line 3229 "cc/lower/lower_parallel.cch"
+#line 2872 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&s, "__cc_pw_", 8, L->arena);
-#line 3229 "cc/lower/lower_parallel.cch"
+#line 2872 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&s, (id), L->arena);
-#line 3229 "cc/lower/lower_parallel.cch"
+#line 2872 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&s, "_stg_", 5, L->arena);
-#line 3229 "cc/lower/lower_parallel.cch"
+#line 2872 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&s, (k), L->arena);
-#line 3229 "cc/lower/lower_parallel.cch"
+#line 2872 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&s, "_a", 2, L->arena);
-#line 3229 "cc/lower/lower_parallel.cch"
+#line 2872 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&s, (j), L->arena);
     return lw_keep(L, &s);
 }
@@ -49490,13 +49388,13 @@ static CCSlice pl_pw_stg_cell(CcLowerer *L, uint32_t id, uint32_t k, uint32_t j)
 static bool pl_stage_parts(CcStmt *s, CcExpr **gate, CcExprList *args, CcStmtList *stmts) {
     bool hit = false;
     if (!s)
-#line 3236 "cc/lower/lower_parallel.cch"
+#line 2879 "cc/lower/lower_parallel.cch"
         return false;
     switch ((s->k).kind) {
         case CcStmtK_stage: {
-#line 3238 "cc/lower/lower_parallel.cch"
+#line 2881 "cc/lower/lower_parallel.cch"
             CcStage x = (s->k).u.stage;
-#line 3238 "cc/lower/lower_parallel.cch"
+#line 2881 "cc/lower/lower_parallel.cch"
             {
                 *gate = x.gate;
                 *args = x.args;
@@ -49504,10 +49402,10 @@ static bool pl_stage_parts(CcStmt *s, CcExpr **gate, CcExprList *args, CcStmtLis
                 hit = true;
                 break;
             }
-#line 3244 "cc/lower/lower_parallel.cch"
+#line 2887 "cc/lower/lower_parallel.cch"
         }
         default:
-#line 3245 "cc/lower/lower_parallel.cch"
+#line 2888 "cc/lower/lower_parallel.cch"
             break;
     }
     return hit;
@@ -49519,13 +49417,13 @@ static bool pl_stage_parts(CcStmt *s, CcExpr **gate, CcExprList *args, CcStmtLis
  * rewrite reaches all of them through the one that stays in the body. */
 static CcExpr *pl_stage_addr(CcLowerer *L, int gform, CcExpr *gate, CcSpan sp) {
     if (gform == 1 || gform == 5)
-#line 3255 "cc/lower/lower_parallel.cch"
+#line 2898 "cc/lower/lower_parallel.cch"
         return cc_expr_unary(CC_OP_ADDR, gate, sp, L->arena);
     return gate;
 }
 
 static CcExpr *pl_stage_call(CcLowerer *L, const char *fn, CcExpr *gaddr, CcExprList *args, CcSpan sp) {
-#line 3261 "cc/lower/lower_parallel.cch"
+#line 2904 "cc/lower/lower_parallel.cch"
     CcExpr *c = lw_call0(L, cstr_slice(fn), sp);
     CcExprList *into = lw_call_args(c);
     size_t n = CCVec_CcExprRef_len(args);
@@ -49548,19 +49446,19 @@ static CcStmt *pl_unwrap_stmt(CcLowerer *L, CcExpr *call, CcSpan sp) {
     CcUnwrapStmt us;
     u.a = call;
     {
-#line 3282 "cc/lower/lower_parallel.cch"
+#line 2925 "cc/lower/lower_parallel.cch"
         CcExprK ek = { .kind = CcExprK_unwrap, .u.unwrap = u };
-#line 3282 "cc/lower/lower_parallel.cch"
+#line 2925 "cc/lower/lower_parallel.cch"
         uw->k = ek;
-#line 3282 "cc/lower/lower_parallel.cch"
+#line 2925 "cc/lower/lower_parallel.cch"
     }
     us.e = uw;
     {
-#line 3284 "cc/lower/lower_parallel.cch"
+#line 2927 "cc/lower/lower_parallel.cch"
         CcStmtK sk = { .kind = CcStmtK_unwrap, .u.unwrap = us };
-#line 3284 "cc/lower/lower_parallel.cch"
+#line 2927 "cc/lower/lower_parallel.cch"
         s->k = sk;
-#line 3284 "cc/lower/lower_parallel.cch"
+#line 2927 "cc/lower/lower_parallel.cch"
     }
     return s;
 }
@@ -49587,7 +49485,7 @@ static CcStmt *pl_unwrap_stmt(CcLowerer *L, CcExpr *call, CcSpan sp) {
  * this reaches them, and the exit spells the calls once the names they
  * read are the ones the body sees. */
 static void pl_pw_stage_lower(PStep *st, uint32_t id, uint32_t k, CcStmt *s, CcExprList *dis_fail, CcExprList *dis_pass, CcStmtList *dis_eval) {
-#line 3312 "cc/lower/lower_parallel.cch"
+#line 2955 "cc/lower/lower_parallel.cch"
     CcLowerer *L = st->L;
     CcSpan sp = s->span;
     CcExpr *gate = NULL;
@@ -49600,7 +49498,7 @@ static void pl_pw_stage_lower(PStep *st, uint32_t id, uint32_t k, CcStmt *s, CcE
     int gform;
     bool face;
     if (!pl_stage_parts(s, &gate, &args, &stmts))
-#line 3323 "cc/lower/lower_parallel.cch"
+#line 2966 "cc/lower/lower_parallel.cch"
         return;
     gform = pl_stage_gate_form(st->w, gate);
     face = pl_stage_is_face(gform);
@@ -49619,9 +49517,9 @@ static void pl_pw_stage_lower(PStep *st, uint32_t id, uint32_t k, CcStmt *s, CcE
     }
     {
         CCString t = cc_string_new();
-#line 3340 "cc/lower/lower_parallel.cch"
+#line 2983 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&t, (flag), L->arena);
-#line 3340 "cc/lower/lower_parallel.cch"
+#line 2983 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&t, " = 1", 4, L->arena);
         pl_pw_text(L, blk, t, sp);
     }
@@ -49632,7 +49530,7 @@ static void pl_pw_stage_lower(PStep *st, uint32_t id, uint32_t k, CcStmt *s, CcE
     }
     {
         CCString t = cc_string_new();
-#line 3349 "cc/lower/lower_parallel.cch"
+#line 2992 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&t, "cc_parallel_honor(__cc_pw_sh->dest)", 35, L->arena);
         pl_pw_text(L, blk, t, sp);
     }
@@ -49640,7 +49538,7 @@ static void pl_pw_stage_lower(PStep *st, uint32_t id, uint32_t k, CcStmt *s, CcE
         CcStmt *inner = lw_block(L, sp);
         CcStmtList *into = lw_block_stmts(inner);
         CCString c = cc_string_new();
-#line 3355 "cc/lower/lower_parallel.cch"
+#line 2998 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&c, "!cc_nursery_is_cancelled_host(__cc_pw_sh->nur)", 46, L->arena);
         size_t n = CCVec_CcStmtRef_len(&stmts);
         size_t i;
@@ -49657,9 +49555,9 @@ static void pl_pw_stage_lower(PStep *st, uint32_t id, uint32_t k, CcStmt *s, CcE
     }
     {
         CCString t = cc_string_new();
-#line 3370 "cc/lower/lower_parallel.cch"
+#line 3013 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&t, (flag), L->arena);
-#line 3370 "cc/lower/lower_parallel.cch"
+#line 3013 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&t, " = 2", 4, L->arena);
         pl_pw_text(L, blk, t, sp);
     }
@@ -49675,9 +49573,9 @@ static void pl_pw_stage_lower(PStep *st, uint32_t id, uint32_t k, CcStmt *s, CcE
     }
     {
         CCString c = cc_string_new();
-#line 3384 "cc/lower/lower_parallel.cch"
+#line 3027 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&c, "!", 1, L->arena);
-#line 3384 "cc/lower/lower_parallel.cch"
+#line 3027 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&c, (flag), L->arena);
         CCVec_CcStmtRef_push(dis_eval, lw_if(L, lw_text(L, c, sp), ev, NULL, sp));
     }
@@ -49708,7 +49606,7 @@ static void pl_stage_inert(PStep *st, CcStmt *s) {
     size_t i;
     size_t n;
     if (!pl_stage_parts(s, &gate, &args, &stmts))
-#line 3413 "cc/lower/lower_parallel.cch"
+#line 3056 "cc/lower/lower_parallel.cch"
         return;
     gform = pl_stage_gate_form(st->w, gate);
     face = pl_stage_is_face(gform);
@@ -49721,9 +49619,9 @@ static void pl_stage_inert(PStep *st, CcStmt *s) {
         for (j = 0; j < na; j++) {
             CcExpr *a = *CCVec_CcExprRef_get_ptr(&args, j);
             CCString cn = cc_string_new();
-#line 3424 "cc/lower/lower_parallel.cch"
+#line 3067 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&cn, "__cc_stg_a", 10, L->arena);
-#line 3424 "cc/lower/lower_parallel.cch"
+#line 3067 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&cn, (j), L->arena);
             CCSlice cell = lw_keep(L, &cn);
             lw_push(blk, lw_decl_stmt(L, intt, cell, a, sp));
@@ -49776,31 +49674,31 @@ static void pl_for_inert(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
     CCSlice los = lw_keep(L, &lo);
     CCSlice his = lw_keep(L, &hi);
     CCString init = cc_string_new();
-#line 3475 "cc/lower/lower_parallel.cch"
+#line 3118 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&init, (nm), L->arena);
-#line 3475 "cc/lower/lower_parallel.cch"
+#line 3118 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&init, " = (int)(", 9, L->arena);
-#line 3475 "cc/lower/lower_parallel.cch"
+#line 3118 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&init, (los), L->arena);
-#line 3475 "cc/lower/lower_parallel.cch"
+#line 3118 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&init, ")", 1, L->arena);
     CCString cond = cc_string_new();
-#line 3476 "cc/lower/lower_parallel.cch"
+#line 3119 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&cond, (nm), L->arena);
-#line 3476 "cc/lower/lower_parallel.cch"
+#line 3119 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&cond, " < (int)(", 9, L->arena);
-#line 3476 "cc/lower/lower_parallel.cch"
+#line 3119 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&cond, (his), L->arena);
-#line 3476 "cc/lower/lower_parallel.cch"
+#line 3119 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&cond, ")", 1, L->arena);
     CCString step = cc_string_new();
-#line 3477 "cc/lower/lower_parallel.cch"
+#line 3120 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&step, (nm), L->arena);
-#line 3477 "cc/lower/lower_parallel.cch"
+#line 3120 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&step, "++", 2, L->arena);
     CcType *ity = cc_type_named(cstr_slice("int"), sp, L->arena);
     if (!body)
-#line 3479 "cc/lower/lower_parallel.cch"
+#line 3122 "cc/lower/lower_parallel.cch"
         body = lw_block(L, sp);
     if (pf.wait) {
         CcStmtList *bs = lw_block_stmts(body);
@@ -49810,7 +49708,7 @@ static void pl_for_inert(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
             for (i = 0; i < n; i++) {
                 CcStmt *q = *CCVec_CcStmtRef_get_ptr(bs, i);
                 if (pl_stage_owned(st, q))
-#line 3487 "cc/lower/lower_parallel.cch"
+#line 3130 "cc/lower/lower_parallel.cch"
                     pl_stage_inert(st, q);
             }
         }
@@ -49821,7 +49719,7 @@ static void pl_for_inert(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
     if (wk.len) {
         CcType *wty = cc_type_named(cstr_slice("int"), sp, L->arena);
         CCString z = cc_string_new();
-#line 3496 "cc/lower/lower_parallel.cch"
+#line 3139 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&z, "0", 1, L->arena);
         lw_push(blk, lw_decl_stmt(L, wty, wk, lw_text(L, z, sp), sp));
     }
@@ -49839,7 +49737,7 @@ static bool pl_body_declares(CcStmt *body, CCSlice nm) {
     size_t n;
     size_t i;
     if (!bs || !nm.len)
-#line 3512 "cc/lower/lower_parallel.cch"
+#line 3155 "cc/lower/lower_parallel.cch"
         return false;
     n = CCVec_CcStmtRef_len(bs);
     for (i = 0; i < n; i++) {
@@ -49848,54 +49746,54 @@ static bool pl_body_declares(CcStmt *body, CCSlice nm) {
         CCSlice got = cc_slice_empty();
         switch ((q->k).kind) {
             case CcStmtK_decl: {
-#line 3519 "cc/lower/lower_parallel.cch"
+#line 3162 "cc/lower/lower_parallel.cch"
                 CcDeclStmt ds = (q->k).u.decl;
-#line 3519 "cc/lower/lower_parallel.cch"
+#line 3162 "cc/lower/lower_parallel.cch"
                 d = ds.d;
-#line 3519 "cc/lower/lower_parallel.cch"
+#line 3162 "cc/lower/lower_parallel.cch"
                 break;
-#line 3519 "cc/lower/lower_parallel.cch"
+#line 3162 "cc/lower/lower_parallel.cch"
             }
             case CcStmtK_parallel: {
-#line 3520 "cc/lower/lower_parallel.cch"
+#line 3163 "cc/lower/lower_parallel.cch"
                 CcParallel pa = (q->k).u.parallel;
-#line 3520 "cc/lower/lower_parallel.cch"
+#line 3163 "cc/lower/lower_parallel.cch"
                 got = pa.bind;
-#line 3520 "cc/lower/lower_parallel.cch"
+#line 3163 "cc/lower/lower_parallel.cch"
                 break;
-#line 3520 "cc/lower/lower_parallel.cch"
+#line 3163 "cc/lower/lower_parallel.cch"
             }
             case CcStmtK_parallel_for: {
-#line 3521 "cc/lower/lower_parallel.cch"
+#line 3164 "cc/lower/lower_parallel.cch"
                 CcParallelFor pw = (q->k).u.parallel_for;
-#line 3521 "cc/lower/lower_parallel.cch"
+#line 3164 "cc/lower/lower_parallel.cch"
                 got = pw.bind;
-#line 3521 "cc/lower/lower_parallel.cch"
+#line 3164 "cc/lower/lower_parallel.cch"
                 break;
-#line 3521 "cc/lower/lower_parallel.cch"
+#line 3164 "cc/lower/lower_parallel.cch"
             }
             default:
-#line 3522 "cc/lower/lower_parallel.cch"
+#line 3165 "cc/lower/lower_parallel.cch"
                 break;
         }
         if (d) {
             switch ((d->k).kind) {
                 case CcDeclK_var: {
-#line 3526 "cc/lower/lower_parallel.cch"
+#line 3169 "cc/lower/lower_parallel.cch"
                     CcVarDecl v = (d->k).u.var;
-#line 3526 "cc/lower/lower_parallel.cch"
+#line 3169 "cc/lower/lower_parallel.cch"
                     got = v.name;
-#line 3526 "cc/lower/lower_parallel.cch"
+#line 3169 "cc/lower/lower_parallel.cch"
                     break;
-#line 3526 "cc/lower/lower_parallel.cch"
+#line 3169 "cc/lower/lower_parallel.cch"
                 }
                 default:
-#line 3527 "cc/lower/lower_parallel.cch"
+#line 3170 "cc/lower/lower_parallel.cch"
                     break;
             }
         }
         if (got.len && slice_eq(got, nm))
-#line 3530 "cc/lower/lower_parallel.cch"
+#line 3173 "cc/lower/lower_parallel.cch"
             return true;
     }
     return false;
@@ -49903,35 +49801,35 @@ static bool pl_body_declares(CcStmt *body, CCSlice nm) {
 
 /* The first name a stage's gate or arguments read that the body declares. */
 typedef struct PTicketQ {
-#line 3536 "cc/lower/lower_parallel.cch"
+#line 3179 "cc/lower/lower_parallel.cch"
     CcStmt *body;
-#line 3536 "cc/lower/lower_parallel.cch"
+#line 3179 "cc/lower/lower_parallel.cch"
     CCSlice hit;
-#line 3536 "cc/lower/lower_parallel.cch"
+#line 3179 "cc/lower/lower_parallel.cch"
 } PTicketQ;
 
 static bool pl_ticket_fact_visit(CcExpr *e, void *env) {
     PTicketQ *q = (PTicketQ *)(env);
     CCSlice nm = cc_slice_empty();
     if (q->hit.len)
-#line 3541 "cc/lower/lower_parallel.cch"
+#line 3184 "cc/lower/lower_parallel.cch"
         return false;
     switch ((e->k).kind) {
         case CcExprK_ident: {
-#line 3543 "cc/lower/lower_parallel.cch"
+#line 3186 "cc/lower/lower_parallel.cch"
             CCSlice x = (e->k).u.ident;
-#line 3543 "cc/lower/lower_parallel.cch"
+#line 3186 "cc/lower/lower_parallel.cch"
             nm = x;
-#line 3543 "cc/lower/lower_parallel.cch"
+#line 3186 "cc/lower/lower_parallel.cch"
             break;
-#line 3543 "cc/lower/lower_parallel.cch"
+#line 3186 "cc/lower/lower_parallel.cch"
         }
         default:
-#line 3544 "cc/lower/lower_parallel.cch"
+#line 3187 "cc/lower/lower_parallel.cch"
             break;
     }
     if (nm.len && pl_body_declares(q->body, nm))
-#line 3546 "cc/lower/lower_parallel.cch"
+#line 3189 "cc/lower/lower_parallel.cch"
         q->hit = nm;
     return !q->hit.len;
 }
@@ -49947,7 +49845,7 @@ static CCSlice pl_stage_body_name(CcStmt *body, CcExpr *gate, CcExprList *args) 
     v.expr = pl_ticket_fact_visit;
     v.env = &q;
     if (gate)
-#line 3560 "cc/lower/lower_parallel.cch"
+#line 3203 "cc/lower/lower_parallel.cch"
         CcExpr_walk(gate, v);
     for (i = 0; i < n && !q.hit.len; i++) {
         CcExpr *a = *CCVec_CcExprRef_get_ptr(args, i);
@@ -49973,7 +49871,7 @@ static bool pl_pw_stages_ok(PStep *st, CcStmt *body) {
     size_t n;
     size_t i;
     if (!bs)
-#line 3584 "cc/lower/lower_parallel.cch"
+#line 3227 "cc/lower/lower_parallel.cch"
         return true;
     n = CCVec_CcStmtRef_len(bs);
     for (i = 0; i < n; i++) {
@@ -49985,16 +49883,16 @@ static bool pl_pw_stages_ok(PStep *st, CcStmt *body) {
         uint32_t want;
         int gform;
         if (!pl_stage_parts(q, &gate, &args, &stmts))
-#line 3594 "cc/lower/lower_parallel.cch"
+#line 3237 "cc/lower/lower_parallel.cch"
             continue;
         gform = gate ? pl_stage_gate_form(st->w, gate) : 0;
         if (!gform) {
             CCString m = cc_string_new();
-#line 3597 "cc/lower/lower_parallel.cch"
+#line 3240 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&m, "'", 1, L->arena);
-#line 3597 "cc/lower/lower_parallel.cch"
+#line 3240 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&m, ("@"), L->arena);
-#line 3597 "cc/lower/lower_parallel.cch"
+#line 3240 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&m, "stage' orders the walk's tickets on a 'CCTurnstile' or on one of the stages a 'CCTurnstileRW' embeds: the gate here is something else", 133, L->arena);
             lw_error(L, q->span, m);
             ok = false;
@@ -50005,24 +49903,24 @@ static bool pl_pw_stages_ok(PStep *st, CcStmt *body) {
         if (na != want) {
             if (want == 1u) {
                 CCString m = cc_string_new();
-#line 3606 "cc/lower/lower_parallel.cch"
+#line 3249 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&m, "'", 1, L->arena);
-#line 3606 "cc/lower/lower_parallel.cch"
+#line 3249 "cc/lower/lower_parallel.cch"
                 cc__string_slot_push(&m, ("@"), L->arena);
-#line 3606 "cc/lower/lower_parallel.cch"
+#line 3249 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&m, "stage (ts.read, ticket)' names a ticket beside its stage: this one names ", 73, L->arena);
-#line 3606 "cc/lower/lower_parallel.cch"
+#line 3249 "cc/lower/lower_parallel.cch"
                 cc__string_slot_push(&m, (na), L->arena);
                 lw_error(L, q->span, m);
             } else {
                 CCString m = cc_string_new();
-#line 3609 "cc/lower/lower_parallel.cch"
+#line 3252 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&m, "'", 1, L->arena);
-#line 3609 "cc/lower/lower_parallel.cch"
+#line 3252 "cc/lower/lower_parallel.cch"
                 cc__string_slot_push(&m, ("@"), L->arena);
-#line 3609 "cc/lower/lower_parallel.cch"
+#line 3252 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&m, "stage (gate, phase, ticket)' names a phase and a ticket beside its gate: this one names ", 88, L->arena);
-#line 3609 "cc/lower/lower_parallel.cch"
+#line 3252 "cc/lower/lower_parallel.cch"
                 cc__string_slot_push(&m, (na), L->arena);
                 lw_error(L, q->span, m);
             }
@@ -50032,15 +49930,15 @@ static bool pl_pw_stages_ok(PStep *st, CcStmt *body) {
             CCSlice nm = pl_stage_body_name(body, gate, &args);
             if (nm.len) {
                 CCString m = cc_string_new();
-#line 3617 "cc/lower/lower_parallel.cch"
+#line 3260 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&m, "'", 1, L->arena);
-#line 3617 "cc/lower/lower_parallel.cch"
+#line 3260 "cc/lower/lower_parallel.cch"
                 cc__string_slot_push(&m, ("@"), L->arena);
-#line 3617 "cc/lower/lower_parallel.cch"
+#line 3260 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&m, "stage' names '", 14, L->arena);
-#line 3617 "cc/lower/lower_parallel.cch"
+#line 3260 "cc/lower/lower_parallel.cch"
                 cc__string_slot_push(&m, (nm), L->arena);
-#line 3617 "cc/lower/lower_parallel.cch"
+#line 3260 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&m, "', which the body declares: a stage name is a ticket fact that must exist before the body runs; it may read the loop variable, the 'worker' binder, and names of the enclosing frame", 180, L->arena);
                 lw_error(L, q->span, m);
                 ok = false;
@@ -50054,7 +49952,7 @@ static bool pl_pw_stages_ok(PStep *st, CcStmt *body) {
  * is and which slot is its own; the ticket is already held when it starts and
  * is given back before it returns, so both schedules keep the gate balanced. */
 static CcDecl *pl_pw_run_decl(PStep *st, uint32_t id, PCapList *caps, CcForIn loop, CCSlice worker, CcNameList *cache, CcSpan sp) {
-#line 3631 "cc/lower/lower_parallel.cch"
+#line 3274 "cc/lower/lower_parallel.cch"
     CcLowerer *L = st->L;
     CCSlice env = pl_pw_name(L, id, "_env_t");
     CCSlice run = pl_pw_name(L, id, "_run");
@@ -50087,17 +49985,17 @@ static CcDecl *pl_pw_run_decl(PStep *st, uint32_t id, PCapList *caps, CcForIn lo
     }
     {
         CCString d1 = cc_string_new();
-#line 3662 "cc/lower/lower_parallel.cch"
+#line 3305 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&d1, (sht), L->arena);
-#line 3662 "cc/lower/lower_parallel.cch"
+#line 3305 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&d1, "* __cc_pw_sh = e->sh", 20, L->arena);
         CCString d2 = cc_string_new();
-#line 3663 "cc/lower/lower_parallel.cch"
+#line 3306 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&d2, (slt), L->arena);
-#line 3663 "cc/lower/lower_parallel.cch"
+#line 3306 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&d2, "* __cc_pw_sl = &e->slots[__cc_pw_slot]", 38, L->arena);
         CCString d3 = cc_string_new();
-#line 3664 "cc/lower/lower_parallel.cch"
+#line 3307 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&d3, "cc_parallel_honor(__cc_pw_sh->dest)", 35, L->arena);
         pl_pw_text(L, fnbody, d1, sp);
         pl_pw_text(L, fnbody, d2, sp);
@@ -50124,16 +50022,16 @@ static CcDecl *pl_pw_run_decl(PStep *st, uint32_t id, PCapList *caps, CcForIn lo
                 CcExprList qa;
                 CcStmtList qs;
                 if (!pl_stage_parts(q, &g, &qa, &qs))
-#line 3689 "cc/lower/lower_parallel.cch"
+#line 3332 "cc/lower/lower_parallel.cch"
                     continue;
                 {
                     CCSlice flag = pl_pw_stg_name(L, id, nstg);
                     CCString t = cc_string_new();
-#line 3692 "cc/lower/lower_parallel.cch"
+#line 3335 "cc/lower/lower_parallel.cch"
                     cc_string_push_buffer(&t, "int ", 4, L->arena);
-#line 3692 "cc/lower/lower_parallel.cch"
+#line 3335 "cc/lower/lower_parallel.cch"
                     cc__string_slot_push(&t, (flag), L->arena);
-#line 3692 "cc/lower/lower_parallel.cch"
+#line 3335 "cc/lower/lower_parallel.cch"
                     cc_string_push_buffer(&t, " = 0", 4, L->arena);
                     pl_pw_text(L, fnbody, t, sp);
                 }
@@ -50145,11 +50043,11 @@ static CcDecl *pl_pw_run_decl(PStep *st, uint32_t id, PCapList *caps, CcForIn lo
                     for (j = 0; j < na; j++) {
                         CCSlice cell = pl_pw_stg_cell(L, id, nstg, j);
                         CCString t = cc_string_new();
-#line 3702 "cc/lower/lower_parallel.cch"
+#line 3345 "cc/lower/lower_parallel.cch"
                         cc_string_push_buffer(&t, "int ", 4, L->arena);
-#line 3702 "cc/lower/lower_parallel.cch"
+#line 3345 "cc/lower/lower_parallel.cch"
                         cc__string_slot_push(&t, (cell), L->arena);
-#line 3702 "cc/lower/lower_parallel.cch"
+#line 3345 "cc/lower/lower_parallel.cch"
                         cc_string_push_buffer(&t, " = 0", 4, L->arena);
                         pl_pw_text(L, fnbody, t, sp);
                     }
@@ -50174,32 +50072,32 @@ static CcDecl *pl_pw_run_decl(PStep *st, uint32_t id, PCapList *caps, CcForIn lo
              * was spawned, is slot 0 */
             CcType *pt = cc_type_pointer(c->type, sp, L->arena);
             CCString rn = cc_string_new();
-#line 3725 "cc/lower/lower_parallel.cch"
+#line 3368 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&rn, "__cc_ref_", 9, L->arena);
-#line 3725 "cc/lower/lower_parallel.cch"
+#line 3368 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&rn, (cn), L->arena);
             CCSlice ref = lw_keep(L, &rn);
             CCString pick = cc_string_new();
-#line 3727 "cc/lower/lower_parallel.cch"
+#line 3370 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&pick, "(__cc_pw_slot > 0 && e->__cc_pw_cx_", 35, L->arena);
-#line 3727 "cc/lower/lower_parallel.cch"
+#line 3370 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&pick, (cn), L->arena);
-#line 3727 "cc/lower/lower_parallel.cch"
+#line 3370 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&pick, ") ? &e->__cc_pw_cx_", 19, L->arena);
-#line 3727 "cc/lower/lower_parallel.cch"
+#line 3370 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&pick, (cn), L->arena);
-#line 3727 "cc/lower/lower_parallel.cch"
+#line 3370 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&pick, "[__cc_pw_slot - 1] : e->", 24, L->arena);
-#line 3727 "cc/lower/lower_parallel.cch"
+#line 3370 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&pick, (cn), L->arena);
             lw_push(fnbody, lw_decl_stmt(L, pt, ref, lw_text(L, pick, sp), sp));
             pl_rewrite(L, NULL, loop.body, cn, ref);
         } else {
             CcType *pt = cc_type_pointer(c->type, sp, L->arena);
             CCString rn = cc_string_new();
-#line 3732 "cc/lower/lower_parallel.cch"
+#line 3375 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&rn, "__cc_ref_", 9, L->arena);
-#line 3732 "cc/lower/lower_parallel.cch"
+#line 3375 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&rn, (cn), L->arena);
             CCSlice ref = lw_keep(L, &rn);
             lw_push(fnbody, lw_decl_stmt(L, pt, ref, read, sp));
@@ -50217,7 +50115,7 @@ static CcDecl *pl_pw_run_decl(PStep *st, uint32_t id, PCapList *caps, CcForIn lo
         fx.cancel = true;
         fx.leave = done;
         if (loop.body)
-#line 3748 "cc/lower/lower_parallel.cch"
+#line 3391 "cc/lower/lower_parallel.cch"
             pl_for_exits(&fx, loop.body, 0);
     }
     {
@@ -50230,7 +50128,7 @@ static CcDecl *pl_pw_run_decl(PStep *st, uint32_t id, PCapList *caps, CcForIn lo
         CcStmt *hs = cc__stmt_blank(sp, L->arena);
         CcErrhandler eh;
         CCString ht = cc_string_new();
-#line 3759 "cc/lower/lower_parallel.cch"
+#line 3402 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&ht, "__cc_pw_sl->err = __cc_pw_eb; __cc_pw_sl->failed = 1; __cc_pw_sl->i = __cc_pw_i; cc_nursery_cancel_host(__cc_pw_sh->nur)", 120, L->arena);
         pl_pw_text(L, hb, ht, sp);
         lw_push(hb, lw_goto(L, done, sp));
@@ -50239,25 +50137,25 @@ static CcDecl *pl_pw_run_decl(PStep *st, uint32_t id, PCapList *caps, CcForIn lo
         eh.binder = cstr_slice("__cc_pw_eb");
         eh.body = hb;
         {
-#line 3766 "cc/lower/lower_parallel.cch"
+#line 3409 "cc/lower/lower_parallel.cch"
             CcStmtK sk = { .kind = CcStmtK_errhandler, .u.errhandler = eh };
-#line 3766 "cc/lower/lower_parallel.cch"
+#line 3409 "cc/lower/lower_parallel.cch"
             hs->k = sk;
-#line 3766 "cc/lower/lower_parallel.cch"
+#line 3409 "cc/lower/lower_parallel.cch"
         }
         lw_push(fnbody, hs);
     }
     if (loop.body) {
-#line 3769 "cc/lower/lower_parallel.cch"
+#line 3412 "cc/lower/lower_parallel.cch"
         lw_push(fnbody, loop.body);
-#line 3769 "cc/lower/lower_parallel.cch"
+#line 3412 "cc/lower/lower_parallel.cch"
     }
     {
         /* the one exit. The `return` after it is what keeps the ordinary
          * ending out of the handler the results step hoists below. */
         CcStmt *lv = lw_block(L, sp);
         CCString lt = cc_string_new();
-#line 3774 "cc/lower/lower_parallel.cch"
+#line 3417 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&lt, "__typeof__(cc_turnstile_leave(__cc_pw_sh->gate)) __cc_pw_lr = cc_turnstile_leave(__cc_pw_sh->gate); if (!__cc_pw_lr.ok && !__cc_pw_sl->failed) { __cc_pw_sl->err = __cc_pw_lr.u.error.base; __cc_pw_sl->failed = 1; __cc_pw_sl->i = __cc_pw_i; cc_nursery_cancel_host(__cc_pw_sh->nur); }", 281, L->arena);
         {
             /* a stage the body left before passing is discharged here, so a
@@ -50278,27 +50176,27 @@ static CcDecl *pl_pw_run_decl(PStep *st, uint32_t id, PCapList *caps, CcForIn lo
                 CCSlice fc = lw_keep(L, &fs);
                 CCSlice pc = lw_keep(L, &ps);
                 CCString t = cc_string_new();
-#line 3793 "cc/lower/lower_parallel.cch"
+#line 3436 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&t, "if (", 4, L->arena);
-#line 3793 "cc/lower/lower_parallel.cch"
+#line 3436 "cc/lower/lower_parallel.cch"
                 cc__string_slot_push(&t, (flag), L->arena);
-#line 3793 "cc/lower/lower_parallel.cch"
+#line 3436 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&t, " != 2) { if (__cc_pw_sl->failed) { __typeof__(", 46, L->arena);
-#line 3793 "cc/lower/lower_parallel.cch"
+#line 3436 "cc/lower/lower_parallel.cch"
                 cc__string_slot_push(&t, (fc), L->arena);
-#line 3793 "cc/lower/lower_parallel.cch"
+#line 3436 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&t, ") __cc_pw_dr = ", 15, L->arena);
-#line 3793 "cc/lower/lower_parallel.cch"
+#line 3436 "cc/lower/lower_parallel.cch"
                 cc__string_slot_push(&t, (fc), L->arena);
-#line 3793 "cc/lower/lower_parallel.cch"
+#line 3436 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&t, "; (void)__cc_pw_dr; } else { __typeof__(", 40, L->arena);
-#line 3793 "cc/lower/lower_parallel.cch"
+#line 3436 "cc/lower/lower_parallel.cch"
                 cc__string_slot_push(&t, (pc), L->arena);
-#line 3793 "cc/lower/lower_parallel.cch"
+#line 3436 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&t, ") __cc_pw_dr = ", 15, L->arena);
-#line 3793 "cc/lower/lower_parallel.cch"
+#line 3436 "cc/lower/lower_parallel.cch"
                 cc__string_slot_push(&t, (pc), L->arena);
-#line 3793 "cc/lower/lower_parallel.cch"
+#line 3436 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&t, "; if (!__cc_pw_dr.ok) { __cc_pw_sl->err = __cc_pw_dr.u.error; __cc_pw_sl->failed = 1; __cc_pw_sl->i = __cc_pw_i; cc_nursery_cancel_host(__cc_pw_sh->nur); } } }", 159, L->arena);
                 lw_push(lv, ev);
                 pl_pw_text(L, lv, t, sp);
@@ -50316,25 +50214,25 @@ static CcDecl *pl_pw_run_decl(PStep *st, uint32_t id, PCapList *caps, CcForIn lo
         memset(&p1, 0, sizeof(p1));
         memset(&p2, 0, sizeof(p2));
         p0.span = sp;
-#line 3809 "cc/lower/lower_parallel.cch"
+#line 3452 "cc/lower/lower_parallel.cch"
         p0.type = voidp;
-#line 3809 "cc/lower/lower_parallel.cch"
+#line 3452 "cc/lower/lower_parallel.cch"
         p0.name = cstr_slice("__p");
-#line 3809 "cc/lower/lower_parallel.cch"
+#line 3452 "cc/lower/lower_parallel.cch"
         p0.attrs = CCVec_CcAttr_new(L->arena);
         p1.span = sp;
-#line 3810 "cc/lower/lower_parallel.cch"
+#line 3453 "cc/lower/lower_parallel.cch"
         p1.type = intt;
-#line 3810 "cc/lower/lower_parallel.cch"
+#line 3453 "cc/lower/lower_parallel.cch"
         p1.name = cstr_slice("__cc_pw_i");
-#line 3810 "cc/lower/lower_parallel.cch"
+#line 3453 "cc/lower/lower_parallel.cch"
         p1.attrs = CCVec_CcAttr_new(L->arena);
         p2.span = sp;
-#line 3811 "cc/lower/lower_parallel.cch"
+#line 3454 "cc/lower/lower_parallel.cch"
         p2.type = intt;
-#line 3811 "cc/lower/lower_parallel.cch"
+#line 3454 "cc/lower/lower_parallel.cch"
         p2.name = cstr_slice("__cc_pw_slot");
-#line 3811 "cc/lower/lower_parallel.cch"
+#line 3454 "cc/lower/lower_parallel.cch"
         p2.attrs = CCVec_CcAttr_new(L->arena);
         CCVec_CcParam_push(&params, p0);
         CCVec_CcParam_push(&params, p1);
@@ -50345,11 +50243,11 @@ static CcDecl *pl_pw_run_decl(PStep *st, uint32_t id, PCapList *caps, CcForIn lo
     ft.params = params;
     ft.has_prototype = true;
     {
-#line 3820 "cc/lower/lower_parallel.cch"
+#line 3463 "cc/lower/lower_parallel.cch"
         CcTypeK tk = { .kind = CcTypeK_func, .u.func = ft };
-#line 3820 "cc/lower/lower_parallel.cch"
+#line 3463 "cc/lower/lower_parallel.cch"
         fn_type->k = tk;
-#line 3820 "cc/lower/lower_parallel.cch"
+#line 3463 "cc/lower/lower_parallel.cch"
     }
     memset(&fd, 0, sizeof(fd));
     fd.name = run;
@@ -50361,11 +50259,11 @@ static CcDecl *pl_pw_run_decl(PStep *st, uint32_t id, PCapList *caps, CcForIn lo
     d->specs = CC_SPEC_STATIC;
     d->attrs = CCVec_CcAttr_new(L->arena);
     {
-#line 3830 "cc/lower/lower_parallel.cch"
+#line 3473 "cc/lower/lower_parallel.cch"
         CcDeclK dk = { .kind = CcDeclK_func, .u.func = fd };
-#line 3830 "cc/lower/lower_parallel.cch"
+#line 3473 "cc/lower/lower_parallel.cch"
         d->k = dk;
-#line 3830 "cc/lower/lower_parallel.cch"
+#line 3473 "cc/lower/lower_parallel.cch"
     }
     return d;
 }
@@ -50378,17 +50276,17 @@ static bool pl_pw_handle_bind(CcParallelFor pf) {
     CCSlice nm = cc_slice_empty();
     CCSlice want = cstr_slice("CCParallel");
     if (!pf.bind.len || !pf.bind_type)
-#line 3841 "cc/lower/lower_parallel.cch"
+#line 3484 "cc/lower/lower_parallel.cch"
         return false;
     if (!type_named_name(pf.bind_type, &nm))
-#line 3842 "cc/lower/lower_parallel.cch"
+#line 3485 "cc/lower/lower_parallel.cch"
         return false;
     return slice_eq(nm, want);
 }
 
 static bool pl_pw_result_dest(CcParallelFor pf) {
     if (!pf.bind.len && !pf.target)
-#line 3847 "cc/lower/lower_parallel.cch"
+#line 3490 "cc/lower/lower_parallel.cch"
         return false;
     return !pl_pw_handle_bind(pf);
 }
@@ -50403,28 +50301,28 @@ static bool pl_gate_named(CcType *t, CCSlice *out, bool *is_ptr) {
     CcType *p = NULL;
     *is_ptr = false;
     if (!t)
-#line 3860 "cc/lower/lower_parallel.cch"
+#line 3503 "cc/lower/lower_parallel.cch"
         return false;
     switch ((t->k).kind) {
         case CcTypeK_pointer: {
-#line 3862 "cc/lower/lower_parallel.cch"
+#line 3505 "cc/lower/lower_parallel.cch"
             CcPointerType pt = (t->k).u.pointer;
-#line 3862 "cc/lower/lower_parallel.cch"
+#line 3505 "cc/lower/lower_parallel.cch"
             p = pt.pointee;
-#line 3862 "cc/lower/lower_parallel.cch"
+#line 3505 "cc/lower/lower_parallel.cch"
             break;
-#line 3862 "cc/lower/lower_parallel.cch"
+#line 3505 "cc/lower/lower_parallel.cch"
         }
         default:
-#line 3863 "cc/lower/lower_parallel.cch"
+#line 3506 "cc/lower/lower_parallel.cch"
             break;
     }
     if (p) {
-#line 3865 "cc/lower/lower_parallel.cch"
+#line 3508 "cc/lower/lower_parallel.cch"
         *is_ptr = true;
-#line 3865 "cc/lower/lower_parallel.cch"
+#line 3508 "cc/lower/lower_parallel.cch"
         t = p;
-#line 3865 "cc/lower/lower_parallel.cch"
+#line 3508 "cc/lower/lower_parallel.cch"
     }
     return type_named_name(t, out);
 }
@@ -50435,13 +50333,13 @@ static int pl_pw_gate_form(Walker *w, CcExpr *g) {
     CCSlice nm = cc_slice_empty();
     bool ptr = false;
     if (!pl_gate_named(type_of_expr(w, g), &nm, &ptr))
-#line 3874 "cc/lower/lower_parallel.cch"
+#line 3517 "cc/lower/lower_parallel.cch"
         return 0;
     if (cc_slice_eq_cstr(&nm, "CCTurnstile"))
-#line 3875 "cc/lower/lower_parallel.cch"
+#line 3518 "cc/lower/lower_parallel.cch"
         return ptr ? 2 : 1;
     if (cc_slice_eq_cstr(&nm, "CCTurnstileRW"))
-#line 3876 "cc/lower/lower_parallel.cch"
+#line 3519 "cc/lower/lower_parallel.cch"
         return ptr ? 4 : 3;
     return 0;
 }
@@ -50453,13 +50351,13 @@ static int pl_stage_gate_form(Walker *w, CcExpr *g) {
     CCSlice nm = cc_slice_empty();
     bool ptr = false;
     if (!pl_gate_named(type_of_expr(w, g), &nm, &ptr))
-#line 3886 "cc/lower/lower_parallel.cch"
+#line 3529 "cc/lower/lower_parallel.cch"
         return 0;
     if (cc_slice_eq_cstr(&nm, "CCTurnstile"))
-#line 3887 "cc/lower/lower_parallel.cch"
+#line 3530 "cc/lower/lower_parallel.cch"
         return ptr ? 2 : 1;
     if (cc_slice_eq_cstr(&nm, "CCTurnstileStage"))
-#line 3888 "cc/lower/lower_parallel.cch"
+#line 3531 "cc/lower/lower_parallel.cch"
         return ptr ? 6 : 5;
     return 0;
 }
@@ -50467,9 +50365,9 @@ static int pl_stage_gate_form(Walker *w, CcExpr *g) {
 /* A stage named through a face takes the ticket alone; one named through
  * the whole turnstile takes the phase beside it. */
 static bool pl_stage_is_face(int gform) {
-#line 3894 "cc/lower/lower_parallel.cch"
+#line 3537 "cc/lower/lower_parallel.cch"
     return gform == 5 || gform == 6;
-#line 3894 "cc/lower/lower_parallel.cch"
+#line 3537 "cc/lower/lower_parallel.cch"
 }
 
 /* ---- `cache (name, ...)` ------------------------------------------------- */
@@ -50477,15 +50375,15 @@ static bool pl_stage_is_face(int gform) {
 /* The declaration of `nm` in the function the site stands in: the type,
  * initializer and destroy hook the extras take. */
 typedef struct PDeclQ {
-#line 3900 "cc/lower/lower_parallel.cch"
+#line 3543 "cc/lower/lower_parallel.cch"
     CCSlice name;
-#line 3900 "cc/lower/lower_parallel.cch"
+#line 3543 "cc/lower/lower_parallel.cch"
     CcVarDecl v;
-#line 3900 "cc/lower/lower_parallel.cch"
+#line 3543 "cc/lower/lower_parallel.cch"
     CcDecl *at;
-#line 3900 "cc/lower/lower_parallel.cch"
+#line 3543 "cc/lower/lower_parallel.cch"
     bool hit;
-#line 3900 "cc/lower/lower_parallel.cch"
+#line 3543 "cc/lower/lower_parallel.cch"
 } PDeclQ;
 
 static bool pl_decl_visit(CcStmt *s, void *env) {
@@ -50494,49 +50392,49 @@ static bool pl_decl_visit(CcStmt *s, void *env) {
     CcVarDecl v;
     bool is_var = false;
     if (q->hit)
-#line 3907 "cc/lower/lower_parallel.cch"
+#line 3550 "cc/lower/lower_parallel.cch"
         return false;
     switch ((s->k).kind) {
         case CcStmtK_decl: {
-#line 3909 "cc/lower/lower_parallel.cch"
+#line 3552 "cc/lower/lower_parallel.cch"
             CcDeclStmt x = (s->k).u.decl;
-#line 3909 "cc/lower/lower_parallel.cch"
+#line 3552 "cc/lower/lower_parallel.cch"
             d = x.d;
-#line 3909 "cc/lower/lower_parallel.cch"
+#line 3552 "cc/lower/lower_parallel.cch"
             break;
-#line 3909 "cc/lower/lower_parallel.cch"
+#line 3552 "cc/lower/lower_parallel.cch"
         }
         default:
-#line 3910 "cc/lower/lower_parallel.cch"
+#line 3553 "cc/lower/lower_parallel.cch"
             break;
     }
     if (!d)
-#line 3912 "cc/lower/lower_parallel.cch"
+#line 3555 "cc/lower/lower_parallel.cch"
         return true;
     switch ((d->k).kind) {
         case CcDeclK_var: {
-#line 3914 "cc/lower/lower_parallel.cch"
+#line 3557 "cc/lower/lower_parallel.cch"
             CcVarDecl x = (d->k).u.var;
-#line 3914 "cc/lower/lower_parallel.cch"
+#line 3557 "cc/lower/lower_parallel.cch"
             v = x;
-#line 3914 "cc/lower/lower_parallel.cch"
+#line 3557 "cc/lower/lower_parallel.cch"
             is_var = true;
-#line 3914 "cc/lower/lower_parallel.cch"
+#line 3557 "cc/lower/lower_parallel.cch"
             break;
-#line 3914 "cc/lower/lower_parallel.cch"
+#line 3557 "cc/lower/lower_parallel.cch"
         }
         default:
-#line 3915 "cc/lower/lower_parallel.cch"
+#line 3558 "cc/lower/lower_parallel.cch"
             break;
     }
     if (is_var && slice_eq(v.name, q->name)) {
-#line 3917 "cc/lower/lower_parallel.cch"
+#line 3560 "cc/lower/lower_parallel.cch"
         q->v = v;
-#line 3917 "cc/lower/lower_parallel.cch"
+#line 3560 "cc/lower/lower_parallel.cch"
         q->at = d;
-#line 3917 "cc/lower/lower_parallel.cch"
+#line 3560 "cc/lower/lower_parallel.cch"
         q->hit = true;
-#line 3917 "cc/lower/lower_parallel.cch"
+#line 3560 "cc/lower/lower_parallel.cch"
     }
     return !q->hit;
 }
@@ -50548,26 +50446,26 @@ static bool pl_find_var_decl_at(PStep *st, CCSlice nm, CcVarDecl *out, CcDecl **
     bool is_fn = false;
     CcDecl *ad = st->at_decl;
     if (!ad)
-#line 3927 "cc/lower/lower_parallel.cch"
+#line 3570 "cc/lower/lower_parallel.cch"
         return false;
     switch ((ad->k).kind) {
         case CcDeclK_func: {
-#line 3929 "cc/lower/lower_parallel.cch"
+#line 3572 "cc/lower/lower_parallel.cch"
             CcFuncDecl x = (ad->k).u.func;
-#line 3929 "cc/lower/lower_parallel.cch"
+#line 3572 "cc/lower/lower_parallel.cch"
             f = x;
-#line 3929 "cc/lower/lower_parallel.cch"
+#line 3572 "cc/lower/lower_parallel.cch"
             is_fn = true;
-#line 3929 "cc/lower/lower_parallel.cch"
+#line 3572 "cc/lower/lower_parallel.cch"
             break;
-#line 3929 "cc/lower/lower_parallel.cch"
+#line 3572 "cc/lower/lower_parallel.cch"
         }
         default:
-#line 3930 "cc/lower/lower_parallel.cch"
+#line 3573 "cc/lower/lower_parallel.cch"
             break;
     }
     if (!is_fn || !f.body)
-#line 3932 "cc/lower/lower_parallel.cch"
+#line 3575 "cc/lower/lower_parallel.cch"
         return false;
     memset(&q, 0, sizeof(q));
     q.name = nm;
@@ -50576,13 +50474,13 @@ static bool pl_find_var_decl_at(PStep *st, CCSlice nm, CcVarDecl *out, CcDecl **
     v.env = &q;
     CcStmt_walk(f.body, v);
     if (q.hit) {
-#line 3939 "cc/lower/lower_parallel.cch"
+#line 3582 "cc/lower/lower_parallel.cch"
         *out = q.v;
-#line 3939 "cc/lower/lower_parallel.cch"
+#line 3582 "cc/lower/lower_parallel.cch"
         if (at)
-#line 3939 "cc/lower/lower_parallel.cch"
+#line 3582 "cc/lower/lower_parallel.cch"
             *at = q.at;
-#line 3939 "cc/lower/lower_parallel.cch"
+#line 3582 "cc/lower/lower_parallel.cch"
     }
     return q.hit;
 }
@@ -50601,7 +50499,7 @@ static CcNameList pl_pw_cache_names(CcLowerer *L, CcParallelFor pf) {
         CcExpr *ce = *CCVec_CcExprRef_get_ptr(cv, i);
         CCSlice nm = cc_slice_empty();
         if (!expr_ident(strip_parens_expr(ce), &nm) || !nm.len)
-#line 3956 "cc/lower/lower_parallel.cch"
+#line 3599 "cc/lower/lower_parallel.cch"
             continue;
         CCVec_CCSlice_push(&out, nm);
     }
@@ -50611,13 +50509,13 @@ static CcNameList pl_pw_cache_names(CcLowerer *L, CcParallelFor pf) {
 /* The extras of a cached name, as the site declares them. */
 static CCSlice pl_pw_cx_name(CcLowerer *L, uint32_t id, CCSlice nm) {
     CCString s = cc_string_new();
-#line 3964 "cc/lower/lower_parallel.cch"
+#line 3607 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&s, "__cc_pw_", 8, L->arena);
-#line 3964 "cc/lower/lower_parallel.cch"
+#line 3607 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&s, (id), L->arena);
-#line 3964 "cc/lower/lower_parallel.cch"
+#line 3607 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&s, "_cx_", 4, L->arena);
-#line 3964 "cc/lower/lower_parallel.cch"
+#line 3607 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&s, (nm), L->arena);
     return lw_keep(L, &s);
 }
@@ -50626,11 +50524,11 @@ static CCSlice pl_pw_cx_name(CcLowerer *L, uint32_t id, CCSlice nm) {
  * loop-carried identity; a cached name is an instance no ticket can name,
  * and the spec keeps the two apart. */
 typedef struct PNameQ {
-#line 3971 "cc/lower/lower_parallel.cch"
+#line 3614 "cc/lower/lower_parallel.cch"
     CCSlice name;
-#line 3971 "cc/lower/lower_parallel.cch"
+#line 3614 "cc/lower/lower_parallel.cch"
     bool hit;
-#line 3971 "cc/lower/lower_parallel.cch"
+#line 3614 "cc/lower/lower_parallel.cch"
 } PNameQ;
 
 static bool pl_name_expr(CcExpr *e, void *env) {
@@ -50638,20 +50536,20 @@ static bool pl_name_expr(CcExpr *e, void *env) {
     CCSlice nm;
     switch ((e->k).kind) {
         case CcExprK_ident: {
-#line 3977 "cc/lower/lower_parallel.cch"
+#line 3620 "cc/lower/lower_parallel.cch"
             CCSlice x = (e->k).u.ident;
-#line 3977 "cc/lower/lower_parallel.cch"
+#line 3620 "cc/lower/lower_parallel.cch"
             nm = x;
-#line 3977 "cc/lower/lower_parallel.cch"
+#line 3620 "cc/lower/lower_parallel.cch"
             break;
-#line 3977 "cc/lower/lower_parallel.cch"
+#line 3620 "cc/lower/lower_parallel.cch"
         }
         default:
-#line 3978 "cc/lower/lower_parallel.cch"
+#line 3621 "cc/lower/lower_parallel.cch"
             return true;
     }
     if (slice_eq(nm, q->name))
-#line 3980 "cc/lower/lower_parallel.cch"
+#line 3623 "cc/lower/lower_parallel.cch"
         q->hit = true;
     return !q->hit;
 }
@@ -50661,7 +50559,7 @@ static bool pl_pw_cache_in_stage(CcStmt *body, CCSlice nm) {
     size_t n;
     size_t i;
     if (!bs)
-#line 3988 "cc/lower/lower_parallel.cch"
+#line 3631 "cc/lower/lower_parallel.cch"
         return false;
     n = CCVec_CcStmtRef_len(bs);
     for (i = 0; i < n; i++) {
@@ -50672,7 +50570,7 @@ static bool pl_pw_cache_in_stage(CcStmt *body, CCSlice nm) {
         size_t k;
         size_t nk;
         if (!pl_stage_parts(q, &g, &qa, &qs))
-#line 3997 "cc/lower/lower_parallel.cch"
+#line 3640 "cc/lower/lower_parallel.cch"
             continue;
         nk = CCVec_CcStmtRef_len(&qs);
         for (k = 0; k < nk; k++) {
@@ -50686,7 +50584,7 @@ static bool pl_pw_cache_in_stage(CcStmt *body, CCSlice nm) {
             v.env = &nq;
             CcStmt_walk(t, v);
             if (nq.hit)
-#line 4009 "cc/lower/lower_parallel.cch"
+#line 3652 "cc/lower/lower_parallel.cch"
                 return true;
         }
     }
@@ -50707,13 +50605,13 @@ static bool pl_pw_cache_in_stage(CcStmt *body, CCSlice nm) {
 
 static CCSlice pl_pw_drop_name(CcLowerer *L, uint32_t id, CCSlice nm) {
     CCString s = cc_string_new();
-#line 4028 "cc/lower/lower_parallel.cch"
+#line 3671 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&s, "__cc_pw_", 8, L->arena);
-#line 4028 "cc/lower/lower_parallel.cch"
+#line 3671 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&s, (id), L->arena);
-#line 4028 "cc/lower/lower_parallel.cch"
+#line 3671 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&s, "_drop_", 6, L->arena);
-#line 4028 "cc/lower/lower_parallel.cch"
+#line 3671 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&s, (nm), L->arena);
     return lw_keep(L, &s);
 }
@@ -50725,22 +50623,22 @@ static bool pl_drop_ret_stmt(CcStmt *s, void *env) {
     CcReturn r;
     switch ((s->k).kind) {
         case CcStmtK_return_: {
-#line 4038 "cc/lower/lower_parallel.cch"
+#line 3681 "cc/lower/lower_parallel.cch"
             CcReturn x = (s->k).u.return_;
-#line 4038 "cc/lower/lower_parallel.cch"
+#line 3681 "cc/lower/lower_parallel.cch"
             r = x;
-#line 4038 "cc/lower/lower_parallel.cch"
+#line 3681 "cc/lower/lower_parallel.cch"
             is_ret = true;
-#line 4038 "cc/lower/lower_parallel.cch"
+#line 3681 "cc/lower/lower_parallel.cch"
             break;
-#line 4038 "cc/lower/lower_parallel.cch"
+#line 3681 "cc/lower/lower_parallel.cch"
         }
         default:
-#line 4039 "cc/lower/lower_parallel.cch"
+#line 3682 "cc/lower/lower_parallel.cch"
             break;
     }
     if (!is_ret || r.value)
-#line 4041 "cc/lower/lower_parallel.cch"
+#line 3684 "cc/lower/lower_parallel.cch"
         return true;
     {
         CcStmt *nr = cc_stmt_return(lw_call0(L, cstr_slice("cc_ok"), s->span), s->span, L->arena);
@@ -50753,14 +50651,14 @@ static bool pl_drop_ret_stmt(CcStmt *s, void *env) {
  * prototype beside the forward block; the declaration then destroys through
  * it. `*raises` says whether the call sites unwrap. */
 static bool pl_pw_drop_make(PStep *st, uint32_t id, CCSlice cn, CcVarDecl *cv, CcDecl *dd, bool *raises, CcSpan sp) {
-#line 4054 "cc/lower/lower_parallel.cch"
+#line 3697 "cc/lower/lower_parallel.cch"
     CcLowerer *L = st->L;
     CcStmt *body = cv->destroy_body;
     CCSlice drop = pl_pw_drop_name(L, id, cn);
     CCString rn = cc_string_new();
-#line 4057 "cc/lower/lower_parallel.cch"
+#line 3700 "cc/lower/lower_parallel.cch"
     cc_string_push_buffer(&rn, "__cc_ref_", 9, L->arena);
-#line 4057 "cc/lower/lower_parallel.cch"
+#line 3700 "cc/lower/lower_parallel.cch"
     cc__string_slot_push(&rn, (cn), L->arena);
     CCSlice ref = lw_keep(L, &rn);
     CCSlice ety = cc_slice_empty();
@@ -50794,23 +50692,23 @@ static bool pl_pw_drop_make(PStep *st, uint32_t id, CCSlice cn, CcVarDecl *cv, C
                 PCap *c = *CCVec_PCapRef_get_ptr(&cl, 0);
                 CCSlice other = c->name;
                 CCString m = cc_string_new();
-#line 4089 "cc/lower/lower_parallel.cch"
+#line 3732 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&m, "the destroy body of cached name '", 33, L->arena);
-#line 4089 "cc/lower/lower_parallel.cch"
+#line 3732 "cc/lower/lower_parallel.cch"
                 cc__string_slot_push(&m, (cn), L->arena);
-#line 4089 "cc/lower/lower_parallel.cch"
+#line 3732 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&m, "' reads '", 9, L->arena);
-#line 4089 "cc/lower/lower_parallel.cch"
+#line 3732 "cc/lower/lower_parallel.cch"
                 cc__string_slot_push(&m, (other), L->arena);
-#line 4089 "cc/lower/lower_parallel.cch"
+#line 3732 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&m, "' from the frame; the drop of a cached instance runs once per instance, away from the frame: reach '", 100, L->arena);
-#line 4089 "cc/lower/lower_parallel.cch"
+#line 3732 "cc/lower/lower_parallel.cch"
                 cc__string_slot_push(&m, (other), L->arena);
-#line 4089 "cc/lower/lower_parallel.cch"
+#line 3732 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&m, "' through a field of '", 22, L->arena);
-#line 4089 "cc/lower/lower_parallel.cch"
+#line 3732 "cc/lower/lower_parallel.cch"
                 cc__string_slot_push(&m, (cn), L->arena);
-#line 4089 "cc/lower/lower_parallel.cch"
+#line 3732 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&m, "', or take it out of the destroy body", 37, L->arena);
                 lw_error(L, sp, m);
                 return false;
@@ -50821,7 +50719,7 @@ static bool pl_pw_drop_make(PStep *st, uint32_t id, CCSlice cn, CcVarDecl *cv, C
     if (*raises) {
         ety = pl_eh_type(st, sp);
         if (!ety.len)
-#line 4098 "cc/lower/lower_parallel.cch"
+#line 3741 "cc/lower/lower_parallel.cch"
             return false;
     }
     pl_rewrite(L, NULL, body, cn, ref);
@@ -50844,17 +50742,17 @@ static bool pl_pw_drop_make(PStep *st, uint32_t id, CCSlice cn, CcVarDecl *cv, C
         eh.binder = de;
         eh.body = hb;
         {
-#line 4119 "cc/lower/lower_parallel.cch"
+#line 3762 "cc/lower/lower_parallel.cch"
             CcStmtK sk = { .kind = CcStmtK_errhandler, .u.errhandler = eh };
-#line 4119 "cc/lower/lower_parallel.cch"
+#line 3762 "cc/lower/lower_parallel.cch"
             hs->k = sk;
-#line 4119 "cc/lower/lower_parallel.cch"
+#line 3762 "cc/lower/lower_parallel.cch"
         }
         lw_push(fnbody, hs);
     }
     lw_push(fnbody, body);
     if (*raises)
-#line 4123 "cc/lower/lower_parallel.cch"
+#line 3766 "cc/lower/lower_parallel.cch"
         lw_push(fnbody, cc_stmt_return(lw_call0(L, cstr_slice("cc_ok"), sp), sp, L->arena));
     {
         CcParam p0;
@@ -50867,18 +50765,18 @@ static bool pl_pw_drop_make(PStep *st, uint32_t id, CCSlice cn, CcVarDecl *cv, C
     }
     ret = cc_type_named(cstr_slice("void"), sp, L->arena);
     if (*raises)
-#line 4134 "cc/lower/lower_parallel.cch"
+#line 3777 "cc/lower/lower_parallel.cch"
         ret = cc_type_result(ret, cc_type_named(ety, sp, L->arena), false, sp, L->arena);
     memset(&ft, 0, sizeof(ft));
     ft.ret = ret;
     ft.params = params;
     ft.has_prototype = true;
     {
-#line 4139 "cc/lower/lower_parallel.cch"
+#line 3782 "cc/lower/lower_parallel.cch"
         CcTypeK tk = { .kind = CcTypeK_func, .u.func = ft };
-#line 4139 "cc/lower/lower_parallel.cch"
+#line 3782 "cc/lower/lower_parallel.cch"
         fn_type->k = tk;
-#line 4139 "cc/lower/lower_parallel.cch"
+#line 3782 "cc/lower/lower_parallel.cch"
     }
     memset(&fd, 0, sizeof(fd));
     fd.name = drop;
@@ -50890,11 +50788,11 @@ static bool pl_pw_drop_make(PStep *st, uint32_t id, CCSlice cn, CcVarDecl *cv, C
     d->specs = CC_SPEC_STATIC;
     d->attrs = CCVec_CcAttr_new(L->arena);
     {
-#line 4149 "cc/lower/lower_parallel.cch"
+#line 3792 "cc/lower/lower_parallel.cch"
         CcDeclK dk = { .kind = CcDeclK_func, .u.func = fd };
-#line 4149 "cc/lower/lower_parallel.cch"
+#line 3792 "cc/lower/lower_parallel.cch"
         d->k = dk;
-#line 4149 "cc/lower/lower_parallel.cch"
+#line 3792 "cc/lower/lower_parallel.cch"
     }
     CCVec_CcDeclRef_push(&st->made, d);
     /* the results step types a call by the symbol the index holds, and the
@@ -50912,11 +50810,11 @@ static bool pl_pw_drop_make(PStep *st, uint32_t id, CCSlice cn, CcVarDecl *cv, C
         proto->specs = CC_SPEC_STATIC;
         proto->attrs = CCVec_CcAttr_new(L->arena);
         {
-#line 4165 "cc/lower/lower_parallel.cch"
+#line 3808 "cc/lower/lower_parallel.cch"
             CcDeclK dk = { .kind = CcDeclK_func, .u.func = pf };
-#line 4165 "cc/lower/lower_parallel.cch"
+#line 3808 "cc/lower/lower_parallel.cch"
             proto->k = dk;
-#line 4165 "cc/lower/lower_parallel.cch"
+#line 3808 "cc/lower/lower_parallel.cch"
         }
         pl_host(st);
         CCVec_CcDeclRef_push(&st->protos, proto);
@@ -50926,18 +50824,18 @@ static bool pl_pw_drop_make(PStep *st, uint32_t id, CCSlice cn, CcVarDecl *cv, C
         CcStmt *nb = lw_block(L, sp);
         CcExpr *call = lw_call1(L, drop, cc_expr_unary(CC_OP_ADDR, lw_ident(L, cn, sp), sp, L->arena), sp);
         if (*raises)
-#line 4173 "cc/lower/lower_parallel.cch"
+#line 3816 "cc/lower/lower_parallel.cch"
             lw_push(nb, pl_unwrap_stmt(L, call, sp));
-#line 4173 "cc/lower/lower_parallel.cch"
+#line 3816 "cc/lower/lower_parallel.cch"
         else
             lw_push(nb, lw_expr_stmt(L, call, sp));
         cv->destroy_body = nb;
         {
-#line 4176 "cc/lower/lower_parallel.cch"
+#line 3819 "cc/lower/lower_parallel.cch"
             CcDeclK dk = { .kind = CcDeclK_var, .u.var = *cv };
-#line 4176 "cc/lower/lower_parallel.cch"
+#line 3819 "cc/lower/lower_parallel.cch"
             dd->k = dk;
-#line 4176 "cc/lower/lower_parallel.cch"
+#line 3819 "cc/lower/lower_parallel.cch"
         }
     }
     return true;
@@ -50965,74 +50863,74 @@ static void pl_pw_cache_alloc(PStep *st, CcStmt *blk, uint32_t id, PCapList *cap
         CCString al;
         CCString more;
         if (!pl_pw_is_cache(cache, cn))
-#line 4202 "cc/lower/lower_parallel.cch"
+#line 3845 "cc/lower/lower_parallel.cch"
             continue;
         cx = pl_pw_cx_name(L, id, cn);
         tn = CcIndex_canon(L->ix, c->type);
         dtext = ({
-#line 4205 "cc/lower/lower_parallel.cch"
-            CCString __cc_str_61 = cc_string_new();
-#line 4205 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_61, (tn), L->arena);
-#line 4205 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_61, "* ", 2, L->arena);
-#line 4205 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_61, (cx), L->arena);
-#line 4205 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_61, " = 0", 4, L->arena);
-#line 4205 "cc/lower/lower_parallel.cch"
-            __cc_str_61;
-#line 4205 "cc/lower/lower_parallel.cch"
+#line 3848 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_59 = cc_string_new();
+#line 3848 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_59, (tn), L->arena);
+#line 3848 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_59, "* ", 2, L->arena);
+#line 3848 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_59, (cx), L->arena);
+#line 3848 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_59, " = 0", 4, L->arena);
+#line 3848 "cc/lower/lower_parallel.cch"
+            __cc_str_59;
+#line 3848 "cc/lower/lower_parallel.cch"
         });
         al = ({
-#line 4206 "cc/lower/lower_parallel.cch"
-            CCString __cc_str_62 = cc_string_new();
-#line 4206 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_62, "if (", 4, L->arena);
-#line 4206 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_62, (nur), L->arena);
-#line 4206 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_62, " && ", 4, L->arena);
-#line 4206 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_62, (nw), L->arena);
-#line 4206 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_62, " > 1) ", 6, L->arena);
-#line 4206 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_62, (cx), L->arena);
-#line 4206 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_62, " = cc_nursery_closure_env_alloc_host(", 37, L->arena);
-#line 4206 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_62, (nur), L->arena);
-#line 4206 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_62, ", (size_t)(", 11, L->arena);
-#line 4206 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_62, (nw), L->arena);
-#line 4206 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_62, " - 1) * sizeof(*", 16, L->arena);
-#line 4206 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_62, (cx), L->arena);
-#line 4206 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_62, "), 16)", 6, L->arena);
-#line 4206 "cc/lower/lower_parallel.cch"
-            __cc_str_62;
-#line 4206 "cc/lower/lower_parallel.cch"
+#line 3849 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_60 = cc_string_new();
+#line 3849 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_60, "if (", 4, L->arena);
+#line 3849 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_60, (nur), L->arena);
+#line 3849 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_60, " && ", 4, L->arena);
+#line 3849 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_60, (nw), L->arena);
+#line 3849 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_60, " > 1) ", 6, L->arena);
+#line 3849 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_60, (cx), L->arena);
+#line 3849 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_60, " = cc_nursery_closure_env_alloc_host(", 37, L->arena);
+#line 3849 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_60, (nur), L->arena);
+#line 3849 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_60, ", (size_t)(", 11, L->arena);
+#line 3849 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_60, (nw), L->arena);
+#line 3849 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_60, " - 1) * sizeof(*", 16, L->arena);
+#line 3849 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_60, (cx), L->arena);
+#line 3849 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_60, "), 16)", 6, L->arena);
+#line 3849 "cc/lower/lower_parallel.cch"
+            __cc_str_60;
+#line 3849 "cc/lower/lower_parallel.cch"
         });
         more = ({
-#line 4207 "cc/lower/lower_parallel.cch"
-            CCString __cc_str_63 = cc_string_new();
-#line 4207 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_63, " || (", 5, L->arena);
-#line 4207 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_63, (nw), L->arena);
-#line 4207 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_63, " > 1 && !", 9, L->arena);
-#line 4207 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_63, (cx), L->arena);
-#line 4207 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_63, ")", 1, L->arena);
-#line 4207 "cc/lower/lower_parallel.cch"
-            __cc_str_63;
-#line 4207 "cc/lower/lower_parallel.cch"
+#line 3850 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_61 = cc_string_new();
+#line 3850 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_61, " || (", 5, L->arena);
+#line 3850 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_61, (nw), L->arena);
+#line 3850 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_61, " > 1 && !", 9, L->arena);
+#line 3850 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_61, (cx), L->arena);
+#line 3850 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_61, ")", 1, L->arena);
+#line 3850 "cc/lower/lower_parallel.cch"
+            __cc_str_61;
+#line 3850 "cc/lower/lower_parallel.cch"
         });
         pl_pw_text(L, blk, dtext, sp);
         pl_pw_text(L, blk, al, sp);
@@ -51062,10 +50960,10 @@ static void pl_pw_cache_init(PStep *st, CcStmt *blk, uint32_t id, PCapList *caps
         CCString ks;
         CCString put;
         if (!pl_pw_is_cache(cache, cn))
-#line 4235 "cc/lower/lower_parallel.cch"
+#line 3878 "cc/lower/lower_parallel.cch"
             continue;
         if (!pl_find_var_decl(st, cn, &cv))
-#line 4236 "cc/lower/lower_parallel.cch"
+#line 3879 "cc/lower/lower_parallel.cch"
             continue;
         cx = pl_pw_cx_name(L, id, cn);
         lb = lw_block(L, sp);
@@ -51075,98 +50973,98 @@ static void pl_pw_cache_init(PStep *st, CcStmt *blk, uint32_t id, PCapList *caps
                 CcDeclStmt ds;
                 ds.d = cc_decl_var(cv.type, cn, cv.init, sp, L->arena);
                 {
-#line 4244 "cc/lower/lower_parallel.cch"
+#line 3887 "cc/lower/lower_parallel.cch"
                     CcStmtK sk = { .kind = CcStmtK_decl, .u.decl = ds };
-#line 4244 "cc/lower/lower_parallel.cch"
+#line 3887 "cc/lower/lower_parallel.cch"
                     one->k = sk;
-#line 4244 "cc/lower/lower_parallel.cch"
+#line 3887 "cc/lower/lower_parallel.cch"
                 }
             }
             lw_push(lb, one);
             put = ({
-#line 4247 "cc/lower/lower_parallel.cch"
-                CCString __cc_str_64 = cc_string_new();
-#line 4247 "cc/lower/lower_parallel.cch"
-                cc__string_slot_push(&__cc_str_64, (cx), L->arena);
-#line 4247 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&__cc_str_64, "[", 1, L->arena);
-#line 4247 "cc/lower/lower_parallel.cch"
-                cc__string_slot_push(&__cc_str_64, (wv), L->arena);
-#line 4247 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&__cc_str_64, "] = ", 4, L->arena);
-#line 4247 "cc/lower/lower_parallel.cch"
-                cc__string_slot_push(&__cc_str_64, (cn), L->arena);
-#line 4247 "cc/lower/lower_parallel.cch"
-                __cc_str_64;
-#line 4247 "cc/lower/lower_parallel.cch"
+#line 3890 "cc/lower/lower_parallel.cch"
+                CCString __cc_str_62 = cc_string_new();
+#line 3890 "cc/lower/lower_parallel.cch"
+                cc__string_slot_push(&__cc_str_62, (cx), L->arena);
+#line 3890 "cc/lower/lower_parallel.cch"
+                cc_string_push_buffer(&__cc_str_62, "[", 1, L->arena);
+#line 3890 "cc/lower/lower_parallel.cch"
+                cc__string_slot_push(&__cc_str_62, (wv), L->arena);
+#line 3890 "cc/lower/lower_parallel.cch"
+                cc_string_push_buffer(&__cc_str_62, "] = ", 4, L->arena);
+#line 3890 "cc/lower/lower_parallel.cch"
+                cc__string_slot_push(&__cc_str_62, (cn), L->arena);
+#line 3890 "cc/lower/lower_parallel.cch"
+                __cc_str_62;
+#line 3890 "cc/lower/lower_parallel.cch"
             });
         } else {
             /* a declaration with no initializer: the extras start zeroed,
              * which is the most an indeterminate declared instance promises */
             put = ({
-#line 4251 "cc/lower/lower_parallel.cch"
-                CCString __cc_str_65 = cc_string_new();
-#line 4251 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&__cc_str_65, "cc__bytes_zero(&", 16, L->arena);
-#line 4251 "cc/lower/lower_parallel.cch"
-                cc__string_slot_push(&__cc_str_65, (cx), L->arena);
-#line 4251 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&__cc_str_65, "[", 1, L->arena);
-#line 4251 "cc/lower/lower_parallel.cch"
-                cc__string_slot_push(&__cc_str_65, (wv), L->arena);
-#line 4251 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&__cc_str_65, "], sizeof(*", 11, L->arena);
-#line 4251 "cc/lower/lower_parallel.cch"
-                cc__string_slot_push(&__cc_str_65, (cx), L->arena);
-#line 4251 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&__cc_str_65, "))", 2, L->arena);
-#line 4251 "cc/lower/lower_parallel.cch"
-                __cc_str_65;
-#line 4251 "cc/lower/lower_parallel.cch"
+#line 3894 "cc/lower/lower_parallel.cch"
+                CCString __cc_str_63 = cc_string_new();
+#line 3894 "cc/lower/lower_parallel.cch"
+                cc_string_push_buffer(&__cc_str_63, "cc__bytes_zero(&", 16, L->arena);
+#line 3894 "cc/lower/lower_parallel.cch"
+                cc__string_slot_push(&__cc_str_63, (cx), L->arena);
+#line 3894 "cc/lower/lower_parallel.cch"
+                cc_string_push_buffer(&__cc_str_63, "[", 1, L->arena);
+#line 3894 "cc/lower/lower_parallel.cch"
+                cc__string_slot_push(&__cc_str_63, (wv), L->arena);
+#line 3894 "cc/lower/lower_parallel.cch"
+                cc_string_push_buffer(&__cc_str_63, "], sizeof(*", 11, L->arena);
+#line 3894 "cc/lower/lower_parallel.cch"
+                cc__string_slot_push(&__cc_str_63, (cx), L->arena);
+#line 3894 "cc/lower/lower_parallel.cch"
+                cc_string_push_buffer(&__cc_str_63, "))", 2, L->arena);
+#line 3894 "cc/lower/lower_parallel.cch"
+                __cc_str_63;
+#line 3894 "cc/lower/lower_parallel.cch"
             });
         }
         pl_pw_text(L, lb, put, sp);
         ki = ({
-#line 4254 "cc/lower/lower_parallel.cch"
-            CCString __cc_str_66 = cc_string_new();
-#line 4254 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_66, (wv), L->arena);
-#line 4254 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_66, " = 0", 4, L->arena);
-#line 4254 "cc/lower/lower_parallel.cch"
-            __cc_str_66;
-#line 4254 "cc/lower/lower_parallel.cch"
+#line 3897 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_64 = cc_string_new();
+#line 3897 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_64, (wv), L->arena);
+#line 3897 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_64, " = 0", 4, L->arena);
+#line 3897 "cc/lower/lower_parallel.cch"
+            __cc_str_64;
+#line 3897 "cc/lower/lower_parallel.cch"
         });
         kc = ({
-#line 4255 "cc/lower/lower_parallel.cch"
-            CCString __cc_str_67 = cc_string_new();
-#line 4255 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_67, (wv), L->arena);
-#line 4255 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_67, " < ", 3, L->arena);
-#line 4255 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_67, (nw), L->arena);
-#line 4255 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_67, " - 1", 4, L->arena);
-#line 4255 "cc/lower/lower_parallel.cch"
-            __cc_str_67;
-#line 4255 "cc/lower/lower_parallel.cch"
+#line 3898 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_65 = cc_string_new();
+#line 3898 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_65, (wv), L->arena);
+#line 3898 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_65, " < ", 3, L->arena);
+#line 3898 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_65, (nw), L->arena);
+#line 3898 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_65, " - 1", 4, L->arena);
+#line 3898 "cc/lower/lower_parallel.cch"
+            __cc_str_65;
+#line 3898 "cc/lower/lower_parallel.cch"
         });
         ks = ({
-#line 4256 "cc/lower/lower_parallel.cch"
-            CCString __cc_str_68 = cc_string_new();
-#line 4256 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_68, (wv), L->arena);
-#line 4256 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_68, "++", 2, L->arena);
-#line 4256 "cc/lower/lower_parallel.cch"
-            __cc_str_68;
-#line 4256 "cc/lower/lower_parallel.cch"
+#line 3899 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_66 = cc_string_new();
+#line 3899 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_66, (wv), L->arena);
+#line 3899 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_66, "++", 2, L->arena);
+#line 3899 "cc/lower/lower_parallel.cch"
+            __cc_str_66;
+#line 3899 "cc/lower/lower_parallel.cch"
         });
         {
             CcStmt *then = lw_block(L, sp);
             CCString cnd = cc_string_new();
-#line 4259 "cc/lower/lower_parallel.cch"
+#line 3902 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&cnd, (cx), L->arena);
             lw_push(then, pl_pw_for(L, ki, kc, ks, lb, sp));
             lw_push(blk, lw_if(L, lw_text(L, cnd, sp), then, NULL, sp));
@@ -51175,7 +51073,7 @@ static void pl_pw_cache_init(PStep *st, CcStmt *blk, uint32_t id, PCapList *caps
 }
 
 static void pl_pw_cache_destroy(PStep *st, CcStmt *blk, uint32_t id, PCapList *caps, CcNameList *cache, CcNameList *drops, CcNameList *draise, CCSlice nw, CCSlice wv, CcSpan sp) {
-#line 4268 "cc/lower/lower_parallel.cch"
+#line 3911 "cc/lower/lower_parallel.cch"
     CcLowerer *L = st->L;
     size_t n = CCVec_PCapRef_len(caps);
     size_t i;
@@ -51199,40 +51097,40 @@ static void pl_pw_cache_destroy(PStep *st, CcStmt *blk, uint32_t id, PCapList *c
         CCString ks;
         CCString take;
         if (!pl_pw_is_cache(cache, cn))
-#line 4290 "cc/lower/lower_parallel.cch"
+#line 3933 "cc/lower/lower_parallel.cch"
             continue;
         if (!pl_find_var_decl(st, cn, &cv))
-#line 4291 "cc/lower/lower_parallel.cch"
+#line 3934 "cc/lower/lower_parallel.cch"
             continue;
         if (!cv.destroy)
-#line 4292 "cc/lower/lower_parallel.cch"
+#line 3935 "cc/lower/lower_parallel.cch"
             continue;
         cx = pl_pw_cx_name(L, id, cn);
         lb = lw_block(L, sp);
         inner = lw_block(L, sp);
         one = cc__stmt_blank(sp, L->arena);
         take = ({
-#line 4297 "cc/lower/lower_parallel.cch"
-            CCString __cc_str_69 = cc_string_new();
-#line 4297 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_69, (cx), L->arena);
-#line 4297 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_69, "[", 1, L->arena);
-#line 4297 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_69, (wv), L->arena);
-#line 4297 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_69, "]", 1, L->arena);
-#line 4297 "cc/lower/lower_parallel.cch"
-            __cc_str_69;
-#line 4297 "cc/lower/lower_parallel.cch"
+#line 3940 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_67 = cc_string_new();
+#line 3940 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_67, (cx), L->arena);
+#line 3940 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_67, "[", 1, L->arena);
+#line 3940 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_67, (wv), L->arena);
+#line 3940 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_67, "]", 1, L->arena);
+#line 3940 "cc/lower/lower_parallel.cch"
+            __cc_str_67;
+#line 3940 "cc/lower/lower_parallel.cch"
         });
         if (pl_pw_is_cache(drops, cn)) {
             CCSlice drop = pl_pw_drop_name(L, id, cn);
             CcExpr *call = lw_call1(L, drop, cc_expr_unary(CC_OP_ADDR, lw_text(L, take, sp), sp, L->arena), sp);
             if (pl_pw_is_cache(draise, cn))
-#line 4301 "cc/lower/lower_parallel.cch"
+#line 3944 "cc/lower/lower_parallel.cch"
                 one = pl_unwrap_stmt(L, call, sp);
-#line 4301 "cc/lower/lower_parallel.cch"
+#line 3944 "cc/lower/lower_parallel.cch"
             else
                 one = lw_expr_stmt(L, call, sp);
         } else {
@@ -51248,18 +51146,18 @@ static void pl_pw_cache_destroy(PStep *st, CcStmt *blk, uint32_t id, PCapList *c
             in->expr = lw_text(L, take, sp);
             switch ((dd->k).kind) {
                 case CcDeclK_var: {
-#line 4315 "cc/lower/lower_parallel.cch"
+#line 3958 "cc/lower/lower_parallel.cch"
                     CcVarDecl x = (dd->k).u.var;
-#line 4315 "cc/lower/lower_parallel.cch"
+#line 3958 "cc/lower/lower_parallel.cch"
                     nv = x;
-#line 4315 "cc/lower/lower_parallel.cch"
+#line 3958 "cc/lower/lower_parallel.cch"
                     is_var = true;
-#line 4315 "cc/lower/lower_parallel.cch"
+#line 3958 "cc/lower/lower_parallel.cch"
                     break;
-#line 4315 "cc/lower/lower_parallel.cch"
+#line 3958 "cc/lower/lower_parallel.cch"
                 }
                 default:
-#line 4316 "cc/lower/lower_parallel.cch"
+#line 3959 "cc/lower/lower_parallel.cch"
                     break;
             }
             if (is_var) {
@@ -51267,65 +51165,65 @@ static void pl_pw_cache_destroy(PStep *st, CcStmt *blk, uint32_t id, PCapList *c
                 nv.destroy = true;
                 nv.destroy_body = cv.destroy_body;
                 {
-#line 4322 "cc/lower/lower_parallel.cch"
+#line 3965 "cc/lower/lower_parallel.cch"
                     CcDeclK dk = { .kind = CcDeclK_var, .u.var = nv };
-#line 4322 "cc/lower/lower_parallel.cch"
+#line 3965 "cc/lower/lower_parallel.cch"
                     dd->k = dk;
-#line 4322 "cc/lower/lower_parallel.cch"
+#line 3965 "cc/lower/lower_parallel.cch"
                 }
             }
             ds.d = dd;
             {
-#line 4325 "cc/lower/lower_parallel.cch"
+#line 3968 "cc/lower/lower_parallel.cch"
                 CcStmtK sk = { .kind = CcStmtK_decl, .u.decl = ds };
-#line 4325 "cc/lower/lower_parallel.cch"
+#line 3968 "cc/lower/lower_parallel.cch"
                 one->k = sk;
-#line 4325 "cc/lower/lower_parallel.cch"
+#line 3968 "cc/lower/lower_parallel.cch"
             }
         }
         lw_push(inner, one);
         lw_push(lb, inner);
         ki = ({
-#line 4329 "cc/lower/lower_parallel.cch"
-            CCString __cc_str_70 = cc_string_new();
-#line 4329 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_70, (wv), L->arena);
-#line 4329 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_70, " = 0", 4, L->arena);
-#line 4329 "cc/lower/lower_parallel.cch"
-            __cc_str_70;
-#line 4329 "cc/lower/lower_parallel.cch"
+#line 3972 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_68 = cc_string_new();
+#line 3972 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_68, (wv), L->arena);
+#line 3972 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_68, " = 0", 4, L->arena);
+#line 3972 "cc/lower/lower_parallel.cch"
+            __cc_str_68;
+#line 3972 "cc/lower/lower_parallel.cch"
         });
         kc = ({
-#line 4330 "cc/lower/lower_parallel.cch"
-            CCString __cc_str_71 = cc_string_new();
-#line 4330 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_71, (wv), L->arena);
-#line 4330 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_71, " < ", 3, L->arena);
-#line 4330 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_71, (nw), L->arena);
-#line 4330 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_71, " - 1", 4, L->arena);
-#line 4330 "cc/lower/lower_parallel.cch"
-            __cc_str_71;
-#line 4330 "cc/lower/lower_parallel.cch"
+#line 3973 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_69 = cc_string_new();
+#line 3973 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_69, (wv), L->arena);
+#line 3973 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_69, " < ", 3, L->arena);
+#line 3973 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_69, (nw), L->arena);
+#line 3973 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_69, " - 1", 4, L->arena);
+#line 3973 "cc/lower/lower_parallel.cch"
+            __cc_str_69;
+#line 3973 "cc/lower/lower_parallel.cch"
         });
         ks = ({
-#line 4331 "cc/lower/lower_parallel.cch"
-            CCString __cc_str_72 = cc_string_new();
-#line 4331 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_72, (wv), L->arena);
-#line 4331 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_72, "++", 2, L->arena);
-#line 4331 "cc/lower/lower_parallel.cch"
-            __cc_str_72;
-#line 4331 "cc/lower/lower_parallel.cch"
+#line 3974 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_70 = cc_string_new();
+#line 3974 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_70, (wv), L->arena);
+#line 3974 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_70, "++", 2, L->arena);
+#line 3974 "cc/lower/lower_parallel.cch"
+            __cc_str_70;
+#line 3974 "cc/lower/lower_parallel.cch"
         });
         {
             CcStmt *then = lw_block(L, sp);
             CCString cnd = cc_string_new();
-#line 4334 "cc/lower/lower_parallel.cch"
+#line 3977 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&cnd, (cx), L->arena);
             lw_push(then, pl_pw_for(L, ki, kc, ks, lb, sp));
             lw_push(blk, lw_if(L, lw_text(L, cnd, sp), then, NULL, sp));
@@ -51405,49 +51303,49 @@ static void pl_pw_lower(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
             CcDecl *cd = NULL;
             if (!pl_find_var_decl_at(st, nm, &cv, &cd)) {
                 CCString m = cc_string_new();
-#line 4412 "cc/lower/lower_parallel.cch"
+#line 4055 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&m, "cache (name) '", 14, L->arena);
-#line 4412 "cc/lower/lower_parallel.cch"
+#line 4055 "cc/lower/lower_parallel.cch"
                 cc__string_slot_push(&m, (nm), L->arena);
-#line 4412 "cc/lower/lower_parallel.cch"
+#line 4055 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&m, "' has no declaration in the function the walk stands in; the extras take their initializer and '", 96, L->arena);
-#line 4412 "cc/lower/lower_parallel.cch"
+#line 4055 "cc/lower/lower_parallel.cch"
                 cc__string_slot_push(&m, ("@"), L->arena);
-#line 4412 "cc/lower/lower_parallel.cch"
+#line 4055 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&m, "destroy' from one: declare '", 28, L->arena);
-#line 4412 "cc/lower/lower_parallel.cch"
+#line 4055 "cc/lower/lower_parallel.cch"
                 cc__string_slot_push(&m, (nm), L->arena);
-#line 4412 "cc/lower/lower_parallel.cch"
+#line 4055 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&m, "' above the walk", 16, L->arena);
                 lw_error(L, sp, m);
                 return;
             }
             if (pl_for_decayed(cv.type)) {
                 CCString m = cc_string_new();
-#line 4417 "cc/lower/lower_parallel.cch"
+#line 4060 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&m, "cache (name) '", 14, L->arena);
-#line 4417 "cc/lower/lower_parallel.cch"
+#line 4060 "cc/lower/lower_parallel.cch"
                 cc__string_slot_push(&m, (nm), L->arena);
-#line 4417 "cc/lower/lower_parallel.cch"
+#line 4060 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&m, "' is an array; the extras are instances of a value type: wrap the array in a struct and cache that", 98, L->arena);
                 lw_error(L, sp, m);
                 return;
             }
             if (pl_pw_cache_in_stage(pf.loop.body, nm)) {
                 CCString m = cc_string_new();
-#line 4422 "cc/lower/lower_parallel.cch"
+#line 4065 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&m, "cache (name) '", 14, L->arena);
-#line 4422 "cc/lower/lower_parallel.cch"
+#line 4065 "cc/lower/lower_parallel.cch"
                 cc__string_slot_push(&m, (nm), L->arena);
-#line 4422 "cc/lower/lower_parallel.cch"
+#line 4065 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&m, "' is read inside an '", 21, L->arena);
-#line 4422 "cc/lower/lower_parallel.cch"
+#line 4065 "cc/lower/lower_parallel.cch"
                 cc__string_slot_push(&m, ("@"), L->arena);
-#line 4422 "cc/lower/lower_parallel.cch"
+#line 4065 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&m, "stage' block: a stage is loop-carried identity and a cached name is an instance no ticket can name; read '", 106, L->arena);
-#line 4422 "cc/lower/lower_parallel.cch"
+#line 4065 "cc/lower/lower_parallel.cch"
                 cc__string_slot_push(&m, (nm), L->arena);
-#line 4422 "cc/lower/lower_parallel.cch"
+#line 4065 "cc/lower/lower_parallel.cch"
                 cc_string_push_buffer(&m, "' outside the stage, or drop it from 'cache'", 44, L->arena);
                 lw_error(L, sp, m);
                 return;
@@ -51456,11 +51354,11 @@ static void pl_pw_lower(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
                 /* one body for the declared instance and every extra */
                 bool raises = false;
                 if (!pl_pw_drop_make(st, id, nm, &cv, cd, &raises, sp))
-#line 4429 "cc/lower/lower_parallel.cch"
+#line 4072 "cc/lower/lower_parallel.cch"
                     return;
                 CCVec_CCSlice_push(&drops, nm);
                 if (raises)
-#line 4431 "cc/lower/lower_parallel.cch"
+#line 4074 "cc/lower/lower_parallel.cch"
                     CCVec_CCSlice_push(&draise, nm);
             }
         }
@@ -51477,7 +51375,7 @@ static void pl_pw_lower(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
         v.expr = pl_scan_expr;
         v.env = &sc;
         if (pf.loop.body)
-#line 4446 "cc/lower/lower_parallel.cch"
+#line 4089 "cc/lower/lower_parallel.cch"
             CcStmt_walk(pf.loop.body, v);
     }
     caps = sc.caps;
@@ -51492,7 +51390,7 @@ static void pl_pw_lower(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
         CCSlice rn = CcIndex_canon(L->ix, st->fn_ret);
         CCSlice vd = cstr_slice("void");
         if (rn.len && !slice_eq(rn, vd))
-#line 4459 "cc/lower/lower_parallel.cch"
+#line 4102 "cc/lower/lower_parallel.cch"
             ret_ty = rn;
     }
     if (pl_pw_result_dest(pf)) {
@@ -51522,37 +51420,37 @@ static void pl_pw_lower(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
         CCVec_PBindRef_push(&st->binds, b);
     }
     {
-#line 4487 "cc/lower/lower_parallel.cch"
+#line 4130 "cc/lower/lower_parallel.cch"
         CCString t = lw_spell_expr(L, pf.wait);
-#line 4487 "cc/lower/lower_parallel.cch"
+#line 4130 "cc/lower/lower_parallel.cch"
         wspell = lw_keep(L, &t);
-#line 4487 "cc/lower/lower_parallel.cch"
+#line 4130 "cc/lower/lower_parallel.cch"
     }
     if (pf.seq) {
-#line 4488 "cc/lower/lower_parallel.cch"
+#line 4131 "cc/lower/lower_parallel.cch"
         CCString t = lw_spell_expr(L, pf.seq);
-#line 4488 "cc/lower/lower_parallel.cch"
+#line 4131 "cc/lower/lower_parallel.cch"
         gspell = lw_keep(L, &t);
-#line 4488 "cc/lower/lower_parallel.cch"
+#line 4131 "cc/lower/lower_parallel.cch"
     }
     {
-#line 4489 "cc/lower/lower_parallel.cch"
+#line 4132 "cc/lower/lower_parallel.cch"
         CCString t = lw_spell_expr(L, rg.lo);
-#line 4489 "cc/lower/lower_parallel.cch"
+#line 4132 "cc/lower/lower_parallel.cch"
         los = lw_keep(L, &t);
-#line 4489 "cc/lower/lower_parallel.cch"
+#line 4132 "cc/lower/lower_parallel.cch"
     }
     {
-#line 4490 "cc/lower/lower_parallel.cch"
+#line 4133 "cc/lower/lower_parallel.cch"
         CCString t = lw_spell_expr(L, rg.hi);
-#line 4490 "cc/lower/lower_parallel.cch"
+#line 4133 "cc/lower/lower_parallel.cch"
         his = lw_keep(L, &t);
-#line 4490 "cc/lower/lower_parallel.cch"
+#line 4133 "cc/lower/lower_parallel.cch"
     }
     {
         CCString et = pl_pw_env_text(st, id, &caps, ret_ty, &cache);
         pl_host(st);
-#line 4493 "cc/lower/lower_parallel.cch"
+#line 4136 "cc/lower/lower_parallel.cch"
         cc_string_push_slice(&st->fwd, cc_string_as_slice(&et), L->arena);
     }
     pl_pw_forward(st, id);
@@ -51560,136 +51458,136 @@ static void pl_pw_lower(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
     CCVec_CcDeclRef_push(&st->made, pl_pw_worker_decl(st, id, sp));
     {
         CCString a1 = cc_string_new();
-#line 4499 "cc/lower/lower_parallel.cch"
+#line 4142 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&a1, (env), L->arena);
-#line 4499 "cc/lower/lower_parallel.cch"
+#line 4142 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&a1, " ", 1, L->arena);
-#line 4499 "cc/lower/lower_parallel.cch"
+#line 4142 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&a1, (ev), L->arena);
         CCString a2 = cc_string_new();
-#line 4500 "cc/lower/lower_parallel.cch"
+#line 4143 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&a2, (sht), L->arena);
-#line 4500 "cc/lower/lower_parallel.cch"
+#line 4143 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&a2, " ", 1, L->arena);
-#line 4500 "cc/lower/lower_parallel.cch"
+#line 4143 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&a2, (shv), L->arena);
         CCString a3 = cc_string_new();
-#line 4501 "cc/lower/lower_parallel.cch"
+#line 4144 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&a3, (ext), L->arena);
-#line 4501 "cc/lower/lower_parallel.cch"
+#line 4144 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&a3, " ", 1, L->arena);
-#line 4501 "cc/lower/lower_parallel.cch"
+#line 4144 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&a3, (cell), L->arena);
         CCString a4 = cc_string_new();
-#line 4502 "cc/lower/lower_parallel.cch"
+#line 4145 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&a4, (slt), L->arena);
-#line 4502 "cc/lower/lower_parallel.cch"
+#line 4145 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&a4, " ", 1, L->arena);
-#line 4502 "cc/lower/lower_parallel.cch"
+#line 4145 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&a4, (s0), L->arena);
         CCString a5 = cc_string_new();
-#line 4503 "cc/lower/lower_parallel.cch"
+#line 4146 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&a5, "CCNurseryHost* ", 15, L->arena);
-#line 4503 "cc/lower/lower_parallel.cch"
+#line 4146 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&a5, (nur), L->arena);
-#line 4503 "cc/lower/lower_parallel.cch"
+#line 4146 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&a5, " = 0", 4, L->arena);
         CCString a6 = cc_string_new();
-#line 4504 "cc/lower/lower_parallel.cch"
+#line 4147 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&a6, "CCChan* ", 8, L->arena);
-#line 4504 "cc/lower/lower_parallel.cch"
+#line 4147 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&a6, (work), L->arena);
-#line 4504 "cc/lower/lower_parallel.cch"
+#line 4147 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&a6, " = 0", 4, L->arena);
         CCString a7 = cc_string_new();
-#line 4505 "cc/lower/lower_parallel.cch"
+#line 4148 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&a7, (slt), L->arena);
-#line 4505 "cc/lower/lower_parallel.cch"
+#line 4148 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&a7, "* ", 2, L->arena);
-#line 4505 "cc/lower/lower_parallel.cch"
+#line 4148 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&a7, (slots), L->arena);
-#line 4505 "cc/lower/lower_parallel.cch"
+#line 4148 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&a7, " = 0", 4, L->arena);
         CCString a8 = cc_string_new();
-#line 4506 "cc/lower/lower_parallel.cch"
+#line 4149 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&a8, (agt), L->arena);
-#line 4506 "cc/lower/lower_parallel.cch"
+#line 4149 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&a8, "* ", 2, L->arena);
-#line 4506 "cc/lower/lower_parallel.cch"
+#line 4149 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&a8, (args), L->arena);
-#line 4506 "cc/lower/lower_parallel.cch"
+#line 4149 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&a8, " = 0", 4, L->arena);
         /* The pool is capped on a `CCTurnstile`. A gate held by value is
          * taken by address; one already a pointer is passed on; a
          * `CCTurnstileRW` is two stages around one core, and the core is
          * the turnstile the tickets enter. */
         CCString a9 = cc_string_new();
-#line 4511 "cc/lower/lower_parallel.cch"
+#line 4154 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&a9, "CCTurnstile* ", 13, L->arena);
-#line 4511 "cc/lower/lower_parallel.cch"
+#line 4154 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&a9, (gv), L->arena);
-#line 4511 "cc/lower/lower_parallel.cch"
+#line 4154 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&a9, " = (", 4, L->arena);
-#line 4511 "cc/lower/lower_parallel.cch"
+#line 4154 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&a9, (wspell), L->arena);
-#line 4511 "cc/lower/lower_parallel.cch"
+#line 4154 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&a9, ")", 1, L->arena);
         if (gform == 1)
-#line 4512 "cc/lower/lower_parallel.cch"
+#line 4155 "cc/lower/lower_parallel.cch"
             a9 = ({
-#line 4512 "cc/lower/lower_parallel.cch"
-                CCString __cc_str_73 = cc_string_new();
-#line 4512 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&__cc_str_73, "CCTurnstile* ", 13, L->arena);
-#line 4512 "cc/lower/lower_parallel.cch"
-                cc__string_slot_push(&__cc_str_73, (gv), L->arena);
-#line 4512 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&__cc_str_73, " = &(", 5, L->arena);
-#line 4512 "cc/lower/lower_parallel.cch"
-                cc__string_slot_push(&__cc_str_73, (wspell), L->arena);
-#line 4512 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&__cc_str_73, ")", 1, L->arena);
-#line 4512 "cc/lower/lower_parallel.cch"
-                __cc_str_73;
-#line 4512 "cc/lower/lower_parallel.cch"
+#line 4155 "cc/lower/lower_parallel.cch"
+                CCString __cc_str_71 = cc_string_new();
+#line 4155 "cc/lower/lower_parallel.cch"
+                cc_string_push_buffer(&__cc_str_71, "CCTurnstile* ", 13, L->arena);
+#line 4155 "cc/lower/lower_parallel.cch"
+                cc__string_slot_push(&__cc_str_71, (gv), L->arena);
+#line 4155 "cc/lower/lower_parallel.cch"
+                cc_string_push_buffer(&__cc_str_71, " = &(", 5, L->arena);
+#line 4155 "cc/lower/lower_parallel.cch"
+                cc__string_slot_push(&__cc_str_71, (wspell), L->arena);
+#line 4155 "cc/lower/lower_parallel.cch"
+                cc_string_push_buffer(&__cc_str_71, ")", 1, L->arena);
+#line 4155 "cc/lower/lower_parallel.cch"
+                __cc_str_71;
+#line 4155 "cc/lower/lower_parallel.cch"
             });
-#line 4512 "cc/lower/lower_parallel.cch"
+#line 4155 "cc/lower/lower_parallel.cch"
         else if (gform == 3)
             a9 = ({
-#line 4513 "cc/lower/lower_parallel.cch"
-                CCString __cc_str_74 = cc_string_new();
-#line 4513 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&__cc_str_74, "CCTurnstile* ", 13, L->arena);
-#line 4513 "cc/lower/lower_parallel.cch"
-                cc__string_slot_push(&__cc_str_74, (gv), L->arena);
-#line 4513 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&__cc_str_74, " = &(", 5, L->arena);
-#line 4513 "cc/lower/lower_parallel.cch"
-                cc__string_slot_push(&__cc_str_74, (wspell), L->arena);
-#line 4513 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&__cc_str_74, ").core", 6, L->arena);
-#line 4513 "cc/lower/lower_parallel.cch"
-                __cc_str_74;
-#line 4513 "cc/lower/lower_parallel.cch"
+#line 4156 "cc/lower/lower_parallel.cch"
+                CCString __cc_str_72 = cc_string_new();
+#line 4156 "cc/lower/lower_parallel.cch"
+                cc_string_push_buffer(&__cc_str_72, "CCTurnstile* ", 13, L->arena);
+#line 4156 "cc/lower/lower_parallel.cch"
+                cc__string_slot_push(&__cc_str_72, (gv), L->arena);
+#line 4156 "cc/lower/lower_parallel.cch"
+                cc_string_push_buffer(&__cc_str_72, " = &(", 5, L->arena);
+#line 4156 "cc/lower/lower_parallel.cch"
+                cc__string_slot_push(&__cc_str_72, (wspell), L->arena);
+#line 4156 "cc/lower/lower_parallel.cch"
+                cc_string_push_buffer(&__cc_str_72, ").core", 6, L->arena);
+#line 4156 "cc/lower/lower_parallel.cch"
+                __cc_str_72;
+#line 4156 "cc/lower/lower_parallel.cch"
             });
-#line 4513 "cc/lower/lower_parallel.cch"
+#line 4156 "cc/lower/lower_parallel.cch"
         else if (gform == 4)
             a9 = ({
-#line 4514 "cc/lower/lower_parallel.cch"
-                CCString __cc_str_75 = cc_string_new();
-#line 4514 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&__cc_str_75, "CCTurnstile* ", 13, L->arena);
-#line 4514 "cc/lower/lower_parallel.cch"
-                cc__string_slot_push(&__cc_str_75, (gv), L->arena);
-#line 4514 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&__cc_str_75, " = &(", 5, L->arena);
-#line 4514 "cc/lower/lower_parallel.cch"
-                cc__string_slot_push(&__cc_str_75, (wspell), L->arena);
-#line 4514 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&__cc_str_75, ")->core", 7, L->arena);
-#line 4514 "cc/lower/lower_parallel.cch"
-                __cc_str_75;
-#line 4514 "cc/lower/lower_parallel.cch"
+#line 4157 "cc/lower/lower_parallel.cch"
+                CCString __cc_str_73 = cc_string_new();
+#line 4157 "cc/lower/lower_parallel.cch"
+                cc_string_push_buffer(&__cc_str_73, "CCTurnstile* ", 13, L->arena);
+#line 4157 "cc/lower/lower_parallel.cch"
+                cc__string_slot_push(&__cc_str_73, (gv), L->arena);
+#line 4157 "cc/lower/lower_parallel.cch"
+                cc_string_push_buffer(&__cc_str_73, " = &(", 5, L->arena);
+#line 4157 "cc/lower/lower_parallel.cch"
+                cc__string_slot_push(&__cc_str_73, (wspell), L->arena);
+#line 4157 "cc/lower/lower_parallel.cch"
+                cc_string_push_buffer(&__cc_str_73, ")->core", 7, L->arena);
+#line 4157 "cc/lower/lower_parallel.cch"
+                __cc_str_73;
+#line 4157 "cc/lower/lower_parallel.cch"
             });
         pl_pw_text(L, blk, a1, sp);
         pl_pw_text(L, blk, a2, sp);
@@ -51705,87 +51603,87 @@ static void pl_pw_lower(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
         /* the dest is planted before the pool opens: live from here to the
          * join, and the handle the tickets pause, resume and cancel through */
         CCString t = cc_string_new();
-#line 4528 "cc/lower/lower_parallel.cch"
+#line 4171 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&t, (hv), L->arena);
-#line 4528 "cc/lower/lower_parallel.cch"
+#line 4171 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&t, " = cc_parallel_dest()", 21, L->arena);
         pl_pw_text(L, blk, t, sp);
     }
     {
         CCString b1 = cc_string_new();
-#line 4532 "cc/lower/lower_parallel.cch"
+#line 4175 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&b1, "CCError ", 8, L->arena);
-#line 4532 "cc/lower/lower_parallel.cch"
+#line 4175 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&b1, (ferr), L->arena);
         CCString b2 = cc_string_new();
-#line 4533 "cc/lower/lower_parallel.cch"
+#line 4176 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&b2, "int ", 4, L->arena);
-#line 4533 "cc/lower/lower_parallel.cch"
+#line 4176 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&b2, (fail), L->arena);
-#line 4533 "cc/lower/lower_parallel.cch"
+#line 4176 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&b2, " = 0", 4, L->arena);
         CCString b3 = cc_string_new();
-#line 4534 "cc/lower/lower_parallel.cch"
+#line 4177 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&b3, "int ", 4, L->arena);
-#line 4534 "cc/lower/lower_parallel.cch"
+#line 4177 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&b3, (echo), L->arena);
-#line 4534 "cc/lower/lower_parallel.cch"
+#line 4177 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&b3, " = 0", 4, L->arena);
         CCString b4 = cc_string_new();
-#line 4535 "cc/lower/lower_parallel.cch"
+#line 4178 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&b4, "int ", 4, L->arena);
-#line 4535 "cc/lower/lower_parallel.cch"
+#line 4178 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&b4, (best), L->arena);
-#line 4535 "cc/lower/lower_parallel.cch"
+#line 4178 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&b4, " = 0", 4, L->arena);
         CCString b5 = cc_string_new();
-#line 4536 "cc/lower/lower_parallel.cch"
+#line 4179 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&b5, "int ", 4, L->arena);
-#line 4536 "cc/lower/lower_parallel.cch"
+#line 4179 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&b5, (wv), L->arena);
-#line 4536 "cc/lower/lower_parallel.cch"
+#line 4179 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&b5, " = 0", 4, L->arena);
         CCString b6 = cc_string_new();
-#line 4537 "cc/lower/lower_parallel.cch"
+#line 4180 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&b6, "int ", 4, L->arena);
-#line 4537 "cc/lower/lower_parallel.cch"
+#line 4180 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&b6, (nw), L->arena);
-#line 4537 "cc/lower/lower_parallel.cch"
+#line 4180 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&b6, " = 1", 4, L->arena);
         CCString b7 = cc_string_new();
-#line 4538 "cc/lower/lower_parallel.cch"
+#line 4181 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&b7, "int ", 4, L->arena);
-#line 4538 "cc/lower/lower_parallel.cch"
+#line 4181 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&b7, (nh), L->arena);
-#line 4538 "cc/lower/lower_parallel.cch"
+#line 4181 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&b7, " = 1", 4, L->arena);
         CCString b8 = cc_string_new();
-#line 4539 "cc/lower/lower_parallel.cch"
+#line 4182 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&b8, "int ", 4, L->arena);
-#line 4539 "cc/lower/lower_parallel.cch"
+#line 4182 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&b8, (spawned), L->arena);
-#line 4539 "cc/lower/lower_parallel.cch"
+#line 4182 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&b8, " = 0", 4, L->arena);
         CCString b9 = cc_string_new();
-#line 4540 "cc/lower/lower_parallel.cch"
+#line 4183 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&b9, "int ", 4, L->arena);
-#line 4540 "cc/lower/lower_parallel.cch"
+#line 4183 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&b9, (iv), L->arena);
-#line 4540 "cc/lower/lower_parallel.cch"
+#line 4183 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&b9, " = 0", 4, L->arena);
         CCString b10 = cc_string_new();
-#line 4541 "cc/lower/lower_parallel.cch"
+#line 4184 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&b10, "int ", 4, L->arena);
-#line 4541 "cc/lower/lower_parallel.cch"
+#line 4184 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&b10, (eok), L->arena);
-#line 4541 "cc/lower/lower_parallel.cch"
+#line 4184 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&b10, " = 0", 4, L->arena);
         CCString b11 = cc_string_new();
-#line 4542 "cc/lower/lower_parallel.cch"
+#line 4185 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&b11, "int ", 4, L->arena);
-#line 4542 "cc/lower/lower_parallel.cch"
+#line 4185 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&b11, (sf), L->arena);
-#line 4542 "cc/lower/lower_parallel.cch"
+#line 4185 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&b11, " = 0", 4, L->arena);
         pl_pw_text(L, blk, b1, sp);
         pl_pw_text(L, blk, b2, sp);
@@ -51801,78 +51699,78 @@ static void pl_pw_lower(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
     }
     {
         CCString z1 = cc_string_new();
-#line 4556 "cc/lower/lower_parallel.cch"
+#line 4199 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&z1, "cc__bytes_zero(&", 16, L->arena);
-#line 4556 "cc/lower/lower_parallel.cch"
+#line 4199 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&z1, (ferr), L->arena);
-#line 4556 "cc/lower/lower_parallel.cch"
+#line 4199 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&z1, ", sizeof(", 9, L->arena);
-#line 4556 "cc/lower/lower_parallel.cch"
+#line 4199 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&z1, (ferr), L->arena);
-#line 4556 "cc/lower/lower_parallel.cch"
+#line 4199 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&z1, "))", 2, L->arena);
         CCString z2 = cc_string_new();
-#line 4557 "cc/lower/lower_parallel.cch"
+#line 4200 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&z2, "cc__bytes_zero(&", 16, L->arena);
-#line 4557 "cc/lower/lower_parallel.cch"
+#line 4200 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&z2, (cell), L->arena);
-#line 4557 "cc/lower/lower_parallel.cch"
+#line 4200 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&z2, ", sizeof(", 9, L->arena);
-#line 4557 "cc/lower/lower_parallel.cch"
+#line 4200 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&z2, (cell), L->arena);
-#line 4557 "cc/lower/lower_parallel.cch"
+#line 4200 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&z2, "))", 2, L->arena);
         CCString z3 = cc_string_new();
-#line 4558 "cc/lower/lower_parallel.cch"
+#line 4201 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&z3, "cc__bytes_zero(&", 16, L->arena);
-#line 4558 "cc/lower/lower_parallel.cch"
+#line 4201 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&z3, (s0), L->arena);
-#line 4558 "cc/lower/lower_parallel.cch"
+#line 4201 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&z3, ", sizeof(", 9, L->arena);
-#line 4558 "cc/lower/lower_parallel.cch"
+#line 4201 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&z3, (s0), L->arena);
-#line 4558 "cc/lower/lower_parallel.cch"
+#line 4201 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&z3, "))", 2, L->arena);
         CCString z4 = cc_string_new();
-#line 4559 "cc/lower/lower_parallel.cch"
+#line 4202 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&z4, "cc__bytes_zero(&", 16, L->arena);
-#line 4559 "cc/lower/lower_parallel.cch"
+#line 4202 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&z4, (ev), L->arena);
-#line 4559 "cc/lower/lower_parallel.cch"
+#line 4202 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&z4, ", sizeof(", 9, L->arena);
-#line 4559 "cc/lower/lower_parallel.cch"
+#line 4202 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&z4, (ev), L->arena);
-#line 4559 "cc/lower/lower_parallel.cch"
+#line 4202 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&z4, "))", 2, L->arena);
         CCString z5 = cc_string_new();
-#line 4560 "cc/lower/lower_parallel.cch"
+#line 4203 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&z5, "cc__bytes_zero(&", 16, L->arena);
-#line 4560 "cc/lower/lower_parallel.cch"
+#line 4203 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&z5, (shv), L->arena);
-#line 4560 "cc/lower/lower_parallel.cch"
+#line 4203 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&z5, ", sizeof(", 9, L->arena);
-#line 4560 "cc/lower/lower_parallel.cch"
+#line 4203 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&z5, (shv), L->arena);
-#line 4560 "cc/lower/lower_parallel.cch"
+#line 4203 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&z5, "))", 2, L->arena);
         CCString z6 = cc_string_new();
-#line 4561 "cc/lower/lower_parallel.cch"
+#line 4204 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&z6, "if (", 4, L->arena);
-#line 4561 "cc/lower/lower_parallel.cch"
+#line 4204 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&z6, (gv), L->arena);
-#line 4561 "cc/lower/lower_parallel.cch"
+#line 4204 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&z6, " && ", 4, L->arena);
-#line 4561 "cc/lower/lower_parallel.cch"
+#line 4204 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&z6, (gv), L->arena);
-#line 4561 "cc/lower/lower_parallel.cch"
+#line 4204 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&z6, "->cap > 1) ", 11, L->arena);
-#line 4561 "cc/lower/lower_parallel.cch"
+#line 4204 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&z6, (nw), L->arena);
-#line 4561 "cc/lower/lower_parallel.cch"
+#line 4204 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&z6, " = ", 3, L->arena);
-#line 4561 "cc/lower/lower_parallel.cch"
+#line 4204 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&z6, (gv), L->arena);
-#line 4561 "cc/lower/lower_parallel.cch"
+#line 4204 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&z6, "->cap", 5, L->arena);
         pl_pw_text(L, blk, z1, sp);
         pl_pw_text(L, blk, z2, sp);
@@ -51885,24 +51783,24 @@ static void pl_pw_lower(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
      * the tickets go through the same body on the caller */
     if (gspell.len) {
         CCString c1 = cc_string_new();
-#line 4572 "cc/lower/lower_parallel.cch"
+#line 4215 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&c1, "if ((", 5, L->arena);
-#line 4572 "cc/lower/lower_parallel.cch"
+#line 4215 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&c1, (gspell), L->arena);
-#line 4572 "cc/lower/lower_parallel.cch"
+#line 4215 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&c1, ")) { __typeof__(cc_nursery_create()) __cc_pw_nr = cc_nursery_create(); if (__cc_pw_nr.ok) ", 90, L->arena);
-#line 4572 "cc/lower/lower_parallel.cch"
+#line 4215 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&c1, (nur), L->arena);
-#line 4572 "cc/lower/lower_parallel.cch"
+#line 4215 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&c1, " = __cc_pw_nr.u.value.p; }", 26, L->arena);
         pl_pw_text(L, blk, c1, sp);
     } else {
         CCString c1 = cc_string_new();
-#line 4575 "cc/lower/lower_parallel.cch"
+#line 4218 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&c1, "{ __typeof__(cc_nursery_create()) __cc_pw_nr = cc_nursery_create(); if (__cc_pw_nr.ok) ", 87, L->arena);
-#line 4575 "cc/lower/lower_parallel.cch"
+#line 4218 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&c1, (nur), L->arena);
-#line 4575 "cc/lower/lower_parallel.cch"
+#line 4218 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&c1, " = __cc_pw_nr.u.value.p; }", 26, L->arena);
         pl_pw_text(L, blk, c1, sp);
     }
@@ -51910,118 +51808,118 @@ static void pl_pw_lower(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
         /* an allocation that did not come back closes the pool again rather
          * than running half of one: the caller takes the tickets instead */
         CCString c2 = cc_string_new();
-#line 4581 "cc/lower/lower_parallel.cch"
+#line 4224 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&c2, "if (", 4, L->arena);
-#line 4581 "cc/lower/lower_parallel.cch"
+#line 4224 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&c2, (nur), L->arena);
-#line 4581 "cc/lower/lower_parallel.cch"
+#line 4224 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&c2, ") { ", 4, L->arena);
-#line 4581 "cc/lower/lower_parallel.cch"
+#line 4224 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&c2, (work), L->arena);
-#line 4581 "cc/lower/lower_parallel.cch"
+#line 4224 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&c2, " = cc_chan_create((size_t)", 26, L->arena);
-#line 4581 "cc/lower/lower_parallel.cch"
+#line 4224 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&c2, (nw), L->arena);
-#line 4581 "cc/lower/lower_parallel.cch"
+#line 4224 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&c2, "); if (", 7, L->arena);
-#line 4581 "cc/lower/lower_parallel.cch"
+#line 4224 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&c2, (work), L->arena);
-#line 4581 "cc/lower/lower_parallel.cch"
+#line 4224 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&c2, ") ", 2, L->arena);
-#line 4581 "cc/lower/lower_parallel.cch"
+#line 4224 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&c2, (slots), L->arena);
-#line 4581 "cc/lower/lower_parallel.cch"
+#line 4224 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&c2, " = cc_nursery_closure_env_alloc_host(", 37, L->arena);
-#line 4581 "cc/lower/lower_parallel.cch"
+#line 4224 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&c2, (nur), L->arena);
-#line 4581 "cc/lower/lower_parallel.cch"
+#line 4224 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&c2, ", (size_t)", 10, L->arena);
-#line 4581 "cc/lower/lower_parallel.cch"
+#line 4224 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&c2, (nw), L->arena);
-#line 4581 "cc/lower/lower_parallel.cch"
+#line 4224 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&c2, " * sizeof(*", 11, L->arena);
-#line 4581 "cc/lower/lower_parallel.cch"
+#line 4224 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&c2, (slots), L->arena);
-#line 4581 "cc/lower/lower_parallel.cch"
+#line 4224 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&c2, "), 16); if (", 12, L->arena);
-#line 4581 "cc/lower/lower_parallel.cch"
+#line 4224 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&c2, (slots), L->arena);
-#line 4581 "cc/lower/lower_parallel.cch"
+#line 4224 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&c2, ") ", 2, L->arena);
-#line 4581 "cc/lower/lower_parallel.cch"
+#line 4224 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&c2, (args), L->arena);
-#line 4581 "cc/lower/lower_parallel.cch"
+#line 4224 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&c2, " = cc_nursery_closure_env_alloc_host(", 37, L->arena);
-#line 4581 "cc/lower/lower_parallel.cch"
+#line 4224 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&c2, (nur), L->arena);
-#line 4581 "cc/lower/lower_parallel.cch"
+#line 4224 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&c2, ", (size_t)", 10, L->arena);
-#line 4581 "cc/lower/lower_parallel.cch"
+#line 4224 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&c2, (nw), L->arena);
-#line 4581 "cc/lower/lower_parallel.cch"
+#line 4224 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&c2, " * sizeof(*", 11, L->arena);
-#line 4581 "cc/lower/lower_parallel.cch"
+#line 4224 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&c2, (args), L->arena);
-#line 4581 "cc/lower/lower_parallel.cch"
+#line 4224 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&c2, "), 16); }", 9, L->arena);
         CCString more = cc_string_new();
         CCString c3;
         pl_pw_text(L, blk, c2, sp);
         pl_pw_cache_alloc(st, blk, id, &caps, &cache, nur, nw, &more, sp);
         c3 = ({
-#line 4586 "cc/lower/lower_parallel.cch"
-            CCString __cc_str_76 = cc_string_new();
-#line 4586 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_76, "if (", 4, L->arena);
-#line 4586 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_76, (nur), L->arena);
-#line 4586 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_76, " && (!", 6, L->arena);
-#line 4586 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_76, (work), L->arena);
-#line 4586 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_76, " || !", 5, L->arena);
-#line 4586 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_76, (slots), L->arena);
-#line 4586 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_76, " || !", 5, L->arena);
-#line 4586 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_76, (args), L->arena);
-#line 4586 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_76, (more), L->arena);
-#line 4586 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_76, ")) { if (", 9, L->arena);
-#line 4586 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_76, (work), L->arena);
-#line 4586 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_76, ") cc_chan_free(", 15, L->arena);
-#line 4586 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_76, (work), L->arena);
-#line 4586 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_76, "); ", 3, L->arena);
-#line 4586 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_76, (work), L->arena);
-#line 4586 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_76, " = 0; ", 6, L->arena);
-#line 4586 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_76, (slots), L->arena);
-#line 4586 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_76, " = 0; ", 6, L->arena);
-#line 4586 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_76, (args), L->arena);
-#line 4586 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_76, " = 0; cc_nursery_free_host(", 27, L->arena);
-#line 4586 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_76, (nur), L->arena);
-#line 4586 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_76, "); ", 3, L->arena);
-#line 4586 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_76, (nur), L->arena);
-#line 4586 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_76, " = 0; }", 7, L->arena);
-#line 4586 "cc/lower/lower_parallel.cch"
-            __cc_str_76;
-#line 4586 "cc/lower/lower_parallel.cch"
+#line 4229 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_74 = cc_string_new();
+#line 4229 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_74, "if (", 4, L->arena);
+#line 4229 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_74, (nur), L->arena);
+#line 4229 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_74, " && (!", 6, L->arena);
+#line 4229 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_74, (work), L->arena);
+#line 4229 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_74, " || !", 5, L->arena);
+#line 4229 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_74, (slots), L->arena);
+#line 4229 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_74, " || !", 5, L->arena);
+#line 4229 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_74, (args), L->arena);
+#line 4229 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_74, (more), L->arena);
+#line 4229 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_74, ")) { if (", 9, L->arena);
+#line 4229 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_74, (work), L->arena);
+#line 4229 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_74, ") cc_chan_free(", 15, L->arena);
+#line 4229 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_74, (work), L->arena);
+#line 4229 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_74, "); ", 3, L->arena);
+#line 4229 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_74, (work), L->arena);
+#line 4229 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_74, " = 0; ", 6, L->arena);
+#line 4229 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_74, (slots), L->arena);
+#line 4229 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_74, " = 0; ", 6, L->arena);
+#line 4229 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_74, (args), L->arena);
+#line 4229 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_74, " = 0; cc_nursery_free_host(", 27, L->arena);
+#line 4229 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_74, (nur), L->arena);
+#line 4229 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_74, "); ", 3, L->arena);
+#line 4229 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_74, (nur), L->arena);
+#line 4229 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_74, " = 0; }", 7, L->arena);
+#line 4229 "cc/lower/lower_parallel.cch"
+            __cc_str_74;
+#line 4229 "cc/lower/lower_parallel.cch"
         });
         pl_pw_text(L, blk, c3, sp);
     }
@@ -52030,100 +51928,100 @@ static void pl_pw_lower(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
         /* the caller's own slot stands in for a runner's when there is no
          * pool, so the body is handed the same shape on either schedule */
         CCString f1 = cc_string_new();
-#line 4593 "cc/lower/lower_parallel.cch"
+#line 4236 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&f1, (shv), L->arena);
-#line 4593 "cc/lower/lower_parallel.cch"
+#line 4236 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&f1, ".gate = ", 8, L->arena);
-#line 4593 "cc/lower/lower_parallel.cch"
+#line 4236 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&f1, (gv), L->arena);
         CCString f2 = cc_string_new();
-#line 4594 "cc/lower/lower_parallel.cch"
+#line 4237 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&f2, (shv), L->arena);
-#line 4594 "cc/lower/lower_parallel.cch"
+#line 4237 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&f2, ".nur = ", 7, L->arena);
-#line 4594 "cc/lower/lower_parallel.cch"
+#line 4237 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&f2, (nur), L->arena);
         CCString f3 = cc_string_new();
-#line 4595 "cc/lower/lower_parallel.cch"
+#line 4238 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&f3, (shv), L->arena);
-#line 4595 "cc/lower/lower_parallel.cch"
+#line 4238 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&f3, ".work = ", 8, L->arena);
-#line 4595 "cc/lower/lower_parallel.cch"
+#line 4238 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&f3, (work), L->arena);
         /* the handle the tickets pause and resume through, and the nursery
          * its cancel stops: `h.n` is the pool, so `h.cancel()` marks the
          * dest and cancels the pool, and the enter loop below stops */
         CCString f4 = hdest ? ({
-#line 4599 "cc/lower/lower_parallel.cch"
-            CCString __cc_str_77 = cc_string_new();
-#line 4599 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_77, (shv), L->arena);
-#line 4599 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_77, ".dest = &", 9, L->arena);
-#line 4599 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_77, (hv), L->arena);
-#line 4599 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_77, "; ", 2, L->arena);
-#line 4599 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_77, (hv), L->arena);
-#line 4599 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_77, ".n = ", 5, L->arena);
-#line 4599 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_77, (nur), L->arena);
-#line 4599 "cc/lower/lower_parallel.cch"
-            __cc_str_77;
-#line 4599 "cc/lower/lower_parallel.cch"
+#line 4242 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_75 = cc_string_new();
+#line 4242 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_75, (shv), L->arena);
+#line 4242 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_75, ".dest = &", 9, L->arena);
+#line 4242 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_75, (hv), L->arena);
+#line 4242 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_75, "; ", 2, L->arena);
+#line 4242 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_75, (hv), L->arena);
+#line 4242 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_75, ".n = ", 5, L->arena);
+#line 4242 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_75, (nur), L->arena);
+#line 4242 "cc/lower/lower_parallel.cch"
+            __cc_str_75;
+#line 4242 "cc/lower/lower_parallel.cch"
         }) : ({
-            CCString __cc_str_78 = cc_string_new();
-#line 4600 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_78, (shv), L->arena);
-#line 4600 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_78, ".dest = 0", 9, L->arena);
-#line 4600 "cc/lower/lower_parallel.cch"
-            __cc_str_78;
-#line 4600 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_76 = cc_string_new();
+#line 4243 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_76, (shv), L->arena);
+#line 4243 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_76, ".dest = 0", 9, L->arena);
+#line 4243 "cc/lower/lower_parallel.cch"
+            __cc_str_76;
+#line 4243 "cc/lower/lower_parallel.cch"
         });
         CCString f5 = cc_string_new();
-#line 4601 "cc/lower/lower_parallel.cch"
+#line 4244 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&f5, (ev), L->arena);
-#line 4601 "cc/lower/lower_parallel.cch"
+#line 4244 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&f5, ".sh = &", 7, L->arena);
-#line 4601 "cc/lower/lower_parallel.cch"
+#line 4244 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&f5, (shv), L->arena);
         CCString f6 = cc_string_new();
-#line 4602 "cc/lower/lower_parallel.cch"
+#line 4245 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&f6, (ev), L->arena);
-#line 4602 "cc/lower/lower_parallel.cch"
+#line 4245 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&f6, ".slots = ", 9, L->arena);
-#line 4602 "cc/lower/lower_parallel.cch"
+#line 4245 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&f6, (slots), L->arena);
-#line 4602 "cc/lower/lower_parallel.cch"
+#line 4245 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&f6, " ? ", 3, L->arena);
-#line 4602 "cc/lower/lower_parallel.cch"
+#line 4245 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&f6, (slots), L->arena);
-#line 4602 "cc/lower/lower_parallel.cch"
+#line 4245 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&f6, " : &", 4, L->arena);
-#line 4602 "cc/lower/lower_parallel.cch"
+#line 4245 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&f6, (s0), L->arena);
         CCString f7 = cc_string_new();
-#line 4603 "cc/lower/lower_parallel.cch"
+#line 4246 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&f7, (ev), L->arena);
-#line 4603 "cc/lower/lower_parallel.cch"
+#line 4246 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&f7, ".__cc_pf_ex = &", 15, L->arena);
-#line 4603 "cc/lower/lower_parallel.cch"
+#line 4246 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&f7, (cell), L->arena);
         CCString f8 = cc_string_new();
-#line 4604 "cc/lower/lower_parallel.cch"
+#line 4247 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&f8, (nh), L->arena);
-#line 4604 "cc/lower/lower_parallel.cch"
+#line 4247 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&f8, " = ", 3, L->arena);
-#line 4604 "cc/lower/lower_parallel.cch"
+#line 4247 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&f8, (slots), L->arena);
-#line 4604 "cc/lower/lower_parallel.cch"
+#line 4247 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&f8, " ? ", 3, L->arena);
-#line 4604 "cc/lower/lower_parallel.cch"
+#line 4247 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&f8, (nw), L->arena);
-#line 4604 "cc/lower/lower_parallel.cch"
+#line 4247 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&f8, " : 1", 4, L->arena);
         pl_pw_text(L, blk, f1, sp);
         pl_pw_text(L, blk, f2, sp);
@@ -52138,39 +52036,39 @@ static void pl_pw_lower(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
         PCap *c = *CCVec_PCapRef_get_ptr(&caps, i);
         CCSlice cn = c->name;
         CCString as = pl_for_decayed(c->type) ? ({
-            CCString __cc_str_79 = cc_string_new();
-#line 4618 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_79, (ev), L->arena);
-#line 4618 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_79, ".", 1, L->arena);
-#line 4618 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_79, (cn), L->arena);
-#line 4618 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_79, " = (", 4, L->arena);
-#line 4618 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_79, (cn), L->arena);
-#line 4618 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_79, ")", 1, L->arena);
-#line 4618 "cc/lower/lower_parallel.cch"
-            __cc_str_79;
-#line 4618 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_77 = cc_string_new();
+#line 4261 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_77, (ev), L->arena);
+#line 4261 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_77, ".", 1, L->arena);
+#line 4261 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_77, (cn), L->arena);
+#line 4261 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_77, " = (", 4, L->arena);
+#line 4261 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_77, (cn), L->arena);
+#line 4261 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_77, ")", 1, L->arena);
+#line 4261 "cc/lower/lower_parallel.cch"
+            __cc_str_77;
+#line 4261 "cc/lower/lower_parallel.cch"
         }) : ({
-            CCString __cc_str_80 = cc_string_new();
-#line 4619 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_80, (ev), L->arena);
-#line 4619 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_80, ".", 1, L->arena);
-#line 4619 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_80, (cn), L->arena);
-#line 4619 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_80, " = &(", 5, L->arena);
-#line 4619 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_80, (cn), L->arena);
-#line 4619 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_80, ")", 1, L->arena);
-#line 4619 "cc/lower/lower_parallel.cch"
-            __cc_str_80;
-#line 4619 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_78 = cc_string_new();
+#line 4262 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_78, (ev), L->arena);
+#line 4262 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_78, ".", 1, L->arena);
+#line 4262 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_78, (cn), L->arena);
+#line 4262 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_78, " = &(", 5, L->arena);
+#line 4262 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_78, (cn), L->arena);
+#line 4262 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_78, ")", 1, L->arena);
+#line 4262 "cc/lower/lower_parallel.cch"
+            __cc_str_78;
+#line 4262 "cc/lower/lower_parallel.cch"
         });
         pl_pw_text(L, blk, as, sp);
         if (pl_pw_is_cache(&cache, cn)) {
@@ -52178,117 +52076,117 @@ static void pl_pw_lower(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
              * 0 checks out its own */
             CCSlice cx = pl_pw_cx_name(L, id, cn);
             CCString cs = cc_string_new();
-#line 4625 "cc/lower/lower_parallel.cch"
+#line 4268 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&cs, (ev), L->arena);
-#line 4625 "cc/lower/lower_parallel.cch"
+#line 4268 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&cs, ".__cc_pw_cx_", 12, L->arena);
-#line 4625 "cc/lower/lower_parallel.cch"
+#line 4268 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&cs, (cn), L->arena);
-#line 4625 "cc/lower/lower_parallel.cch"
+#line 4268 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&cs, " = ", 3, L->arena);
-#line 4625 "cc/lower/lower_parallel.cch"
+#line 4268 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&cs, (cx), L->arena);
             pl_pw_text(L, blk, cs, sp);
         }
     }
     {
         CCString g1 = cc_string_new();
-#line 4630 "cc/lower/lower_parallel.cch"
+#line 4273 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&g1, "if (", 4, L->arena);
-#line 4630 "cc/lower/lower_parallel.cch"
+#line 4273 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&g1, (nur), L->arena);
-#line 4630 "cc/lower/lower_parallel.cch"
+#line 4273 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&g1, ") cc__bytes_zero(", 17, L->arena);
-#line 4630 "cc/lower/lower_parallel.cch"
+#line 4273 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&g1, (slots), L->arena);
-#line 4630 "cc/lower/lower_parallel.cch"
+#line 4273 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&g1, ", (size_t)", 10, L->arena);
-#line 4630 "cc/lower/lower_parallel.cch"
+#line 4273 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&g1, (nw), L->arena);
-#line 4630 "cc/lower/lower_parallel.cch"
+#line 4273 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&g1, " * sizeof(*", 11, L->arena);
-#line 4630 "cc/lower/lower_parallel.cch"
+#line 4273 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&g1, (slots), L->arena);
-#line 4630 "cc/lower/lower_parallel.cch"
+#line 4273 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&g1, "))", 2, L->arena);
         CCString g2 = cc_string_new();
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&g2, "if (", 4, L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&g2, (nur), L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&g2, ") for (", 7, L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&g2, (wv), L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&g2, " = 0; ", 6, L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&g2, (wv), L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&g2, " < ", 3, L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&g2, (nw), L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&g2, "; ", 2, L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&g2, (wv), L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&g2, "++) { ", 6, L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&g2, (args), L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&g2, "[", 1, L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&g2, (wv), L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&g2, "].work = ", 9, L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&g2, (work), L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&g2, "; ", 2, L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&g2, (args), L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&g2, "[", 1, L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&g2, (wv), L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&g2, "].env = &", 9, L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&g2, (ev), L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&g2, "; ", 2, L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&g2, (args), L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&g2, "[", 1, L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&g2, (wv), L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&g2, "].slot = ", 9, L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&g2, (wv), L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&g2, "; if (cc_is_ok(cc_nursery_spawn_host(", 37, L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&g2, (nur), L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&g2, ", ", 2, L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&g2, (worker), L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&g2, ", &", 3, L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&g2, (args), L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&g2, "[", 1, L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&g2, (wv), L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&g2, "]))) ", 5, L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&g2, (spawned), L->arena);
-#line 4631 "cc/lower/lower_parallel.cch"
+#line 4274 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&g2, "++; }", 5, L->arena);
         pl_pw_text(L, blk, g1, sp);
         pl_pw_text(L, blk, g2, sp);
@@ -52302,197 +52200,197 @@ static void pl_pw_lower(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
         /* a bound handle is honored at enter -- a paused dest hands out no
          * ticket until it resumes -- and a cancelled one hands out none */
         CCString k1 = hdest ? ({
-#line 4643 "cc/lower/lower_parallel.cch"
-            CCString __cc_str_81 = cc_string_new();
-#line 4643 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_81, "cc_parallel_honor(&", 19, L->arena);
-#line 4643 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_81, (hv), L->arena);
-#line 4643 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_81, "); if (cc_nursery_is_cancelled_host(", 36, L->arena);
-#line 4643 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_81, (nur), L->arena);
-#line 4643 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_81, ") || cc_atomic_load(&", 21, L->arena);
-#line 4643 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_81, (hv), L->arena);
-#line 4643 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_81, ".cancelled)) break", 18, L->arena);
-#line 4643 "cc/lower/lower_parallel.cch"
-            __cc_str_81;
-#line 4643 "cc/lower/lower_parallel.cch"
+#line 4286 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_79 = cc_string_new();
+#line 4286 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_79, "cc_parallel_honor(&", 19, L->arena);
+#line 4286 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_79, (hv), L->arena);
+#line 4286 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_79, "); if (cc_nursery_is_cancelled_host(", 36, L->arena);
+#line 4286 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_79, (nur), L->arena);
+#line 4286 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_79, ") || cc_atomic_load(&", 21, L->arena);
+#line 4286 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_79, (hv), L->arena);
+#line 4286 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_79, ".cancelled)) break", 18, L->arena);
+#line 4286 "cc/lower/lower_parallel.cch"
+            __cc_str_79;
+#line 4286 "cc/lower/lower_parallel.cch"
         }) : ({
-            CCString __cc_str_82 = cc_string_new();
-#line 4644 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_82, "if (cc_nursery_is_cancelled_host(", 33, L->arena);
-#line 4644 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_82, (nur), L->arena);
-#line 4644 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_82, ")) break", 8, L->arena);
-#line 4644 "cc/lower/lower_parallel.cch"
-            __cc_str_82;
-#line 4644 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_80 = cc_string_new();
+#line 4287 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_80, "if (cc_nursery_is_cancelled_host(", 33, L->arena);
+#line 4287 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_80, (nur), L->arena);
+#line 4287 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_80, ")) break", 8, L->arena);
+#line 4287 "cc/lower/lower_parallel.cch"
+            __cc_str_80;
+#line 4287 "cc/lower/lower_parallel.cch"
         });
         CCString k2 = cc_string_new();
-#line 4645 "cc/lower/lower_parallel.cch"
+#line 4288 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k2, "if (cc_atomic_load(&", 20, L->arena);
-#line 4645 "cc/lower/lower_parallel.cch"
+#line 4288 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&k2, (cell), L->arena);
-#line 4645 "cc/lower/lower_parallel.cch"
+#line 4288 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k2, ".xk)) break", 11, L->arena);
         CCString k3 = cc_string_new();
-#line 4646 "cc/lower/lower_parallel.cch"
+#line 4289 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k3, "if (!", 5, L->arena);
-#line 4646 "cc/lower/lower_parallel.cch"
+#line 4289 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&k3, (spawned), L->arena);
-#line 4646 "cc/lower/lower_parallel.cch"
+#line 4289 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k3, " && ", 4, L->arena);
-#line 4646 "cc/lower/lower_parallel.cch"
+#line 4289 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&k3, (ev), L->arena);
-#line 4646 "cc/lower/lower_parallel.cch"
+#line 4289 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k3, ".slots[0].failed) break", 23, L->arena);
         CCString k4 = cc_string_new();
-#line 4647 "cc/lower/lower_parallel.cch"
+#line 4290 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k4, "{ __typeof__(cc_turnstile_enter(", 32, L->arena);
-#line 4647 "cc/lower/lower_parallel.cch"
+#line 4290 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&k4, (gv), L->arena);
-#line 4647 "cc/lower/lower_parallel.cch"
+#line 4290 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k4, ", ", 2, L->arena);
-#line 4647 "cc/lower/lower_parallel.cch"
+#line 4290 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&k4, (iv), L->arena);
-#line 4647 "cc/lower/lower_parallel.cch"
+#line 4290 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k4, ")) __cc_pw_r = cc_turnstile_enter(", 34, L->arena);
-#line 4647 "cc/lower/lower_parallel.cch"
+#line 4290 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&k4, (gv), L->arena);
-#line 4647 "cc/lower/lower_parallel.cch"
+#line 4290 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k4, ", ", 2, L->arena);
-#line 4647 "cc/lower/lower_parallel.cch"
+#line 4290 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&k4, (iv), L->arena);
-#line 4647 "cc/lower/lower_parallel.cch"
+#line 4290 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k4, "); ", 3, L->arena);
-#line 4647 "cc/lower/lower_parallel.cch"
+#line 4290 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&k4, (eok), L->arena);
-#line 4647 "cc/lower/lower_parallel.cch"
+#line 4290 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k4, " = __cc_pw_r.ok; if (!__cc_pw_r.ok) ", 36, L->arena);
-#line 4647 "cc/lower/lower_parallel.cch"
+#line 4290 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&k4, (ferr), L->arena);
-#line 4647 "cc/lower/lower_parallel.cch"
+#line 4290 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k4, " = __cc_pw_r.u.error.base; }", 28, L->arena);
         CCString k5 = cc_string_new();
-#line 4648 "cc/lower/lower_parallel.cch"
+#line 4291 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k5, "if (!", 5, L->arena);
-#line 4648 "cc/lower/lower_parallel.cch"
+#line 4291 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&k5, (eok), L->arena);
-#line 4648 "cc/lower/lower_parallel.cch"
+#line 4291 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k5, ") { ", 4, L->arena);
-#line 4648 "cc/lower/lower_parallel.cch"
+#line 4291 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&k5, (fail), L->arena);
-#line 4648 "cc/lower/lower_parallel.cch"
+#line 4291 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k5, " = 1; ", 6, L->arena);
-#line 4648 "cc/lower/lower_parallel.cch"
+#line 4291 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&k5, (best), L->arena);
-#line 4648 "cc/lower/lower_parallel.cch"
+#line 4291 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k5, " = ", 3, L->arena);
-#line 4648 "cc/lower/lower_parallel.cch"
+#line 4291 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&k5, (iv), L->arena);
-#line 4648 "cc/lower/lower_parallel.cch"
+#line 4291 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k5, "; break; }", 10, L->arena);
         CCString k6 = cc_string_new();
-#line 4649 "cc/lower/lower_parallel.cch"
+#line 4292 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&k6, (sf), L->arena);
-#line 4649 "cc/lower/lower_parallel.cch"
+#line 4292 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k6, " = 0", 4, L->arena);
         CCString k7 = cc_string_new();
-#line 4650 "cc/lower/lower_parallel.cch"
+#line 4293 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k7, "if (", 4, L->arena);
-#line 4650 "cc/lower/lower_parallel.cch"
+#line 4293 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&k7, (spawned), L->arena);
-#line 4650 "cc/lower/lower_parallel.cch"
+#line 4293 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k7, " && cc_chan_send(", 17, L->arena);
-#line 4650 "cc/lower/lower_parallel.cch"
+#line 4293 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&k7, (work), L->arena);
-#line 4650 "cc/lower/lower_parallel.cch"
+#line 4293 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k7, ", &", 3, L->arena);
-#line 4650 "cc/lower/lower_parallel.cch"
+#line 4293 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&k7, (iv), L->arena);
-#line 4650 "cc/lower/lower_parallel.cch"
+#line 4293 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k7, ", sizeof(", 9, L->arena);
-#line 4650 "cc/lower/lower_parallel.cch"
+#line 4293 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&k7, (iv), L->arena);
-#line 4650 "cc/lower/lower_parallel.cch"
+#line 4293 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k7, ")) != 0) ", 9, L->arena);
-#line 4650 "cc/lower/lower_parallel.cch"
+#line 4293 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&k7, (sf), L->arena);
-#line 4650 "cc/lower/lower_parallel.cch"
+#line 4293 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k7, " = 1", 4, L->arena);
         CCString k8 = cc_string_new();
-#line 4651 "cc/lower/lower_parallel.cch"
+#line 4294 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k8, "if (!", 5, L->arena);
-#line 4651 "cc/lower/lower_parallel.cch"
+#line 4294 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&k8, (spawned), L->arena);
-#line 4651 "cc/lower/lower_parallel.cch"
+#line 4294 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k8, ") ", 2, L->arena);
-#line 4651 "cc/lower/lower_parallel.cch"
+#line 4294 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&k8, (run), L->arena);
-#line 4651 "cc/lower/lower_parallel.cch"
+#line 4294 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k8, "(&", 2, L->arena);
-#line 4651 "cc/lower/lower_parallel.cch"
+#line 4294 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&k8, (ev), L->arena);
-#line 4651 "cc/lower/lower_parallel.cch"
+#line 4294 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k8, ", ", 2, L->arena);
-#line 4651 "cc/lower/lower_parallel.cch"
+#line 4294 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&k8, (iv), L->arena);
-#line 4651 "cc/lower/lower_parallel.cch"
+#line 4294 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k8, ", 0)", 4, L->arena);
         CCString k9 = cc_string_new();
-#line 4652 "cc/lower/lower_parallel.cch"
+#line 4295 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k9, "if (", 4, L->arena);
-#line 4652 "cc/lower/lower_parallel.cch"
+#line 4295 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&k9, (sf), L->arena);
-#line 4652 "cc/lower/lower_parallel.cch"
+#line 4295 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k9, ") { (void)cc_turnstile_leave(", 29, L->arena);
-#line 4652 "cc/lower/lower_parallel.cch"
+#line 4295 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&k9, (gv), L->arena);
-#line 4652 "cc/lower/lower_parallel.cch"
+#line 4295 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k9, "); ", 3, L->arena);
-#line 4652 "cc/lower/lower_parallel.cch"
+#line 4295 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&k9, (ferr), L->arena);
-#line 4652 "cc/lower/lower_parallel.cch"
+#line 4295 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k9, " = CC_ERROR(CC_ERR_IO, \"parallel wait send\"); ", 46, L->arena);
-#line 4652 "cc/lower/lower_parallel.cch"
+#line 4295 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&k9, (fail), L->arena);
-#line 4652 "cc/lower/lower_parallel.cch"
+#line 4295 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k9, " = 1; ", 6, L->arena);
-#line 4652 "cc/lower/lower_parallel.cch"
+#line 4295 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&k9, (best), L->arena);
-#line 4652 "cc/lower/lower_parallel.cch"
+#line 4295 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k9, " = ", 3, L->arena);
-#line 4652 "cc/lower/lower_parallel.cch"
+#line 4295 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&k9, (iv), L->arena);
-#line 4652 "cc/lower/lower_parallel.cch"
+#line 4295 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&k9, "; break; }", 10, L->arena);
         CCString ki = cc_string_new();
-#line 4653 "cc/lower/lower_parallel.cch"
+#line 4296 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&ki, (iv), L->arena);
-#line 4653 "cc/lower/lower_parallel.cch"
+#line 4296 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&ki, " = (int)(", 9, L->arena);
-#line 4653 "cc/lower/lower_parallel.cch"
+#line 4296 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&ki, (los), L->arena);
-#line 4653 "cc/lower/lower_parallel.cch"
+#line 4296 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&ki, ")", 1, L->arena);
         CCString kc = cc_string_new();
-#line 4654 "cc/lower/lower_parallel.cch"
+#line 4297 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&kc, (iv), L->arena);
-#line 4654 "cc/lower/lower_parallel.cch"
+#line 4297 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&kc, " < (int)(", 9, L->arena);
-#line 4654 "cc/lower/lower_parallel.cch"
+#line 4297 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&kc, (his), L->arena);
-#line 4654 "cc/lower/lower_parallel.cch"
+#line 4297 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&kc, ")", 1, L->arena);
         CCString ks = cc_string_new();
-#line 4655 "cc/lower/lower_parallel.cch"
+#line 4298 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&ks, (iv), L->arena);
-#line 4655 "cc/lower/lower_parallel.cch"
+#line 4298 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&ks, "++", 2, L->arena);
         pl_pw_text(L, lb, k1, sp);
         pl_pw_text(L, lb, k2, sp);
@@ -52507,26 +52405,26 @@ static void pl_pw_lower(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
     }
     {
         CCString h1 = cc_string_new();
-#line 4668 "cc/lower/lower_parallel.cch"
+#line 4311 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&h1, "if (", 4, L->arena);
-#line 4668 "cc/lower/lower_parallel.cch"
+#line 4311 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&h1, (work), L->arena);
-#line 4668 "cc/lower/lower_parallel.cch"
+#line 4311 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&h1, ") cc_chan_close(", 16, L->arena);
-#line 4668 "cc/lower/lower_parallel.cch"
+#line 4311 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&h1, (work), L->arena);
-#line 4668 "cc/lower/lower_parallel.cch"
+#line 4311 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&h1, ")", 1, L->arena);
         CCString h2 = cc_string_new();
-#line 4669 "cc/lower/lower_parallel.cch"
+#line 4312 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&h2, "if (", 4, L->arena);
-#line 4669 "cc/lower/lower_parallel.cch"
+#line 4312 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&h2, (nur), L->arena);
-#line 4669 "cc/lower/lower_parallel.cch"
+#line 4312 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&h2, ") (void)cc_nursery_wait_host(", 29, L->arena);
-#line 4669 "cc/lower/lower_parallel.cch"
+#line 4312 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&h2, (nur), L->arena);
-#line 4669 "cc/lower/lower_parallel.cch"
+#line 4312 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&h2, ")", 1, L->arena);
         pl_pw_text(L, blk, h1, sp);
         pl_pw_text(L, blk, h2, sp);
@@ -52536,13 +52434,13 @@ static void pl_pw_lower(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
         /* joined: every ticket ran or was drained, and the pool is about to
          * go, so the handle names no nursery any more */
         CCString t = cc_string_new();
-#line 4677 "cc/lower/lower_parallel.cch"
+#line 4320 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&t, (hv), L->arena);
-#line 4677 "cc/lower/lower_parallel.cch"
+#line 4320 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&t, ".n = 0; cc_atomic_store(&", 25, L->arena);
-#line 4677 "cc/lower/lower_parallel.cch"
+#line 4320 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&t, (hv), L->arena);
-#line 4677 "cc/lower/lower_parallel.cch"
+#line 4320 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&t, ".joined, 1)", 11, L->arena);
         pl_pw_text(L, blk, t, sp);
     }
@@ -52551,69 +52449,69 @@ static void pl_pw_lower(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
          * echo of the cancel the first error asked for */
         CcStmt *hb = lw_block(L, sp);
         CCString p1 = cc_string_new();
-#line 4684 "cc/lower/lower_parallel.cch"
+#line 4327 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&p1, (slt), L->arena);
-#line 4684 "cc/lower/lower_parallel.cch"
+#line 4327 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&p1, "* __cc_pw_it = &", 16, L->arena);
-#line 4684 "cc/lower/lower_parallel.cch"
+#line 4327 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&p1, (ev), L->arena);
-#line 4684 "cc/lower/lower_parallel.cch"
+#line 4327 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&p1, ".slots[", 7, L->arena);
-#line 4684 "cc/lower/lower_parallel.cch"
+#line 4327 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&p1, (wv), L->arena);
-#line 4684 "cc/lower/lower_parallel.cch"
+#line 4327 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&p1, "]; int __cc_pw_ec = __cc_pw_it->failed && (__cc_pw_it->err.kind == CC_ERR_CANCELLED)", 84, L->arena);
         CCString p2 = cc_string_new();
-#line 4685 "cc/lower/lower_parallel.cch"
+#line 4328 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&p2, "if (__cc_pw_it->failed && (!", 28, L->arena);
-#line 4685 "cc/lower/lower_parallel.cch"
+#line 4328 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&p2, (fail), L->arena);
-#line 4685 "cc/lower/lower_parallel.cch"
+#line 4328 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&p2, " || (!__cc_pw_ec && ", 20, L->arena);
-#line 4685 "cc/lower/lower_parallel.cch"
+#line 4328 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&p2, (echo), L->arena);
-#line 4685 "cc/lower/lower_parallel.cch"
+#line 4328 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&p2, ") || (__cc_pw_ec == ", 20, L->arena);
-#line 4685 "cc/lower/lower_parallel.cch"
+#line 4328 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&p2, (echo), L->arena);
-#line 4685 "cc/lower/lower_parallel.cch"
+#line 4328 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&p2, " && __cc_pw_it->i < ", 20, L->arena);
-#line 4685 "cc/lower/lower_parallel.cch"
+#line 4328 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&p2, (best), L->arena);
-#line 4685 "cc/lower/lower_parallel.cch"
+#line 4328 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&p2, "))) { ", 6, L->arena);
-#line 4685 "cc/lower/lower_parallel.cch"
+#line 4328 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&p2, (ferr), L->arena);
-#line 4685 "cc/lower/lower_parallel.cch"
+#line 4328 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&p2, " = __cc_pw_it->err; ", 20, L->arena);
-#line 4685 "cc/lower/lower_parallel.cch"
+#line 4328 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&p2, (fail), L->arena);
-#line 4685 "cc/lower/lower_parallel.cch"
+#line 4328 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&p2, " = 1; ", 6, L->arena);
-#line 4685 "cc/lower/lower_parallel.cch"
+#line 4328 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&p2, (best), L->arena);
-#line 4685 "cc/lower/lower_parallel.cch"
+#line 4328 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&p2, " = __cc_pw_it->i; ", 18, L->arena);
-#line 4685 "cc/lower/lower_parallel.cch"
+#line 4328 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&p2, (echo), L->arena);
-#line 4685 "cc/lower/lower_parallel.cch"
+#line 4328 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&p2, " = __cc_pw_ec; }", 16, L->arena);
         CCString hi = cc_string_new();
-#line 4686 "cc/lower/lower_parallel.cch"
+#line 4329 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&hi, (wv), L->arena);
-#line 4686 "cc/lower/lower_parallel.cch"
+#line 4329 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&hi, " = 0", 4, L->arena);
         CCString hc = cc_string_new();
-#line 4687 "cc/lower/lower_parallel.cch"
+#line 4330 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&hc, (wv), L->arena);
-#line 4687 "cc/lower/lower_parallel.cch"
+#line 4330 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&hc, " < ", 3, L->arena);
-#line 4687 "cc/lower/lower_parallel.cch"
+#line 4330 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&hc, (nh), L->arena);
         CCString hs = cc_string_new();
-#line 4688 "cc/lower/lower_parallel.cch"
+#line 4331 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&hs, (wv), L->arena);
-#line 4688 "cc/lower/lower_parallel.cch"
+#line 4331 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&hs, "++", 2, L->arena);
         pl_pw_text(L, hb, p1, sp);
         pl_pw_text(L, hb, p2, sp);
@@ -52621,26 +52519,26 @@ static void pl_pw_lower(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
     }
     {
         CCString r1 = cc_string_new();
-#line 4694 "cc/lower/lower_parallel.cch"
+#line 4337 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&r1, "if (", 4, L->arena);
-#line 4694 "cc/lower/lower_parallel.cch"
+#line 4337 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&r1, (work), L->arena);
-#line 4694 "cc/lower/lower_parallel.cch"
+#line 4337 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&r1, ") cc_chan_free(", 15, L->arena);
-#line 4694 "cc/lower/lower_parallel.cch"
+#line 4337 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&r1, (work), L->arena);
-#line 4694 "cc/lower/lower_parallel.cch"
+#line 4337 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&r1, ")", 1, L->arena);
         CCString r2 = cc_string_new();
-#line 4695 "cc/lower/lower_parallel.cch"
+#line 4338 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&r2, "if (", 4, L->arena);
-#line 4695 "cc/lower/lower_parallel.cch"
+#line 4338 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&r2, (nur), L->arena);
-#line 4695 "cc/lower/lower_parallel.cch"
+#line 4338 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&r2, ") cc_nursery_free_host(", 23, L->arena);
-#line 4695 "cc/lower/lower_parallel.cch"
+#line 4338 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&r2, (nur), L->arena);
-#line 4695 "cc/lower/lower_parallel.cch"
+#line 4338 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&r2, ")", 1, L->arena);
         pl_pw_text(L, blk, r1, sp);
         pl_pw_text(L, blk, r2, sp);
@@ -52652,16 +52550,16 @@ static void pl_pw_lower(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
         CcStmt *fw = cc__stmt_blank(sp, L->arena);
         CcErrFwd fe;
         CCString cnd = cc_string_new();
-#line 4705 "cc/lower/lower_parallel.cch"
+#line 4348 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&cnd, (fail), L->arena);
         fe.err = lw_paren(L, lw_ident(L, ferr, sp), sp);
         fe.delegate = false;
         {
-#line 4708 "cc/lower/lower_parallel.cch"
+#line 4351 "cc/lower/lower_parallel.cch"
             CcStmtK sk = { .kind = CcStmtK_err_fwd, .u.err_fwd = fe };
-#line 4708 "cc/lower/lower_parallel.cch"
+#line 4351 "cc/lower/lower_parallel.cch"
             fw->k = sk;
-#line 4708 "cc/lower/lower_parallel.cch"
+#line 4351 "cc/lower/lower_parallel.cch"
         }
         lw_push(then, fw);
         lw_push(blk, lw_if(L, lw_text(L, cnd, sp), then, NULL, sp));
@@ -52670,16 +52568,16 @@ static void pl_pw_lower(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
         /* a `return` inside the body is the caller's to make */
         CcStmt *then = lw_block(L, sp);
         CCString rv = cc_string_new();
-#line 4715 "cc/lower/lower_parallel.cch"
+#line 4358 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&rv, (cell), L->arena);
-#line 4715 "cc/lower/lower_parallel.cch"
+#line 4358 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&rv, ".rv", 3, L->arena);
         CCString cnd = cc_string_new();
-#line 4716 "cc/lower/lower_parallel.cch"
+#line 4359 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&cnd, "cc_atomic_load(&", 16, L->arena);
-#line 4716 "cc/lower/lower_parallel.cch"
+#line 4359 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&cnd, (cell), L->arena);
-#line 4716 "cc/lower/lower_parallel.cch"
+#line 4359 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&cnd, ".xk) == 2", 9, L->arena);
         lw_push(then, cc_stmt_return(lw_text(L, rv, sp), sp, L->arena));
         lw_push(blk, lw_if(L, lw_text(L, cnd, sp), then, NULL, sp));
@@ -52688,13 +52586,13 @@ static void pl_pw_lower(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
         /* the walk's own answer, reached only by the site that neither
          * raised nor returned: every ticket ran unless one of them broke */
         CCString t = cc_string_new();
-#line 4723 "cc/lower/lower_parallel.cch"
+#line 4366 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&t, (dst), L->arena);
-#line 4723 "cc/lower/lower_parallel.cch"
+#line 4366 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&t, " = (cc_atomic_load(&", 20, L->arena);
-#line 4723 "cc/lower/lower_parallel.cch"
+#line 4366 "cc/lower/lower_parallel.cch"
         cc__string_slot_push(&t, (cell), L->arena);
-#line 4723 "cc/lower/lower_parallel.cch"
+#line 4366 "cc/lower/lower_parallel.cch"
         cc_string_push_buffer(&t, ".xk) != 1)", 10, L->arena);
         pl_pw_text(L, blk, t, sp);
     }
@@ -52708,22 +52606,22 @@ static void pl_pw_lower(PStep *st, CcStmt *s, CcParallelFor pf, CcRange rg) {
 static bool pl_pw_tail_raises(CcExpr *tail) {
     bool raises = false;
     if (!tail)
-#line 4735 "cc/lower/lower_parallel.cch"
+#line 4378 "cc/lower/lower_parallel.cch"
         return false;
     switch ((tail->k).kind) {
         case CcExprK_unwrap:
-#line 4737 "cc/lower/lower_parallel.cch"
+#line 4380 "cc/lower/lower_parallel.cch"
             raises = true;
-#line 4737 "cc/lower/lower_parallel.cch"
+#line 4380 "cc/lower/lower_parallel.cch"
             break;
         /* the destroy tail on a bound handle unwraps the same way */
         case CcExprK_unwrap_destroy:
-#line 4739 "cc/lower/lower_parallel.cch"
+#line 4382 "cc/lower/lower_parallel.cch"
             raises = true;
-#line 4739 "cc/lower/lower_parallel.cch"
+#line 4382 "cc/lower/lower_parallel.cch"
             break;
         default:
-#line 4740 "cc/lower/lower_parallel.cch"
+#line 4383 "cc/lower/lower_parallel.cch"
             break;
     }
     return raises;
@@ -52743,87 +52641,87 @@ static bool pl_pw_break_at(CcStmt *s, int depth) {
     CcStmt *a = NULL;
     CcStmt *b = NULL;
     if (!s)
-#line 4758 "cc/lower/lower_parallel.cch"
+#line 4401 "cc/lower/lower_parallel.cch"
         return false;
     switch ((s->k).kind) {
         case CcStmtK_break_:
-#line 4760 "cc/lower/lower_parallel.cch"
+#line 4403 "cc/lower/lower_parallel.cch"
             is_break = true;
-#line 4760 "cc/lower/lower_parallel.cch"
+#line 4403 "cc/lower/lower_parallel.cch"
             break;
         case CcStmtK_for_: {
-#line 4761 "cc/lower/lower_parallel.cch"
+#line 4404 "cc/lower/lower_parallel.cch"
             CcFor x = (s->k).u.for_;
-#line 4761 "cc/lower/lower_parallel.cch"
+#line 4404 "cc/lower/lower_parallel.cch"
             opens = true;
-#line 4761 "cc/lower/lower_parallel.cch"
+#line 4404 "cc/lower/lower_parallel.cch"
             a = x.body;
-#line 4761 "cc/lower/lower_parallel.cch"
+#line 4404 "cc/lower/lower_parallel.cch"
             break;
-#line 4761 "cc/lower/lower_parallel.cch"
+#line 4404 "cc/lower/lower_parallel.cch"
         }
         case CcStmtK_while_: {
-#line 4762 "cc/lower/lower_parallel.cch"
+#line 4405 "cc/lower/lower_parallel.cch"
             CcWhile x = (s->k).u.while_;
-#line 4762 "cc/lower/lower_parallel.cch"
+#line 4405 "cc/lower/lower_parallel.cch"
             opens = true;
-#line 4762 "cc/lower/lower_parallel.cch"
+#line 4405 "cc/lower/lower_parallel.cch"
             a = x.body;
-#line 4762 "cc/lower/lower_parallel.cch"
+#line 4405 "cc/lower/lower_parallel.cch"
             break;
-#line 4762 "cc/lower/lower_parallel.cch"
+#line 4405 "cc/lower/lower_parallel.cch"
         }
         case CcStmtK_do_: {
-#line 4763 "cc/lower/lower_parallel.cch"
+#line 4406 "cc/lower/lower_parallel.cch"
             CcWhile x = (s->k).u.do_;
-#line 4763 "cc/lower/lower_parallel.cch"
+#line 4406 "cc/lower/lower_parallel.cch"
             opens = true;
-#line 4763 "cc/lower/lower_parallel.cch"
+#line 4406 "cc/lower/lower_parallel.cch"
             a = x.body;
-#line 4763 "cc/lower/lower_parallel.cch"
+#line 4406 "cc/lower/lower_parallel.cch"
             break;
-#line 4763 "cc/lower/lower_parallel.cch"
+#line 4406 "cc/lower/lower_parallel.cch"
         }
         case CcStmtK_switch_: {
-#line 4764 "cc/lower/lower_parallel.cch"
+#line 4407 "cc/lower/lower_parallel.cch"
             CcSwitch x = (s->k).u.switch_;
-#line 4764 "cc/lower/lower_parallel.cch"
+#line 4407 "cc/lower/lower_parallel.cch"
             opens = true;
-#line 4764 "cc/lower/lower_parallel.cch"
+#line 4407 "cc/lower/lower_parallel.cch"
             a = x.body;
-#line 4764 "cc/lower/lower_parallel.cch"
+#line 4407 "cc/lower/lower_parallel.cch"
             break;
-#line 4764 "cc/lower/lower_parallel.cch"
+#line 4407 "cc/lower/lower_parallel.cch"
         }
         case CcStmtK_if_: {
-#line 4765 "cc/lower/lower_parallel.cch"
+#line 4408 "cc/lower/lower_parallel.cch"
             CcIf x = (s->k).u.if_;
-#line 4765 "cc/lower/lower_parallel.cch"
+#line 4408 "cc/lower/lower_parallel.cch"
             a = x.then;
-#line 4765 "cc/lower/lower_parallel.cch"
+#line 4408 "cc/lower/lower_parallel.cch"
             b = x.els;
-#line 4765 "cc/lower/lower_parallel.cch"
+#line 4408 "cc/lower/lower_parallel.cch"
             break;
-#line 4765 "cc/lower/lower_parallel.cch"
+#line 4408 "cc/lower/lower_parallel.cch"
         }
         case CcStmtK_label: {
-#line 4766 "cc/lower/lower_parallel.cch"
+#line 4409 "cc/lower/lower_parallel.cch"
             CcLabel x = (s->k).u.label;
-#line 4766 "cc/lower/lower_parallel.cch"
+#line 4409 "cc/lower/lower_parallel.cch"
             a = x.inner;
-#line 4766 "cc/lower/lower_parallel.cch"
+#line 4409 "cc/lower/lower_parallel.cch"
             break;
-#line 4766 "cc/lower/lower_parallel.cch"
+#line 4409 "cc/lower/lower_parallel.cch"
         }
         default:
-#line 4767 "cc/lower/lower_parallel.cch"
+#line 4410 "cc/lower/lower_parallel.cch"
             break;
     }
     if (is_break)
-#line 4769 "cc/lower/lower_parallel.cch"
+#line 4412 "cc/lower/lower_parallel.cch"
         return depth == 0;
     if (opens)
-#line 4770 "cc/lower/lower_parallel.cch"
+#line 4413 "cc/lower/lower_parallel.cch"
         inner = depth + 1;
     bs = lw_block_stmts(s);
     if (bs) {
@@ -52831,16 +52729,16 @@ static bool pl_pw_break_at(CcStmt *s, int depth) {
         for (i = 0; i < n; i++) {
             CcStmt *k = *CCVec_CcStmtRef_get_ptr(bs, i);
             if (pl_pw_break_at(k, inner))
-#line 4776 "cc/lower/lower_parallel.cch"
+#line 4419 "cc/lower/lower_parallel.cch"
                 return true;
         }
         return false;
     }
     if (a && pl_pw_break_at(a, inner))
-#line 4780 "cc/lower/lower_parallel.cch"
+#line 4423 "cc/lower/lower_parallel.cch"
         return true;
     if (b && pl_pw_break_at(b, inner))
-#line 4781 "cc/lower/lower_parallel.cch"
+#line 4424 "cc/lower/lower_parallel.cch"
         return true;
     return false;
 }
@@ -52861,20 +52759,20 @@ static bool pl_pw_label_visit(CcStmt *s, void *env) {
     CCSlice name = cc_slice_empty();
     switch ((s->k).kind) {
         case CcStmtK_label: {
-#line 4800 "cc/lower/lower_parallel.cch"
+#line 4443 "cc/lower/lower_parallel.cch"
             CcLabel lb = (s->k).u.label;
-#line 4800 "cc/lower/lower_parallel.cch"
+#line 4443 "cc/lower/lower_parallel.cch"
             name = lb.name;
-#line 4800 "cc/lower/lower_parallel.cch"
+#line 4443 "cc/lower/lower_parallel.cch"
             break;
-#line 4800 "cc/lower/lower_parallel.cch"
+#line 4443 "cc/lower/lower_parallel.cch"
         }
         default:
-#line 4801 "cc/lower/lower_parallel.cch"
+#line 4444 "cc/lower/lower_parallel.cch"
             break;
     }
     if (name.len)
-#line 4803 "cc/lower/lower_parallel.cch"
+#line 4446 "cc/lower/lower_parallel.cch"
         CCVec_CCSlice_push(&g->labels, name);
     return true;
 }
@@ -52892,36 +52790,36 @@ static bool pl_pw_goto_visit(CcStmt *s, void *env) {
      * jump's own field once the switch is behind us. */
     switch ((s->k).kind) {
         case CcStmtK_goto_: {
-#line 4819 "cc/lower/lower_parallel.cch"
+#line 4462 "cc/lower/lower_parallel.cch"
             CcGoto x = (s->k).u.goto_;
-#line 4819 "cc/lower/lower_parallel.cch"
+#line 4462 "cc/lower/lower_parallel.cch"
             gt = x;
-#line 4819 "cc/lower/lower_parallel.cch"
+#line 4462 "cc/lower/lower_parallel.cch"
             is_goto = true;
-#line 4819 "cc/lower/lower_parallel.cch"
+#line 4462 "cc/lower/lower_parallel.cch"
             break;
-#line 4819 "cc/lower/lower_parallel.cch"
+#line 4462 "cc/lower/lower_parallel.cch"
         }
         default:
-#line 4820 "cc/lower/lower_parallel.cch"
+#line 4463 "cc/lower/lower_parallel.cch"
             break;
     }
     if (!is_goto)
-#line 4822 "cc/lower/lower_parallel.cch"
+#line 4465 "cc/lower/lower_parallel.cch"
         return true;
     want = gt.label;
     if (!want.len || g->out.len)
-#line 4824 "cc/lower/lower_parallel.cch"
+#line 4467 "cc/lower/lower_parallel.cch"
         return true;
     n = CCVec_CCSlice_len(&g->labels);
     for (i = 0; i < n; i++) {
         CCSlice nm = *CCVec_CCSlice_get_ptr(&g->labels, i);
         if (slice_eq(nm, want))
-#line 4828 "cc/lower/lower_parallel.cch"
+#line 4471 "cc/lower/lower_parallel.cch"
             inside = true;
     }
     if (!inside)
-#line 4830 "cc/lower/lower_parallel.cch"
+#line 4473 "cc/lower/lower_parallel.cch"
         g->out = want;
     return true;
 }
@@ -52930,7 +52828,7 @@ static CCSlice pl_pw_goto_out(CcLowerer *L, CcStmt *body) {
     CcVisitor v;
     PGoto g;
     if (!body)
-#line 4837 "cc/lower/lower_parallel.cch"
+#line 4480 "cc/lower/lower_parallel.cch"
         return cc_slice_empty();
     g.L = L;
     g.labels = CCVec_CCSlice_new(L->arena);
@@ -52948,11 +52846,11 @@ static CCSlice pl_pw_goto_out(CcLowerer *L, CcStmt *body) {
 
 /* One name, asked of a body: is it declared there, is it read there. */
 typedef struct PCacheQ {
-#line 4853 "cc/lower/lower_parallel.cch"
+#line 4496 "cc/lower/lower_parallel.cch"
     CCSlice want;
-#line 4853 "cc/lower/lower_parallel.cch"
+#line 4496 "cc/lower/lower_parallel.cch"
     bool found;
-#line 4853 "cc/lower/lower_parallel.cch"
+#line 4496 "cc/lower/lower_parallel.cch"
 } PCacheQ;
 
 static bool pl_cache_decl_visit(CcStmt *s, void *env) {
@@ -52961,37 +52859,37 @@ static bool pl_cache_decl_visit(CcStmt *s, void *env) {
     CCSlice nm = cc_slice_empty();
     switch ((s->k).kind) {
         case CcStmtK_decl: {
-#line 4860 "cc/lower/lower_parallel.cch"
+#line 4503 "cc/lower/lower_parallel.cch"
             CcDeclStmt ds = (s->k).u.decl;
-#line 4860 "cc/lower/lower_parallel.cch"
+#line 4503 "cc/lower/lower_parallel.cch"
             d = ds.d;
-#line 4860 "cc/lower/lower_parallel.cch"
+#line 4503 "cc/lower/lower_parallel.cch"
             break;
-#line 4860 "cc/lower/lower_parallel.cch"
+#line 4503 "cc/lower/lower_parallel.cch"
         }
         default:
-#line 4861 "cc/lower/lower_parallel.cch"
+#line 4504 "cc/lower/lower_parallel.cch"
             break;
     }
     if (!d)
-#line 4863 "cc/lower/lower_parallel.cch"
+#line 4506 "cc/lower/lower_parallel.cch"
         return true;
     switch ((d->k).kind) {
         case CcDeclK_var: {
-#line 4865 "cc/lower/lower_parallel.cch"
+#line 4508 "cc/lower/lower_parallel.cch"
             CcVarDecl v = (d->k).u.var;
-#line 4865 "cc/lower/lower_parallel.cch"
+#line 4508 "cc/lower/lower_parallel.cch"
             nm = v.name;
-#line 4865 "cc/lower/lower_parallel.cch"
+#line 4508 "cc/lower/lower_parallel.cch"
             break;
-#line 4865 "cc/lower/lower_parallel.cch"
+#line 4508 "cc/lower/lower_parallel.cch"
         }
         default:
-#line 4866 "cc/lower/lower_parallel.cch"
+#line 4509 "cc/lower/lower_parallel.cch"
             break;
     }
     if (nm.len && slice_eq(nm, q->want))
-#line 4868 "cc/lower/lower_parallel.cch"
+#line 4511 "cc/lower/lower_parallel.cch"
         q->found = true;
     return true;
 }
@@ -53001,20 +52899,20 @@ static bool pl_cache_ident_visit(CcExpr *e, void *env) {
     CCSlice nm = cc_slice_empty();
     switch ((e->k).kind) {
         case CcExprK_ident: {
-#line 4876 "cc/lower/lower_parallel.cch"
+#line 4519 "cc/lower/lower_parallel.cch"
             CCSlice x = (e->k).u.ident;
-#line 4876 "cc/lower/lower_parallel.cch"
+#line 4519 "cc/lower/lower_parallel.cch"
             nm = x;
-#line 4876 "cc/lower/lower_parallel.cch"
+#line 4519 "cc/lower/lower_parallel.cch"
             break;
-#line 4876 "cc/lower/lower_parallel.cch"
+#line 4519 "cc/lower/lower_parallel.cch"
         }
         default:
-#line 4877 "cc/lower/lower_parallel.cch"
+#line 4520 "cc/lower/lower_parallel.cch"
             break;
     }
     if (nm.len && slice_eq(nm, q->want))
-#line 4879 "cc/lower/lower_parallel.cch"
+#line 4522 "cc/lower/lower_parallel.cch"
         q->found = true;
     return true;
 }
@@ -53024,7 +52922,7 @@ static bool pl_cache_body_local(CcStmt *body, CCSlice nm) {
     PCacheQ q;
     CcVisitor v;
     if (!body)
-#line 4887 "cc/lower/lower_parallel.cch"
+#line 4530 "cc/lower/lower_parallel.cch"
         return false;
     q.want = nm;
     q.found = false;
@@ -53041,7 +52939,7 @@ static bool pl_cache_in_stage(CcStmt *body, CCSlice nm) {
     size_t n;
     size_t i;
     if (!bs)
-#line 4902 "cc/lower/lower_parallel.cch"
+#line 4545 "cc/lower/lower_parallel.cch"
         return false;
     n = CCVec_CcStmtRef_len(bs);
     for (i = 0; i < n; i++) {
@@ -53049,16 +52947,16 @@ static bool pl_cache_in_stage(CcStmt *body, CCSlice nm) {
         bool is_stage = false;
         switch ((k->k).kind) {
             case CcStmtK_stage:
-#line 4908 "cc/lower/lower_parallel.cch"
+#line 4551 "cc/lower/lower_parallel.cch"
                 is_stage = true;
-#line 4908 "cc/lower/lower_parallel.cch"
+#line 4551 "cc/lower/lower_parallel.cch"
                 break;
             default:
-#line 4909 "cc/lower/lower_parallel.cch"
+#line 4552 "cc/lower/lower_parallel.cch"
                 break;
         }
         if (!is_stage)
-#line 4911 "cc/lower/lower_parallel.cch"
+#line 4554 "cc/lower/lower_parallel.cch"
             continue;
         {
             PCacheQ q;
@@ -53070,7 +52968,7 @@ static bool pl_cache_in_stage(CcStmt *body, CCSlice nm) {
             v.env = &q;
             CcStmt_walk(k, v);
             if (q.found)
-#line 4921 "cc/lower/lower_parallel.cch"
+#line 4564 "cc/lower/lower_parallel.cch"
                 return true;
         }
     }
@@ -53101,21 +52999,21 @@ static bool pl_pw_cache_ok(PStep *st, CcParallelFor pf, CcSpan sp) {
         bool dup = false;
         size_t j;
         if (!expr_ident(strip_parens_expr(ce), &nm))
-#line 4950 "cc/lower/lower_parallel.cch"
+#line 4593 "cc/lower/lower_parallel.cch"
             continue;
         if (!nm.len)
-#line 4951 "cc/lower/lower_parallel.cch"
+#line 4594 "cc/lower/lower_parallel.cch"
             continue;
         is_bind = pf.loop.bind.len != 0 && slice_eq(nm, pf.loop.bind);
         is_bind2 = pf.loop.bind2.len != 0 && slice_eq(nm, pf.loop.bind2);
         is_worker = pf.worker.len != 0 && slice_eq(nm, pf.worker);
         if (is_bind || is_bind2 || is_worker) {
             CCString m = cc_string_new();
-#line 4956 "cc/lower/lower_parallel.cch"
+#line 4599 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&m, "cache (name) cannot adopt the loop variable or worker binder '", 62, L->arena);
-#line 4956 "cc/lower/lower_parallel.cch"
+#line 4599 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&m, (nm), L->arena);
-#line 4956 "cc/lower/lower_parallel.cch"
+#line 4599 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&m, "'", 1, L->arena);
             lw_error(L, sp, m);
             ok = false;
@@ -53123,11 +53021,11 @@ static bool pl_pw_cache_ok(PStep *st, CcParallelFor pf, CcSpan sp) {
         }
         if (pl_cache_body_local(pf.loop.body, nm)) {
             CCString m = cc_string_new();
-#line 4962 "cc/lower/lower_parallel.cch"
+#line 4605 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&m, "cache (name) '", 14, L->arena);
-#line 4962 "cc/lower/lower_parallel.cch"
+#line 4605 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&m, (nm), L->arena);
-#line 4962 "cc/lower/lower_parallel.cch"
+#line 4605 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&m, "' is a body local — adopt an enclosing declaration", 52, L->arena);
             lw_error(L, sp, m);
             ok = false;
@@ -53135,11 +53033,11 @@ static bool pl_pw_cache_ok(PStep *st, CcParallelFor pf, CcSpan sp) {
         }
         if (!sc_lookup(st->w, nm)) {
             CCString m = cc_string_new();
-#line 4968 "cc/lower/lower_parallel.cch"
+#line 4611 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&m, "cache (name) '", 14, L->arena);
-#line 4968 "cc/lower/lower_parallel.cch"
+#line 4611 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&m, (nm), L->arena);
-#line 4968 "cc/lower/lower_parallel.cch"
+#line 4611 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&m, "' is not a name in the enclosing scope", 38, L->arena);
             lw_error(L, sp, m);
             ok = false;
@@ -53149,19 +53047,19 @@ static bool pl_pw_cache_ok(PStep *st, CcParallelFor pf, CcSpan sp) {
             CcExpr *pe = *CCVec_CcExprRef_get_ptr(cv, j);
             CCSlice pn = cc_slice_empty();
             if (!expr_ident(strip_parens_expr(pe), &pn))
-#line 4976 "cc/lower/lower_parallel.cch"
+#line 4619 "cc/lower/lower_parallel.cch"
                 continue;
             if (pn.len && slice_eq(pn, nm))
-#line 4977 "cc/lower/lower_parallel.cch"
+#line 4620 "cc/lower/lower_parallel.cch"
                 dup = true;
         }
         if (dup) {
             CCString m = cc_string_new();
-#line 4980 "cc/lower/lower_parallel.cch"
+#line 4623 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&m, "cache (name) adopts '", 21, L->arena);
-#line 4980 "cc/lower/lower_parallel.cch"
+#line 4623 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&m, (nm), L->arena);
-#line 4980 "cc/lower/lower_parallel.cch"
+#line 4623 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&m, "' once", 6, L->arena);
             lw_error(L, sp, m);
             ok = false;
@@ -53169,15 +53067,15 @@ static bool pl_pw_cache_ok(PStep *st, CcParallelFor pf, CcSpan sp) {
         }
         if (pl_cache_in_stage(pf.loop.body, nm)) {
             CCString m = cc_string_new();
-#line 4986 "cc/lower/lower_parallel.cch"
+#line 4629 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&m, "cache (name) '", 14, L->arena);
-#line 4986 "cc/lower/lower_parallel.cch"
+#line 4629 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&m, (nm), L->arena);
-#line 4986 "cc/lower/lower_parallel.cch"
+#line 4629 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&m, "' cannot appear in an ", 22, L->arena);
-#line 4986 "cc/lower/lower_parallel.cch"
+#line 4629 "cc/lower/lower_parallel.cch"
             cc__string_slot_push(&m, ("@"), L->arena);
-#line 4986 "cc/lower/lower_parallel.cch"
+#line 4629 "cc/lower/lower_parallel.cch"
             cc_string_push_buffer(&m, "stage block — stage is loop-carried, cache is unobservable instance identity", 78, L->arena);
             lw_error(L, sp, m);
             ok = false;
@@ -53202,17 +53100,17 @@ static void pl_for(PStep *st, CcStmt *s, CcParallelFor pf) {
     CcStmt *gone = lw_block(L, sp);
     if (pf.spawn) {
         m = ({
-#line 5009 "cc/lower/lower_parallel.cch"
-            CCString __cc_str_83 = cc_string_new();
-#line 5009 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_83, "'", 1, L->arena);
-#line 5009 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_83, ("@"), L->arena);
-#line 5009 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_83, "parallel spawn': do not combine with for or wait", 48, L->arena);
-#line 5009 "cc/lower/lower_parallel.cch"
-            __cc_str_83;
-#line 5009 "cc/lower/lower_parallel.cch"
+#line 4652 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_81 = cc_string_new();
+#line 4652 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_81, "'", 1, L->arena);
+#line 4652 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_81, ("@"), L->arena);
+#line 4652 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_81, "parallel spawn': do not combine with for or wait", 48, L->arena);
+#line 4652 "cc/lower/lower_parallel.cch"
+            __cc_str_81;
+#line 4652 "cc/lower/lower_parallel.cch"
         });
         lw_error(L, sp, m);
         s->k = gone->k;
@@ -53227,13 +53125,13 @@ static void pl_for(PStep *st, CcStmt *s, CcParallelFor pf) {
     }
     if (CCVec_CcExprRef_len(&pf.cache) && !pf.wait) {
         m = ({
-#line 5022 "cc/lower/lower_parallel.cch"
-            CCString __cc_str_84 = cc_string_new();
-#line 5022 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_84, "cache (name) requires the wait (gate) form", 42, L->arena);
-#line 5022 "cc/lower/lower_parallel.cch"
-            __cc_str_84;
-#line 5022 "cc/lower/lower_parallel.cch"
+#line 4665 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_82 = cc_string_new();
+#line 4665 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_82, "cache (name) requires the wait (gate) form", 42, L->arena);
+#line 4665 "cc/lower/lower_parallel.cch"
+            __cc_str_82;
+#line 4665 "cc/lower/lower_parallel.cch"
         });
         lw_error(L, sp, m);
         s->k = gone->k;
@@ -53251,16 +53149,16 @@ static void pl_for(PStep *st, CcStmt *s, CcParallelFor pf) {
                 bool is_stage = false;
                 switch ((k->k).kind) {
                     case CcStmtK_stage:
-#line 5038 "cc/lower/lower_parallel.cch"
+#line 4681 "cc/lower/lower_parallel.cch"
                         is_stage = true;
-#line 5038 "cc/lower/lower_parallel.cch"
+#line 4681 "cc/lower/lower_parallel.cch"
                         break;
                     default:
-#line 5039 "cc/lower/lower_parallel.cch"
+#line 4682 "cc/lower/lower_parallel.cch"
                         break;
                 }
                 if (is_stage)
-#line 5041 "cc/lower/lower_parallel.cch"
+#line 4684 "cc/lower/lower_parallel.cch"
                     CCVec_CcStmtRef_push(&st->stages, k);
             }
         }
@@ -53268,7 +53166,7 @@ static void pl_for(PStep *st, CcStmt *s, CcParallelFor pf) {
     /* the body goes with the statement below, so anything in it this step
      * would have reported has to be reported before it does */
     if (pf.loop.body)
-#line 5047 "cc/lower/lower_parallel.cch"
+#line 4690 "cc/lower/lower_parallel.cch"
         pl_stray_stages(st, pf.loop.body);
     if (!pf.wait) {
         CcRange rg;
@@ -53282,26 +53180,26 @@ static void pl_for(PStep *st, CcStmt *s, CcParallelFor pf) {
             return;
         }
         if (pl_par_off_at(st, sp.first))
-#line 5059 "cc/lower/lower_parallel.cch"
+#line 4702 "cc/lower/lower_parallel.cch"
             pl_for_inert(st, s, pf, rg);
-#line 5059 "cc/lower/lower_parallel.cch"
+#line 4702 "cc/lower/lower_parallel.cch"
         else
             pl_for_lower(st, s, pf, rg);
         return;
     }
     if (pf.pred) {
         m = ({
-#line 5064 "cc/lower/lower_parallel.cch"
-            CCString __cc_str_85 = cc_string_new();
-#line 5064 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_85, "a gated '", 9, L->arena);
-#line 5064 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_85, ("@"), L->arena);
-#line 5064 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_85, "parallel wait (...) for' spells its gate 'seq (...)': the predicate form is not lowered by the clean lowerer yet", 112, L->arena);
-#line 5064 "cc/lower/lower_parallel.cch"
-            __cc_str_85;
-#line 5064 "cc/lower/lower_parallel.cch"
+#line 4707 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_83 = cc_string_new();
+#line 4707 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_83, "a gated '", 9, L->arena);
+#line 4707 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_83, ("@"), L->arena);
+#line 4707 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_83, "parallel wait (...) for' spells its gate 'seq (...)': the predicate form is not lowered by the clean lowerer yet", 112, L->arena);
+#line 4707 "cc/lower/lower_parallel.cch"
+            __cc_str_83;
+#line 4707 "cc/lower/lower_parallel.cch"
         });
         lw_error(L, sp, m);
         s->k = gone->k;
@@ -53313,17 +53211,17 @@ static void pl_for(PStep *st, CcStmt *s, CcParallelFor pf) {
     }
     if (!pl_pw_gate_form(st->w, pf.wait)) {
         m = ({
-#line 5074 "cc/lower/lower_parallel.cch"
-            CCString __cc_str_86 = cc_string_new();
-#line 5074 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_86, "'", 1, L->arena);
-#line 5074 "cc/lower/lower_parallel.cch"
-            cc__string_slot_push(&__cc_str_86, ("@"), L->arena);
-#line 5074 "cc/lower/lower_parallel.cch"
-            cc_string_push_buffer(&__cc_str_86, "parallel wait (...)' caps on a gate: it must be a CCTurnstile or a CCTurnstileRW", 80, L->arena);
-#line 5074 "cc/lower/lower_parallel.cch"
-            __cc_str_86;
-#line 5074 "cc/lower/lower_parallel.cch"
+#line 4717 "cc/lower/lower_parallel.cch"
+            CCString __cc_str_84 = cc_string_new();
+#line 4717 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_84, "'", 1, L->arena);
+#line 4717 "cc/lower/lower_parallel.cch"
+            cc__string_slot_push(&__cc_str_84, ("@"), L->arena);
+#line 4717 "cc/lower/lower_parallel.cch"
+            cc_string_push_buffer(&__cc_str_84, "parallel wait (...)' caps on a gate: it must be a CCTurnstile or a CCTurnstileRW", 80, L->arena);
+#line 4717 "cc/lower/lower_parallel.cch"
+            __cc_str_84;
+#line 4717 "cc/lower/lower_parallel.cch"
         });
         lw_error(L, sp, m);
         s->k = gone->k;
@@ -53344,21 +53242,21 @@ static void pl_for(PStep *st, CcStmt *s, CcParallelFor pf) {
         CCSlice away = pl_pw_goto_out(L, pf.loop.body);
         if (away.len) {
             m = ({
-#line 5093 "cc/lower/lower_parallel.cch"
-                CCString __cc_str_87 = cc_string_new();
-#line 5093 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&__cc_str_87, "goto '", 6, L->arena);
-#line 5093 "cc/lower/lower_parallel.cch"
-                cc__string_slot_push(&__cc_str_87, (away), L->arena);
-#line 5093 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&__cc_str_87, "' crosses a '", 13, L->arena);
-#line 5093 "cc/lower/lower_parallel.cch"
-                cc__string_slot_push(&__cc_str_87, ("@"), L->arena);
-#line 5093 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&__cc_str_87, "parallel' boundary", 18, L->arena);
-#line 5093 "cc/lower/lower_parallel.cch"
-                __cc_str_87;
-#line 5093 "cc/lower/lower_parallel.cch"
+#line 4736 "cc/lower/lower_parallel.cch"
+                CCString __cc_str_85 = cc_string_new();
+#line 4736 "cc/lower/lower_parallel.cch"
+                cc_string_push_buffer(&__cc_str_85, "goto '", 6, L->arena);
+#line 4736 "cc/lower/lower_parallel.cch"
+                cc__string_slot_push(&__cc_str_85, (away), L->arena);
+#line 4736 "cc/lower/lower_parallel.cch"
+                cc_string_push_buffer(&__cc_str_85, "' crosses a '", 13, L->arena);
+#line 4736 "cc/lower/lower_parallel.cch"
+                cc__string_slot_push(&__cc_str_85, ("@"), L->arena);
+#line 4736 "cc/lower/lower_parallel.cch"
+                cc_string_push_buffer(&__cc_str_85, "parallel' boundary", 18, L->arena);
+#line 4736 "cc/lower/lower_parallel.cch"
+                __cc_str_85;
+#line 4736 "cc/lower/lower_parallel.cch"
             });
             lw_error(L, sp, m);
             s->k = gone->k;
@@ -53390,9 +53288,9 @@ static void pl_for(PStep *st, CcStmt *s, CcParallelFor pf) {
             return;
         }
         if (pl_par_off_at(st, sp.first))
-#line 5123 "cc/lower/lower_parallel.cch"
+#line 4766 "cc/lower/lower_parallel.cch"
             pl_for_inert(st, s, pf, rg);
-#line 5123 "cc/lower/lower_parallel.cch"
+#line 4766 "cc/lower/lower_parallel.cch"
         else
             pl_pw_lower(st, s, pf, rg);
     }
@@ -53411,35 +53309,35 @@ static void pl_on_decl(Walker *w, CcDecl *d) {
     st->eh_marks = CCVec_size_t_new(st->L->arena);
     switch ((d->k).kind) {
         case CcDeclK_func: {
-#line 5140 "cc/lower/lower_parallel.cch"
+#line 4783 "cc/lower/lower_parallel.cch"
             CcFuncDecl x = (d->k).u.func;
-#line 5140 "cc/lower/lower_parallel.cch"
+#line 4783 "cc/lower/lower_parallel.cch"
             f = x;
-#line 5140 "cc/lower/lower_parallel.cch"
+#line 4783 "cc/lower/lower_parallel.cch"
             is_fn = true;
-#line 5140 "cc/lower/lower_parallel.cch"
+#line 4783 "cc/lower/lower_parallel.cch"
             break;
-#line 5140 "cc/lower/lower_parallel.cch"
+#line 4783 "cc/lower/lower_parallel.cch"
         }
         default:
-#line 5141 "cc/lower/lower_parallel.cch"
+#line 4784 "cc/lower/lower_parallel.cch"
             break;
     }
     if (!is_fn || !f.type)
-#line 5143 "cc/lower/lower_parallel.cch"
+#line 4786 "cc/lower/lower_parallel.cch"
         return;
     switch ((f.type->k).kind) {
         case CcTypeK_func: {
-#line 5145 "cc/lower/lower_parallel.cch"
+#line 4788 "cc/lower/lower_parallel.cch"
             CcFuncType ft = (f.type->k).u.func;
-#line 5145 "cc/lower/lower_parallel.cch"
+#line 4788 "cc/lower/lower_parallel.cch"
             st->fn_ret = ft.ret;
-#line 5145 "cc/lower/lower_parallel.cch"
+#line 4788 "cc/lower/lower_parallel.cch"
             break;
-#line 5145 "cc/lower/lower_parallel.cch"
+#line 4788 "cc/lower/lower_parallel.cch"
         }
         default:
-#line 5146 "cc/lower/lower_parallel.cch"
+#line 4789 "cc/lower/lower_parallel.cch"
             break;
     }
     if (f.body) {
@@ -53449,18 +53347,18 @@ static void pl_on_decl(Walker *w, CcDecl *d) {
         bool is_block = false;
         switch ((f.body->k).kind) {
             case CcStmtK_block: {
-#line 5154 "cc/lower/lower_parallel.cch"
+#line 4797 "cc/lower/lower_parallel.cch"
                 CcBlock b = (f.body->k).u.block;
-#line 5154 "cc/lower/lower_parallel.cch"
+#line 4797 "cc/lower/lower_parallel.cch"
                 body = b.stmts;
-#line 5154 "cc/lower/lower_parallel.cch"
+#line 4797 "cc/lower/lower_parallel.cch"
                 is_block = true;
-#line 5154 "cc/lower/lower_parallel.cch"
+#line 4797 "cc/lower/lower_parallel.cch"
                 break;
-#line 5154 "cc/lower/lower_parallel.cch"
+#line 4797 "cc/lower/lower_parallel.cch"
             }
             default:
-#line 5155 "cc/lower/lower_parallel.cch"
+#line 4798 "cc/lower/lower_parallel.cch"
                 break;
         }
         if (is_block) {
@@ -53471,16 +53369,16 @@ static void pl_on_decl(Walker *w, CcDecl *d) {
                 bool is_eh = false;
                 switch ((t->k).kind) {
                     case CcStmtK_errhandler:
-#line 5164 "cc/lower/lower_parallel.cch"
+#line 4807 "cc/lower/lower_parallel.cch"
                         is_eh = true;
-#line 5164 "cc/lower/lower_parallel.cch"
+#line 4807 "cc/lower/lower_parallel.cch"
                         break;
                     default:
-#line 5165 "cc/lower/lower_parallel.cch"
+#line 4808 "cc/lower/lower_parallel.cch"
                         break;
                 }
                 if (!is_eh)
-#line 5167 "cc/lower/lower_parallel.cch"
+#line 4810 "cc/lower/lower_parallel.cch"
                     continue;
                 CCVec_CcStmtRef_push(&st->eh_top, t);
                 st->eh_any = true;
@@ -53497,50 +53395,50 @@ static void pl_on_stmt(Walker *w, CcStmt *s, bool enter) {
     int shape = 0; /* 1 arms, 2 dest, 3 for, 4 stage, 5 errhandler */
     switch ((s->k).kind) {
         case CcStmtK_parallel: {
-#line 5182 "cc/lower/lower_parallel.cch"
+#line 4825 "cc/lower/lower_parallel.cch"
             CcParallel x = (s->k).u.parallel;
-#line 5182 "cc/lower/lower_parallel.cch"
+#line 4825 "cc/lower/lower_parallel.cch"
             p = x;
-#line 5182 "cc/lower/lower_parallel.cch"
+#line 4825 "cc/lower/lower_parallel.cch"
             shape = 1;
-#line 5182 "cc/lower/lower_parallel.cch"
+#line 4825 "cc/lower/lower_parallel.cch"
             break;
-#line 5182 "cc/lower/lower_parallel.cch"
+#line 4825 "cc/lower/lower_parallel.cch"
         }
         case CcStmtK_parallel_dest: {
-#line 5183 "cc/lower/lower_parallel.cch"
+#line 4826 "cc/lower/lower_parallel.cch"
             CcParallelDest x = (s->k).u.parallel_dest;
-#line 5183 "cc/lower/lower_parallel.cch"
+#line 4826 "cc/lower/lower_parallel.cch"
             pd = x;
-#line 5183 "cc/lower/lower_parallel.cch"
+#line 4826 "cc/lower/lower_parallel.cch"
             shape = 2;
-#line 5183 "cc/lower/lower_parallel.cch"
+#line 4826 "cc/lower/lower_parallel.cch"
             break;
-#line 5183 "cc/lower/lower_parallel.cch"
+#line 4826 "cc/lower/lower_parallel.cch"
         }
         case CcStmtK_parallel_for: {
-#line 5184 "cc/lower/lower_parallel.cch"
+#line 4827 "cc/lower/lower_parallel.cch"
             CcParallelFor x = (s->k).u.parallel_for;
-#line 5184 "cc/lower/lower_parallel.cch"
+#line 4827 "cc/lower/lower_parallel.cch"
             pf = x;
-#line 5184 "cc/lower/lower_parallel.cch"
+#line 4827 "cc/lower/lower_parallel.cch"
             shape = 3;
-#line 5184 "cc/lower/lower_parallel.cch"
+#line 4827 "cc/lower/lower_parallel.cch"
             break;
-#line 5184 "cc/lower/lower_parallel.cch"
+#line 4827 "cc/lower/lower_parallel.cch"
         }
         case CcStmtK_stage:
-#line 5185 "cc/lower/lower_parallel.cch"
+#line 4828 "cc/lower/lower_parallel.cch"
             shape = 4;
-#line 5185 "cc/lower/lower_parallel.cch"
+#line 4828 "cc/lower/lower_parallel.cch"
             break;
         case CcStmtK_errhandler:
-#line 5186 "cc/lower/lower_parallel.cch"
+#line 4829 "cc/lower/lower_parallel.cch"
             shape = 5;
-#line 5186 "cc/lower/lower_parallel.cch"
+#line 4829 "cc/lower/lower_parallel.cch"
             break;
         default:
-#line 5187 "cc/lower/lower_parallel.cch"
+#line 4830 "cc/lower/lower_parallel.cch"
             break;
     }
     if (!enter) {
@@ -53552,7 +53450,7 @@ static void pl_on_stmt(Walker *w, CcStmt *s, bool enter) {
             size_t m = *CCVec_size_t_get_ptr(marks, nm - 1);
             CCVec_size_t_truncate(marks, nm - 1);
             if (shape != 5)
-#line 5197 "cc/lower/lower_parallel.cch"
+#line 4840 "cc/lower/lower_parallel.cch"
                 st->eh_in_scope = m;
         }
         return;
@@ -53562,20 +53460,20 @@ static void pl_on_stmt(Walker *w, CcStmt *s, bool enter) {
         CCVec_size_t_push(marks, st->eh_in_scope);
     }
     if (shape == 5)
-#line 5205 "cc/lower/lower_parallel.cch"
+#line 4848 "cc/lower/lower_parallel.cch"
         st->eh_in_scope++;
     if (shape == 1)
-#line 5206 "cc/lower/lower_parallel.cch"
+#line 4849 "cc/lower/lower_parallel.cch"
         pl_lower(st, s, p);
-#line 5206 "cc/lower/lower_parallel.cch"
+#line 4849 "cc/lower/lower_parallel.cch"
     else if (shape == 2)
         pl_dest(st, s, pd);
-#line 5207 "cc/lower/lower_parallel.cch"
+#line 4850 "cc/lower/lower_parallel.cch"
     else if (shape == 3)
         pl_for(st, s, pf);
-#line 5208 "cc/lower/lower_parallel.cch"
+#line 4851 "cc/lower/lower_parallel.cch"
     else if (shape == 4 && !pl_stage_owned(st, s)) {
-#line 5210 "cc/lower/lower_parallel.cch"
+#line 4853 "cc/lower/lower_parallel.cch"
         CCString m = cc_string_new();
         cc_string_push_cstr(&m, "@stage must be a top-level statement of a '@parallel wait for' body", st->L->arena);
         lw_error(st->L, s->span, m);
@@ -53591,7 +53489,7 @@ static PBind *pl_bind_at(PStep *st, CcStmt *s) {
     for (i = 0; i < n; i++) {
         PBind *b = *CCVec_PBindRef_get_ptr(v, i);
         if (b->at == s)
-#line 5224 "cc/lower/lower_parallel.cch"
+#line 4867 "cc/lower/lower_parallel.cch"
             return b;
     }
     return NULL;
@@ -53602,7 +53500,7 @@ static void pl_declare_binds(PStep *st, CcStmtList *list);
 static void pl_declare_in(PStep *st, CcStmt *s) {
     StmtView v;
     if (!s)
-#line 5233 "cc/lower/lower_parallel.cch"
+#line 4876 "cc/lower/lower_parallel.cch"
         return;
     view_stmt(&v, s);
     if (v.is_block || (v.has_stmts && CCVec_CcStmtRef_len(&v.stmts))) {
@@ -53610,18 +53508,18 @@ static void pl_declare_in(PStep *st, CcStmt *s) {
         pl_declare_binds(st, &inner);
         switch ((s->k).kind) {
             case CcStmtK_block: {
-#line 5239 "cc/lower/lower_parallel.cch"
+#line 4882 "cc/lower/lower_parallel.cch"
                 CcBlock b = (s->k).u.block;
-#line 5239 "cc/lower/lower_parallel.cch"
+#line 4882 "cc/lower/lower_parallel.cch"
                 b.stmts = inner;
-#line 5239 "cc/lower/lower_parallel.cch"
+#line 4882 "cc/lower/lower_parallel.cch"
                 s->k = (CcStmtK){ .kind = CcStmtK_block, .u.block = b };
-#line 5239 "cc/lower/lower_parallel.cch"
+#line 4882 "cc/lower/lower_parallel.cch"
                 break;
-#line 5239 "cc/lower/lower_parallel.cch"
+#line 4882 "cc/lower/lower_parallel.cch"
             }
             default:
-#line 5240 "cc/lower/lower_parallel.cch"
+#line 4883 "cc/lower/lower_parallel.cch"
                 break;
         }
     }
@@ -53649,33 +53547,33 @@ static void pl_declare_binds(PStep *st, CcStmtList *list) {
                 bool is_var = false;
                 switch ((ds->k).kind) {
                     case CcStmtK_decl: {
-#line 5266 "cc/lower/lower_parallel.cch"
+#line 4909 "cc/lower/lower_parallel.cch"
                         CcDeclStmt x = (ds->k).u.decl;
-#line 5266 "cc/lower/lower_parallel.cch"
+#line 4909 "cc/lower/lower_parallel.cch"
                         d = x.d;
-#line 5266 "cc/lower/lower_parallel.cch"
+#line 4909 "cc/lower/lower_parallel.cch"
                         break;
-#line 5266 "cc/lower/lower_parallel.cch"
+#line 4909 "cc/lower/lower_parallel.cch"
                     }
                     default:
-#line 5267 "cc/lower/lower_parallel.cch"
+#line 4910 "cc/lower/lower_parallel.cch"
                         break;
                 }
                 if (d) {
                     switch ((d->k).kind) {
                         case CcDeclK_var: {
-#line 5271 "cc/lower/lower_parallel.cch"
+#line 4914 "cc/lower/lower_parallel.cch"
                             CcVarDecl x = (d->k).u.var;
-#line 5271 "cc/lower/lower_parallel.cch"
+#line 4914 "cc/lower/lower_parallel.cch"
                             v = x;
-#line 5271 "cc/lower/lower_parallel.cch"
+#line 4914 "cc/lower/lower_parallel.cch"
                             is_var = true;
-#line 5271 "cc/lower/lower_parallel.cch"
+#line 4914 "cc/lower/lower_parallel.cch"
                             break;
-#line 5271 "cc/lower/lower_parallel.cch"
+#line 4914 "cc/lower/lower_parallel.cch"
                         }
                         default:
-#line 5272 "cc/lower/lower_parallel.cch"
+#line 4915 "cc/lower/lower_parallel.cch"
                             break;
                     }
                 }
@@ -53683,11 +53581,11 @@ static void pl_declare_binds(PStep *st, CcStmtList *list) {
                     v.destroy = true;
                     v.destroy_body = b->destroy_body;
                     {
-#line 5278 "cc/lower/lower_parallel.cch"
+#line 4921 "cc/lower/lower_parallel.cch"
                         CcDeclK dk = { .kind = CcDeclK_var, .u.var = v };
-#line 5278 "cc/lower/lower_parallel.cch"
+#line 4921 "cc/lower/lower_parallel.cch"
                         d->k = dk;
-#line 5278 "cc/lower/lower_parallel.cch"
+#line 4921 "cc/lower/lower_parallel.cch"
                     }
                 }
             }
@@ -53722,7 +53620,7 @@ static void CcLowerer_parallel(CcLowerer *L) {
     w.env = &st;
     tw_unit(&w);
     if (!st.any)
-#line 5311 "cc/lower/lower_parallel.cch"
+#line 4954 "cc/lower/lower_parallel.cch"
         return;
     if (CCVec_PBindRef_len(&st.binds)) {
         CcDeclList *dv = &L->unit->decls;
@@ -53734,23 +53632,23 @@ static void CcLowerer_parallel(CcLowerer *L) {
             bool is_fn = false;
             switch ((d0->k).kind) {
                 case CcDeclK_func: {
-#line 5321 "cc/lower/lower_parallel.cch"
+#line 4964 "cc/lower/lower_parallel.cch"
                     CcFuncDecl x = (d0->k).u.func;
-#line 5321 "cc/lower/lower_parallel.cch"
+#line 4964 "cc/lower/lower_parallel.cch"
                     f0 = x;
-#line 5321 "cc/lower/lower_parallel.cch"
+#line 4964 "cc/lower/lower_parallel.cch"
                     is_fn = true;
-#line 5321 "cc/lower/lower_parallel.cch"
+#line 4964 "cc/lower/lower_parallel.cch"
                     break;
-#line 5321 "cc/lower/lower_parallel.cch"
+#line 4964 "cc/lower/lower_parallel.cch"
                 }
                 default:
-#line 5322 "cc/lower/lower_parallel.cch"
+#line 4965 "cc/lower/lower_parallel.cch"
                     break;
             }
             st.at_decl = d0;
             if (is_fn && f0.body)
-#line 5325 "cc/lower/lower_parallel.cch"
+#line 4968 "cc/lower/lower_parallel.cch"
                 pl_declare_in(&st, f0.body);
         }
     }
@@ -53768,41 +53666,41 @@ static void CcLowerer_parallel(CcLowerer *L) {
             bool is_pp = false;
             switch ((dd->k).kind) {
                 case CcDeclK_pp:
-#line 5341 "cc/lower/lower_parallel.cch"
+#line 4984 "cc/lower/lower_parallel.cch"
                     is_pp = true;
-#line 5341 "cc/lower/lower_parallel.cch"
+#line 4984 "cc/lower/lower_parallel.cch"
                     break;
                 case CcDeclK_empty:
-#line 5342 "cc/lower/lower_parallel.cch"
+#line 4985 "cc/lower/lower_parallel.cch"
                     is_pp = true;
-#line 5342 "cc/lower/lower_parallel.cch"
+#line 4985 "cc/lower/lower_parallel.cch"
                     break;
                 case CcDeclK_pragma_cc:
-#line 5343 "cc/lower/lower_parallel.cch"
+#line 4986 "cc/lower/lower_parallel.cch"
                     is_pp = true;
-#line 5343 "cc/lower/lower_parallel.cch"
+#line 4986 "cc/lower/lower_parallel.cch"
                     break;
                 case CcDeclK_raw:
-#line 5344 "cc/lower/lower_parallel.cch"
+#line 4987 "cc/lower/lower_parallel.cch"
                     is_pp = true;
-#line 5344 "cc/lower/lower_parallel.cch"
+#line 4987 "cc/lower/lower_parallel.cch"
                     break;
                 default:
-#line 5345 "cc/lower/lower_parallel.cch"
+#line 4988 "cc/lower/lower_parallel.cch"
                     break;
             }
             if (!is_pp)
-#line 5347 "cc/lower/lower_parallel.cch"
+#line 4990 "cc/lower/lower_parallel.cch"
                 break;
             at = k + 1;
         }
         for (k = at; st.first_host && k < nd; k++) {
             if (*CCVec_CcDeclRef_get_ptr(decls, k) == st.first_host) {
-#line 5351 "cc/lower/lower_parallel.cch"
+#line 4994 "cc/lower/lower_parallel.cch"
                 at = k;
-#line 5351 "cc/lower/lower_parallel.cch"
+#line 4994 "cc/lower/lower_parallel.cch"
                 break;
-#line 5351 "cc/lower/lower_parallel.cch"
+#line 4994 "cc/lower/lower_parallel.cch"
             }
         }
         {
@@ -53836,13 +53734,13 @@ static void CcLowerer_parallel(CcLowerer *L) {
             CcDeclList *madev = &st.made;
             size_t nm2 = CCVec_CcDeclRef_len(madev);
             CCVec_CcDeclRef_push(&with, lw_raw_decl(L, ({
-#line 5383 "cc/lower/lower_parallel.cch"
-                CCString __cc_str_88 = cc_string_new();
-#line 5383 "cc/lower/lower_parallel.cch"
-                cc_string_push_buffer(&__cc_str_88, "/* --- CC parallel arms --- */", 30, L->arena);
-#line 5383 "cc/lower/lower_parallel.cch"
-                __cc_str_88;
-#line 5383 "cc/lower/lower_parallel.cch"
+#line 5026 "cc/lower/lower_parallel.cch"
+                CCString __cc_str_86 = cc_string_new();
+#line 5026 "cc/lower/lower_parallel.cch"
+                cc_string_push_buffer(&__cc_str_86, "/* --- CC parallel arms --- */", 30, L->arena);
+#line 5026 "cc/lower/lower_parallel.cch"
+                __cc_str_86;
+#line 5026 "cc/lower/lower_parallel.cch"
             }), sp));
             for (k = 0; k < nm2; k++) {
                 CcDecl *md = *CCVec_CcDeclRef_get_ptr(madev, k);
@@ -53854,9 +53752,9 @@ static void CcLowerer_parallel(CcLowerer *L) {
 }
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_parallel.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_parallel.cch*/
 #line 298 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_variants.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_variants.cch*/
 #line 1 "cc/lower/lower_variants.cch"
 
 /* Clean lowerer, step: variants. A variant declaration lowers to its tag
@@ -58117,9 +58015,9 @@ void CcLowerer_variants(CcLowerer *L) {
 }
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_variants.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_variants.cch*/
 #line 299 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_ufcs.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_ufcs.cch*/
 #line 1 "cc/lower/lower_ufcs.cch"
 
 /* Clean lowerer, step: UFCS. `x.m(args)` and `p->m(args)` become the call
@@ -58323,11 +58221,11 @@ static CcExpr *uf_compound(CcLowerer *L, CcType *t, CcExpr *e, CcSpan sp) {
         at.elem = t;
         at.size = lw_text(L, ({
 #line 134 "cc/lower/lower_ufcs.cch"
-            CCString __cc_str_89 = cc_string_new();
+            CCString __cc_str_87 = cc_string_new();
 #line 134 "cc/lower/lower_ufcs.cch"
-            cc_string_push_buffer(&__cc_str_89, "1", 1, L->arena);
+            cc_string_push_buffer(&__cc_str_87, "1", 1, L->arena);
 #line 134 "cc/lower/lower_ufcs.cch"
-            __cc_str_89;
+            __cc_str_87;
 #line 134 "cc/lower/lower_ufcs.cch"
         }), sp);
         at.is_static = false;
@@ -59895,18 +59793,18 @@ static bool uf_formal_rewrite(Walker *w, UStep *st, CcExpr *e, CcUfcs uf, CcType
     }
     if (!ty) {
         CCString msg = is_alloc ? ({
-            CCString __cc_str_90 = cc_string_new();
+            CCString __cc_str_88 = cc_string_new();
 #line 1110 "cc/lower/lower_ufcs.cch"
-            cc_string_push_buffer(&__cc_str_90, "type: arena.allocT needs its element type: declare a typed pointer destination (T* p = arena.allocT(n)) or spell it (arena.allocT::[T](n))", 138, L->arena);
+            cc_string_push_buffer(&__cc_str_88, "type: arena.allocT needs its element type: declare a typed pointer destination (T* p = arena.allocT(n)) or spell it (arena.allocT::[T](n))", 138, L->arena);
 #line 1110 "cc/lower/lower_ufcs.cch"
-            __cc_str_90;
+            __cc_str_88;
 #line 1110 "cc/lower/lower_ufcs.cch"
         }) : ({
-            CCString __cc_str_91 = cc_string_new();
+            CCString __cc_str_89 = cc_string_new();
 #line 1111 "cc/lower/lower_ufcs.cch"
-            cc_string_push_buffer(&__cc_str_91, "type: 'task.block_on' needs its result type: declare a typed destination (T v = task.block_on()) or spell it (task.block_on::[T]())", 131, L->arena);
+            cc_string_push_buffer(&__cc_str_89, "type: 'task.block_on' needs its result type: declare a typed destination (T v = task.block_on()) or spell it (task.block_on::[T]())", 131, L->arena);
 #line 1111 "cc/lower/lower_ufcs.cch"
-            __cc_str_91;
+            __cc_str_89;
 #line 1111 "cc/lower/lower_ufcs.cch"
         });
         lw_error(L, sp, msg);
@@ -60107,19 +60005,19 @@ static void uf_rewrite(Walker *w, CcExpr *e, CcUfcs uf, CcType *rt, CcMethod *m,
         if (uf.recv && expr_ident(strip_parens_expr(uf.recv), &who) && who.len)
             msg = ({
 #line 1258 "cc/lower/lower_ufcs.cch"
-                CCString __cc_str_92 = cc_string_new();
+                CCString __cc_str_90 = cc_string_new();
 #line 1258 "cc/lower/lower_ufcs.cch"
-                cc_string_push_buffer(&__cc_str_92, "type: cannot type the receiver '", 32, L->arena);
+                cc_string_push_buffer(&__cc_str_90, "type: cannot type the receiver '", 32, L->arena);
 #line 1258 "cc/lower/lower_ufcs.cch"
-                cc__string_slot_push(&__cc_str_92, (who), L->arena);
+                cc__string_slot_push(&__cc_str_90, (who), L->arena);
 #line 1258 "cc/lower/lower_ufcs.cch"
-                cc_string_push_buffer(&__cc_str_92, "' of '.", 7, L->arena);
+                cc_string_push_buffer(&__cc_str_90, "' of '.", 7, L->arena);
 #line 1258 "cc/lower/lower_ufcs.cch"
-                cc__string_slot_push(&__cc_str_92, (uf.method), L->arena);
+                cc__string_slot_push(&__cc_str_90, (uf.method), L->arena);
 #line 1258 "cc/lower/lower_ufcs.cch"
-                cc_string_push_buffer(&__cc_str_92, "'; declare it with a type the index can see", 43, L->arena);
+                cc_string_push_buffer(&__cc_str_90, "'; declare it with a type the index can see", 43, L->arena);
 #line 1258 "cc/lower/lower_ufcs.cch"
-                __cc_str_92;
+                __cc_str_90;
 #line 1258 "cc/lower/lower_ufcs.cch"
             });
 #line 1258 "cc/lower/lower_ufcs.cch"
@@ -60127,19 +60025,19 @@ static void uf_rewrite(Walker *w, CcExpr *e, CcUfcs uf, CcType *rt, CcMethod *m,
 #line 1260 "cc/lower/lower_ufcs.cch"
             msg = ({
 #line 1260 "cc/lower/lower_ufcs.cch"
-                CCString __cc_str_93 = cc_string_new();
+                CCString __cc_str_91 = cc_string_new();
 #line 1260 "cc/lower/lower_ufcs.cch"
-                cc_string_push_buffer(&__cc_str_93, "type: cannot type the receiver of '.", 36, L->arena);
+                cc_string_push_buffer(&__cc_str_91, "type: cannot type the receiver of '.", 36, L->arena);
 #line 1260 "cc/lower/lower_ufcs.cch"
-                cc__string_slot_push(&__cc_str_93, (uf.method), L->arena);
+                cc__string_slot_push(&__cc_str_91, (uf.method), L->arena);
 #line 1260 "cc/lower/lower_ufcs.cch"
-                cc_string_push_buffer(&__cc_str_93, "' (a ", 5, L->arena);
+                cc_string_push_buffer(&__cc_str_91, "' (a ", 5, L->arena);
 #line 1260 "cc/lower/lower_ufcs.cch"
-                cc__string_slot_push(&__cc_str_93, (kind), L->arena);
+                cc__string_slot_push(&__cc_str_91, (kind), L->arena);
 #line 1260 "cc/lower/lower_ufcs.cch"
-                cc_string_push_buffer(&__cc_str_93, "); declare it with a type the index can see", 43, L->arena);
+                cc_string_push_buffer(&__cc_str_91, "); declare it with a type the index can see", 43, L->arena);
 #line 1260 "cc/lower/lower_ufcs.cch"
-                __cc_str_93;
+                __cc_str_91;
 #line 1260 "cc/lower/lower_ufcs.cch"
             });
         lw_error(L, sp, msg);
@@ -63198,9 +63096,9 @@ void CcLowerer_ufcs(CcLowerer *L) {
 }
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_ufcs.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_ufcs.cch*/
 #line 300 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_results.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_results.cch*/
 #line 1 "cc/lower/lower_results.cch"
 
 /* Results: `T!>(E)` types, cc_ok / cc_err, the `!>` and `?>` forms,
@@ -63869,13 +63767,13 @@ static void rl_ctor(RFn *fn, CcExpr *e, bool is_ok, CcExprList args) {
     }
     fname = ({
 #line 402 "cc/lower/lower_results.cch"
-        CCString __cc_str_94 = cc_string_new();
+        CCString __cc_str_92 = cc_string_new();
 #line 402 "cc/lower/lower_results.cch"
-        cc__string_slot_push(&__cc_str_94, (is_ok ? "cc_ok_" : "cc_err_"), L->arena);
+        cc__string_slot_push(&__cc_str_92, (is_ok ? "cc_ok_" : "cc_err_"), L->arena);
 #line 402 "cc/lower/lower_results.cch"
-        cc__string_slot_push(&__cc_str_94, (spec->name), L->arena);
+        cc__string_slot_push(&__cc_str_92, (spec->name), L->arena);
 #line 402 "cc/lower/lower_results.cch"
-        __cc_str_94;
+        __cc_str_92;
 #line 402 "cc/lower/lower_results.cch"
     });
     if (payload)
@@ -67125,9 +67023,9 @@ void CcLowerer_results(CcLowerer *L) {
 }
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_results.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_results.cch*/
 #line 301 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_asargs.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_asargs.cch*/
 #line 1 "cc/lower/lower_asargs.cch"
 
 /* Clean lowerer, step: `as:` coercion at a call.
@@ -67445,9 +67343,9 @@ void CcLowerer_asargs(CcLowerer *L) {
 }
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_asargs.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_asargs.cch*/
 #line 302 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_strswitch.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_strswitch.cch*/
 #line 1 "cc/lower/lower_strswitch.cch"
 
 /* String case labels: `switch (slice) { case "GET": ... }`.
@@ -67844,9 +67742,9 @@ void CcLowerer_strswitch(CcLowerer *L) {
 }
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_strswitch.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_strswitch.cch*/
 #line 303 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_cleanup.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_cleanup.cch*/
 #line 1 "cc/lower/lower_cleanup.cch"
 
 /* Clean lowerer, step: scope-exit cleanup. `@defer stmt;`, `@defer(ok|err)`,
@@ -68920,9 +68818,9 @@ void CcLowerer_cleanup(CcLowerer *L) {
 }
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_cleanup.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_cleanup.cch*/
 #line 304 "cc/lower/lower_impl.cch"
-/*cc:impl_cch_begin:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_own.cch*/
+/*cc:impl_cch_begin:/home/user/concurrent-c/cc/lower/lower_own.cch*/
 #line 1 "cc/lower/lower_own.cch"
 
 /* Clean lowerer, step: ownership and borrow safety.
@@ -71485,7 +71383,7 @@ void CcLowerer_own(CcLowerer *L) {
 }
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_own.cch*/
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_own.cch*/
 #line 305 "cc/lower/lower_impl.cch"
 
 /* The banner every lowered TU starts with: the generator, and the two
@@ -72022,15 +71920,15 @@ static void lw_include_defining_faces(CcLowerer *L, CcDeclList *decls) {
             continue;
         line = ({
 #line 676 "cc/lower/lower_impl.cch"
-            CCString __cc_str_95 = cc_string_new();
+            CCString __cc_str_93 = cc_string_new();
 #line 676 "cc/lower/lower_impl.cch"
-            cc_string_push_buffer(&__cc_str_95, "#include \"", 10, L->arena);
+            cc_string_push_buffer(&__cc_str_93, "#include \"", 10, L->arena);
 #line 676 "cc/lower/lower_impl.cch"
-            cc__string_slot_push(&__cc_str_95, (stem), L->arena);
+            cc__string_slot_push(&__cc_str_93, (stem), L->arena);
 #line 676 "cc/lower/lower_impl.cch"
-            cc_string_push_buffer(&__cc_str_95, ".h\"\n", 4, L->arena);
+            cc_string_push_buffer(&__cc_str_93, ".h\"\n", 4, L->arena);
 #line 676 "cc/lower/lower_impl.cch"
-            __cc_str_95;
+            __cc_str_93;
 #line 676 "cc/lower/lower_impl.cch"
         });
 #line 678 "cc/lower/lower_impl.cch"
@@ -72478,8 +72376,14 @@ static bool lw_tof_scalar(CCSlice n) {
  * `_Static_assert`. Left as written they are a member of a call to
  * `cc_type_of`, which returns a pointer: the host explains a `.` on a
  * pointer, about a line that has no pointer in it. */
+typedef struct TofEnv {
+    CcLowerer *L;
+    bool in_block; /* inside a `@comptime { }` block: the executor's reflection answers */
+} TofEnv;
+
 static bool lw_tof_visit(CcExpr *e, void *env) {
-    CcLowerer *L = (CcLowerer *)(env);
+    TofEnv *te = (TofEnv *)(env);
+    CcLowerer *L = te->L;
     CcExpr *base = NULL;
     CCSlice field = cc_slice_empty();
     bool arrow = false;
@@ -72490,127 +72394,149 @@ static bool lw_tof_visit(CcExpr *e, void *env) {
     CCString out = cc_string_new();
     switch ((e->k).kind) {
         case CcExprK_member: {
-#line 994 "cc/lower/lower_impl.cch"
+#line 1000 "cc/lower/lower_impl.cch"
             CcMember mb = (e->k).u.member;
-#line 994 "cc/lower/lower_impl.cch"
+#line 1000 "cc/lower/lower_impl.cch"
             base = mb.a;
-#line 994 "cc/lower/lower_impl.cch"
+#line 1000 "cc/lower/lower_impl.cch"
             field = mb.name;
-#line 994 "cc/lower/lower_impl.cch"
+#line 1000 "cc/lower/lower_impl.cch"
             arrow = mb.arrow;
-#line 994 "cc/lower/lower_impl.cch"
+#line 1000 "cc/lower/lower_impl.cch"
             break;
-#line 994 "cc/lower/lower_impl.cch"
+#line 1000 "cc/lower/lower_impl.cch"
         }
         default:
-#line 995 "cc/lower/lower_impl.cch"
+#line 1001 "cc/lower/lower_impl.cch"
             return true;
     }
     if (arrow || !field.len)
-#line 997 "cc/lower/lower_impl.cch"
+#line 1003 "cc/lower/lower_impl.cch"
         return true;
     t = lw_tof_subject(base);
     if (!t)
-#line 999 "cc/lower/lower_impl.cch"
+#line 1005 "cc/lower/lower_impl.cch"
         return true;
     tn = CcIndex_canon(L->ix, t);
     scalar = lw_tof_scalar(tn);
     if (cc_slice_eq_cstr(&field, "size"))
-#line 1002 "cc/lower/lower_impl.cch"
+#line 1008 "cc/lower/lower_impl.cch"
         out = ({
-#line 1002 "cc/lower/lower_impl.cch"
-            CCString __cc_str_96 = cc_string_new();
-#line 1002 "cc/lower/lower_impl.cch"
-            cc_string_push_buffer(&__cc_str_96, "((size_t)sizeof(", 16, L->arena);
-#line 1002 "cc/lower/lower_impl.cch"
-            cc__string_slot_push(&__cc_str_96, (tn), L->arena);
-#line 1002 "cc/lower/lower_impl.cch"
-            cc_string_push_buffer(&__cc_str_96, "))", 2, L->arena);
-#line 1002 "cc/lower/lower_impl.cch"
-            __cc_str_96;
-#line 1002 "cc/lower/lower_impl.cch"
+#line 1008 "cc/lower/lower_impl.cch"
+            CCString __cc_str_94 = cc_string_new();
+#line 1008 "cc/lower/lower_impl.cch"
+            cc_string_push_buffer(&__cc_str_94, "((size_t)sizeof(", 16, L->arena);
+#line 1008 "cc/lower/lower_impl.cch"
+            cc__string_slot_push(&__cc_str_94, (tn), L->arena);
+#line 1008 "cc/lower/lower_impl.cch"
+            cc_string_push_buffer(&__cc_str_94, "))", 2, L->arena);
+#line 1008 "cc/lower/lower_impl.cch"
+            __cc_str_94;
+#line 1008 "cc/lower/lower_impl.cch"
         });
-#line 1002 "cc/lower/lower_impl.cch"
+#line 1008 "cc/lower/lower_impl.cch"
     else if (cc_slice_eq_cstr(&field, "align"))
         out = ({
-#line 1003 "cc/lower/lower_impl.cch"
-            CCString __cc_str_97 = cc_string_new();
-#line 1003 "cc/lower/lower_impl.cch"
-            cc_string_push_buffer(&__cc_str_97, "((size_t)_Alignof(", 18, L->arena);
-#line 1003 "cc/lower/lower_impl.cch"
-            cc__string_slot_push(&__cc_str_97, (tn), L->arena);
-#line 1003 "cc/lower/lower_impl.cch"
-            cc_string_push_buffer(&__cc_str_97, "))", 2, L->arena);
-#line 1003 "cc/lower/lower_impl.cch"
-            __cc_str_97;
-#line 1003 "cc/lower/lower_impl.cch"
+#line 1009 "cc/lower/lower_impl.cch"
+            CCString __cc_str_95 = cc_string_new();
+#line 1009 "cc/lower/lower_impl.cch"
+            cc_string_push_buffer(&__cc_str_95, "((size_t)_Alignof(", 18, L->arena);
+#line 1009 "cc/lower/lower_impl.cch"
+            cc__string_slot_push(&__cc_str_95, (tn), L->arena);
+#line 1009 "cc/lower/lower_impl.cch"
+            cc_string_push_buffer(&__cc_str_95, "))", 2, L->arena);
+#line 1009 "cc/lower/lower_impl.cch"
+            __cc_str_95;
+#line 1009 "cc/lower/lower_impl.cch"
         });
-#line 1003 "cc/lower/lower_impl.cch"
+#line 1009 "cc/lower/lower_impl.cch"
     else if (cc_slice_eq_cstr(&field, "name"))
         out = ({
-#line 1004 "cc/lower/lower_impl.cch"
-            CCString __cc_str_98 = cc_string_new();
-#line 1004 "cc/lower/lower_impl.cch"
-            cc_string_push_buffer(&__cc_str_98, "\"", 1, L->arena);
-#line 1004 "cc/lower/lower_impl.cch"
-            cc__string_slot_push(&__cc_str_98, (tn), L->arena);
-#line 1004 "cc/lower/lower_impl.cch"
-            cc_string_push_buffer(&__cc_str_98, "\"", 1, L->arena);
-#line 1004 "cc/lower/lower_impl.cch"
-            __cc_str_98;
-#line 1004 "cc/lower/lower_impl.cch"
+#line 1010 "cc/lower/lower_impl.cch"
+            CCString __cc_str_96 = cc_string_new();
+#line 1010 "cc/lower/lower_impl.cch"
+            cc_string_push_buffer(&__cc_str_96, "\"", 1, L->arena);
+#line 1010 "cc/lower/lower_impl.cch"
+            cc__string_slot_push(&__cc_str_96, (tn), L->arena);
+#line 1010 "cc/lower/lower_impl.cch"
+            cc_string_push_buffer(&__cc_str_96, "\"", 1, L->arena);
+#line 1010 "cc/lower/lower_impl.cch"
+            __cc_str_96;
+#line 1010 "cc/lower/lower_impl.cch"
         });
-#line 1004 "cc/lower/lower_impl.cch"
+#line 1010 "cc/lower/lower_impl.cch"
     else if (cc_slice_eq_cstr(&field, "kind"))
-#line 1006 "cc/lower/lower_impl.cch"
+#line 1012 "cc/lower/lower_impl.cch"
         out = scalar ? ({
-#line 1006 "cc/lower/lower_impl.cch"
-            CCString __cc_str_99 = cc_string_new();
-#line 1006 "cc/lower/lower_impl.cch"
-            cc_string_push_buffer(&__cc_str_99, "(CC_TK_PRIMITIVE)", 17, L->arena);
-#line 1006 "cc/lower/lower_impl.cch"
-            __cc_str_99;
-#line 1006 "cc/lower/lower_impl.cch"
+#line 1012 "cc/lower/lower_impl.cch"
+            CCString __cc_str_97 = cc_string_new();
+#line 1012 "cc/lower/lower_impl.cch"
+            cc_string_push_buffer(&__cc_str_97, "(CC_TK_PRIMITIVE)", 17, L->arena);
+#line 1012 "cc/lower/lower_impl.cch"
+            __cc_str_97;
+#line 1012 "cc/lower/lower_impl.cch"
+        }) : te->in_block ? ({
+            CCString __cc_str_98 = cc_string_new();
+#line 1013 "cc/lower/lower_impl.cch"
+            cc_string_push_buffer(&__cc_str_98, "(cc_reflect_kind(\"", 18, L->arena);
+#line 1013 "cc/lower/lower_impl.cch"
+            cc__string_slot_push(&__cc_str_98, (tn), L->arena);
+#line 1013 "cc/lower/lower_impl.cch"
+            cc_string_push_buffer(&__cc_str_98, "\"))", 3, L->arena);
+#line 1013 "cc/lower/lower_impl.cch"
+            __cc_str_98;
+#line 1013 "cc/lower/lower_impl.cch"
         }) : ({
-            CCString __cc_str_100 = cc_string_new();
-#line 1007 "cc/lower/lower_impl.cch"
-            cc_string_push_buffer(&__cc_str_100, "(cc_type_of(\"", 13, L->arena);
-#line 1007 "cc/lower/lower_impl.cch"
-            cc__string_slot_push(&__cc_str_100, (tn), L->arena);
-#line 1007 "cc/lower/lower_impl.cch"
-            cc_string_push_buffer(&__cc_str_100, "\")->kind)", 9, L->arena);
-#line 1007 "cc/lower/lower_impl.cch"
-            __cc_str_100;
-#line 1007 "cc/lower/lower_impl.cch"
+            CCString __cc_str_99 = cc_string_new();
+#line 1014 "cc/lower/lower_impl.cch"
+            cc_string_push_buffer(&__cc_str_99, "(cc_type_of(\"", 13, L->arena);
+#line 1014 "cc/lower/lower_impl.cch"
+            cc__string_slot_push(&__cc_str_99, (tn), L->arena);
+#line 1014 "cc/lower/lower_impl.cch"
+            cc_string_push_buffer(&__cc_str_99, "\")->kind)", 9, L->arena);
+#line 1014 "cc/lower/lower_impl.cch"
+            __cc_str_99;
+#line 1014 "cc/lower/lower_impl.cch"
         });
-#line 1007 "cc/lower/lower_impl.cch"
+#line 1014 "cc/lower/lower_impl.cch"
     else if (cc_slice_eq_cstr(&field, "nfields"))
-#line 1009 "cc/lower/lower_impl.cch"
+#line 1016 "cc/lower/lower_impl.cch"
         out = scalar ? ({
-#line 1009 "cc/lower/lower_impl.cch"
+#line 1016 "cc/lower/lower_impl.cch"
+            CCString __cc_str_100 = cc_string_new();
+#line 1016 "cc/lower/lower_impl.cch"
+            cc_string_push_buffer(&__cc_str_100, "((size_t)0)", 11, L->arena);
+#line 1016 "cc/lower/lower_impl.cch"
+            __cc_str_100;
+#line 1016 "cc/lower/lower_impl.cch"
+        }) : te->in_block ? ({
             CCString __cc_str_101 = cc_string_new();
-#line 1009 "cc/lower/lower_impl.cch"
-            cc_string_push_buffer(&__cc_str_101, "((size_t)0)", 11, L->arena);
-#line 1009 "cc/lower/lower_impl.cch"
+#line 1017 "cc/lower/lower_impl.cch"
+            cc_string_push_buffer(&__cc_str_101, "((size_t)cc_reflect_field_count(\"", 33, L->arena);
+#line 1017 "cc/lower/lower_impl.cch"
+            cc__string_slot_push(&__cc_str_101, (tn), L->arena);
+#line 1017 "cc/lower/lower_impl.cch"
+            cc_string_push_buffer(&__cc_str_101, "\"))", 3, L->arena);
+#line 1017 "cc/lower/lower_impl.cch"
             __cc_str_101;
-#line 1009 "cc/lower/lower_impl.cch"
+#line 1017 "cc/lower/lower_impl.cch"
         }) : ({
             CCString __cc_str_102 = cc_string_new();
-#line 1010 "cc/lower/lower_impl.cch"
+#line 1018 "cc/lower/lower_impl.cch"
             cc_string_push_buffer(&__cc_str_102, "((size_t)cc_type_of(\"", 21, L->arena);
-#line 1010 "cc/lower/lower_impl.cch"
+#line 1018 "cc/lower/lower_impl.cch"
             cc__string_slot_push(&__cc_str_102, (tn), L->arena);
-#line 1010 "cc/lower/lower_impl.cch"
+#line 1018 "cc/lower/lower_impl.cch"
             cc_string_push_buffer(&__cc_str_102, "\")->nfields)", 12, L->arena);
-#line 1010 "cc/lower/lower_impl.cch"
+#line 1018 "cc/lower/lower_impl.cch"
             __cc_str_102;
-#line 1010 "cc/lower/lower_impl.cch"
+#line 1018 "cc/lower/lower_impl.cch"
         });
-#line 1010 "cc/lower/lower_impl.cch"
+#line 1018 "cc/lower/lower_impl.cch"
     else
         ok = false;
     if (!ok)
-#line 1012 "cc/lower/lower_impl.cch"
+#line 1020 "cc/lower/lower_impl.cch"
         return true;
     {
         CcExpr *rep = lw_text(L, out, e->span);
@@ -72621,9 +72547,39 @@ static bool lw_tof_visit(CcExpr *e, void *env) {
 
 static void CcLowerer_typeof_members(CcLowerer *L) {
     CcVisitor v;
+    TofEnv te;
+    size_t i;
+    size_t nb = CCVec_CcDeclRef_len(&L->ct_fns);
+    memset(&te, 0, sizeof(te));
+    te.L = L;
     memset(&v, 0, sizeof(v));
     v.expr = lw_tof_visit;
-    v.env = L;
+    v.env = &te;
+    /* a block's members first: there `type_of(T).nfields` is a question
+     * for the executor's reflection, not the runtime registry */
+    te.in_block = true;
+    for (i = 0; i < nb; i++) {
+        CcDecl *d = *CCVec_CcDeclRef_get_ptr(&L->ct_fns, i);
+        CcStmt *body = NULL;
+        switch ((d->k).kind) {
+            case CcDeclK_func: {
+#line 1045 "cc/lower/lower_impl.cch"
+                CcFuncDecl fd = (d->k).u.func;
+#line 1045 "cc/lower/lower_impl.cch"
+                body = fd.body;
+#line 1045 "cc/lower/lower_impl.cch"
+                break;
+#line 1045 "cc/lower/lower_impl.cch"
+            }
+            default:
+#line 1046 "cc/lower/lower_impl.cch"
+                break;
+        }
+        if (body)
+#line 1048 "cc/lower/lower_impl.cch"
+            CcStmt_walk(body, v);
+    }
+    te.in_block = false;
     CcUnit_walk(L->unit, v);
 }
 
@@ -72634,35 +72590,35 @@ static void CcLowerer_typeof_members(CcLowerer *L) {
 static CCSlice lw_ptr_named(CcType *t) {
     CcType *p = NULL;
     if (!t)
-#line 1034 "cc/lower/lower_impl.cch"
+#line 1060 "cc/lower/lower_impl.cch"
         return cc_slice_empty();
     switch ((t->k).kind) {
         case CcTypeK_pointer: {
-#line 1036 "cc/lower/lower_impl.cch"
+#line 1062 "cc/lower/lower_impl.cch"
             CcPointerType pt = (t->k).u.pointer;
-#line 1036 "cc/lower/lower_impl.cch"
+#line 1062 "cc/lower/lower_impl.cch"
             p = pt.pointee;
-#line 1036 "cc/lower/lower_impl.cch"
+#line 1062 "cc/lower/lower_impl.cch"
             break;
-#line 1036 "cc/lower/lower_impl.cch"
+#line 1062 "cc/lower/lower_impl.cch"
         }
         default:
-#line 1037 "cc/lower/lower_impl.cch"
+#line 1063 "cc/lower/lower_impl.cch"
             return cc_slice_empty();
     }
     if (!p)
-#line 1039 "cc/lower/lower_impl.cch"
+#line 1065 "cc/lower/lower_impl.cch"
         return cc_slice_empty();
     switch ((p->k).kind) {
         case CcTypeK_named: {
-#line 1041 "cc/lower/lower_impl.cch"
+#line 1067 "cc/lower/lower_impl.cch"
             CcNamedType nm = (p->k).u.named;
-#line 1041 "cc/lower/lower_impl.cch"
+#line 1067 "cc/lower/lower_impl.cch"
             return nm.name;
-#line 1041 "cc/lower/lower_impl.cch"
+#line 1067 "cc/lower/lower_impl.cch"
         }
         default:
-#line 1042 "cc/lower/lower_impl.cch"
+#line 1068 "cc/lower/lower_impl.cch"
             return cc_slice_empty();
     }
 }
@@ -72675,26 +72631,26 @@ static void lw_fwd_scan(CcType *t, CcNameList *out, int depth) {
     size_t n;
     size_t i;
     if (!t || depth > 4)
-#line 1053 "cc/lower/lower_impl.cch"
+#line 1079 "cc/lower/lower_impl.cch"
         return;
     switch ((t->k).kind) {
         case CcTypeK_record: {
-#line 1055 "cc/lower/lower_impl.cch"
+#line 1081 "cc/lower/lower_impl.cch"
             CcRecordType x = (t->k).u.record;
-#line 1055 "cc/lower/lower_impl.cch"
+#line 1081 "cc/lower/lower_impl.cch"
             rc = x;
-#line 1055 "cc/lower/lower_impl.cch"
+#line 1081 "cc/lower/lower_impl.cch"
             is_rec = true;
-#line 1055 "cc/lower/lower_impl.cch"
+#line 1081 "cc/lower/lower_impl.cch"
             break;
-#line 1055 "cc/lower/lower_impl.cch"
+#line 1081 "cc/lower/lower_impl.cch"
         }
         default:
-#line 1056 "cc/lower/lower_impl.cch"
+#line 1082 "cc/lower/lower_impl.cch"
             break;
     }
     if (!is_rec || !rc.is_definition)
-#line 1058 "cc/lower/lower_impl.cch"
+#line 1084 "cc/lower/lower_impl.cch"
         return;
     fv = &rc.fields;
     n = CCVec_CcField_len(fv);
@@ -72702,11 +72658,11 @@ static void lw_fwd_scan(CcType *t, CcNameList *out, int depth) {
         CcField *f = CCVec_CcField_get_ptr(fv, i);
         CCSlice nm = lw_ptr_named(f->type);
         if (nm.len) {
-#line 1064 "cc/lower/lower_impl.cch"
+#line 1090 "cc/lower/lower_impl.cch"
             CCVec_CCSlice_push(out, nm);
-#line 1064 "cc/lower/lower_impl.cch"
+#line 1090 "cc/lower/lower_impl.cch"
             continue;
-#line 1064 "cc/lower/lower_impl.cch"
+#line 1090 "cc/lower/lower_impl.cch"
         }
         lw_fwd_scan(f->type, out, depth + 1);
     }
@@ -72716,59 +72672,59 @@ static void lw_fwd_scan(CcType *t, CcNameList *out, int depth) {
  * definition; empty when the type is not one, or is anonymous. */
 static CCSlice lw_record_tag(CcType *t, bool *is_union) {
     if (!t)
-#line 1072 "cc/lower/lower_impl.cch"
+#line 1098 "cc/lower/lower_impl.cch"
         return cc_slice_empty();
     switch ((t->k).kind) {
         case CcTypeK_record: {
-#line 1074 "cc/lower/lower_impl.cch"
+#line 1100 "cc/lower/lower_impl.cch"
             CcRecordType rc = (t->k).u.record;
-#line 1074 "cc/lower/lower_impl.cch"
+#line 1100 "cc/lower/lower_impl.cch"
             {
                 CCSlice tag = rc.tag;
                 bool u = rc.is_union;
                 bool def = rc.is_definition;
                 if (!def)
-#line 1078 "cc/lower/lower_impl.cch"
+#line 1104 "cc/lower/lower_impl.cch"
                     return cc_slice_empty();
                 *is_union = u;
                 return tag;
             }
-#line 1081 "cc/lower/lower_impl.cch"
+#line 1107 "cc/lower/lower_impl.cch"
         }
         default:
-#line 1082 "cc/lower/lower_impl.cch"
+#line 1108 "cc/lower/lower_impl.cch"
             return cc_slice_empty();
     }
 }
 
 static CcType *lw_decl_type(CcDecl *d) {
     if (!d)
-#line 1087 "cc/lower/lower_impl.cch"
+#line 1113 "cc/lower/lower_impl.cch"
         return NULL;
     switch ((d->k).kind) {
         case CcDeclK_var: {
-#line 1089 "cc/lower/lower_impl.cch"
+#line 1115 "cc/lower/lower_impl.cch"
             CcVarDecl v = (d->k).u.var;
-#line 1089 "cc/lower/lower_impl.cch"
+#line 1115 "cc/lower/lower_impl.cch"
             return v.type;
-#line 1089 "cc/lower/lower_impl.cch"
+#line 1115 "cc/lower/lower_impl.cch"
         }
         case CcDeclK_typedef_: {
-#line 1090 "cc/lower/lower_impl.cch"
+#line 1116 "cc/lower/lower_impl.cch"
             CcTypedefDecl td = (d->k).u.typedef_;
-#line 1090 "cc/lower/lower_impl.cch"
+#line 1116 "cc/lower/lower_impl.cch"
             return td.type;
-#line 1090 "cc/lower/lower_impl.cch"
+#line 1116 "cc/lower/lower_impl.cch"
         }
         case CcDeclK_tagged: {
-#line 1091 "cc/lower/lower_impl.cch"
+#line 1117 "cc/lower/lower_impl.cch"
             CcTaggedDecl tg = (d->k).u.tagged;
-#line 1091 "cc/lower/lower_impl.cch"
+#line 1117 "cc/lower/lower_impl.cch"
             return tg.type;
-#line 1091 "cc/lower/lower_impl.cch"
+#line 1117 "cc/lower/lower_impl.cch"
         }
         default:
-#line 1092 "cc/lower/lower_impl.cch"
+#line 1118 "cc/lower/lower_impl.cch"
             return NULL;
     }
 }
@@ -72779,7 +72735,7 @@ static bool lw_name_seen(CcNameList *v, CCSlice name) {
     for (i = 0; i < n; i++) {
         CCSlice s = *CCVec_CCSlice_get_ptr(v, i);
         if (slice_eq(s, name))
-#line 1101 "cc/lower/lower_impl.cch"
+#line 1127 "cc/lower/lower_impl.cch"
             return true;
     }
     return false;
@@ -72807,7 +72763,7 @@ static void lw_fwd_typedefs(CcLowerer *L) {
         lw_fwd_scan(lw_decl_type(d), &pointed, 0);
     }
     if (!CCVec_CCSlice_len(&pointed))
-#line 1127 "cc/lower/lower_impl.cch"
+#line 1153 "cc/lower/lower_impl.cch"
         return;
     for (i = 0; i < n; i++) {
         CcDecl *d = *CCVec_CcDeclRef_get_ptr(decls, i);
@@ -72817,32 +72773,32 @@ static void lw_fwd_typedefs(CcLowerer *L) {
         CCSlice tag;
         switch ((d->k).kind) {
             case CcDeclK_typedef_: {
-#line 1135 "cc/lower/lower_impl.cch"
+#line 1161 "cc/lower/lower_impl.cch"
                 CcTypedefDecl x = (d->k).u.typedef_;
-#line 1135 "cc/lower/lower_impl.cch"
+#line 1161 "cc/lower/lower_impl.cch"
                 td = x;
-#line 1135 "cc/lower/lower_impl.cch"
+#line 1161 "cc/lower/lower_impl.cch"
                 is_td = true;
-#line 1135 "cc/lower/lower_impl.cch"
+#line 1161 "cc/lower/lower_impl.cch"
                 break;
-#line 1135 "cc/lower/lower_impl.cch"
+#line 1161 "cc/lower/lower_impl.cch"
             }
             default:
-#line 1136 "cc/lower/lower_impl.cch"
+#line 1162 "cc/lower/lower_impl.cch"
                 break;
         }
         if (!is_td || !td.name.len)
-#line 1138 "cc/lower/lower_impl.cch"
+#line 1164 "cc/lower/lower_impl.cch"
             continue;
         tag = lw_record_tag(td.type, &is_union);
         if (!tag.len)
-#line 1140 "cc/lower/lower_impl.cch"
+#line 1166 "cc/lower/lower_impl.cch"
             continue;
         if (!lw_name_seen(&pointed, td.name))
-#line 1141 "cc/lower/lower_impl.cch"
+#line 1167 "cc/lower/lower_impl.cch"
             continue;
         if (at == n)
-#line 1142 "cc/lower/lower_impl.cch"
+#line 1168 "cc/lower/lower_impl.cch"
             at = i;
         cc_string_push_cstr(&text, "typedef ", L->arena);
         cc_string_push_cstr(&text, is_union ? "union " : "struct ", L->arena);
@@ -72852,7 +72808,7 @@ static void lw_fwd_typedefs(CcLowerer *L) {
         cc_string_push_cstr(&text, ";\n", L->arena);
     }
     if (at == n || !cc_string_len(&text))
-#line 1150 "cc/lower/lower_impl.cch"
+#line 1176 "cc/lower/lower_impl.cch"
         return;
     {
         CcDecl *anchor = *CCVec_CcDeclRef_get_ptr(decls, at);
@@ -72860,7 +72816,7 @@ static void lw_fwd_typedefs(CcLowerer *L) {
         for (i = 0; i < n; i++) {
             CcDecl *d = *CCVec_CcDeclRef_get_ptr(decls, i);
             if (i == at)
-#line 1156 "cc/lower/lower_impl.cch"
+#line 1182 "cc/lower/lower_impl.cch"
                 CCVec_CcDeclRef_push(&with, raw);
             CCVec_CcDeclRef_push(&with, d);
         }
@@ -72869,14 +72825,15 @@ static void lw_fwd_typedefs(CcLowerer *L) {
 }
 
 void CcLowerer_lower_unit(CcLowerer *L) {
-    CcLowerer_comptime(L); /* first: a value the user asked for at compile time is a constant to every step */
+    CcLowerer_ct_blocks(L); /* first: a compile-time block is a function to every step */
+    CcLowerer_comptime(L); /* then: a value the user asked for at compile time is a constant to every step */
     CcLowerer_own(L); /* then, before any rewrite: the ownership checks read the program as written */
     CcLowerer_typeof(L); /* likewise: `type_of(T)` names a type by its spelling, as written */
     CcLowerer_typeof_members(L); /* then fold its members: a constant where C wants one */
     CcLowerer_includes(L);
     CcLowerer_deadline(L); /* before the rest: a deadline body is ordinary statements to every one of them */
     CcLowerer_chan(L);
-#line 1170 "cc/lower/lower_impl.cch"
+#line 1197 "cc/lower/lower_impl.cch"
     /* before them: an endpoint is the runtime handle before anything
                                captures it, spells it into a frame, or copies it into an arm */
     CcLowerer_async(L); /* then: an async body is an ordinary body to every step after it */
@@ -72895,12 +72852,13 @@ void CcLowerer_lower_unit(CcLowerer *L) {
     CcLowerer_strswitch(L); /* last but cleanup: the subject it spells is the C it will be */
     CcLowerer_cleanup(L);
     lw_drop_cc_only(L); /* after the steps: the index reads faces off the unit's declarations */
+    lw_ct_regions(L); /* after the drop: the block functions stay, between their markers */
     lw_fwd_typedefs(L); /* after them: the records the steps spliced need forwards too */
     lw_banner(L);
 }
 
 #endif
-/*cc:impl_cch_end:/Users/airm5/Documents/code/concurrent-c/cc/lower/lower_impl.cch*/
-#line 158 "out/.cc-build/modules/lower_cch.e37159c939efaeb9.ccs"
+/*cc:impl_cch_end:/home/user/concurrent-c/cc/lower/lower_impl.cch*/
+#line 163 "out/.cc-build/modules/lower_cch.c8f8cf2eb817ae5a.ccs"
 
 #endif

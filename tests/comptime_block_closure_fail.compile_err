@@ -1,0 +1,2 @@
+comptime_block_closure_fail.ccs:8
+a closure does not belong in a @comptime block
