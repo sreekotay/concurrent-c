@@ -37,3 +37,19 @@ The "brk" in the comment is the switch-scratch-reclaim defect fixed in
 main's `796b454` ("@scratch reclaim before @switch cases jumped over
 init (host brk)"). On 411 the top-level handler is the right form and
 the five per-site handlers and the comment can go.
+
+## Seed 0.4.0-414: the face is gone
+
+`face_dispatch.ccs` no longer compiles, with two diagnostics that name
+the rule and the types:
+
+```
+error: '@errhandler(CCError)' handles an error nothing in its scope raises;
+       remove it, or unwrap a Result of 'CCError' under it
+error: no matching '@errhandler' for error type 'CCIoError': 'io_fail' is
+       'bool !>(CCIoError)'; in-scope '@errhandler' is 'CCError'
+```
+
+The misroute this study found is now a compile error. `redis_std.ccs`
+on main still compiles on 414 with its five per-site handlers, which
+are now merely unnecessary.
