@@ -34,7 +34,6 @@ static void bench_abort(const char* msg) {
 
 static void reply_init_inline(BenchWireReply* wr, uint64_t seq) {
     memset(wr, 0, sizeof(*wr));
-    wr->reply.kind = REDIS_REPLY_WIRE;
     wr->data_inline = 1;
     int len = snprintf(wr->inline_buf, sizeof(wr->inline_buf),
                        "$5\r\n%05llu\r\n",
@@ -42,12 +41,22 @@ static void reply_init_inline(BenchWireReply* wr, uint64_t seq) {
     if (len < 0 || (size_t)len >= sizeof(wr->inline_buf)) {
         bench_abort("failed to build inline reply");
     }
-    wr->reply.data = wr->inline_buf.to_slice_n((size_t)len);
+    char[:] w = wr->inline_buf.to_slice_n((size_t)len);
+    wr->reply = (RedisReply){ .wire = w };
+}
+
+/* The wire bytes a reply points at; NULL for any other arm. */
+static const char* reply_wire_ptr(const RedisReply* r) {
+    if (r->kind == .wire) return r->wire.ptr;
+    return NULL;
 }
 
 static void reply_rebase_inline_ptr(BenchWireReply* wr) {
     if (!wr || !wr->data_inline) return;
-    wr->reply.data = wr->inline_buf.to_slice_n(wr->reply.data.len);
+    if (wr->reply.kind == .wire) {
+        char[:] w = wr->inline_buf.to_slice_n(wr->reply.wire.len);
+        wr->reply = (RedisReply){ .wire = w };
+    }
 }
 
 static int notify_signal(void* ctx_ptr) {
@@ -92,7 +101,7 @@ static uint64_t bench_local_ready_queue(void) {
                 bench_abort("local queue pop failed");
             }
             reply_rebase_inline_ptr(&reply);
-            if (reply.reply.data.ptr != reply.inline_buf) bench_abort("local queue rebase failed");
+            if (reply_wire_ptr(&reply.reply) != reply.inline_buf) bench_abort("local queue rebase failed");
         }
         (void)cc_local_ready_queue_continue_drain(&q);
     }
@@ -128,7 +137,7 @@ static uint64_t bench_chan_by_value(void) {
                 bench_abort("channel by-value recv failed");
             }
             reply_rebase_inline_ptr(&reply);
-            if (reply.reply.data.ptr != reply.inline_buf) bench_abort("channel by-value rebase failed");
+            if (reply_wire_ptr(&reply.reply) != reply.inline_buf) bench_abort("channel by-value rebase failed");
         }
     }
     uint64_t elapsed = now_ns() - start;
@@ -164,7 +173,7 @@ static uint64_t bench_chan_by_pointer(void) {
             if (cc_chan_try_recv(ch, &ptr, sizeof(ptr)) != 0) {
                 bench_abort("channel by-pointer recv failed");
             }
-            if (!ptr || ptr->reply.data.ptr != ptr->inline_buf) {
+            if (!ptr || reply_wire_ptr(&ptr->reply) != ptr->inline_buf) {
                 bench_abort("channel by-pointer recv validation failed");
             }
         }

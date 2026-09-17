@@ -1,0 +1,46 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/std/static_map.cch>
+#include <ccc/stdio.cch>
+
+/* A static_map value struct carries a `@variant` field beside its ints:
+ * the serializer flattens the nested struct, so the table states the
+ * command set once, as the type. */
+@variant Verb { get: void; set: void; del: void; };
+
+typedef struct Spec {
+    Verb verb;
+    int min_args;
+    int max_args;
+} Spec;
+
+typedef struct SpecEntry {
+    const char* key;
+    Spec value;
+} SpecEntry;
+
+@comptime {
+    SpecEntry entries[] = {
+        { "GET", { (Verb){ .get = {} }, 1, 1 } },
+        { "SET", { (Verb){ .set = {} }, 2, 2 } },
+        { "DEL", { (Verb){ .del = {} }, 1, -1 } },
+    };
+    static_map("verbs", entries, CC_STATIC_MAP_ASCII_CI);
+}
+
+static const char* verb_word(Verb v) {
+    @switch (v) {
+    case .get: return "get";
+    case .set: return "set";
+    case .del: return "del";
+    }
+}
+
+int main(void) {
+    const Spec* s = verbs_get(CC_SLICE_LIT("del"));
+    if (!s) { println("miss"); return 1; }
+    const char* w = verb_word(s->verb);
+    int lo = s->min_args;
+    int hi = s->max_args;
+    println(@string(`${w} ${lo} ${hi}`, @scratch));
+    return 0;
+}

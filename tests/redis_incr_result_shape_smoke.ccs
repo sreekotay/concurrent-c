@@ -4,10 +4,7 @@
 #include "../real_projects/redis/redis_cc/redis_cc.cch"
 
 static RedisReply reply_simple_local(const char* s) {
-    RedisReply r = {0};
-    r.kind = REDIS_REPLY_SIMPLE_STRING;
-    r.data = cc_slice_cstr(s);
-    return r;
+    return (RedisReply){ .simple = cc_slice_cstr(s) };
 }
 
 static RedisReply !>(CCError) db_set_local(char[:] key, char[:] value) {

@@ -52,14 +52,14 @@ What we are trying to break, mapped to the specimen's seams:
 | WebSocket | Fragments, RSV, oversize, ping flood, fanout | `ws_protocol_abuse`, `ws_ping_flood`, `ws_fanout`, `ws_churn` |
 | Pages | Throw storm | `pages_throw_storm` |
 | Resource | RSS / fd leak under churn | `conn_churn_rss`, `ws_churn_rss` |
+| Disk / stall | Worker blocked in `pread` on a cold block; static HOL behind it | `cold_fill_hol` |
 | URI | Strict path decode refuse | `uri_decode_refuse` |
 
 Planned (named in reviews, **not** in `MODES` yet): `tls_slow_client_hello`,
-`tls_http_ok`, `cold_fill_hol`, `pages_slow_hold`, `pages_handler_leak`,
+`tls_http_ok`, `pages_slow_hold`, `pages_handler_leak`,
 `write_stall_tiny_sndbuf` (TLS/ciphertext drain; `pending_out` ≠ app cursor),
 `pipelined_close`, `symlink_escape_race`.
-`cold_fill_hol` is the highest-value gap while `checkout_block` still blocks
-on `pread`. Invariants that must stay test-backed: **drop-before-close**
+Invariants that must stay test-backed: **drop-before-close**
 (`fault_bail_live`) and **transport pending ≠ app cursor** (needs
 `write_stall_tiny_sndbuf` / TLS stall).
 
@@ -134,6 +134,12 @@ on `pread`. Invariants that must stay test-backed: **drop-before-close**
 |------|--------|-----------------|--------|
 | `uri_decode_refuse` | green | `%00`, bad `%`, decoded `/` `\` | 400 |
 
+### Disk / stall
+
+| Mode | Status | What it hammers | expect |
+|------|--------|-----------------|--------|
+| `cold_fill_hol` | break | 16 wrk keep-alive readers pull scattered 64 KB ranges of a 128 MB file (quick) that an evictor keeps out of the page cache, so each chunk step is a cold `pread`; a `/4kb.html` probe in its own process measures latency behind them, and the same readers on the warm file separate the load from the stall. Nothing measured shares a Python interpreter lock with load | reports `load` (warm p99 over alone), `stall` (cold p99 over warm), the readers' own p50/p99, throughput, and the cold and warm disk latency; BREAK at `stall >= 3x`. One worker on NVMe-class storage: readers 881 MB/s warm, 348 cold; probe 2.6 ms warm, 5.7 ms cold. `STATICD_STRESS_WORKERS=0` spawns at the engine's level: it grows to four workers on the stall, peers take the stalled tape's queued steps, readers hold 1150 MB/s cold with a 3 ms p99, and the probe sits under 1 ms p50 |
+
 ### Soaks
 
 | Mode | Status | What it hammers | expect |
@@ -166,7 +172,6 @@ timeout. Spawned servers get short env budgets (`HEADER_*`, `KEEPALIVE`).
 
 ### Not in suite yet
 
-- Real uncached disk HOL (`cold_fill_hol` — needs large file + purge)
 - `accept_soft` counter exposed for fd_exhaust receipt
 - io_uring / async-fill completion wake races
 - Multi-GB OOM / cgroup pressure

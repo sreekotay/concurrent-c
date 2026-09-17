@@ -30,6 +30,8 @@ typedef struct CcLowerOpts {
                                  * the family then its type spellings */
     CCSlice factories;          /* families a `@comptime { cc_generic_register(...) }` bound: one line each,
                                  * the family, its handler, then `extend` for one that appends */
+    CcNameList module_faces;    /* faces the driver staged as modules, canonical: an angle include that
+                                 * names one is lowered here, as a quoted include is */
 } CcLowerOpts;
 
 typedef struct CcLowerer {
@@ -72,6 +74,11 @@ typedef struct CcLowerer {
                                  * has to resolve within the body */
     bool factories_ready;       /* the compiled factories have been bound to their handlers */
     bool factories_ok;          /* and the binding worked */
+    /* The `@comptime { }` blocks of this unit, each lowered as the body of
+     * a function the executor runs, and at the same index the anchor the
+     * driver splices what the block emitted at (`enum{__ccs<off>=0};`). */
+    CcDeclList ct_fns;
+    Vec::[CCSlice] ct_markers;
 } CcLowerer;
 
 CcLowerer cc_lowerer_new(CcUnit* u, CcIndex* ix, CcLowerOpts opts, CcDiags* ds);

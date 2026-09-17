@@ -1,0 +1,32 @@
+/* A file-scope `@comptime` block that follows an inlined include and a
+ * `@grammar` expansion still pairs with the region the lowerer wrote for
+ * it: the block runs as lowered code, and the table it builds is there. */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/static_map.cch>
+#include <stdio.h>
+#include "comptime_block_after_grammar_helper.cch"
+
+@grammar(rules) Digits {~~~~
+    digit:  charset [#'0' - #'9']
+    number: keep [some digit]
+~~~~}
+
+typedef struct Entry {
+    const char* key;
+    Spec value;
+} Entry;
+
+@comptime {
+    Entry table[] = {
+        { "PING", { (Verb){ .ping = {} }, 0 } },
+        { "GET",  { (Verb){ .get = {} }, 1 } },
+    };
+    static_map("verbs", table, CC_STATIC_MAP_ASCII_CI);
+}
+
+int main(void) {
+    const Spec* s = verbs_get(cc_slice_cstr("get"));
+    if (!s) return 1;
+    printf("get: min_args=%d is_get=%d\n", s->min_args, s->verb.kind == .get ? 1 : 0);
+    return 0;
+}

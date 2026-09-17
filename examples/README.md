@@ -132,7 +132,8 @@ scanner still accepts raw controls. Full ladder:
 
 | File | Demonstrates |
 |------|--------------|
-| `recipe_tcp_echo.ccs` | Accept until stop; `@parallel(h)` admits each handle onto the dest. Dest-per-conn shape; the file server is `real_projects/staticd` (worker loop). |
+| `recipe_tcp_echo.ccs` | Accept until stop; `@parallel(h)` admits each handle onto the dest. Dest-per-conn shape. |
+| `recipe_server_echo.ccs` | The same echo on `<ccc/std/server.cch>`: `cc_server_listen`, then `serve` runs one step per ready session (`window` / `write` / `consume` / `wait`). The shape of `real_projects/staticd` and `redis_std`. |
 | `recipe_http_get.ccs` | Parallel HTTP requests with `@parallel for` |
 
 HTTP examples require libcurl (system curl on macOS) and `-DCC_ENABLE_HTTP=1`. The

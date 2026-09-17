@@ -20,52 +20,52 @@
 typedef struct RedisReplyOutbox RedisReplyOutbox;
 typedef struct RedisConn RedisConn;
 
-typedef enum RedisCommandKind {
-    REDIS_CMD_PING = 0,
-    REDIS_CMD_CONFIG_GET,
-    REDIS_CMD_ECHO,
-    REDIS_CMD_GET,
-    REDIS_CMD_SET,
-    REDIS_CMD_SETNX,
-    REDIS_CMD_SETEX,
-    REDIS_CMD_PSETEX,
-    REDIS_CMD_APPEND,
-    REDIS_CMD_STRLEN,
-    REDIS_CMD_TYPE,
-    REDIS_CMD_DEL,
-    REDIS_CMD_EXISTS,
-    REDIS_CMD_INCR,
-    REDIS_CMD_DECR,
-    REDIS_CMD_INCRBY,
-    REDIS_CMD_DECRBY,
-    REDIS_CMD_MGET,
-    REDIS_CMD_MSET,
-    REDIS_CMD_EXPIRE,
-    REDIS_CMD_PEXPIRE,
-    REDIS_CMD_TTL,
-    REDIS_CMD_PTTL,
-    REDIS_CMD_PERSIST,
-    REDIS_CMD_DBSIZE,
-    REDIS_CMD_FLUSHDB,
-    REDIS_CMD_FLUSHALL,
-    REDIS_CMD_KEYS,
+@variant RedisCommand {
+    ping: void;
+    config_get: void;
+    echo: void;
+    get: void;
+    set: void;
+    setnx: void;
+    setex: void;
+    psetex: void;
+    append: void;
+    strlen: void;
+    type: void;
+    del: void;
+    exists: void;
+    incr: void;
+    decr: void;
+    incrby: void;
+    decrby: void;
+    mget: void;
+    mset: void;
+    expire: void;
+    pexpire: void;
+    ttl: void;
+    pttl: void;
+    persist: void;
+    dbsize: void;
+    flushdb: void;
+    flushall: void;
+    keys: void;
     /* Concurrent-C: dump arena / mem stats to stderr; reply +OK. */
-    REDIS_CMD_CC_MEMLOG,
-} RedisCommandKind;
+    cc_memlog: void;
+};
 
 /* Channel element form:
  *   structured — SIMPLE/BULK/INTEGER/NULL_BULK/ERROR (domain shape)
  *   WIRE       — opaque RESP bytes already in the reply arena (array+nil
  *                shapes that do not round-trip through structured arms)
  * Ownership (arena-safe for send_into) is a separate seam from form. */
-typedef enum RedisReplyKind {
-    REDIS_REPLY_SIMPLE_STRING = 0,
-    REDIS_REPLY_BULK_STRING,
-    REDIS_REPLY_INTEGER,
-    REDIS_REPLY_NULL_BULK,
-    REDIS_REPLY_ERROR,
-    REDIS_REPLY_WIRE,
-} RedisReplyKind;
+@variant RedisReply {
+    simple: char[:];
+    bulk: char[:];
+    integer: int64_t;
+    null_bulk: void;
+    error: char[:];
+    wire: char[:];
+};
 
 /* Owner-fiber argv AFTER the command word (redis_owner). Idiomatic has
  * no argc cap: schema `items` without `cap N` + a parse arena. Owner
@@ -80,7 +80,7 @@ typedef struct RedisRequest {
     uint64_t request_id;
     uint32_t shard_id;
     RedisConn* conn;
-    RedisCommandKind kind;
+    RedisCommand kind;
     size_t argc;
     char[:] argv[REDIS_ARGV_MAX];
     /* argv-clone scratch: req->arena wraps argv_buf and heap-spills
@@ -90,57 +90,52 @@ typedef struct RedisRequest {
     char argv_buf[REDIS_REQUEST_ARGV_BUF_CAP];
 } RedisRequest;
 
-typedef struct RedisReply {
-    RedisReplyKind kind;
-    char[:] data;
-    int64_t int_value;
-} RedisReply;
 
-static inline const char* redis_command_name(RedisCommandKind kind) {
-    switch (kind) {
-        case REDIS_CMD_PING: return "PING";
-        case REDIS_CMD_CONFIG_GET: return "CONFIG_GET";
-        case REDIS_CMD_ECHO: return "ECHO";
-        case REDIS_CMD_GET: return "GET";
-        case REDIS_CMD_SET: return "SET";
-        case REDIS_CMD_SETNX: return "SETNX";
-        case REDIS_CMD_SETEX: return "SETEX";
-        case REDIS_CMD_PSETEX: return "PSETEX";
-        case REDIS_CMD_APPEND: return "APPEND";
-        case REDIS_CMD_STRLEN: return "STRLEN";
-        case REDIS_CMD_TYPE: return "TYPE";
-        case REDIS_CMD_DEL: return "DEL";
-        case REDIS_CMD_EXISTS: return "EXISTS";
-        case REDIS_CMD_INCR: return "INCR";
-        case REDIS_CMD_DECR: return "DECR";
-        case REDIS_CMD_INCRBY: return "INCRBY";
-        case REDIS_CMD_DECRBY: return "DECRBY";
-        case REDIS_CMD_MGET: return "MGET";
-        case REDIS_CMD_MSET: return "MSET";
-        case REDIS_CMD_EXPIRE: return "EXPIRE";
-        case REDIS_CMD_PEXPIRE: return "PEXPIRE";
-        case REDIS_CMD_TTL: return "TTL";
-        case REDIS_CMD_PTTL: return "PTTL";
-        case REDIS_CMD_PERSIST: return "PERSIST";
-        case REDIS_CMD_DBSIZE: return "DBSIZE";
-        case REDIS_CMD_FLUSHDB: return "FLUSHDB";
-        case REDIS_CMD_FLUSHALL: return "FLUSHALL";
-        case REDIS_CMD_KEYS: return "KEYS";
-        case REDIS_CMD_CC_MEMLOG: return "CC_MEMLOG";
-        default: return "UNKNOWN";
+static inline const char* redis_command_name(RedisCommand kind) {
+    @switch (kind) {
+        case .ping: return "PING";
+        case .config_get: return "CONFIG_GET";
+        case .echo: return "ECHO";
+        case .get: return "GET";
+        case .set: return "SET";
+        case .setnx: return "SETNX";
+        case .setex: return "SETEX";
+        case .psetex: return "PSETEX";
+        case .append: return "APPEND";
+        case .strlen: return "STRLEN";
+        case .type: return "TYPE";
+        case .del: return "DEL";
+        case .exists: return "EXISTS";
+        case .incr: return "INCR";
+        case .decr: return "DECR";
+        case .incrby: return "INCRBY";
+        case .decrby: return "DECRBY";
+        case .mget: return "MGET";
+        case .mset: return "MSET";
+        case .expire: return "EXPIRE";
+        case .pexpire: return "PEXPIRE";
+        case .ttl: return "TTL";
+        case .pttl: return "PTTL";
+        case .persist: return "PERSIST";
+        case .dbsize: return "DBSIZE";
+        case .flushdb: return "FLUSHDB";
+        case .flushall: return "FLUSHALL";
+        case .keys: return "KEYS";
+        case .cc_memlog: return "CC_MEMLOG";
     }
+    return "UNKNOWN";
 }
 
-static inline const char* redis_reply_name(RedisReplyKind kind) {
-    switch (kind) {
-        case REDIS_REPLY_SIMPLE_STRING: return "simple-string";
-        case REDIS_REPLY_BULK_STRING: return "bulk-string";
-        case REDIS_REPLY_INTEGER: return "integer";
-        case REDIS_REPLY_NULL_BULK: return "null-bulk";
-        case REDIS_REPLY_ERROR: return "error";
-        case REDIS_REPLY_WIRE: return "wire";
-        default: return "unknown";
+static inline const char* redis_reply_name(const RedisReply* r) {
+    @switch (*r) {
+        case .simple: return "simple-string";
+        case .bulk: return "bulk-string";
+        case .integer: return "integer";
+        case .null_bulk: return "null-bulk";
+        case .error: return "error";
+        case .wire: return "wire";
     }
+    return "unknown";
 }
 
 #endif

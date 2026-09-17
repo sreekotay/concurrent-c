@@ -11007,10 +11007,54 @@ static char* cc__rewrite_result_star_unwrap(const char* src, size_t n) {
     return out;
 }
 
-// Rewrite @link("lib") directives into marker comments that the linker phase can extract.
-// Input:  @link("curl")
-// Output: a comment containing __CC_LINK__ curl
-char* cc__rewrite_link_directives(const char* src, size_t n) {
+/* The file a byte of `src` was written in, from the nearest `#line N "file"`
+ * (or cpp `# N "file"`) directive at or above line start `at`. Empty when
+ * the text carries no pins. */
+static void cc__link_pin_file(const char* src, size_t n, size_t at, char* out, size_t cap) {
+    size_t p = at;
+    (void)n;
+    out[0] = 0;
+    while (p > 0) {
+        size_t ls;
+        size_t q;
+        p--;
+        while (p > 0 && src[p - 1] != '\n') p--;
+        ls = p;
+        q = ls;
+        while (q < at && (src[q] == ' ' || src[q] == '\t')) q++;
+        if (q < at && src[q] == '#') {
+            q++;
+            while (q < at && (src[q] == ' ' || src[q] == '\t')) q++;
+            if (q + 4 <= at && strncmp(src + q, "line", 4) == 0) q += 4;
+            while (q < at && (src[q] == ' ' || src[q] == '\t')) q++;
+            if (q < at && src[q] >= '0' && src[q] <= '9') {
+                while (q < at && src[q] >= '0' && src[q] <= '9') q++;
+                while (q < at && (src[q] == ' ' || src[q] == '\t')) q++;
+                if (q < at && src[q] == '"') {
+                    size_t e = q + 1;
+                    while (e < at && src[e] != '"' && src[e] != '\n') e++;
+                    if (e < at && src[e] == '"' && e - (q + 1) < cap) {
+                        memcpy(out, src + q + 1, e - (q + 1));
+                        out[e - (q + 1)] = 0;
+                        return;
+                    }
+                }
+            }
+        }
+        if (ls == 0) break;
+        p = ls;
+    }
+}
+
+/* Rewrite `@link("lib")` directives into marker comments the link phase
+ * reads (`__CC_LINK__ lib`). A name (`curl`) stays a name. A path that is
+ * relative -- it has a slash and does not start with one -- names a file
+ * beside the source that wrote it, the way a quoted include does: it is
+ * joined to the directory of the file the nearest `#line` pin names, or of
+ * `base_path` when the text carries no pin, and the marker holds the joined
+ * spelling. Nothing here checks that the file exists: a missing archive is
+ * the linker's to report, with the full path it looked for. */
+char* cc__rewrite_link_directives_at(const char* src, size_t n, const char* base_path) {
     if (!src || n == 0) return NULL;
     if (!cc_contains_token_top_level(src, n, "@link")) return NULL;
     char* out = NULL;
@@ -11028,35 +11072,63 @@ char* cc__rewrite_link_directives(const char* src, size_t n) {
         if (c == '@' && i + 5 < n && strncmp(src + i, "@link(", 6) == 0) {
             size_t start = i;
             i += 6;  /* skip @link( */
-            
+
             /* Skip whitespace */
             while (i < n && (src[i] == ' ' || src[i] == '\t')) i++;
-            
+
             /* Expect " */
             if (i < n && src[i] == '"') {
                 i++;  /* skip opening " */
                 size_t lib_start = i;
-                
+
                 /* Find closing " */
                 while (i < n && src[i] != '"' && src[i] != '\n') i++;
-                
+
                 if (i < n && src[i] == '"') {
                     size_t lib_end = i;
                     i++;  /* skip closing " */
-                    
+
                     /* Skip whitespace and closing ) */
                     while (i < n && (src[i] == ' ' || src[i] == '\t')) i++;
                     if (i < n && src[i] == ')') {
+                        char pin[PATH_MAX];
+                        const char* from = NULL;
+                        int relative = lib_end > lib_start && src[lib_start] != '/' &&
+                                       memchr(src + lib_start, '/', lib_end - lib_start) != NULL;
                         i++;  /* skip ) */
-                        
+
                         /* Success! Emit up to @link, then emit marker comment */
                         cc_sb_append(&out, &out_len, &out_cap, src + last_emit, start - last_emit);
-                        
-                        // Emit marker: __CC_LINK__ libname 
+
+                        // Emit marker: __CC_LINK__ libname
                         cc_sb_append_cstr(&out, &out_len, &out_cap, "/* __CC_LINK__ ");
+                        if (relative) {
+                            cc__link_pin_file(src, n, start, pin, sizeof(pin));
+                            from = pin[0] ? pin : base_path;
+                        }
+                        if (from && from[0]) {
+                            /* the directory of the file, absolute: the marker
+                             * is read by a link that may run from anywhere */
+                            const char* slash = strrchr(from, '/');
+                            char dir[PATH_MAX];
+                            char abs_dir[PATH_MAX];
+                            size_t dl = slash ? (size_t)(slash - from) : 0;
+                            if (slash && dl < sizeof(dir)) {
+                                memcpy(dir, from, dl);
+                                dir[dl] = 0;
+                            } else {
+                                strcpy(dir, ".");
+                            }
+                            if (realpath(dir, abs_dir)) {
+                                cc_sb_append_cstr(&out, &out_len, &out_cap, abs_dir);
+                                cc_sb_append_cstr(&out, &out_len, &out_cap, "/");
+                            } else if (slash) {
+                                cc_sb_append(&out, &out_len, &out_cap, from, dl + 1);
+                            }
+                        }
                         cc_sb_append(&out, &out_len, &out_cap, src + lib_start, lib_end - lib_start);
                         cc_sb_append_cstr(&out, &out_len, &out_cap, " */");
-                        
+
                         last_emit = i;
                         continue;
                     }
@@ -11072,6 +11144,10 @@ char* cc__rewrite_link_directives(const char* src, size_t n) {
     if (last_emit == 0) return NULL;  /* No rewrites */
     if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
     return out;
+}
+
+char* cc__rewrite_link_directives(const char* src, size_t n) {
+    return cc__rewrite_link_directives_at(src, n, NULL);
 }
 
 /* Check that channel ops inside @async functions are awaited.
@@ -15289,12 +15365,42 @@ static int cc__build_stable_lowered_header_path(const char* abs_src,
     rel = abs_src + repo_len;
     if (*rel == '/') rel++;
     if (!*rel) return -1;
+    /* A stdlib face is included by its spelling under `cc/include`: the
+     * lowered header goes where `<ccc/...>` resolves. */
+    if (strncmp(rel, "cc/include/", 11) == 0) rel += 11;
     rel_len = strlen(rel);
     if (snprintf(out_path, out_path_sz, "%s/out/include/%s", repo_root, rel) >= (int)out_path_sz) {
         return -1;
     }
     strcpy(out_path + strlen(out_path) - 4, ".h");
     return 0;
+}
+
+/* A face that declares a module (`#pragma(@module) "name"`): its own root
+ * when the name is its stem, a member otherwise. A stdlib face with owned
+ * bodies and no pragma is not one: it is pasted into its includers as it
+ * always was. */
+static int cc__cch_declares_module(const char* abs);
+
+static int cc__match_system_include_line(const char* line,
+                                         size_t len,
+                                         size_t* out_path_s,
+                                         size_t* out_path_e) {
+    size_t p = 0;
+    if (!line || !out_path_s || !out_path_e) return 0;
+    while (p < len && (line[p] == ' ' || line[p] == '\t')) p++;
+    if (p >= len || line[p] != '#') return 0;
+    p++;
+    while (p < len && (line[p] == ' ' || line[p] == '\t')) p++;
+    if (p + strlen("include") >= len || strncmp(line + p, "include", strlen("include")) != 0) return 0;
+    p += strlen("include");
+    while (p < len && (line[p] == ' ' || line[p] == '\t')) p++;
+    if (p >= len || line[p] != '<') return 0;
+    *out_path_s = ++p;
+    while (p < len && line[p] != '>') p++;
+    if (p >= len) return 0;
+    *out_path_e = p;
+    return (*out_path_e > *out_path_s);
 }
 
 static int cc__match_local_include_line(const char* line,
@@ -15994,6 +16100,11 @@ static int cc__module_ctx_of_root(const char* root_abs, CCModuleCtx* out) {
     }
     out->kind = CC_MODULE_PROGRAM;
     return 1;
+}
+
+static int cc__cch_declares_module(const char* abs) {
+    char name[CC_MODULE_NAME_CAP];
+    return cc__unit_module_name(abs, name, sizeof(name)) && name[0];
 }
 
 /* A face is its own module root unless it declares another module. */
@@ -19686,9 +19797,11 @@ char* cc_splice_module_members(const char* src, size_t input_len,
  * headers. The lowerer hoists its Result specs and generic instances
  * ahead of every include, so with `faces_first` the faces that define
  * their types go first as well. An include under a conditional other than a
- * guard (`#ifndef NAME` then `#define NAME`) stays where it is. The
- * members are already spliced into `src`, so a quoted `.cch` left in it
- * is a face. Repeated where the unit wrote them, the includes are inert. */
+ * file-level include guard (`#ifndef NAME` then `#define NAME` at depth 0)
+ * stays where it is. Nested `#ifndef`/`#define` defaults inside a real `#if`
+ * are conditionals, not guards. The members are already spliced into `src`,
+ * so a quoted `.cch` left in it is a face. Repeated where the unit wrote
+ * them, the includes are inert. */
 static void cc__unit_prologue_includes(const char* src, size_t n, int faces_first,
                                        char** out, size_t* len, size_t* cap) {
     char* copy;
@@ -19738,23 +19851,33 @@ static void cc__unit_prologue_includes(const char* src, size_t n, int faces_firs
                     }
                 }
             } else if (w - p == 6 && memcmp(copy + p, "ifndef", 6) == 0) {
-                /* A guard: `#ifndef NAME` with `#define NAME` on the next line. */
+                /* File-level include guard only: `#ifndef NAME` then
+                 * `#define NAME` at depth 0. Nested `#ifndef`/`#define`
+                 * (e.g. defaulting a batch size inside `#if BACKEND`) is a
+                 * real conditional — treating it as a guard would let its
+                 * `#endif` pop the outer `#if`, and angle includes in the
+                 * following `#elif`/`#else` would hoist into the prologue
+                 * (Darwin then sees `<sys/epoll.h>` from a Linux branch). */
                 size_t ns = w, ne, q;
                 int guard = 0;
                 while (ns < line_end && (copy[ns] == ' ' || copy[ns] == '\t')) ns++;
                 ne = ns;
                 while (ne < line_end && cc_is_ident_char(copy[ne])) ne++;
-                q = (line_end < n) ? line_end + 1 : line_end;
-                while (q < n && (copy[q] == ' ' || copy[q] == '\t')) q++;
-                if (ne > ns && q < n && copy[q] == '#') {
-                    q++;
+                if (depth == 0) {
+                    q = (line_end < n) ? line_end + 1 : line_end;
                     while (q < n && (copy[q] == ' ' || copy[q] == '\t')) q++;
-                    if (q + 6 <= n && memcmp(copy + q, "define", 6) == 0) {
-                        q += 6;
+                    if (ne > ns && q < n && copy[q] == '#') {
+                        q++;
                         while (q < n && (copy[q] == ' ' || copy[q] == '\t')) q++;
-                        if (q + (ne - ns) <= n && memcmp(copy + q, copy + ns, ne - ns) == 0 &&
-                            (q + (ne - ns) >= n || !cc_is_ident_char(copy[q + (ne - ns)])))
-                            guard = 1;
+                        if (q + 6 <= n && memcmp(copy + q, "define", 6) == 0) {
+                            q += 6;
+                            while (q < n && (copy[q] == ' ' || copy[q] == '\t')) q++;
+                            if (q + (ne - ns) <= n &&
+                                memcmp(copy + q, copy + ns, ne - ns) == 0 &&
+                                (q + (ne - ns) >= n ||
+                                 !cc_is_ident_char(copy[q + (ne - ns)])))
+                                guard = 1;
+                        }
                     }
                 }
                 if (!guard) depth++;
@@ -19878,6 +20001,24 @@ static int cc__module_faces_walk(const char* abs, cc_module_face_fn fn, void* en
                     }
                 }
             }
+        } else if (cc__match_system_include_line(src + i, line_end - i, &path_s, &path_e)) {
+            /* `<ccc/std/x.cch>`: a stdlib face that is a module is staged
+             * as a quoted one is */
+            char rel[PATH_MAX], child_path[PATH_MAX], child_abs[PATH_MAX];
+            size_t rel_len = path_e - path_s;
+            if (rel_len > 4 && rel_len < sizeof(rel)) {
+                memcpy(rel, src + i + path_s, rel_len);
+                rel[rel_len] = 0;
+                if (strcmp(rel + rel_len - 4, ".cch") == 0 &&
+                    cc_path_resolve_system_cch(rel, child_path, sizeof(child_path)) &&
+                    realpath(child_path, child_abs) &&
+                    cc__cch_declares_module(child_abs)) {
+                    if (cc__module_faces_walk(child_abs, fn, env, seen, nseen, cseen) != 0) {
+                        free(src);
+                        return -1;
+                    }
+                }
+            }
         }
         i = (line_end < n) ? line_end + 1 : line_end;
     }
@@ -19992,6 +20133,15 @@ char* cc_rewrite_local_cch_includes_to_lowered_headers(const char* src,
 }
 
 int cc_local_header_lower_failed(void) { return g_local_cch_lower_failed; }
+
+/* A face that declares a module, as its root or as a member: lowered by
+ * the program that includes it, never on its own. */
+int cc_cch_is_module_unit(const char* path) {
+    char abs[PATH_MAX];
+    if (!path || !realpath(path, abs)) return 0;
+    if (!cc__path_ends_with(abs, ".cch")) return 0;
+    return cc__cch_declares_module(abs);
+}
 
 size_t cc_lowered_local_header_count(void) { return g_lowered_local_header_count; }
 
@@ -20823,6 +20973,11 @@ const char* cc_lowered_header_source_for(const char* lowered_path) {
     return NULL;
 }
 
+const char* cc_lowered_local_header_path(size_t i) {
+    if (i >= g_lowered_local_header_count) return NULL;
+    return g_lowered_local_headers[i].lowered_path;
+}
+
 char* cc_rewrite_system_cch_includes_to_lowered_headers(const char* src, size_t n) {
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
@@ -20861,8 +21016,21 @@ char* cc_rewrite_system_cch_includes_to_lowered_headers(const char* src, size_t 
                                  * CC_INCLUDE_PATH so prefix installs work
                                  * for sources outside any checkout. */
                                 if (cc_path_resolve_system_cch(rel, abs_src,
-                                                               sizeof(abs_src)))
+                                                               sizeof(abs_src))) {
+                                    char real_src[PATH_MAX];
                                     cc__register_included_cch_tree(abs_src);
+                                    /* A module face in the stdlib is a module
+                                     * like any other: the `.h` the includer
+                                     * reads is extracted from its unit and
+                                     * opens with the link marker, so the
+                                     * program links the module's C. The
+                                     * include keeps its spelling; the lowered
+                                     * header sits at that spelling under the
+                                     * lowered include root. */
+                                    if (realpath(abs_src, real_src) &&
+                                        cc__cch_declares_module(real_src))
+                                        (void)cc__lower_local_cch_header(real_src);
+                                }
                             }
                             cc_sb_append(&out, &out_len, &out_cap, src + i, path_end - i);
                             cc_sb_append_cstr(&out, &out_len, &out_cap, ".h");
@@ -25968,7 +26136,7 @@ static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
     }
     if (cc_pass_chain_apply(chain, cc__rewrite_result_star_unwrap(chain->src, chain->len)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__rewrite_cc_concurrent(chain->src, chain->len)) < 0) return -1;
-    if (cc_pass_chain_apply(chain, cc__rewrite_link_directives(chain->src, chain->len)) < 0) return -1;
+    if (cc_pass_chain_apply(chain, cc__rewrite_link_directives_at(chain->src, chain->len, input_path)) < 0) return -1;
     return 0;
 }
 

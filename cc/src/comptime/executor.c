@@ -355,6 +355,29 @@ int cc_comptime_fn_is_registered(const char* name) {
     return 0;
 }
 
+size_t cc_comptime_fn_registry_prelude_mark(void) {
+    return cc__comptime_fn_prelude ? strlen(cc__comptime_fn_prelude) : 0;
+}
+
+const char* cc_comptime_fn_registry_prelude_text(void) {
+    return cc__comptime_fn_prelude;
+}
+
+void cc_comptime_fn_registry_prelude_truncate(size_t mark) {
+    if (!cc__comptime_fn_prelude) return;
+    if (mark < strlen(cc__comptime_fn_prelude)) cc__comptime_fn_prelude[mark] = '\0';
+}
+
+const char* cc_comptime_fn_registry_defs_only(void) {
+    const char* all = cc_comptime_fn_registry_defs();
+    size_t plen;
+    if (!all) return NULL;
+    if (!cc__comptime_fn_prelude || !cc__comptime_fn_prelude[0]) return all;
+    plen = strlen(cc__comptime_fn_prelude);
+    if (strncmp(all, cc__comptime_fn_prelude, plen) != 0) return all;
+    return all + plen + (all[plen] == '\n' ? 1 : 0);
+}
+
 const char* cc_comptime_fn_registry_defs(void) {
     return cc__comptime_fn_defs_blob ? cc__comptime_fn_defs_blob : "";
 }
@@ -637,6 +660,101 @@ static char* cc__exec_build_tu(const char* body, size_t body_len,
     if (ld) { memcpy(s + o, line_dir, ld); o += ld; }
     memcpy(s + o, body, body_len); o += body_len;
     memcpy(s + o, tail, tl); o += tl;
+    s[o] = '\0';
+    free(slim);
+    return s;
+}
+
+/* The TU for a lowered region: as cc__exec_build_tu, with the region at
+ * file scope and an entry that calls the block's function. */
+/* The prelude with `#define CC_COMPTIME 1` taken out: the standalone
+ * comptime mode of the inline stdlib (its own layouts, its own inline
+ * stand-ins for the runtime) is for a unit that has no runtime. A region
+ * TU links the runtime and includes the unit's headers as the host does,
+ * so every type has one layout in it. */
+static const char* cc__exec_host_mode_prelude(void) {
+    static char* cached = NULL;
+    static const char line[] = "#define CC_COMPTIME 1\n";
+    if (!cached) {
+        const char* hit = strstr(CC__EXEC_PRELUDE, line);
+        size_t n = sizeof(CC__EXEC_PRELUDE) - 1;
+        cached = (char*)malloc(n + 1);
+        if (!cached) return CC__EXEC_PRELUDE;
+        if (hit) {
+            size_t a = (size_t)(hit - CC__EXEC_PRELUDE);
+            memcpy(cached, CC__EXEC_PRELUDE, a);
+            memcpy(cached + a, hit + sizeof(line) - 1, n - a - (sizeof(line) - 1));
+            cached[n - (sizeof(line) - 1)] = '\0';
+        } else {
+            memcpy(cached, CC__EXEC_PRELUDE, n + 1);
+        }
+    }
+    return cached;
+}
+
+/* The TU for a lowered region. It is the unit's own translation unit as
+ * far as declarations go: the prelude, then the unit's preprocessor view
+ * (its includes and macros, guards intact), then the registered
+ * compile-time definitions, the unit's own types, the region (the block's
+ * function and the unit functions it reaches), and an entry that calls
+ * the block. The runtime is linked, so a unit function runs at compile
+ * time as it runs at run time.
+ *
+ * Two headers the prelude already carries are guarded off (the emit
+ * template core and the instantiate surface), a thread-local is a plain
+ * global to a compiler that has none, and the SIMD arms of the vendored
+ * hash stay closed. */
+static char* cc__exec_build_region_tu(const char* region, size_t region_len,
+                                      const char* entry_fn,
+                                      const char* pp_view, const char* types) {
+    static const char head[] =
+        "#define _Thread_local\n"
+        "#define CC_EMIT_TPL_CCH 1\n"
+        "#define CC_INSTANTIATE_CCH 1\n"
+        /* a registration is read off the source before lowering; in the
+         * running block it is nothing more to do */
+        "#define cc_generic_register(name, fn) ((void)(name), (void)(fn), 0)\n"
+        "#define cc_generic_register_extend(name, fn) ((void)(name), (void)(fn), 0)\n"
+        "#undef __SSE2__\n"
+        "#undef __SSE4_2__\n"
+        "#undef __AVX2__\n";
+    static const char exec_def[] = "#define CC_COMPTIME_EXEC 1\n";
+    static const char py_emit_inc[] = "#include <ccc/cc_py_export_emit.h>\n";
+    const char* fndefs = cc_comptime_fn_registry_defs_only();
+    char* slim = cc_ct_field_reg_slim_prelude();
+    size_t slim_len = slim ? strlen(slim) : 0;
+    size_t fndef_len = fndefs ? strlen(fndefs) : 0;
+    size_t pp_len = pp_view ? strlen(pp_view) : 0;
+    size_t ty_len = types ? strlen(types) : 0;
+    int need_exec = cc__exec_fndefs_need_exec_define(fndefs);
+    size_t ed = need_exec ? sizeof(exec_def) - 1 : 0;
+    size_t pyi = need_exec ? sizeof(py_emit_inc) - 1 : 0;
+    const char* prelude = cc__exec_host_mode_prelude();
+    size_t pre = strlen(prelude);
+    size_t hd = sizeof(head) - 1;
+    char entry[256];
+    int en = snprintf(entry, sizeof(entry),
+                      "\nvoid __cc_ct_entry(void) {\n    %s();\n}\n", entry_fn);
+    char* s;
+    size_t o = 0;
+    if (en <= 0 || (size_t)en >= sizeof(entry)) { free(slim); return NULL; }
+    s = (char*)malloc(hd + ed + pre + pyi + pp_len + 1 + slim_len + fndef_len + 1 +
+                      ty_len + 1 + region_len + 1 + (size_t)en + 1);
+    if (!s) { free(slim); return NULL; }
+    memcpy(s + o, head, hd); o += hd;
+    if (ed) { memcpy(s + o, exec_def, ed); o += ed; }
+    memcpy(s + o, prelude, pre); o += pre;
+    if (pyi) { memcpy(s + o, py_emit_inc, pyi); o += pyi; }
+    if (pp_len) { memcpy(s + o, pp_view, pp_len); o += pp_len; }
+    s[o++] = '\n';
+    if (slim_len) { memcpy(s + o, slim, slim_len); o += slim_len; }
+    if (fndef_len) { memcpy(s + o, fndefs, fndef_len); o += fndef_len; }
+    s[o++] = '\n';
+    if (ty_len) { memcpy(s + o, types, ty_len); o += ty_len; }
+    s[o++] = '\n';
+    memcpy(s + o, region, region_len); o += region_len;
+    s[o++] = '\n';
+    memcpy(s + o, entry, (size_t)en); o += (size_t)en;
     s[o] = '\0';
     free(slim);
     return s;
@@ -1145,6 +1263,11 @@ static int cc__exec_run_tu(const char* tu, char* err_buf, size_t err_sz) {
  * bound as compile-string trampolines (TCC-built libtcc SIGSEGVs in
  * tcc_add_symbol on ARM32). Shared by @comptime block execution and the
  * in-process compiled-factory path. */
+/* Set while a lowered region runs: its TU is the unit's, so the unit's
+ * lowered local headers come first on the include path and the runtime
+ * is linked (CC_CT_INCLUDE_FIRST and CC_RUNTIME_LIB_DIR, from the driver). */
+static int cc__exec_link_runtime = 0;
+
 static TCCState* cc__exec_new_state(CCExecErrSink* sink, char* err_buf, size_t err_sz) {
     TCCState* s = tcc_new();
     if (!s) {
@@ -1154,6 +1277,10 @@ static TCCState* cc__exec_new_state(CCExecErrSink* sink, char* err_buf, size_t e
     tcc_set_error_func(s, sink, cc__exec_err_capture);
     /* Parse at the version the real compile will use; see the constant. */
     tcc_set_options(s, CC_TCC_HOST_OPTIONS);
+    if (cc__exec_link_runtime) {
+        const char* first = getenv("CC_CT_INCLUDE_FIRST");
+        if (first && first[0]) tcc_add_include_path(s, first);
+    }
     {
         char dirbuf[1024];
         const char* libdir = cc__exec_lib_dir(dirbuf, sizeof(dirbuf));
@@ -1205,6 +1332,19 @@ static TCCState* cc__exec_new_state(CCExecErrSink* sink, char* err_buf, size_t e
         if (err_buf && err_sz) snprintf(err_buf, err_sz, "tcc_set_output_type failed");
         tcc_delete(s);
         return NULL;
+    }
+    if (cc__exec_link_runtime) {
+        const char* rt = getenv("CC_RUNTIME_LIB_DIR");
+        if (rt && rt[0]) tcc_add_library_path(s, rt);
+        if (tcc_add_library(s, "cc_runtime") < 0) {
+            if (err_buf && err_sz)
+                snprintf(err_buf, err_sz, "the runtime (libcc_runtime) is not where CC_RUNTIME_LIB_DIR says (%s)",
+                         rt ? rt : "unset");
+            tcc_delete(s);
+            return NULL;
+        }
+        tcc_add_library(s, "pthread");
+        tcc_add_library(s, "m");
     }
     if (cc__exec_compile_host_verbs(s) < 0) {
         if (err_buf && err_sz) {
@@ -1507,6 +1647,63 @@ int cc_comptime_exec_block_body(const char* body, size_t body_len,
         free(tu);
         cc_emit_plan_host_ctx_end();
         (void)opts;
+        return rc;
+    }
+#endif
+}
+
+int cc_comptime_exec_block_region(const char* region, size_t region_len,
+                                  const char* entry_fn,
+                                  const char* pp_view, const char* types,
+                                  const CCComptimeExecOpts* opts,
+                                  char* err_buf, size_t err_sz) {
+    if (!region || region_len == 0 || !entry_fn || !entry_fn[0]) {
+        if (err_buf && err_sz) snprintf(err_buf, err_sz, "empty lowered @comptime block");
+        return -1;
+    }
+#ifndef CC_TCC_EXT_AVAILABLE
+    (void)opts;
+    if (err_buf && err_sz) snprintf(err_buf, err_sz, "libtcc not available");
+    return -1;
+#else
+    {
+        const char* tenv = getenv("CC_COMPTIME_EXEC_TIMEOUT_MS");
+        if (tenv && tenv[0]) cc__exec_timeout_ms = atoi(tenv);
+    }
+    cc_emit_plan_host_ctx_begin(opts ? opts->site_pos : 0);
+    cc__exec_start = clock();
+    {
+        char* tu = cc__exec_build_region_tu(region, region_len, entry_fn, pp_view, types);
+        int rc = 0;
+        if (!tu) {
+            cc_emit_plan_host_ctx_end();
+            if (err_buf && err_sz)
+                snprintf(err_buf, err_sz, "OOM building comptime TU");
+            return -1;
+        }
+        if (getenv("CC_DEBUG_COMPTIME_EXEC_DUMP")) {
+            FILE* df = fopen(getenv("CC_DEBUG_COMPTIME_EXEC_DUMP"), "wb");
+            if (df) {
+                fwrite(tu, 1, strlen(tu), df);
+                fclose(df);
+            }
+        }
+        if (setjmp(cc__exec_jb) != 0) {
+            cc__exec_in_block = 0;
+            if (err_buf && err_sz)
+                snprintf(err_buf, err_sz,
+                         "comptime execution timed out (%dms)",
+                         cc__exec_timeout_ms);
+            rc = -1;
+        } else {
+            cc__exec_in_block = 1;
+            cc__exec_link_runtime = 1;
+            rc = cc__exec_run_tu(tu, err_buf, err_sz);
+            cc__exec_link_runtime = 0;
+            cc__exec_in_block = 0;
+        }
+        free(tu);
+        cc_emit_plan_host_ctx_end();
         return rc;
     }
 #endif

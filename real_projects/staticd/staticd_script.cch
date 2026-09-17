@@ -30,13 +30,15 @@
 #define PAGES_CACHE_TTL  1
 #define PAGES_REL_MAX    256
 
-typedef enum PagesKind {
-    PAGES_MISS = 0,
-    PAGES_JS,
-    PAGES_PY,
-    PAGES_BOTH,
-    PAGES_NO_ENGINE,
-} PagesKind;
+/* What the pages tree holds for a URL: nothing, one page, both spellings,
+ * or a page whose engine is not attached. */
+@variant Pages {
+    miss: void;
+    js: void;
+    py: void;
+    both: void;
+    no_engine: void;
+};
 
 typedef struct ScriptHdr {
     char name[64];
@@ -55,7 +57,7 @@ typedef struct PagesCacheSlot {
     char rel[PAGES_REL_MAX];
     time_t mtime;
     time_t checked;
-    PagesKind kind;
+    Pages found;
     int ready;
 } PagesCacheSlot;
 
@@ -265,11 +267,11 @@ static int pages_base_of(char[:] url_path, char* base, size_t cap) {
 
 /*
  * Resolve URL path under pages_fd.
- * *out_rel is "hello.js" / "hello.py" when kind is JS or PY.
+ * *out_rel is "hello.js" / "hello.py" for .js / .py.
  * BOTH / NO_ENGINE leave out_rel empty; caller maps to 500 / 501.
  */
-static PagesKind pages_resolve(int pages_fd, PagesEngines* eng,
-                               char[:] url_path, char* out_rel, size_t cap) {
+static Pages pages_resolve(int pages_fd, PagesEngines* eng,
+                           char[:] url_path, char* out_rel, size_t cap) {
     char base[PAGES_REL_MAX];
     char js_rel[PAGES_REL_MAX];
     char py_rel[PAGES_REL_MAX];
@@ -280,10 +282,10 @@ static PagesKind pages_resolve(int pages_fd, PagesEngines* eng,
     PagesCacheSlot* c;
 
     if (out_rel && cap) out_rel[0] = 0;
-    if (pages_fd < 0) return PAGES_MISS;
-    if (!pages_base_of(url_path, base, sizeof(base))) return PAGES_MISS;
+    if (pages_fd < 0) return (Pages){ .miss = {} };
+    if (!pages_base_of(url_path, base, sizeof(base))) return (Pages){ .miss = {} };
     bl = strlen(base);
-    if (bl + 4 >= sizeof(js_rel)) return PAGES_MISS;
+    if (bl + 4 >= sizeof(js_rel)) return (Pages){ .miss = {} };
     memcpy(js_rel, base, bl);
     memcpy(js_rel + bl, ".js", 4);
     memcpy(py_rel, base, bl);
@@ -303,12 +305,12 @@ static PagesKind pages_resolve(int pages_fd, PagesEngines* eng,
     if (c && c->ready && c->rel[0]
             && strcmp(c->rel, base) == 0
             && now <= c->checked + PAGES_CACHE_TTL) {
-        if (c->kind == PAGES_JS && out_rel && cap > strlen(js_rel)) {
+        if (c->found.kind == .js && out_rel && cap > strlen(js_rel)) {
             memcpy(out_rel, js_rel, strlen(js_rel) + 1);
-        } else if (c->kind == PAGES_PY && out_rel && cap > strlen(py_rel)) {
+        } else if (c->found.kind == .py && out_rel && cap > strlen(py_rel)) {
             memcpy(out_rel, py_rel, strlen(py_rel) + 1);
         }
-        return c->kind;
+        return c->found;
     }
 
     have_js = pages_probe_leaf(pages_fd, js_rel);
@@ -316,48 +318,48 @@ static PagesKind pages_resolve(int pages_fd, PagesEngines* eng,
     if (!have_js && !have_py) {
         if (c) {
             memcpy(c->rel, base, bl + 1);
-            c->kind = PAGES_MISS;
+            c->found = (Pages){ .miss = {} };
             c->checked = now;
             c->ready = 1;
             c->mtime = 0;
         }
-        return PAGES_MISS;
+        return (Pages){ .miss = {} };
     }
     if (have_js && have_py) {
         if (c) {
             memcpy(c->rel, base, bl + 1);
-            c->kind = PAGES_BOTH;
+            c->found = (Pages){ .both = {} };
             c->checked = now;
             c->ready = 1;
             c->mtime = 0;
         }
-        return PAGES_BOTH;
+        return (Pages){ .both = {} };
     }
     if (have_js) {
         /* eng == NULL: probe-only (no cache, no engine gate). */
-        if (eng && !eng->have_js) return PAGES_NO_ENGINE;
+        if (eng && !eng->have_js) return (Pages){ .no_engine = {} };
         if (out_rel && cap > strlen(js_rel))
             memcpy(out_rel, js_rel, strlen(js_rel) + 1);
         if (c) {
             memcpy(c->rel, base, bl + 1);
-            c->kind = PAGES_JS;
+            c->found = (Pages){ .js = {} };
             c->mtime = pages_mtime(pages_fd, js_rel);
             c->checked = now;
             c->ready = 1;
         }
-        return PAGES_JS;
+        return (Pages){ .js = {} };
     }
-    if (eng && !eng->have_py) return PAGES_NO_ENGINE;
+    if (eng && !eng->have_py) return (Pages){ .no_engine = {} };
     if (out_rel && cap > strlen(py_rel))
         memcpy(out_rel, py_rel, strlen(py_rel) + 1);
     if (c) {
         memcpy(c->rel, base, bl + 1);
-        c->kind = PAGES_PY;
+        c->found = (Pages){ .py = {} };
         c->mtime = pages_mtime(pages_fd, py_rel);
         c->checked = now;
         c->ready = 1;
     }
-    return PAGES_PY;
+    return (Pages){ .py = {} };
 }
 
 static CCSlice !>(CCError) pages_read_leaf(int pages_fd, const char* rel,
@@ -745,72 +747,72 @@ if __handler is None:
 }
 
 static ScriptReply !>(CCError) pages_run(PagesEngines* e, int pages_fd,
-                                         PagesKind kind, const char* leaf,
+                                         Pages found, const char* leaf,
                                          char[:] method, char[:] path,
                                          char[:] query, char[:] body,
                                          CCArena arena) {
-    if (kind == PAGES_JS)
+    if (found.kind == .js)
         return pages_run_js(e, pages_fd, leaf, method, path, query, body, arena);
-    if (kind == PAGES_PY)
+    if (found.kind == .py)
         return pages_run_py(e, pages_fd, leaf, method, path, query, body, arena);
     return cc_err(CC_ERROR(CC_ERR_IO, "pages kind"));
 }
 
 /* Probe without the exclusive; take g_pages_mx only for ensure+run.
- * MISS → Ok(empty) with *out_kind = PAGES_MISS (caller falls through to static).
- * BOTH / NO_ENGINE / run failure → Err (kind set when known).
+ * MISS → Ok(empty) with *out_found = .miss (caller falls through to static).
+ * BOTH / NO_ENGINE / run failure → Err (*out_found set when known).
  * Waiters park on g_pages_mx; the OS worker can run other fibers. */
 static ScriptReply !>(CCError) pages_serve(int pages_fd, char[:] url_path,
                                            char[:] method, char[:] path,
                                            char[:] query, char[:] body,
-                                           CCArena arena, PagesKind* out_kind) {
+                                           CCArena arena, Pages* out_found) {
     @errhandler(CCError err) { return cc_err(err); }
     PagesEngines* e = pages_engines();
     char leaf[PAGES_REL_MAX];
-    PagesKind kind;
+    Pages found;
     ScriptReply r;
 
-    if (out_kind) *out_kind = PAGES_MISS;
+    if (out_found) *out_found = (Pages){ .miss = {} };
     /* eng=NULL: filesystem probe only — no cache write, no exclusive. */
-    kind = pages_resolve(pages_fd, NULL, url_path, leaf, sizeof(leaf));
-    if (out_kind) *out_kind = kind;
-    if (kind == PAGES_MISS)
+    found = pages_resolve(pages_fd, NULL, url_path, leaf, sizeof(leaf));
+    if (out_found) *out_found = found;
+    if (found.kind == .miss)
         return cc_ok(script_reply_empty());
-    if (kind == PAGES_BOTH)
+    if (found.kind == .both)
         return cc_err(CC_ERROR(CC_ERR_IO, "pages: both .js and .py"));
-    if (kind != PAGES_JS && kind != PAGES_PY)
+    if (found.kind != .js && found.kind != .py)
         return cc_ok(script_reply_empty());
 
     {
         CCExclusiveGuard hold = g_pages_mx.acquire() @destroy;
         if (!e) {
-            if (out_kind) *out_kind = PAGES_NO_ENGINE;
+            if (out_found) *out_found = (Pages){ .no_engine = {} };
             return cc_err(CC_ERROR(CC_ERR_IO, "pages: engine not attached"));
         }
         if (pages_engines_ensure_locked() != 0) {
-            if (out_kind) *out_kind = PAGES_NO_ENGINE;
+            if (out_found) *out_found = (Pages){ .no_engine = {} };
             return cc_err(CC_ERROR(CC_ERR_IO, "pages engines"));
         }
-        if (kind == PAGES_JS && !e->have_js) {
-            if (out_kind) *out_kind = PAGES_NO_ENGINE;
+        if (found.kind == .js && !e->have_js) {
+            if (out_found) *out_found = (Pages){ .no_engine = {} };
             return cc_err(CC_ERROR(CC_ERR_IO, "pages: engine not attached"));
         }
-        if (kind == PAGES_PY && !e->have_py) {
-            if (out_kind) *out_kind = PAGES_NO_ENGINE;
+        if (found.kind == .py && !e->have_py) {
+            if (out_found) *out_found = (Pages){ .no_engine = {} };
             return cc_err(CC_ERROR(CC_ERR_IO, "pages: engine not attached"));
         }
-        /* Refresh resolve cache under the exclusive; re-bind kind/leaf. */
-        kind = pages_resolve(pages_fd, e, url_path, leaf, sizeof(leaf));
-        if (out_kind) *out_kind = kind;
-        if (kind == PAGES_MISS)
+        /* Refresh resolve cache under the exclusive; re-bind found/leaf. */
+        found = pages_resolve(pages_fd, e, url_path, leaf, sizeof(leaf));
+        if (out_found) *out_found = found;
+        if (found.kind == .miss)
             return cc_ok(script_reply_empty());
-        if (kind == PAGES_BOTH)
+        if (found.kind == .both)
             return cc_err(CC_ERROR(CC_ERR_IO, "pages: both .js and .py"));
-        if (kind == PAGES_NO_ENGINE)
+        if (found.kind == .no_engine)
             return cc_err(CC_ERROR(CC_ERR_IO, "pages: engine not attached"));
-        if (kind != PAGES_JS && kind != PAGES_PY)
+        if (found.kind != .js && found.kind != .py)
             return cc_ok(script_reply_empty());
-        r = pages_run(e, pages_fd, kind, leaf, method, path, query, body, arena) !>;
+        r = pages_run(e, pages_fd, found, leaf, method, path, query, body, arena) !>;
     }
     return cc_ok(r);
 }

@@ -1,0 +1,43 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/std/static_map.cch>
+#include <ccc/stdio.cch>
+
+/* A `@variant` is a static_map value: the table states the closed set
+ * once, as the type, and the block that builds it is the language. */
+@variant Mime {
+    octet: void;
+    html: void;
+    css: void;
+};
+
+typedef struct MimeEntry {
+    const char* key;
+    Mime value;
+} MimeEntry;
+
+@comptime {
+    MimeEntry entries[] = {
+        { ".html", (Mime){ .html = {} } },
+        { ".htm",  (Mime){ .html = {} } },
+        { ".css",  (Mime){ .css = {} } },
+        { ".bin",  (Mime){ .octet = {} } },
+    };
+    static_map("mime_ext", entries, CC_STATIC_MAP_ASCII_CI);
+}
+
+static const char* name_of(const Mime* m) {
+    if (!m) return "miss";
+    @switch (*m) {
+    case .html: return "html";
+    case .css: return "css";
+    case .octet: return "octet";
+    }
+}
+
+int main(void) {
+    println(name_of(mime_ext_get(CC_SLICE_LIT(".css"))));
+    println(name_of(mime_ext_get(CC_SLICE_LIT(".HTM"))));
+    println(name_of(mime_ext_get(CC_SLICE_LIT(".bin"))));
+    println(name_of(mime_ext_get(CC_SLICE_LIT(".wav"))));
+    return 0;
+}

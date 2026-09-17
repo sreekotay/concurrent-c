@@ -1,0 +1,25 @@
+/* `#if A` / `#elif B` / `#else` with A and B unknown to the lowerer: every
+ * branch is lowered, so the one the host takes carries lowered code. Here
+ * neither macro is defined and the host takes the `#else` branch, which
+ * holds Result syntax that only the lowerer can rewrite. */
+#include <ccc/cc_result.cch>
+#include <stdio.h>
+
+static int !>(CCError) pick(int x) {
+#if PP_SMOKE_A
+    return cc_ok(x + 1);
+#elif PP_SMOKE_B
+    return cc_ok(x + 2);
+#else
+    if (x < 0) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "negative"));
+    return cc_ok(x + 3);
+#endif
+}
+
+int main(void) {
+    int v = pick(4) !>(e) { (void)e; return 1; };
+    int neg = 0;
+    pick(-1) !>(e) { (void)e; neg = 1; };
+    printf("pp_elif_unknown_else_smoke: v=%d neg=%d %s\n", v, neg, (v == 7 && neg == 1) ? "PASS" : "FAIL");
+    return (v == 7 && neg == 1) ? 0 : 1;
+}

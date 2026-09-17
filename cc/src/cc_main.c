@@ -30,6 +30,7 @@
 #include "preprocess/script_oneliner.h"
 #include "preprocess/unit_header.h"
 #include "comptime/const_eval.h"
+#include "comptime/executor.h"
 #include "cccportable.h"
 
 /* The legacy multipass front (driver.c / driver.h) has been removed. This
@@ -88,6 +89,8 @@ static void cc__prof_span_arg(const char* name, const char* arg, long long t0) {
 }
 static int cc__take_unit_flag(int argc, char** argv, int* i,
                               CCUnitKind* as_kind, char* pin, size_t pin_cap);
+
+
 
 // `--emit-c-inspect[=PATH]`: dump the merged translation unit for inspection.
 // On a clean build it is the full pre-parse merged TU; on a build that fails in
@@ -3072,6 +3075,63 @@ static void cc__merge_target_link_flags(const CCBuildTargetDecl* t, char* ld_fla
 }
 
 // Helper to add a library to ld_flags, avoiding duplicates
+static void cc__add_lib_to_flags(const char* lib, char* ld_flags, size_t ld_cap);
+
+/* How the runtime was built, from the header `make -C cc` writes beside the
+ * lowered faces: whether TLS has BearSSL behind it, and where BearSSL is. A
+ * runtime with BearSSL behind it references it from `tls.c`, so every link
+ * of such a runtime carries the archive, and a runtime the driver compiles
+ * itself for a flag set is compiled the same way. */
+typedef struct CCBuildConfig {
+    int read;
+    int tls;
+    char bearssl_inc[PATH_MAX];
+    char bearssl_lib[PATH_MAX];
+} CCBuildConfig;
+static CCBuildConfig g_build_config;
+
+static void cc__build_config_take(const char* line, const char* key, char* out, size_t cap) {
+    const char* p = strstr(line, key);
+    const char* q;
+    size_t n;
+    if (!p) return;
+    p = strchr(p + strlen(key), '"');
+    if (!p) return;
+    p++;
+    q = strchr(p, '"');
+    if (!q) return;
+    n = (size_t)(q - p);
+    if (n >= cap) return;
+    memcpy(out, p, n);
+    out[n] = 0;
+}
+
+static const CCBuildConfig* cc__build_config(void) {
+    char path[PATH_MAX];
+    FILE* f;
+    char line[PATH_MAX + 64];
+    if (g_build_config.read) return &g_build_config;
+    g_build_config.read = 1;
+    if (!g_cc_lowered_include[0]) return &g_build_config;
+    if ((size_t)snprintf(path, sizeof(path), "%s/ccc/cc_build_config.h", g_cc_lowered_include) >= sizeof(path))
+        return &g_build_config;
+    f = fopen(path, "r");
+    if (!f) return &g_build_config;
+    while (fgets(line, sizeof(line), f)) {
+        if (strstr(line, "#define CC_RUNTIME_TLS 1")) g_build_config.tls = 1;
+        cc__build_config_take(line, "CC_BEARSSL_INC", g_build_config.bearssl_inc, sizeof(g_build_config.bearssl_inc));
+        cc__build_config_take(line, "CC_BEARSSL_LIB", g_build_config.bearssl_lib, sizeof(g_build_config.bearssl_lib));
+    }
+    fclose(f);
+    return &g_build_config;
+}
+
+/* The archive a TLS runtime needs on its link line, when it has one. */
+static void cc__add_runtime_tls_lib(char* ld_flags, size_t ld_cap) {
+    const CCBuildConfig* bc = cc__build_config();
+    if (bc->tls && bc->bearssl_lib[0]) cc__add_lib_to_flags(bc->bearssl_lib, ld_flags, ld_cap);
+}
+
 static void cc__add_lib_to_flags(const char* lib, char* ld_flags, size_t ld_cap) {
     if (!lib || !lib[0] || !ld_flags) return;
     
@@ -3172,7 +3232,8 @@ static void cc__extract_link_directives(const char* c_file_path, const char* inc
     // Run preprocessor to expand includes and scan that too
     char cmd[2048];
     const char* inc = include_flags ? include_flags : "";
-    snprintf(cmd, sizeof(cmd), "cc -E %s \"%s\" 2>/dev/null", inc, c_file_path);
+    /* -C keeps the marker comments a lowered header carries */
+    snprintf(cmd, sizeof(cmd), "cc -E -C %s \"%s\" 2>/dev/null", inc, c_file_path);
     
     FILE* pp = popen(cmd, "r");
     if (!pp) return;
@@ -3245,6 +3306,7 @@ static void cc__collect_multi_link_flags(const char* extra_ld,
     }
 #ifndef _WIN32
     cc__add_lib_to_flags("m", out, cap);
+    cc__add_runtime_tls_lib(out, cap);
 #endif
 }
 
@@ -4223,16 +4285,138 @@ static int cc__append_harvest(char** buf, size_t* len, char* add) {
     return 0;
 }
 
+/* The regions the lowerer set between `/*__cc_ct_block k begin line=N*​/`
+ * and `/*__cc_ct_block end*​/`: each is one block's function, lowered.
+ * They are cut out of `c` (the host never compiles them) and returned for
+ * the executor, in the order the lowerer numbered them. The C is the
+ * caller's buffer, edited in place. */
+static CCLoweredBlock* cc__cut_lowered_blocks(char* c, size_t* c_len, size_t* out_n) {
+    static const char open_tag[] = "/*__cc_ct_block ";
+    static const char close_tag[] = "/*__cc_ct_block end*/";
+    CCLoweredBlock* v = NULL;
+    size_t n = 0, cap = 0;
+    char* p = c;
+    *out_n = 0;
+    for (;;) {
+        char* open = strstr(p, open_tag);
+        char* nl;
+        char* close;
+        char* close_end;
+        char* region_l;
+        int k = -1, line = 0;
+        if (!open) break;
+        if (sscanf(open + sizeof(open_tag) - 1, "%d begin line=%d*/", &k, &line) != 2) {
+            /* the end tag, or prose: keep looking past it */
+            p = open + 1;
+            continue;
+        }
+        nl = strchr(open, '\n');
+        if (!nl) break;
+        region_l = nl + 1;
+        close = strstr(region_l, close_tag);
+        if (!close) {
+            fprintf(stderr, "cc: lowered @comptime block %d has no end marker\n", k);
+            free(v);
+            return NULL;
+        }
+        close_end = strchr(close, '\n');
+        if (!close_end) close_end = close + strlen(close);
+        else close_end++;
+        if (n == cap) {
+            size_t nc = cap ? cap * 2 : 8;
+            CCLoweredBlock* nv = (CCLoweredBlock*)realloc(v, nc * sizeof(*v));
+            if (!nv) { free(v); return NULL; }
+            v = nv;
+            cap = nc;
+        }
+        {
+            /* the region text outlives the cut: copy it out first */
+            size_t rl = (size_t)(close - region_l);
+            char* text = (char*)malloc(rl + 1);
+            if (!text) { free(v); return NULL; }
+            memcpy(text, region_l, rl);
+            text[rl] = '\0';
+            v[n].line = line;
+            v[n].text = text;
+            v[n].len = rl;
+            v[n].used = 0;
+            n++;
+        }
+        {
+            /* cut [open .. close_end) from the C */
+            char* line_start = open;
+            size_t tail;
+            while (line_start > c && line_start[-1] != '\n') line_start--;
+            tail = strlen(close_end);
+            memmove(line_start, close_end, tail + 1);
+            *c_len = strlen(c);
+            p = line_start;
+        }
+    }
+    *out_n = n;
+    return v;
+}
+
+static void cc__free_lowered_blocks(CCLoweredBlock* v, size_t n) {
+    size_t i;
+    if (!v) return;
+    for (i = 0; i < n; i++) free((char*)v[i].text);
+    free(v);
+}
+
+/* The `@comptime { }` blocks of the unit, run, after the lowerer wrote
+ * its C: a file-scope block runs as the function the lowerer lowered it
+ * to, out of `c_path` (edited: the host never sees those functions); a
+ * block the lowerer did not see, nested in an `enum` body or harvested
+ * out of a header, runs from the copy as text, as before. */
 static int cc__exec_comptime_blocks_for_clean(const char* raw, size_t raw_len,
-                                              const char* in_path) {
+                                              const char* in_path,
+                                              const char* c_path) {
     char* buf = (char*)malloc(raw_len + 1);
     size_t len = raw_len;
     char* r;
     int rc = 0;
     long long t;
+    char* lowered = NULL;
+    size_t lowered_len = 0;
+    CCLoweredBlock* blocks = NULL;
+    size_t nblocks = 0;
+    size_t harvest_off;
+    size_t prelude_mark = 0;
     if (!buf) return -1;
     memcpy(buf, raw, raw_len);
     buf[raw_len] = '\0';
+    if (c_path) {
+        /* the region TU is the unit's: its lowered local headers first on
+         * the include path, and the runtime linked */
+        char hroot[PATH_MAX];
+        char rtdir[PATH_MAX];
+        snprintf(hroot, sizeof(hroot), "%s/.cc-build/clean", g_out_root);
+        setenv("CC_CT_INCLUDE_FIRST", hroot, 1);
+        rtdir[0] = '\0';
+        if (g_repo_root[0]) snprintf(rtdir, sizeof(rtdir), "%s/out/cc/lib", g_repo_root);
+        if (!rtdir[0] || access(rtdir, R_OK) != 0) {
+            /* an installed prefix: the runtime beside the compiler's include tree */
+            char tmp[PATH_MAX];
+            snprintf(tmp, sizeof(tmp), "%s", g_cc_lowered_include);
+            cc__dirname_inplace(tmp);
+            snprintf(rtdir, sizeof(rtdir), "%s/cc/lib", tmp);
+        }
+        setenv("CC_RUNTIME_LIB_DIR", rtdir, 1);
+        lowered = cc__read_all_file(c_path, &lowered_len);
+        if (!lowered) {
+            fprintf(stderr, "cc: cannot read %s\n", c_path);
+            free(buf);
+            return -1;
+        }
+        blocks = cc__cut_lowered_blocks(lowered, &lowered_len, &nblocks);
+        if (nblocks) {
+            FILE* f = fopen(c_path, "wb");
+            if (!f) { free(lowered); free(buf); return -1; }
+            fwrite(lowered, 1, lowered_len, f);
+            fclose(f);
+        }
+    }
     cc_reset_included_cch_sources();
     t = cc__now_ms();
     r = cc_rewrite_local_cch_includes_to_lowered_headers(buf, len, in_path);
@@ -4244,6 +4428,15 @@ static int cc__exec_comptime_blocks_for_clean(const char* raw, size_t raw_len,
     if (r) { free(buf); buf = r; len = strlen(buf); }
     cc__prof_span("    ct_rewrite_system", t);
     t = cc__now_ms();
+    /* The boundary between the unit and the harvests, as a comment the
+     * prepare passes leave alone: the passes keep line counts, not byte
+     * counts, and the executor pairs a block before it with the lowered
+     * region the lowerer wrote for it. */
+    if (cc__append_harvest(&buf, &len, strdup("/*__cc_ct_harvest*/")) != 0) {
+        free(lowered);
+        free(buf);
+        return -1;
+    }
     /* What the includes just stopped carrying.
      *
      * A `.cch` include became the lowered `.h` it stands for, because the
@@ -4261,6 +4454,7 @@ static int cc__exec_comptime_blocks_for_clean(const char* raw, size_t raw_len,
     }
     cc__prof_span("    ct_harvest", t);
     t = cc__now_ms();
+    prelude_mark = cc_comptime_fn_registry_prelude_mark();
     /* Not the value pass: `@comptime(expr)` is the lowerer's, and running
      * it here too would evaluate every site twice and report a bad one
      * from a copy that is thrown away. */
@@ -4273,9 +4467,24 @@ static int cc__exec_comptime_blocks_for_clean(const char* raw, size_t raw_len,
     t = cc__now_ms();
     cc_emit_plan_clear_generic_factory_registrations();
     cc_emit_plan_clear_comptime_fragments();
-    if (cc_emit_plan_exec_comptime_blocks(buf, len, in_path) != 0) rc = -1;
+    {
+        const char* sentinel = strstr(buf, "/*__cc_ct_harvest*/");
+        harvest_off = sentinel ? (size_t)(sentinel - buf) : len;
+    }
+    if (c_path && getenv("CC_DEBUG_COMPTIME_EXEC")) {
+        /* the unit the blocks run in, beside the lowered C */
+        char dpath[PATH_MAX];
+        FILE* df;
+        snprintf(dpath, sizeof(dpath), "%s.ctexec.ccs", c_path);
+        df = fopen(dpath, "wb");
+        if (df) { fwrite(buf, 1, len, df); fclose(df); }
+    }
+    if (cc_emit_plan_exec_comptime_blocks_ex(buf, len, in_path, lowered, lowered_len,
+                                             harvest_off, prelude_mark, blocks, nblocks) != 0) rc = -1;
     else cc_emit_plan_collect_comptime_emits(buf, len);
     cc__prof_span("    ct_exec_tu", t);
+    cc__free_lowered_blocks(blocks, nblocks);
+    free(lowered);
     free(buf);
     return rc;
 }
@@ -4309,16 +4518,28 @@ static int cc__materialize_comptime_for_clean(const char* in_path, char* out_ccs
         fprintf(stderr, "cc: cannot read %s\n", in_path);
         return -1;
     }
-    /* Run the `@comptime { }` blocks first, on their own copy: the
-     * executor is a C compiler, so it needs the lowered `.h` a `.cch`
-     * include stands for, which the lowerer wants left alone. What the
-     * blocks emit is collected now and spliced into the C after lowering. */
+    /* The `@comptime { }` blocks run after the lowerer: each file-scope
+     * block is lowered with the unit, as a function, and the executor is
+     * handed that C (cc__exec_comptime_blocks_for_clean). What the prepare
+     * passes below need of the includes is registered now, on a copy
+     * whose rewritten includes are thrown away: the `.cch` sources a
+     * `@comptime for` reads a header type from. */
     t_step = cc__now_ms();
-    if (cc__exec_comptime_blocks_for_clean(buf, len, in_path) != 0) {
-        free(buf);
-        return -1;
+    {
+        char* copy = (char*)malloc(len + 1);
+        char* r;
+        if (!copy) { free(buf); return -1; }
+        memcpy(copy, buf, len);
+        copy[len] = '\0';
+        cc_reset_included_cch_sources();
+        r = cc_rewrite_local_cch_includes_to_lowered_headers(copy, len, in_path);
+        if (cc_local_header_lower_failed()) { free(r); free(copy); free(buf); return -1; }
+        if (r) { free(copy); copy = r; }
+        r = cc_rewrite_system_cch_includes_to_lowered_headers(copy, strlen(copy));
+        free(r);
+        free(copy);
     }
-    cc__prof_span("  ct_exec_blocks", t_step);
+    cc__prof_span("  ct_includes", t_step);
     t_step = cc__now_ms();
     /* The members of the module this unit roots define their bodies here.
      *
@@ -4374,12 +4595,21 @@ static int cc__materialize_comptime_for_clean(const char* in_path, char* out_ccs
      * there. */
     cc_emit_plan_clear_comptime_instantiations();
     cc_emit_plan_collect_comptime_instantiations(buf, len);
+    /* A factory a block registers by hand (`cc_generic_register("Pair",
+     * handler)`) has to be known before the lowerer meets `Pair::[...]`:
+     * the registrations are read off the blocks now, the emits read with
+     * them dropped (the blocks run, and emit, after lowering). */
+    cc_emit_plan_clear_generic_factory_registrations();
+    cc_emit_plan_clear_comptime_fragments();
+    cc_emit_plan_collect_comptime_emits(buf, len);
+    cc_emit_plan_clear_comptime_fragments();
     {
         /* A block that registers type hooks stays: the lowerer's index
          * reads `cc_type_register(...)` off it as it reads `@typehooks`,
          * and the lowerer drops the block. */
         char* blanked = cc_comptime_blank_blocks_ex(buf, len,
-                                                    CC_BLANK_KEEP_VALUE | CC_BLANK_KEEP_FN | CC_BLANK_KEEP_HOOKS);
+                                                    CC_BLANK_KEEP_VALUE | CC_BLANK_KEEP_FN |
+                                                    CC_BLANK_KEEP_HOOKS | CC_BLANK_KEEP_FILE_SCOPE);
         free(buf);
         if (!blanked) return -1;
         buf = blanked;
@@ -4791,8 +5021,7 @@ static int cc__collect_link_markers_text(const char* text, size_t n, const char*
                     int r;
                     while (p < line_end && text[p] != close) p++;
                     if (p < line_end && p > s && p - s < sizeof(rel) &&
-                        p - s > 2 && memcmp(text + p - 2, ".h", 2) == 0 &&
-                        strncmp(text + s, "ccc/", 4) != 0) {
+                        p - s > 2 && memcmp(text + p - 2, ".h", 2) == 0) {
                         memcpy(rel, text + s, p - s);
                         rel[p - s] = 0;
                         if (open == '"') {
@@ -5979,6 +6208,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             char clean_unit_wrap[PATH_MAX];
             char clean_qdir[PATH_MAX];
             const char* clean_orig = opt->in_path;
+            static char clean_ct_input[PATH_MAX];
             const char* want_pin = pin[0] ? pin : opt->ccc_version_pin;
             CCBuildOptions o2;
             CCBuildOptions o_shcc;
@@ -6076,6 +6306,9 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
                 static char clean_ct[PATH_MAX];
                 static CCBuildOptions o_ct;
                 long long t_ct = cc__now_ms();
+                /* the unit the blocks run from, after lowering: the one
+                 * materialized here (a script is its wrapped unit by now) */
+                snprintf(clean_ct_input, sizeof(clean_ct_input), "%s", opt->in_path);
                 if (cc__materialize_comptime_for_clean(opt->in_path, clean_ct,
                                                        sizeof(clean_ct)) != 0)
                     return -1;
@@ -6100,6 +6333,23 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
                 cc__prof_span("clean_module_stages", t_st);
             }
             if (cc__run_clean_lowerer(opt->in_path, clean_c, clean_qdir, clean_no_line, clean_modules, opt->verbose) != 0) return -1;
+            {
+                /* compile time, on the lowered unit: the blocks run as the
+                 * functions the lowerer made of them, and what they emit is
+                 * spliced at their anchors */
+                long long t_ct = cc__now_ms();
+                size_t rn = 0;
+                char* raw = cc__read_all_file(clean_ct_input, &rn);
+                int rc_ct;
+                if (!raw) {
+                    fprintf(stderr, "cc: cannot read %s\n", clean_ct_input);
+                    return -1;
+                }
+                rc_ct = cc__exec_comptime_blocks_for_clean(raw, rn, clean_ct_input, clean_c);
+                free(raw);
+                if (rc_ct != 0) return -1;
+                cc__prof_span_arg("clean_comptime_exec", clean_orig, t_ct);
+            }
             {
                 long long t_sp = cc__now_ms();
                 if (cc__splice_comptime_into_clean(clean_c, clean_orig) != 0) return -1;
@@ -6436,6 +6686,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
      * no trace. @link remains the idiom for everything outside ISO C. */
     cc__add_lib_to_flags("m", extracted_ld, sizeof(extracted_ld));
 #endif
+    cc__add_runtime_tls_lib(extracted_ld, sizeof(extracted_ld));
     const char* final_ld_flags = extracted_ld[0] ? extracted_ld : opt->ld_flags;
 
     // Link to binary (with incremental cache)
@@ -7001,6 +7252,13 @@ static void cc__runtime_build_cmds(const CCBuildOptions* opt, const char* cc_bin
              obj);
     if (host_prof->ok ? host_prof->no_liblfds : is_tcc) {
         strncat(out->compile, " -DCC_NO_LIBLFDS", sizeof(out->compile) - strlen(out->compile) - 1);
+    }
+    {
+        const CCBuildConfig* bc = cc__build_config();
+        if (bc->tls && bc->bearssl_inc[0]) {
+            strncat(out->compile, " -DCC_ENABLE_TLS -I", sizeof(out->compile) - strlen(out->compile) - 1);
+            strncat(out->compile, bc->bearssl_inc, sizeof(out->compile) - strlen(out->compile) - 1);
+        }
     }
     cc__append_host_cc_flags(out->compile, sizeof(out->compile), cc_bin);
     if (opt->cc_flags && *opt->cc_flags) {

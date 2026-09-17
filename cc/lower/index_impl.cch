@@ -3299,6 +3299,23 @@ static bool cc__first_param_is_pointer(const CcSym* callee) {
     return p0->type->k.kind == CcTypeK_pointer;
 }
 
+static CcSym* cc__macro_forward_sym(const CcIndex* ix, CcSym* s);
+
+/* Whether `sym` takes its receiver by address. A function says so in its
+ * first parameter. A function-like macro has none to read, so the question
+ * goes to the function its body forwards to, followed as far as the
+ * forwarding goes; a macro that forwards to no declared function (a
+ * `_Generic` dispatch, an arity pick) answers `unresolved`: by value for a
+ * plain method, by address for a hook's callee unless it said by value. */
+static bool cc__recv_by_ptr_of(const CcIndex* ix, CcSym* sym, bool unresolved) {
+    CcSym* target;
+    if (!sym) return false;
+    if (sym->kind != CC_SYM_MACRO) return cc__first_param_is_pointer(sym);
+    target = cc__macro_forward_sym(ix, sym);
+    if (target && target->kind == CC_SYM_FUNC) return cc__first_param_is_pointer(target);
+    return unresolved;
+}
+
 static CcMethod* cc__method_new(CcIndex* ix, CcTypeInfo* info, CCSlice method, CCSlice callee, const char* source,
                                 CCSlice origin, CcSym* sym, bool by_value_hint) {
     CcMethod* m = cc_arena_alloc(ix->arena, sizeof(CcMethod), _Alignof(CcMethod));
@@ -3309,9 +3326,7 @@ static CcMethod* cc__method_new(CcIndex* ix, CcTypeInfo* info, CCSlice method, C
     m->source = cc__ix_s(source);
     m->origin = origin;
     m->sym = sym;
-    /* a function-like macro from a hook has no parameters to read: a hook's
-     * callee is address-style unless it said by value */
-    m->recv_by_ptr = by_value_hint ? false : (sym && sym->kind == CC_SYM_MACRO) ? true : cc__first_param_is_pointer(sym);
+    m->recv_by_ptr = by_value_hint ? false : cc__recv_by_ptr_of(ix, sym, true);
     methv->push(m);
     return m;
 }
@@ -4046,7 +4061,7 @@ static CcMethod* cc__method_plain(CcIndex* ix, CCSlice method, CCSlice callee, c
     m->source = cc__ix_s(source);
     m->origin = origin;
     m->sym = sym;
-    m->recv_by_ptr = by_value ? false : cc__first_param_is_pointer(cc__macro_forward_sym(ix, sym));
+    m->recv_by_ptr = by_value ? false : cc__recv_by_ptr_of(ix, sym, false);
     return m;
 }
 

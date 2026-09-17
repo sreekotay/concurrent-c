@@ -1,0 +1,43 @@
+/* A value-less `return;` in a closure body: every early exit of the entry
+ * is a `return NULL;`, so the build is warning-free and the closure still
+ * runs the branch it took. A nested closure keeps its own return.
+ * cc_closureN_call is single-shot, so each closure is called once. */
+#include <ccc/cc_nursery.cch>
+#include <ccc/cc_closure.cch>
+#include <stdio.h>
+
+static int g_hits = 0;
+
+static CCClosure1 count_from(int base) {
+    return (intptr_t v) => [base] {
+        if (v < 0) return;
+        if (v == 0) { g_hits += base; return; }
+        g_hits += (int)v;
+    };
+}
+
+int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
+    cc_closure1_call(count_from(100), -1);
+    cc_closure1_call(count_from(100), 0);
+    cc_closure1_call(count_from(100), 7);
+    {
+        CCNursery n = @create() !> @destroy;
+        n.spawn(() => [] {
+            CCClosure1 skip = (intptr_t v) => [] {
+                if (v) return;
+                g_hits += 1000;
+            };
+            CCClosure1 hit = (intptr_t v) => [] {
+                if (v) return;
+                g_hits += 1000;
+            };
+            cc_closure1_call(skip, 1);
+            cc_closure1_call(hit, 0);
+            return;
+        }) !>;
+        n.wait() !>;
+    }
+    printf("closure_bare_return_smoke: hits=%d %s\n", g_hits, g_hits == 1107 ? "PASS" : "FAIL");
+    return g_hits == 1107 ? 0 : 1;
+}

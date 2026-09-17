@@ -11,6 +11,8 @@
 #   REPEATS          measured rounds (default 6)
 #   REQUESTS         requests per round per binary (default 500000)
 #   CLIENTS          concurrent clients (default 50)
+#   BENCH_THREADS    redis-benchmark --threads (default 1; a 1-thread client is the
+#                    bottleneck once several server threads answer it)
 #   PIPELINE         pipeline depth (default 16)
 #   RANDOM_KEYS      keyspace for -r (default 50000)
 #   BENCH_TESTS      comma-separated command list (default set,get)
@@ -22,6 +24,9 @@
 #   INCLUDE_PARALLEL 1 = also bench redis_parallel (default 0)
 #   PARALLEL_BIN     path to redis_parallel binary
 #   PARALLEL_PORT    default 6396 (when INCLUDE_PARALLEL=1)
+#   INCLUDE_STD      1 = also bench redis_std (default 0)
+#   STD_BIN          path to redis_std binary
+#   STD_PORT         default 6398 (when INCLUDE_STD=1)
 #   INCLUDE_UPSTREAM 1 = bench upstream redis-server (default 1)
 #   INCLUDE_IDIOMATIC 1 = bench redis_idiomatic (default 1)
 #   MGET_KEYS        keys per custom MGET (default 8)
@@ -40,9 +45,11 @@ UPSTREAM_BIN="$SCRIPT_DIR/redis_c/src/redis-server"
 IDIOMATIC_BIN="${IDIOMATIC_BIN:-$SCRIPT_DIR/out/redis_idiomatic}"
 SKETCH_BIN="${SKETCH_BIN:-$SCRIPT_DIR/out/redis_async_sketch}"
 PARALLEL_BIN="${PARALLEL_BIN:-$SCRIPT_DIR/out/redis_parallel}"
+STD_BIN="${STD_BIN:-$SCRIPT_DIR/out/redis_std}"
 GO_BIN="${GO_BIN:-$SCRIPT_DIR/out/redis_go}"
 INCLUDE_SKETCH="${INCLUDE_SKETCH:-0}"
 INCLUDE_PARALLEL="${INCLUDE_PARALLEL:-0}"
+INCLUDE_STD="${INCLUDE_STD:-0}"
 INCLUDE_UPSTREAM="${INCLUDE_UPSTREAM:-1}"
 INCLUDE_IDIOMATIC="${INCLUDE_IDIOMATIC:-1}"
 INCLUDE_GO="${INCLUDE_GO:-0}"
@@ -51,6 +58,7 @@ MGET_KEYS="${MGET_KEYS:-8}"
 REPEATS="${REPEATS:-6}"
 REQUESTS="${REQUESTS:-500000}"
 CLIENTS="${CLIENTS:-50}"
+BENCH_THREADS="${BENCH_THREADS:-1}"
 PIPELINE="${PIPELINE:-16}"
 RANDOM_KEYS="${RANDOM_KEYS:-50000}"
 BENCH_TESTS="${BENCH_TESTS:-set,get,incr}"
@@ -58,6 +66,7 @@ UPSTREAM_PORT="${UPSTREAM_PORT:-6391}"
 IDIOMATIC_PORT="${IDIOMATIC_PORT:-6393}"
 SKETCH_PORT="${SKETCH_PORT:-6395}"
 PARALLEL_PORT="${PARALLEL_PORT:-6396}"
+STD_PORT="${STD_PORT:-6398}"
 GO_PORT="${GO_PORT:-6397}"
 SAMPLE_INTERVAL="${SAMPLE_INTERVAL:-0.05}"
 MEMLOG_ON_EXIT="${MEMLOG_ON_EXIT:-1}"
@@ -82,6 +91,9 @@ fi
 if [[ "$INCLUDE_PARALLEL" == "1" ]]; then
     need "$PARALLEL_BIN" "redis_parallel"
 fi
+if [[ "$INCLUDE_STD" == "1" ]]; then
+    need "$STD_BIN" "redis_std"
+fi
 if [[ "$INCLUDE_GO" == "1" ]]; then
     need "$GO_BIN" "redis_go"
 fi
@@ -100,11 +112,14 @@ fi
 if [[ "$INCLUDE_PARALLEL" == "1" ]]; then
     LABELS+=(parallel)
 fi
+if [[ "$INCLUDE_STD" == "1" ]]; then
+    LABELS+=(std)
+fi
 if [[ "$INCLUDE_GO" == "1" ]]; then
     LABELS+=(go)
 fi
 if [[ ${#LABELS[@]} -eq 0 ]]; then
-    echo "no servers selected (INCLUDE_UPSTREAM/IDIOMATIC/SKETCH/PARALLEL/GO)" >&2
+    echo "no servers selected (INCLUDE_UPSTREAM/IDIOMATIC/SKETCH/PARALLEL/STD/GO)" >&2
     exit 1
 fi
 LABELS_PY="$(printf "'%s'," "${LABELS[@]}")"
@@ -187,6 +202,17 @@ if [[ "$INCLUDE_PARALLEL" == "1" ]]; then
     ALL_PIDS="$ALL_PIDS $PARALLEL_PID"
 fi
 
+STD_PID=""
+if [[ "$INCLUDE_STD" == "1" ]]; then
+    if [[ -n "$env_prefix" ]]; then
+        env $env_prefix "$STD_BIN" "127.0.0.1:$STD_PORT" >"$TMP_DIR/std.log" 2>&1 &
+    else
+        "$STD_BIN" "127.0.0.1:$STD_PORT" >"$TMP_DIR/std.log" 2>&1 &
+    fi
+    STD_PID=$!
+    ALL_PIDS="$ALL_PIDS $STD_PID"
+fi
+
 GO_PID=""
 if [[ "$INCLUDE_GO" == "1" ]]; then
     "$GO_BIN" "127.0.0.1:$GO_PORT" >"$TMP_DIR/go.log" 2>&1 &
@@ -205,6 +231,9 @@ if [[ "$INCLUDE_SKETCH" == "1" ]]; then
 fi
 if [[ "$INCLUDE_PARALLEL" == "1" ]]; then
     wait_port "$PARALLEL_PORT"
+fi
+if [[ "$INCLUDE_STD" == "1" ]]; then
+    wait_port "$STD_PORT"
 fi
 if [[ "$INCLUDE_GO" == "1" ]]; then
     wait_port "$GO_PORT"
@@ -287,6 +316,12 @@ if [[ "$INCLUDE_PARALLEL" == "1" ]]; then
     PARALLEL_SAMPLER_PID=$!
     ALL_PIDS="$ALL_PIDS $PARALLEL_SAMPLER_PID"
 fi
+STD_SAMPLER_PID=""
+if [[ "$INCLUDE_STD" == "1" ]]; then
+    python3 "$TMP_DIR/sampler.py" "$STD_PID" "$TMP_DIR/std_samples.txt" "$SAMPLE_INTERVAL" &
+    STD_SAMPLER_PID=$!
+    ALL_PIDS="$ALL_PIDS $STD_SAMPLER_PID"
+fi
 GO_SAMPLER_PID=""
 if [[ "$INCLUDE_GO" == "1" ]]; then
     python3 "$TMP_DIR/sampler.py" "$GO_PID" "$TMP_DIR/go_samples.txt" "$SAMPLE_INTERVAL" &
@@ -319,10 +354,12 @@ run_one() {
             keys+=("key:__rand_int__")
         done
         "$BENCH_BIN" -h 127.0.0.1 -p "$2" -n "$REQUESTS" -c "$CLIENTS" \
+            --threads "$BENCH_THREADS" \
             -P "$PIPELINE" -q -r "$RANDOM_KEYS" mget "${keys[@]}" \
             >"$4" 2>&1
     else
         "$BENCH_BIN" -h 127.0.0.1 -p "$2" -n "$REQUESTS" -c "$CLIENTS" \
+            --threads "$BENCH_THREADS" \
             -P "$PIPELINE" -q -r "$RANDOM_KEYS" -t "$3" \
             >"$4" 2>&1
     fi
@@ -356,6 +393,7 @@ port_for() {
         idiomatic) echo "$IDIOMATIC_PORT" ;;
         sketch)    echo "$SKETCH_PORT"    ;;
         parallel)  echo "$PARALLEL_PORT"  ;;
+        std)       echo "$STD_PORT"       ;;
         go)        echo "$GO_PORT"        ;;
         *) echo "unknown label: $1" >&2; exit 1 ;;
     esac
@@ -367,6 +405,7 @@ pid_for() {
         idiomatic) echo "$IDIOMATIC_PID" ;;
         sketch)    echo "$SKETCH_PID"    ;;
         parallel)  echo "$PARALLEL_PID"  ;;
+        std)       echo "$STD_PID"       ;;
         go)        echo "$GO_PID"        ;;
         *) echo "unknown label: $1" >&2; exit 1 ;;
     esac
@@ -378,6 +417,7 @@ log_for() {
         idiomatic) echo "$TMP_DIR/idiomatic.log" ;;
         sketch)    echo "$TMP_DIR/sketch.log"    ;;
         parallel)  echo "$TMP_DIR/parallel.log"  ;;
+        std)       echo "$TMP_DIR/std.log"       ;;
         go)        echo "$TMP_DIR/go.log"        ;;
         *) echo "unknown label: $1" >&2; exit 1 ;;
     esac
@@ -431,7 +471,7 @@ print(' '.join(labels))")"
 done
 
 # --- stop samplers and let them flush ---
-for p in $UPSTREAM_SAMPLER_PID $IDIOMATIC_SAMPLER_PID $SKETCH_SAMPLER_PID $PARALLEL_SAMPLER_PID $GO_SAMPLER_PID; do
+for p in $UPSTREAM_SAMPLER_PID $IDIOMATIC_SAMPLER_PID $SKETCH_SAMPLER_PID $PARALLEL_SAMPLER_PID $STD_SAMPLER_PID $GO_SAMPLER_PID; do
     [[ -n "$p" ]] || continue
     kill "$p" 2>/dev/null || true
     wait "$p" 2>/dev/null || true
@@ -552,8 +592,8 @@ def read_idiomatic_memlog(path):
 
 print()
 print("== bench_robust summary ==")
-print(f"rounds={$REPEATS} requests_per_round={$REQUESTS} clients={$CLIENTS} pipeline={$PIPELINE} mget_keys={$MGET_KEYS} cc_workers={'$CC_WORKERS_OVERRIDE' or 'default'}")
-print(f"labels={','.join(labels)} include_sketch={'$INCLUDE_SKETCH'} include_parallel={'$INCLUDE_PARALLEL'} include_go={'$INCLUDE_GO'}")
+print(f"rounds={$REPEATS} requests_per_round={$REQUESTS} clients={$CLIENTS} bench_threads={$BENCH_THREADS} pipeline={$PIPELINE} mget_keys={$MGET_KEYS} cc_workers={'$CC_WORKERS_OVERRIDE' or 'default'}")
+print(f"labels={','.join(labels)} include_sketch={'$INCLUDE_SKETCH'} include_parallel={'$INCLUDE_PARALLEL'} include_std={'$INCLUDE_STD'} include_go={'$INCLUDE_GO'}")
 samp = "  ".join(f"{lab}={sample_peaks[lab]['n']}" for lab in labels)
 print(f"sample_interval={$SAMPLE_INTERVAL}s  samples_taken: {samp}")
 print()
@@ -573,6 +613,7 @@ for cmd in cmds:
     idm = by.get((cmd, "idiomatic"), [])
     sk  = by.get((cmd, "sketch"), [])
     par = by.get((cmd, "parallel"), [])
+    std = by.get((cmd, "std"), [])
     go  = by.get((cmd, "go"), [])
     def ratio_line(a_name, a, b_name, b):
         ratio = statistics.median(a) / statistics.median(b)
@@ -587,6 +628,10 @@ for cmd in cmds:
         ratio_line("sketch", sk, "upstream", ups)
     if ups and par:
         ratio_line("parallel", par, "upstream", ups)
+    if ups and std:
+        ratio_line("std", std, "upstream", ups)
+    if idm and std:
+        ratio_line("std", std, "idiomatic", idm)
     if idm and go:
         ratio_line("idiomatic", idm, "go", go)
     if idm and sk:

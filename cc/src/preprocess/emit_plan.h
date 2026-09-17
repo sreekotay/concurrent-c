@@ -393,4 +393,28 @@ void cc_emit_warning_at(const char* file, int line, const char* msg);
  * calls to registered @comptime functions). */
 int cc_emit_plan_exec_comptime_blocks(const char* src, size_t len, const char* input_path);
 
+/* A file-scope `@comptime { }` block the lowerer lowered: the C of its
+ * function, between the markers the lowerer printed, and the line of the
+ * block's `{` in the file the user wrote, which is how the driver pairs it
+ * with the block the executor copy enumerates. */
+typedef struct CCLoweredBlock {
+    int line;
+    const char* text;
+    size_t len;
+    int used;
+} CCLoweredBlock;
+
+/* Run the blocks of `src` as cc_emit_plan_exec_comptime_blocks does, with
+ * the lowered C of the unit in hand: a block with a lowered region runs
+ * that region (a function the lowerer wrote out of the language), and
+ * reflection and the type prelude read the lowered C, where a `@variant`
+ * is the enum and struct it lowers to. `harvest_off` is where the header
+ * harvests begin in `src`; the unit's own types before it are the lowered
+ * C's. */
+int cc_emit_plan_exec_comptime_blocks_ex(const char* src, size_t len, const char* input_path,
+                                         const char* lowered_c, size_t lowered_len,
+                                         size_t harvest_off, size_t prelude_mark,
+                                         CCLoweredBlock* blocks, size_t nblocks);
+void cc_emit_plan_set_reflect_lowered(const char* lowered, size_t len);
+
 #endif /* CC_EMIT_PLAN_H */

@@ -35,8 +35,7 @@
 #include <ccc/std/net.cch>
 #include <ccc/std/map.cch>
 #include <ccc/std/string.cch>
-#include <ccc/std/table.cch>
-#include <ccc/std/slice_packed.cch>
+#include <ccc/std/shard_map.cch>
 #include <ccc/cc_exclusive.cch>
 #include <ccc/stdio.cch>
 #include <stdio.h>
@@ -54,22 +53,19 @@
  * without eight concurrent snaps / holds. */
 #define K_MGET_CAP   4
 
-#define REDIS_SKETCH_MAX_SHARDS K_MAX_SHARDS
-#include "redis_sketch_kv.cch"
-
 static const char* k_listen = "127.0.0.1:6382";
 
-typedef enum Hold {
-    HOLD_NONE = 0,
-    HOLD_KEY,
-    HOLD_KEYS,
-    HOLD_ALL,
-} Hold;
+/* What a command holds while it runs: one shard, the shards of its keys,
+ * or every shard. */
+@variant Hold {
+    none: void;
+    key: void;
+    keys: void;
+    all: void;
+};
 
-/* Storage + lock domain (same split as redis_idiomatic / redis_db). */
 typedef struct DB {
-    SketchDb store;
-    CCShardDomain shards;
+    CCShardMap maps;
 } DB;
 
 typedef struct Cmd {
@@ -165,17 +161,27 @@ static bool !>(CCError) conn_array_len(Conn* c, size_t nkeys) {
 }
 
 static bool db_init(DB* db, CCExclusive excl, CCShardMask mask) {
-    if (!db || mask.count == 0) return false;
+    CCShardMap* maps;
+    if (!db) return false;
     memset(db, 0, sizeof(*db));
-    if (!sketch_db_init(&db->store, mask.count)) return false;
-    db->shards = cc_shard_domain(excl, mask);
-    return true;
+    maps = &db->maps;
+    return maps->init(excl, mask);
 }
 
 static void db_free(DB* db) {
     if (!db) return;
-    sketch_db_destroy(&db->store);
+    db->maps.destroy();
     memset(db, 0, sizeof(*db));
+}
+
+static size_t key_hash(char[:] key) {
+    CCSlicePackedView view;
+    return cc_map_hash_slice_packed(cc_slice_packed_borrow_slice(&view, key));
+}
+
+static size_t shard_of(DB* db, size_t h) {
+    CCShardMap* maps = &db->maps;
+    return maps->index(h);
 }
 
 static Hold hold_for(char[:] name) {
@@ -183,21 +189,22 @@ static Hold hold_for(char[:] name) {
     case "GET":
     case "SET":
     case "INCR":
-        return HOLD_KEY;
+        return (Hold){ .key = {} };
     case "DEL":
     case "EXISTS":
-        return HOLD_KEYS;
+        return (Hold){ .keys = {} };
     case "DBSIZE":
     case "FLUSHDB":
-        return HOLD_ALL;
+        return (Hold){ .all = {} };
     default:
-        return HOLD_NONE;
+        return (Hold){ .none = {} };
     }
 }
 
-static bool !>(CCError) exec_incr(SketchShard* sh, SketchKey sk, ConnEnc conn) {
+static bool !>(CCError) exec_incr(CCShard* sh, char[:] key, size_t h,
+                                  ConnEnc conn) {
     @errhandler(CCError e) cc_error_exit(e);
-    CCString* v = sketch_get(sh, sk);
+    CCString* v = sh->get_h(key, h);
     int64_t n = 0;
     if (v) {
         char[:] s = v->as_slice();
@@ -209,27 +216,30 @@ static bool !>(CCError) exec_incr(SketchShard* sh, SketchKey sk, ConnEnc conn) {
     }
     n++;
     CCString num = @string(`${n}`, @scratch);
-    if (!sketch_put(sh, sk, num.as_slice())) return conn->err("oom");
+    if (!sh->put_h(key, num.as_slice(), h)) return conn->err("oom");
     return conn->integer(n);
 }
 
-static bool !>(CCError) exec_key(DB* db, Cmd* c, SketchKey sk, ConnEnc conn) {
-    SketchShard* sh = sketch_shard(&db->store, sk);
+static bool !>(CCError) exec_key(DB* db, Cmd* c, size_t si, size_t h,
+                                 ConnEnc conn) {
+    CCShardMap* maps = &db->maps;
+    CCShard* sh = maps->shard(si);
     char[:] name = c->args[0];
+    char[:] key = c->args[1];
     CCString* v;
 
     if (!sh) return conn->err("internal");
     @switch (name) {
     case "GET":
-        v = sketch_get(sh, sk);
+        v = sh->get_h(key, h);
         if (!v) return conn->null();
         return conn->bulk(v->as_slice());
     case "SET":
         if (c->argc < 3) return conn->err("wrong number of arguments");
-        if (!sketch_put(sh, sk, c->args[2])) return conn->err("oom");
+        if (!sh->put_h(key, c->args[2], h)) return conn->err("oom");
         return conn->ok();
     case "INCR":
-        return exec_incr(sh, sk, conn);
+        return exec_incr(sh, key, h, conn);
     default:
         return conn->err("internal");
     }
@@ -238,26 +248,27 @@ static bool !>(CCError) exec_key(DB* db, Cmd* c, SketchKey sk, ConnEnc conn) {
 static bool !>(CCError) exec_keys(DB* db, Cmd* c,
                                   ConnEnc conn) {
     @errhandler(CCError e) { return cc_err(e); }
+    CCShardMap* maps = &db->maps;
     char[:] name = c->args[0];
     size_t i;
     int64_t n;
-    SketchShard* sh;
+    CCShard* sh;
 
     @switch (name) {
     case "DEL":
         n = 0;
         for (i = 1; i < c->argc; i++) {
-            SketchKey sk = sketch_key(c->args[i]);
-            sh = sketch_shard(&db->store, sk);
-            if (sh && sketch_delete(sh, sk)) n++;
+            size_t h = key_hash(c->args[i]);
+            sh = maps->shard(shard_of(db, h));
+            if (sh && sh->delete_h(c->args[i], h)) n++;
         }
         return conn->integer(n);
     case "EXISTS":
         n = 0;
         for (i = 1; i < c->argc; i++) {
-            SketchKey sk = sketch_key(c->args[i]);
-            sh = sketch_shard(&db->store, sk);
-            if (sh && sketch_get(sh, sk)) n++;
+            size_t h = key_hash(c->args[i]);
+            sh = maps->shard(shard_of(db, h));
+            if (sh && sh->get_h(c->args[i], h)) n++;
         }
         return conn->integer(n);
     default:
@@ -267,16 +278,33 @@ static bool !>(CCError) exec_keys(DB* db, Cmd* c,
 
 static bool !>(CCError) exec_all(DB* db, Cmd* c,
                                  ConnEnc conn) {
+    CCShardMap* maps = &db->maps;
     char[:] name = c->args[0];
     @switch (name) {
     case "DBSIZE":
-        return conn->integer((int64_t)sketch_db_len(&db->store));
+        return conn->integer((int64_t)maps->len());
     case "FLUSHDB":
-        if (!sketch_db_reset(&db->store)) return conn->err("oom");
+        if (!maps->reset()) return conn->err("oom");
         return conn->ok();
     default:
         return conn->err("internal");
     }
+}
+
+static size_t unique_shards(DB* db, Cmd* c, uint64_t* names, size_t cap) {
+    size_t n = 0, i, j;
+    for (i = 1; i < c->argc; i++) {
+        uint64_t si = (uint64_t)shard_of(db, key_hash(c->args[i]));
+        int seen = 0;
+        for (j = 0; j < n; j++) {
+            if (names[j] == si) {
+                seen = 1;
+                break;
+            }
+        }
+        if (!seen && n < cap) names[n++] = si;
+    }
+    return n;
 }
 
 static void !>(CCError) require_held(CCExclHold* hold) {
@@ -290,6 +318,7 @@ static void !>(CCError) require_held(CCExclHold* hold) {
  * Snap lives in a ticket-local arena — Conn.arena is not concurrent. */
 static bool !>(CCError) exec_mget_parallel(DB* db, Cmd* c, ConnEnc conn) {
     @errhandler(CCError e) { return cc_err(e); }
+    CCShardMap* maps = &db->maps;
     size_t nkeys = c->argc - 1;
     size_t i;
     char ts_slab[16 * 1024];
@@ -298,7 +327,9 @@ static bool !>(CCError) exec_mget_parallel(DB* db, Cmd* c, ConnEnc conn) {
 
     conn->array_len(nkeys) !>;
     @parallel wait (ts) for (i in 0..nkeys) {
-        SketchKey sk = sketch_key(c->args[i + 1]);
+        char[:] key = c->args[i + 1];
+        size_t h = key_hash(key);
+        size_t si = shard_of(db, h);
         char snap_buf[4096];
         CCArena snap_a =
             cc_arena_create_buffer(snap_buf, sizeof(snap_buf), CC_ARENA_GROWABLE)
@@ -307,12 +338,11 @@ static bool !>(CCError) exec_mget_parallel(DB* db, Cmd* c, ConnEnc conn) {
         char[:] copy = {0};
 
         {
-            CCExclHold hold =
-                db->shards.hold((uint64_t)sketch_shard_index(&db->store, sk));
+            CCExclHold hold = maps->hold_one((uint64_t)si);
             @defer hold.release();
             require_held(&hold) !>;
-            SketchShard* sh = sketch_shard(&db->store, sk);
-            CCString* v = sh ? sketch_get(sh, sk) : NULL;
+            CCShard* sh = maps->shard(si);
+            CCString* v = sh ? sh->get_h(key, h) : NULL;
             if (v) {
                 char[:] src = v->as_slice();
                 copy = src.clone_into(snap_a) !>;
@@ -334,7 +364,7 @@ static bool !>(CCError) exec_mget_parallel(DB* db, Cmd* c, ConnEnc conn) {
 static bool !>(CCError) execute(DB* db, Cmd* c,
                                 ConnEnc conn) {
     @errhandler(CCError e) { return cc_err(e); }
-    Hold h = HOLD_NONE;
+    Hold h = { .none = {} };
     char[:] name;
 
     if (c->argc == 0) return conn->err("empty command");
@@ -357,31 +387,32 @@ static bool !>(CCError) execute(DB* db, Cmd* c,
         break;
     }
     h = hold_for(name);
-    if (h == HOLD_NONE) return conn->err("unknown command");
+    if (h.kind == .none) return conn->err("unknown command");
 
-    if (h == HOLD_KEY) {
-        SketchKey sk;
+    CCShardMap* maps = &db->maps;
+    if (h.kind == .key) {
+        size_t si;
+        size_t kh;
         if (c->argc < 2) return conn->err("wrong number of arguments");
-        sk = sketch_key(c->args[1]);
-        CCExclHold hold =
-            db->shards.hold((uint64_t)sketch_shard_index(&db->store, sk));
+        kh = key_hash(c->args[1]);
+        si = shard_of(db, kh);
+        CCExclHold hold = maps->hold_one((uint64_t)si);
         @defer hold.release();
         if (!hold.held()) return conn->err("shard admission failed");
-        return exec_key(db, c, sk, conn);
+        return exec_key(db, c, si, kh, conn);
     }
-    if (h == HOLD_KEYS) {
+    if (h.kind == .keys) {
         uint64_t names[K_MAX_SHARDS];
         size_t nnames;
         if (c->argc < 2) return conn->err("wrong number of arguments");
-        nnames = sketch_unique_shards(&db->store, c->args + 1, c->argc - 1,
-                                      names, (size_t)K_MAX_SHARDS);
-        CCExclHold hold = db->shards.hold_sorted(names, nnames);
+        nnames = unique_shards(db, c, names, (size_t)K_MAX_SHARDS);
+        CCExclHold hold = maps->hold_sorted(names, nnames);
         @defer hold.release();
         if (!hold.held()) return conn->err("shard admission failed");
         return exec_keys(db, c, conn);
     }
     {
-        CCExclHold hold = db->shards.hold_all();
+        CCExclHold hold = maps->hold_all();
         @defer hold.release();
         if (!hold.held()) return conn->err("shard admission failed");
         return exec_all(db, c, conn);
@@ -519,23 +550,25 @@ int main(int argc, char** argv) {
     };
     @defer ln.close();
 
-    size_t nshards = db.store.shard_count;
+    size_t nshards = db.maps.count();
     @string(`redis-parallel on ${addr} shards=${nshards}`,
             @scratch).println();
 
     /* !> @destroy joins (wait-then-free); cancel unparks accept. */
     CCNursery server = cc_nursery_create() !> @destroy;
-    /* Free call: UFCS peels to CCNursery* but cancel_on_signals is a
-     * by-value macro (same for cancel_on_shutdown sugar). */
-    cc_nursery_cancel_on_shutdown(server) !>;
+    server.cancel_on_signals(SIGINT, SIGTERM) !>;
 
     server.spawn(() => [@safe &db, @safe &ln, server] {
         ln.serve(server, (CCSocket* accepted) => [@safe &db, server] {
             CCSocket client = *accepted;
             (void)client.set_nodelay(1);
-            (void)server.spawn(() => [@safe &db, client] {
+            server.spawn(() => [@safe &db, client] {
                 handle_client(client, &db);
-            });
+            }) !>(e) {
+                const char* why = cc_error_str(e);
+                eprintln(@string(`spawn: ${why}`, @scratch));
+                cc_socket_close(&client);
+            };
         });
     }) !>;
     return 0;

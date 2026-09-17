@@ -5,15 +5,15 @@
  * Sessions are rows. Dest is the worker (`CCServer`: poll → step →
  * accept → reap). A ready fd fills, then one HTTP request or WS frames
  * (no dest-per-conn). A file body is a cursor on the row; a step sends
- * one chunk. POLLOUT waits while left. Workers: start 2 (1 if the cap
- * is 1), grow with live conns (one accept per poll). Cap is ncpu/2
- * (`--workers 0`) or N. `--workers 1` stays one dest — the isolate
- * receipt. `Cfg` is policy (root/pages/index/list/extra).
+ * one chunk. POLLOUT waits while left. Workers: the engine's own level
+ * (saturation and stalls), capped at ncpu; `--workers N` lowers the cap
+ * for experiments and `--workers 1` stays one dest — the isolate receipt.
+ * `Cfg` is policy (root/pages/index/list/extra).
  * `CCIoAct` is wait|wait_out|close; TLS wraps once at accept (`srv.tls_fail`
  * counts drops). Pages are an early arm (`pages_serve`; MISS → static).
  *
- *   CCServer.cch        — dest face (`CCServer` / `CCIoSess` / `CCIoAct`)
- *   CCServer.ccs        — owner: `srv.serve` (workers / poll / grow)
+ *   <ccc/std/server.cch> — dest face (`CCServer` / `CCIoSess` / `CCIoAct`)
+ *   std server_serve.ccs — owner: `srv.serve` (workers / poll / grow)
  *   this page           — HTTP/WS (`handle_http` / `session_app`) + `main`
  *   staticd_http.cch    — date / Range / header-CI mechanics
  *   staticd_block.cch   — block ring keyed by dev+ino (reuse; idle cull)
@@ -37,7 +37,6 @@
 #include <ccc/cc_instantiate.cch>
 #include <ccc/std/net.cch>
 #include <ccc/std/tls.cch>
-@link("../../third_party/bearssl/build/libbearssl.a")
 #include <ccc/std/signal.cch>
 #include <ccc/std/cli.cch>
 #include <ccc/std/static_map.cch>
@@ -49,7 +48,7 @@
 #include "staticd_fs.cch"
 #include "staticd_script.cch"
 #include "staticd_ws.cch"
-#include "CCServer.cch"
+#include <ccc/std/server.cch>
 #include <time.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -162,9 +161,6 @@ typedef struct Session {
     size_t mem_len;
     size_t send_off;
     size_t send_left;
-    char* out_mem;   /* protocol bytes (HTTP headers / WS frames) */
-    size_t out_off;
-    size_t out_left;
     time_t header_hard_deadline; /* 0 = none; absolute */
     Phase phase;
     int send_close;
@@ -181,7 +177,7 @@ typedef @typeview Encode on Enc {
     list: flag --list desc "Directory listing when no index file"
     index: opt string --index as NAME default "index.html" desc "Directory index file"
     header: opt string --header as LINE desc "Extra response header Name: value (repeatable)"
-    workers: opt i64 -w, --workers as N default 0 desc "Worker cap (0 = ncpu/2; start 2, grow with conns)"
+    workers: opt i64 -w, --workers as N default 0 desc "Worker cap (0 = the engine decides; 1 = one dest)"
     block_ring: opt i64 --block-ring as N default 256 desc "Named-block cache slots (64KB each; default 256, max 4096)"
     pages: opt string --pages as DIR default "" desc "Script pages jail (.js / .py views; off when empty)"
     tls_cert: opt string --tls-cert as PATH default "" desc "PEM certificate chain (requires --tls-key)"
@@ -218,47 +214,28 @@ typedef @typeview Encode on Enc {
     txt: void;
 };
 
-/* static_map value is the MimeTagKind ordinal (arm order above).
- * Comptime cannot name variant kind tags yet — keep ints in sync with arms. */
-typedef struct MimeSpec {
-    int kind;
-} MimeSpec;
-
+/* The extension table: the value is the tag itself. */
 typedef struct MimeEntry {
     const char* key;
-    MimeSpec value;
+    MimeTag value;
 } MimeEntry;
 
 @comptime {
     MimeEntry mime_entries[] = {
-        { ".html", { 1 } },
-        { ".htm",  { 1 } },
-        { ".css",  { 2 } },
-        { ".js",   { 3 } },
-        { ".json", { 4 } },
-        { ".png",  { 5 } },
-        { ".jpg",  { 6 } },
-        { ".jpeg", { 6 } },
-        { ".gif",  { 7 } },
-        { ".svg",  { 8 } },
-        { ".txt",  { 9 } },
-        { ".bin",  { 0 } },
+        { ".html", (MimeTag){ .html = {} } },
+        { ".htm",  (MimeTag){ .html = {} } },
+        { ".css",  (MimeTag){ .css = {} } },
+        { ".js",   (MimeTag){ .js = {} } },
+        { ".json", (MimeTag){ .json = {} } },
+        { ".png",  (MimeTag){ .png = {} } },
+        { ".jpg",  (MimeTag){ .jpeg = {} } },
+        { ".jpeg", (MimeTag){ .jpeg = {} } },
+        { ".gif",  (MimeTag){ .gif = {} } },
+        { ".svg",  (MimeTag){ .svg = {} } },
+        { ".txt",  (MimeTag){ .txt = {} } },
+        { ".bin",  (MimeTag){ .octet = {} } },
     };
     static_map("mime_ext", mime_entries, CC_STATIC_MAP_ASCII_CI);
-}
-
-/* Arm order matches MimeTagKind (0..). */
-static MimeTag mime_from_kind(int kind) {
-    if (kind == 1) return (MimeTag){ .html = {} };
-    if (kind == 2) return (MimeTag){ .css = {} };
-    if (kind == 3) return (MimeTag){ .js = {} };
-    if (kind == 4) return (MimeTag){ .json = {} };
-    if (kind == 5) return (MimeTag){ .png = {} };
-    if (kind == 6) return (MimeTag){ .jpeg = {} };
-    if (kind == 7) return (MimeTag){ .gif = {} };
-    if (kind == 8) return (MimeTag){ .svg = {} };
-    if (kind == 9) return (MimeTag){ .txt = {} };
-    return (MimeTag){ .octet = {} };
 }
 
 static const char* mime_cstr(MimeTag t) {
@@ -274,15 +251,6 @@ static const char* mime_cstr(MimeTag t) {
     case .svg:   return "image/svg+xml";
     case .txt:   return "text/plain; charset=utf-8";
     }
-}
-
-static void session_clear_out(Session* s) {
-    if (s->out_mem) {
-        if (g_blocks.pool) g_blocks.pool->free(s->out_mem);
-        s->out_mem = NULL;
-    }
-    s->out_off = 0;
-    s->out_left = 0;
 }
 
 static void session_clear_send(Session* s) {
@@ -314,38 +282,22 @@ static void session_touch_headers(Session* s, time_t now) {
     s->io->deadline = dl;
 }
 
-static Session* session_of(CCIoSess* io, CCArenaPool* pool) {
-    Session* s;
-    if (!io || !pool) return NULL;
-    s = (Session*)io->app;
-    if (s) return s;
-    s = (Session*)pool->alloc();
-    if (!s) return NULL;
+/* The session row (`srv.row(sizeof(Session), session_drop)`): zeroed at
+ * accept, initialized on the first step, cleared when the session ends. */
+static Session* session_of(CCIoSess* io) {
+    Session* s = (Session*)io->app;
+    if (s->io) return s;
     s->io = io;
     s->send = (FileHold){ .slot = -1, .fd = -1 };
-    s->mem = NULL;
-    s->mem_len = 0;
-    s->send_off = 0;
-    s->send_left = 0;
-    s->out_mem = NULL;
-    s->out_off = 0;
-    s->out_left = 0;
-    s->header_hard_deadline = 0;
-    s->send_close = 0;
     s->phase = (Phase){ .http = {} };
-    io->app = s;
     return s;
 }
 
-static void session_release(CCIoSess* io, CCArenaPool* pool) {
-    Session* s;
-    if (!io) return;
-    s = (Session*)io->app;
-    if (!s) return;
+static void session_drop(void* row) {
+    Session* s = (Session*)row;
+    if (!s || !s->io) return;   /* never stepped: nothing was opened */
     session_clear_send(s);
-    session_clear_out(s);
-    io->app = NULL;
-    if (pool) pool->free(s);
+    s->io = NULL;
 }
 
 static void session_queue_send(Session* s, FileHold* fh, size_t off, size_t nsend) {
@@ -378,30 +330,11 @@ static bool !>(CCError) session_queue_mem(Session* s, char[:] body) {
     return cc_ok(true);
 }
 
-/* Queue protocol bytes onto out_* (send_pool slab). Never write_all. */
+/* Queue protocol bytes on the session; the engine sends them after the
+ * step, and before any body bytes this page sends itself. */
 static bool !>(CCError) session_queue_out(Session* s, char[:] data) {
     if (!data.len) return cc_ok(true);
-    if (!g_blocks.pool)
-        return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "out pool"));
-    if (s->out_left) {
-        size_t used = s->out_off + s->out_left;
-        if (used + data.len > (size_t)FILE_SEND_CHUNK)
-            return cc_err(CC_ERROR(CC_ERR_IO, "out backlog"));
-        memcpy(s->out_mem + used, data.ptr, data.len);
-        s->out_left += data.len;
-        session_touch(s, time(NULL), g_sec_write_stall);
-        return cc_ok(true);
-    }
-    if (data.len > (size_t)FILE_SEND_CHUNK)
-        return cc_err(CC_ERROR(CC_ERR_IO, "out too big"));
-    {
-        char* buf = (char*)g_blocks.pool->alloc();
-        if (!buf) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "out pool"));
-        memcpy(buf, data.ptr, data.len);
-        s->out_mem = buf;
-        s->out_off = 0;
-        s->out_left = data.len;
-    }
+    s->io->write(data) !>(e) { return cc_err(e.base); };
     session_touch(s, time(NULL), g_sec_write_stall);
     return cc_ok(true);
 }
@@ -409,36 +342,24 @@ static bool !>(CCError) session_queue_out(Session* s, char[:] data) {
 static CCIoAct !>(CCError) session_send_one(Session* s) {
     @errhandler(CCError e) {
         session_clear_send(s);
-        session_clear_out(s);
         return cc_err(e);
     }
-    /* Protocol bytes first, then body. */
-    if (s->out_left) {
-        size_t want = s->out_left;
-        size_t n = s->io->try_write(
-            cc_slice_from_buffer(s->out_mem + s->out_off, want)) !>(e) {
-            if (e.base.kind == CC_IO_BUSY)
-                return cc_ok((CCIoAct){ .wait_out = {} });
-            session_clear_out(s);
+    /* Protocol bytes first (the session queue), then the body. */
+    {
+        int fl = s->io->flush();
+        if (fl < 0) {
             session_clear_send(s);
-            return cc_err(e);
-        };
-        if (n > 0) {
-            s->out_off += n;
-            s->out_left -= n;
-            if (s->out_left || s->send_left)
-                session_touch(s, time(NULL), g_sec_write_stall);
+            return cc_err(CC_ERROR(CC_ERR_IO, "peer gone"));
         }
-        if (s->out_left)
+        if (fl == 0) {
+            session_touch(s, time(NULL), g_sec_write_stall);
             return cc_ok((CCIoAct){ .wait_out = {} });
-        session_clear_out(s);
-        /* Fall through to body in the same step. */
-        if (!s->send_left) {
-            if (s->send_close) return cc_ok((CCIoAct){ .close = {} });
-            return cc_ok((CCIoAct){ .wait = {} });
         }
     }
-    if (!s->send_left) return cc_ok((CCIoAct){ .wait = {} });
+    if (!s->send_left) {
+        if (s->send_close) return cc_ok((CCIoAct){ .close = {} });
+        return cc_ok((CCIoAct){ .wait = {} });
+    }
     if (s->mem) {
         size_t want = s->send_left;
         size_t n = s->io->try_write(
@@ -503,12 +424,9 @@ static bool !>(CCError) flush_conn(Session* s, Enc* c) {
     return cc_ok(true);
 }
 
-/* After headers are queued: drain out_*, or wait/close by keepalive. */
+/* After headers are queued: the engine drains them; close waits for that. */
 static CCIoAct session_after_flush(Session* s, int ka) {
-    if (s->out_left) {
-        if (!ka) s->send_close = 1;
-        return (CCIoAct){ .wait_out = {} };
-    }
+    (void)s;
     if (!ka) return (CCIoAct){ .close = {} };
     return (CCIoAct){ .wait = {} };
 }
@@ -563,12 +481,12 @@ static Method method_of(char[:] name) {
     }
 }
 
-static const MimeSpec mime_octet_spec = { 0 }; /* MimeTag_octet */
+static const MimeTag mime_octet = { .octet = {} };
 
 static const char* content_type_for(char[:] path) {
     char[:] ext = path_ext(path);
-    const MimeSpec* spec = mime_ext_get(ext) ?> &mime_octet_spec;
-    return mime_cstr(mime_from_kind(spec->kind));
+    const MimeTag* t = mime_ext_get(ext) ?> &mime_octet;
+    return mime_cstr(*t);
 }
 
 static bool !>(CCError) enc_date_ka(Enc* c, int ka) {
@@ -911,16 +829,16 @@ static CCIoAct !>(CCError) handle_http(Session* s, Enc* conn, Cfg* cfg) {
 
     /* Pages arm: MISS falls through to static. */
     if (cfg->pages_fd >= 0) {
-        PagesKind kind = PAGES_MISS;
+        Pages found = { .miss = {} };
         ScriptReply reply = pages_serve(cfg->pages_fd, url, req.method, url,
-                                        query_s, empty, conn->arena, &kind)
+                                        query_s, empty, conn->arena, &found)
                 !>(e) {
             int code = 500;
             const char* msg = "pages failed\n";
-            if (kind == PAGES_NO_ENGINE) {
+            if (found.kind == .no_engine) {
                 code = 501;
                 msg = "pages: engine not attached\n";
-            } else if (kind == PAGES_BOTH) {
+            } else if (found.kind == .both) {
                 msg = "pages: both .js and .py\n";
             } else if (e.message && e.message[0]) {
                 msg = e.message;
@@ -930,7 +848,7 @@ static CCIoAct !>(CCError) handle_http(Session* s, Enc* conn, Cfg* cfg) {
                                          : "Internal Server Error",
                              msg, method_sends_body(meth), ka);
         };
-        if (kind == PAGES_JS || kind == PAGES_PY)
+        if (found.kind == .js || found.kind == .py)
             return pages_send(s, conn, &reply, meth, ka);
     }
 
@@ -1107,7 +1025,7 @@ static WsStep !>(CCError) ws_one_frame(Session* s) {
 static CCIoAct !>(CCError) session_app(Session* s, Enc* conn, Cfg* cfg) {
     @errhandler(CCError e) { return cc_err(e); }
     for (;;) {
-        if (s->out_left || s->send_left) {
+        if (s->send_left) {
             CCIoAct a = session_send_one(s) !>;
             @switch (a) {
             case .close:
@@ -1124,7 +1042,6 @@ static CCIoAct !>(CCError) session_app(Session* s, Enc* conn, Cfg* cfg) {
             WsStep st = ws_one_frame(s) !>;
             CCIoAct fin = (CCIoAct){ .close = {} };
             CCIoAct more = (CCIoAct){ .wait = {} };
-            CCIoAct out = (CCIoAct){ .wait_out = {} };
             @switch (st) {
             case .fin:
                 return cc_ok(fin);
@@ -1135,8 +1052,8 @@ static CCIoAct !>(CCError) session_app(Session* s, Enc* conn, Cfg* cfg) {
                 return cc_ok(more);
             case .again:
                 session_touch(s, time(NULL), g_sec_ws_idle);
-                if (s->out_left)
-                    return cc_ok(out);
+                /* A close frame was answered: the queue drains, then close. */
+                if (s->send_close) return cc_ok((CCIoAct){ .close = {} });
                 continue;
             }
             continue;
@@ -1209,7 +1126,6 @@ int main(int argc, char** argv) {
     cc_arena_pool_stack(send_pool, FILE_SEND_CHUNK, megabytes(1));
     /* L1 one chunk; grows via heap up to --block-ring live slabs. */
     cc_arena_pool_stack(ring_pool, FILE_SEND_CHUNK, FILE_SEND_CHUNK);
-    cc_arena_pool_stack(sess_pool, sizeof(Session), kilobytes(64));
 
     @errhandler(CCError err) {
         cc_error_log(err);
@@ -1236,7 +1152,7 @@ int main(int argc, char** argv) {
             return 1;
         }
         nring = (uint32_t)want;
-        if (!block_cache_init(&g_blocks, &send_pool, &ring_pool, nring)) {
+        if (!block_cache_init(&g_blocks, send_pool, ring_pool, nring)) {
             eprintln("fatal: block ring alloc");
             return 1;
         }
@@ -1244,10 +1160,7 @@ int main(int argc, char** argv) {
 
     char[:0] listen = opts.listen;
     int nworkers = (int)opts.workers;
-    if (nworkers <= 0) {
-        long n = sysconf(_SC_NPROCESSORS_ONLN);
-        nworkers = (n > 1) ? (int)(n / 2) : 1;
-    }
+    if (nworkers < 0) nworkers = 0;          /* 0: the engine's own level */
     if (nworkers > WORKERS_MAX) nworkers = WORKERS_MAX;
 
     Cfg cfg = {
@@ -1258,11 +1171,16 @@ int main(int argc, char** argv) {
         .extra = cc_slice_empty(),
     };
 
-    CCServer srv;
-    srv.init(nworkers);
+    CCServer srv = cc_server_listen(listen) !>(err) {
+        const char* msg = cc_error_str(err);
+        eprintln(@string(`listen: ${msg}`, @scratch));
+        return 1;
+    };
+    @defer srv.close();
+    if (nworkers > 0) srv.workers_max = nworkers;   /* --workers: a ceiling for experiments */
     srv.sec_tls_hs = g_sec_tls_hs;
     srv.sec_first_byte = g_sec_header_total;
-    @defer srv.close();
+    srv.row(sizeof(Session), session_drop);
 
     char[:] root_view = opts.root;
     if (root_view.len == 0) {
@@ -1343,10 +1261,11 @@ int main(int argc, char** argv) {
                 eprintln("staticd: tls key nul");
                 return 1;
             };
-            if (srv.load_tls(cert_c, key_c) != 0) {
-                eprintln("staticd: tls load failed (bad PEM cert/key?)");
+            srv.load_tls(cert_c, key_c) !>(err) {
+                const char* msg = cc_error_str(err);
+                eprintln(@string(`staticd: tls: ${msg}`, @scratch));
                 return 1;
-            }
+            };
         }
     }
 
@@ -1391,11 +1310,6 @@ int main(int argc, char** argv) {
         cfg.extra = extra.as_slice();
     }
 
-    srv.listen(listen) !>(err) {
-        const char* msg = cc_error_str(err);
-        eprintln(@string(`listen: ${msg}`, @scratch));
-        return 1;
-    };
     {
         int start = srv.start_n();
         int cap = srv.workers_max;
@@ -1409,31 +1323,19 @@ int main(int argc, char** argv) {
             println(@string(`staticd on ${listen} root=${root_c} workers=${start}..${cap}`, @scratch));
     }
     CCSignal stop = cc_signal_watch2(SIGINT, SIGTERM) !> @destroy;
-    Cfg* cfgp = &cfg;
-    CCArenaPool* sessions = &sess_pool;
-    srv.serve(&stop, (CCIoSess* io) => [cfgp, sessions] {
-        @errhandler(CCError e) { (void)e; io->dead = 1; }
-        Session* s;
-        Enc enc;
-        CCIoAct a;
-        if (io->dead) {
-            session_release(io, sessions);
-            return;
-        }
-        s = session_of(io, sessions);
-        if (!s) {
-            io->dead = 1;
-            return;
-        }
+    srv.serve(&stop, (CCIoSess* io) => [cfgp = &cfg] {
+        @errhandler(CCError e) { (void)e; io->close(); }
+        Session* s = session_of(io);
         cc_arena_stack(enc_a, K_OUT_BUF);
-        enc = (Enc){ .arena = enc_a, .out = cc_string_new(), .extra = cfgp->extra };
-        a = session_app(s, &enc, cfgp) !>;
+        Enc enc = (Enc){ .arena = enc_a, .out = cc_string_new(), .extra = cfgp->extra };
+        CCIoAct a = session_app(s, &enc, cfgp) !>;
         io->apply(a);
-        if (io->dead) session_release(io, sessions);
     }) !>;
     {
         int nfail = srv.tls_fails();
         int nsteal = srv.step_steals();
+        int npeak = srv.workers_peak();
+        eprintln(@string(`staticd: workers peak: ${npeak}`, @scratch));
         if (srv.tls && nfail > 0)
             eprintln(@string(`staticd: tls handshake failures: ${nfail}`, @scratch));
         if (nsteal > 0)

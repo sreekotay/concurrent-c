@@ -1,0 +1,39 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+
+/* A block calls the unit's own functions and reads its file-scope tables,
+ * as any function does: the region the executor runs carries what the
+ * block reaches, and the runtime is linked, so a function that builds a
+ * CCString on a heap arena runs at compile time as it runs at run time. */
+static const int k_seed[4] = { 3, 5, 7, 11 };
+
+static int weigh(int i) {
+    return k_seed[i % 4] * (i + 1);
+}
+
+static int sum_to(int n) {
+    int s = 0;
+    for (int i = 0; i < n; i++) s += weigh(i);
+    return s;
+}
+
+static const char* label_of(int n, CCArena a) {
+    CCString s = @string(`w${n}`, a);
+    return cc_slice_c_str(a, s.as_slice());
+}
+
+@comptime {
+    CCArena a = cc_arena_heap(kilobytes(4));
+    int total = sum_to(4);
+    const char* label = label_of(total, a);
+    cc_emit_format(CC_EMIT_AFTER_PRELUDE,
+        "enum { CT_TOTAL = %d };\nstatic const char* ct_label = \"%s\";\n", total, label);
+    a.destroy();
+}
+
+int main(void) {
+    if (CT_TOTAL != 3 * 1 + 5 * 2 + 7 * 3 + 11 * 4) return 1;
+    printf("comptime_block_calls_unit_fn_smoke ok total=%d label=%s\n", CT_TOTAL, ct_label);
+    return 0;
+}

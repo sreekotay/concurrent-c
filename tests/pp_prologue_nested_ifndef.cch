@@ -1,0 +1,34 @@
+/*
+ * Nested `#ifndef`/`#define` inside `#if BACKEND` must not be treated as a
+ * file-level include guard by the module prologue hoist. If it is, the
+ * inner `#endif` pops the outer `#if` and the `#elif` angle include is
+ * copied into the prologue for every host (Darwin then fails on epoll.h).
+ */
+#pragma(@module) "pp_prologue_nested_ifndef"
+
+#if defined(PP_PROLOGUE_BACKEND_A)
+#define PP_PROLOGUE_USE_A 1
+#elif defined(PP_PROLOGUE_BACKEND_B)
+#define PP_PROLOGUE_USE_B 1
+#else
+#define PP_PROLOGUE_USE_A 1
+#endif
+
+#if PP_PROLOGUE_USE_A
+#include <stddef.h>
+#ifndef PP_PROLOGUE_BATCH
+#define PP_PROLOGUE_BATCH 8
+#endif
+#elif PP_PROLOGUE_USE_B
+/* Host-missing on purpose when wrongly hoisted (same shape as epoll on Darwin). */
+#include <pp_prologue_missing_backend_b.h>
+#ifndef PP_PROLOGUE_BATCH_B
+#define PP_PROLOGUE_BATCH_B 8
+#endif
+#else
+#include <string.h>
+#endif
+
+static int pp_prologue_batch(void) {
+    return (int)PP_PROLOGUE_BATCH;
+}

@@ -3,10 +3,7 @@
 #include <assert.h>
 
 static RedisReply !>(CCError) make_reply(int64_t value) {
-    RedisReply reply = {0};
-    reply.kind = REDIS_REPLY_INTEGER;
-    reply.int_value = value;
-    return cc_ok(reply);
+    return cc_ok((RedisReply){ .integer = value });
 }
 
 typedef RedisReply[~1 1:1 >] TestReplyTx;
@@ -38,10 +35,10 @@ int main(void) {
     ReplyHolder holder = { .tx = tx };
     assert(queue_reply(&holder, &reply));
 
-    RedisReply got = {0};
+    RedisReply got = { .null_bulk = {} };
     assert(cc_io_avail(rx.recv(&got)));
-    assert(got.kind == REDIS_REPLY_INTEGER);
-    assert(got.int_value == 73);
+    assert(got.kind == .integer);
+    if (got.kind == .integer) assert(got.integer == 73);
     {
         CCNursery n = @create() !> @destroy;
         n.spawn(() => { }) !>;

@@ -193,6 +193,8 @@ char* cc_rewrite_local_cch_includes_to_lowered_headers(const char* src,
 char* cc_splice_module_members(const char* src, size_t input_len,
                                const char* input_path);
 int cc_local_header_lower_failed(void);
+/* 1 when a `.cch` is a module root or a module member: lowered by its includer, not by the header tool. */
+int cc_cch_is_module_unit(const char* path);
 /* The key `<face>_cch.c` is produced under: the face, every quoted `.cch`
  * it reaches, the toolchain and the lowerer. */
 uint64_t cc_face_module_key(const char* abs_face);
@@ -339,6 +341,10 @@ int cc_writeback_local_lowered_headers_from_codegen(char** src, size_t* n);
 // `#line`/`# N "file"` markers so diagnostics in header content blame the .cch.
 const char* cc_lowered_header_source_for(const char* lowered_path);
 
+/* The `.h` the i-th lowered local header became (see
+ * cc_lowered_local_header_source_path for the `.cch` it came from). */
+const char* cc_lowered_local_header_path(size_t i);
+
 /* ---- Header comptime harvest --------------------------------------------
  * lower_header blanks `@comptime` / CC_GENERIC_FACTORY from `.cch` → `.h` so
  * the lowered header stays host-C. The including TU re-appends the raw forms
@@ -427,6 +433,8 @@ int cc_scan_template_literal_end(const char* src, size_t n, size_t tick_pos, siz
 // Rewrite @link("lib") directives to marker comments for linker extraction.
 // Returns newly allocated string, or NULL if no rewrites needed.
 char* cc__rewrite_link_directives(const char* src, size_t n);
+/* The same, with `base_path` as the file a relative path resolves beside when the text has no `#line` pin. */
+char* cc__rewrite_link_directives_at(const char* src, size_t n, const char* base_path);
 
 // Rewrite generic container syntax:
 //   CCVec::[T] -> CCVec_T, Map<K,V> -> Map_K_V

@@ -1,0 +1,32 @@
+/* UFCS onto a function-like macro: the macro has no parameter types, so
+ * the receiver convention is the one of the function its body forwards
+ * to. `Counter_add_n` takes the counter by value; `Counter_add(c, ...)`
+ * forwards to it, so `c.add(1, 2)` passes `c`, not `&c`. `Counter_bump`
+ * forwards to a pointer-taking function, so `c.bump()` passes `&c`. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct Counter { int* cell; } Counter;
+
+static int Counter_add_n(Counter c, const int* vals, size_t n) {
+    size_t i;
+    for (i = 0; i < n; i++) *c.cell += vals[i];
+    return *c.cell;
+}
+
+#define Counter_add(c, ...)                                            \
+    Counter_add_n((c), (const int[]){__VA_ARGS__},                     \
+                  sizeof((const int[]){__VA_ARGS__}) / sizeof(int))
+
+static int Counter_bump_ptr(Counter* c) { *c->cell += 100; return *c->cell; }
+
+#define Counter_bump(c) Counter_bump_ptr(c)
+
+int main(void) {
+    int cell = 0;
+    Counter c = { &cell };
+    int a = c.add(1, 2);
+    int b = c.bump();
+    printf("a=%d b=%d cell=%d\n", a, b, cell);
+    return 0;
+}

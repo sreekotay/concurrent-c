@@ -657,10 +657,11 @@ static void pp_note(P* p, uint32_t i, uint32_t* last, bool* skipped) {
         if (c && c->else_dead) { *last = pp_skip_region(p, i); *skipped = *last != i; }
         else if (c) {
             if (k == PP_ELIF) {
-                /* the #if branch was inactive: this branch is active when
-                 * its condition is not statically false */
+                /* no earlier branch was statically true: this branch is
+                 * active unless its condition is statically false, and it
+                 * ends the chain only when statically true */
                 if (v == 0) { *last = pp_skip_region(p, i); *skipped = *last != i; }
-                else c->else_dead = true;
+                else if (v == 1) c->else_dead = true;
             } else c->else_dead = true;
         }
     } else if (k == PP_ENDIF) {

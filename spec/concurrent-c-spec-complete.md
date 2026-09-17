@@ -5635,7 +5635,7 @@ An optional `worker (name)` after the range binds `name` as an `int`: the index 
 
 Body statements may raise with `!>`. Errors are stop-starting: a failure stops new tickets from entering, in-flight iterations finish, and after the brace a ticket error re-raises into the innermost `@errhandler` for `CCError`, or into an attached `!>(e) { … }` on the construct. A handler must be in scope on both schedules unless that attached tail is present. A failed `enter` takes no token and joins the same way. `wait` and `pass` are `void !>(CCError)`: a handshake failure is a ticket error and runs that same handler. Because an entered successor is parked in `wait(i+1)` until ticket `i` discharges the stage, an entered ticket must discharge every `@stage` on every path. A success exit `pass`es unpassed stages (waiter wakes `ok`). An error exit `fail`s them: the gate becomes FAILED and a parked `wait` wakes as `err(CANCELLED)`. Ticket `i` errors before or inside a stage; ticket `i+1` already in `wait` does not hang — it wakes with that error, skips the block, `fail`s its own remaining stages, and `leave`s. The predecessor's body error and the successor's cancelled wait are both ticket errors; which one re-raises is not specified. `@defer` and `@errhandler` at the top level of the body are ill-formed; the structural form of the discharge is `@stage`.
 
-`@stage (gate, args…) { … }` is a statement inside a wait-for body, not a Result: it unwraps `gate.wait(args…) !>;`, the block, `gate.pass(args…) !>;`. `gate` is spelled as the receiver the calls apply to — `ts.read`, `ts.write`, a `CCTurnstile` with the stage index in `args` (`@stage (t, k, i)`), or a pointer to either. Each `@stage` is a ticket-scoped handshake on a named gate cell: whichever of `wait` or `pass`/`fail` touches the cell first creates it (ARMED, UNARMED, or FAILED); the other completes the handshake. A successor may therefore `wait` before this ticket reaches the block. `wait` has two completions: `pass` wakes `ok`; `fail` wakes `err(CANCELLED)`. Pause is not a third completion. Honor after `wait` returns `ok`, before the block; `resume()` does not complete `wait`. Work inside the block may be empty or guarded (`if (chain) { … }`); the handshake still happens. The `@stage` itself is a top-level statement of the wait-for body — nested in `if`, a loop, or another `@stage` is ill-formed. Inside the block the ticket is ordered and exclusive for that stage — loop-carried state reads as it does in the sequential loop. `@stage` outside a wait-for body is ill-formed. A raise inside the block exits the ticket; the error-path `fail` still happens.
+`@stage (gate, args…) { … }` is a statement inside a wait-for body, not a Result: it unwraps `gate.wait(args…) !>;`, the block, `gate.pass(args…) !>;`. `gate` is spelled as the receiver the calls apply to — `ts.read`, `ts.write`, a `CCTurnstile` with the stage index in `args` (`@stage (t, k, i)`), or a pointer to either. The gate and the arguments are ticket facts: they may read the loop variable, the `worker` binder, and names of the enclosing frame, and never a name the body declares; each argument is evaluated once per ticket, and `wait`, `pass`, and the discharge at the ticket's exit name that one value. Each `@stage` is a ticket-scoped handshake on a named gate cell: whichever of `wait` or `pass`/`fail` touches the cell first creates it (ARMED, UNARMED, or FAILED); the other completes the handshake. A successor may therefore `wait` before this ticket reaches the block. `wait` has two completions: `pass` wakes `ok`; `fail` wakes `err(CANCELLED)`. Pause is not a third completion. Honor after `wait` returns `ok`, before the block; `resume()` does not complete `wait`. Work inside the block may be empty or guarded (`if (chain) { … }`); the handshake still happens. The `@stage` itself is a top-level statement of the wait-for body — nested in `if`, a loop, or another `@stage` is ill-formed. Inside the block the ticket is ordered and exclusive for that stage — loop-carried state reads as it does in the sequential loop. `@stage` outside a wait-for body is ill-formed. A raise inside the block exits the ticket; the error-path `fail` still happens.
 
 The loop-carried case is the point: state that hops from ticket `i` to `i+1` (a chained compression dictionary, a running checksum, an output file position) sits in an `@stage` block in the body and reads exactly as it does in the sequential loop. The parallel run and the denied run produce the same output.
 
@@ -7448,9 +7448,11 @@ A `@comptime { ... }` block runs during compilation and may be used to initializ
 
 **Pipeline note (informative):** One valid implementation strategy is:
 
-1. Canonicalize/preprocess CC for compile-time discovery.
-2. Execute compile-time code and collect registrations for the whole translation unit, including included local headers.
-3. Lower the translation unit to ordinary C using the collected registrations.
+1. Canonicalize/preprocess CC for compile-time discovery, and read the
+   registrations off the translation unit, including included local headers.
+2. Lower the translation unit to ordinary C, each `@comptime {}` block among
+   it as a function.
+3. Execute the blocks and splice what they emit into that C.
 
 **Rule:** A `@comptime {}` block may assign only to:
 
@@ -7462,12 +7464,21 @@ A `@comptime { ... }` block runs during compilation and may be used to initializ
 String-literal case labels (§11) are valid in `@comptime {}` with the same
 surface rules as at runtime.
 
-**Rule (`type_of` in an executed block):** The body of `@comptime {}` is compiled
-as host C. Structural `type_of(T)` members that appear there are lowered to host
-calls before that compile — `type_of(T).nfields` is `cc_reflect_field_count("T")`
-for a user type, the same count `@comptime for (f in type_of(T).fields)` walks.
-`@comptime for` in the main translation unit is a compile-time unroll, not host C,
-and keeps the `type_of` spelling.
+**Rule (the body is the language):** The body of a file-scope `@comptime {}`
+block is written in Concurrent-C and lowered as the body of a function of its
+translation unit: a `@variant` literal, `@string`, a method call, a string
+`@switch` and a Result unwrap mean there what they mean in any function, and
+the block names the unit's types, a `@variant` among them, as it names any
+type, calls the unit's functions and reads its file-scope variables as any
+function does. What a block may not carry is a closure, a dest, a spawn or a deadline:
+a block is straight-line compile-time code, and a program that writes one
+of those in a block is ill-formed. `@emit` templates keep their template
+form in the block. Structural `type_of(T)` members in a block are the
+compile-time reflection's answers — `type_of(T).nfields` is
+`cc_reflect_field_count("T")` for a user type, the same count
+`@comptime for (f in type_of(T).fields)` walks. `@comptime for` in the main
+translation unit is a compile-time unroll, not a block, and keeps the
+`type_of` spelling.
 
 ---
 
@@ -7697,6 +7708,8 @@ type_of(T).kind        // cc_type_kind
 type_of(T).nfields     // field count (in `@comptime {}`, the host reflect count)
 type_of(T).name        // const char* display spelling
 ```
+
+Reflection reads the unit's own declarations and those of the quoted `.cch` headers it includes. A `@variant` reflects as the struct it lowers to: a tag and the union of its arms.
 
 `@comptime for` unrolls a body once per declared field of a struct `T`:
 

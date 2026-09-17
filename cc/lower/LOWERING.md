@@ -92,8 +92,11 @@ by no face is then a compile error at that line, naming the types, rather
 than a conversion nobody chose. A unit whose errors are all one type gets
 no ladder at all: there is nothing for the host to decide.
 
-The handler is hoisted to the end of the function body as a label, with the
-error cell declared at the top of the function:
+The handler is hoisted to the end of the block that declared it as a label,
+with the error cell declared at the top of the function. A jump to that
+label leaves only the blocks between the unwrap and the handler's block,
+so only their `@destroy` and `@defer` run on the way; a handler declared
+at function scope sits at the end of the body:
 
 ```c
     CCError __cc_eh_e_0;              /* at function top */
@@ -163,15 +166,17 @@ above; then the variable is registered for destruction at scope exit with
 the type's destroy hook from the index (`cc_arena_destroy`, a
 `@typehooks .destroy`, the block `D`). Destruction runs in reverse order at
 every exit of the scope: fallthrough, `return`, `break`, `continue`,
-`goto` out of the scope, and the handler `goto`. `@detach` suppresses it.
+`goto` out of the scope, and a handler `goto` to a handler declared
+outside it. `@detach` suppresses it.
 
 **`@defer stmt`, `@defer(ok) stmt`, `@defer(err) stmt`:** same scope-exit
 machinery; `(ok)` runs only on a `return cc_ok(...)` or fallthrough of a
 Result function, `(err)` only on `return cc_err(...)` or a handler exit.
-`@cancel_defer name;` clears the named entry. The current lowerer keeps a
-per-function `__cc_defer_hw` high-water counter and a cleanup label
-(`goto_cleanup`); the clean lowerer emits the deferred statements inline
-at each exit, in reverse order, which is what the `#line` pinning needs.
+`@cancel_defer name;` clears the named entry. Soft returns (any function
+that registers a site) assign `__cc_retval` before unwinding: a bare
+`return;` in `void !>(E)` is `cc_ok_SPEC()`, matching a valued
+`return cc_ok(v)` / `return cc_err(e)`. Leaving `__cc_retval` unset made
+callers observe a garbage Err.
 
 **Result methods.** `r.is_ok()` → `(r).ok`, `r.is_err()` → `!(r).ok`,
 `r.value()` → `((r).ok ? (r).u.value : (cc_error_exit_result(...), (r).u.value))`,
@@ -193,7 +198,11 @@ header the current unit only includes.
 callee's first parameter: by address when the callee takes a pointer and
 the receiver is a value, itself when the two agree. An rvalue receiver
 that the callee wants by address lives in a compound literal of its own
-type. `Type.fn(args)` is the declared `Type_fn(args)`.
+type. A callee that is a function-like macro declares no parameter, so
+the receiver is fitted to the first parameter of the function its body
+forwards to, followed as far as the forwarding goes; a macro that
+forwards to no declared function takes the receiver by address.
+`Type.fn(args)` is the declared `Type_fn(args)`.
 
 **The bare-name tier.** A plain `m(T, ...)` is callable as `x.m(...)`
 under one rule: the address of a receiver may be taken, but a pointer is
@@ -612,6 +621,12 @@ a declaration initializer (`CCString s = @string(..., @scratch);`) and an
 assignment whose stored value is the template (`s = @string(..., @scratch);`,
 through parentheses, a cast, and the arms of a ternary).
 
+A bound product belongs to the statement list that **directly** declares the
+name. Nested blocks reclaim on their own list; a `@switch` body does not
+take a watermark for a bind that lives inside a `case` arm (that would put
+`checkpoint`/`@defer` before the first case label, which case entry jumps
+over).
+
 ## Header mode
 
 A `.cch` is lowered to a `.h` the host compiler includes, and two things
@@ -683,16 +698,52 @@ What the lowerer is not handed is C. The type-scoped and template passes
 are left off, so `Tweet.parse(...)` and `@string(`...`)` still reach it as
 the language, for its own steps to lower from the index and the AST.
 
-`@comptime { }` blocks are run, on their own copy of the source: the
-executor compiles a block as C, so the copy it is handed has every `.cch`
-include rewritten to the lowered header it stands for — a rewrite the
-lowerer must not see, since it resolves those itself. What the blocks
-emit is collected there and spliced into the C after lowering, at the
-anchors the fragments name. What is left of a block in the stage is
-blanked: a block that has run has no code in it for the lowerer to
-lower, and the blanking keeps the line count so the map still holds.
+A file-scope `@comptime { }` block is written in the language, so it is
+lowered by this lowerer, as a function: the first step turns the block
+into `static void __cc_ct_block_<k>(void) { ... }` (`CcLowerer_ct_blocks`),
+and every step after it lowers the body as it lowers any other — a
+`@variant` literal, `@string`, a method call, a string switch, an unwrap.
+A `type_of(T).nfields` in a block folds to the executor's reflection
+(`cc_reflect_field_count("T")`), not the runtime registry. A closure, a
+dest, a spawn or a deadline in a block is refused: their lowering hoists
+declarations to the end of the unit, outside what the executor is handed.
+A block that registers type hooks (`cc_type_register(...)`) is the
+index's, read as written and dropped, as before.
 
-Rewriting those includes takes something away, so it is put back. A
+After the steps, the printer sets each block's function between
+`/*__cc_ct_block <k> begin line=<L>*​/` and `/*__cc_ct_block end*​/`, and
+follows it with the anchor `enum{__ccs<off>=0};` (`off` is the byte
+offset of the block's `{` in the stage, as the blanking wrote it). The
+driver reads the C back, cuts each region out, and runs the blocks on the
+executor with the region as the translation unit's body — an `@emit`
+template in it is still the template the user wrote, and the engine's
+template pass lowers it there. What a block emits is spliced at the
+anchors. The host compiles the C without the regions.
+
+A block calls the unit's own functions and reads its file-scope
+variables as any function does. The region carries what the block
+reaches: every function definition and file-scope variable the block
+names, and every one those name in turn, printed once more inside the
+markers with a prototype for each function first (the unit keeps its own
+copy). A reached function whose lowering hoisted declarations to the end
+of the unit (a closure inside it) is missing them there, and the executor
+says which symbol.
+
+The executor's translation unit for a region is the unit's own: the
+prelude in host mode, the unit's top-level preprocessor lines with their
+guards (`#include`, `#define`, `#if`), the registered compile-time
+definitions, the unit's types as this lowerer spelled them (those the
+regions name, closed over the types they name in turn; a `@variant` is
+its enum and struct there), the region, and an entry that calls the
+block. The runtime is linked, so what a unit function does at run time
+it does at compile time. Reflection (`cc_reflect_*`) reads the source
+first and the lowered C for a type the source does not declare.
+
+A block nested in an `enum { }` body, and a block harvested out of a
+header, are not this lowerer's: the driver runs those from the executor
+copy as text, as before, and their blanking leaves the enumerator marker.
+
+Rewriting the copy's includes takes something away, so it is put back. A
 `@comptime` function, a factory and a `@comptime { }` block are compile
 time only, and the lowered `.h` does not carry them — `static_map` is one
 of those functions, declared in `<ccc/std/static_map.cch>`. The copy the
@@ -701,19 +752,20 @@ executor runs has them appended (`cc_harvest_local_header_factories`,
 `cc_harvest_local_header_comptime_blocks`, in that order, as the shadow
 path appends them). Without it the block calling `static_map` compiles,
 runs, and emits nothing — a table that is silently not there, and a use of
-it that the host reports as an implicit declaration.
+it that the host reports as an implicit declaration. A factory a block
+registers by hand (`cc_generic_register`) is read off the source before
+lowering, since the lowerer meets `Name::[...]` before the block runs.
 
-**Where a fragment lands.** A blanked block leaves `enum{__ccs<n>=0};` on
-one of its blanked lines, and that marker is what a fragment anchored at
-its own site aims at. The marker is a declaration, so how it is laid out
-is the printer's business: this lowerer prints it over several lines with
-a `#line` between each, where the text engine wrote it tight. Matching one
-spelling made the marker read as absent, and a fragment with no marker
-lands at the end of the file — after every use of what it defines. The
-match skips line breaks and `#line` directives with the other blanks, and
-a fragment aimed at the standalone marker goes after that declaration's
-`};`, since with the layout on several lines the marker's own line begins
-inside the enum.
+**Where a fragment lands.** The anchor `enum{__ccs<n>=0};` is what a
+fragment anchored at its own site aims at. The marker is a declaration, so
+how it is laid out is the printer's business: this lowerer prints it over
+several lines with a `#line` between each, where the text engine wrote it
+tight. Matching one spelling made the marker read as absent, and a
+fragment with no marker lands at the end of the file — after every use of
+what it defines. The match skips line breaks and `#line` directives with
+the other blanks, and a fragment aimed at the standalone marker goes after
+that declaration's `};`, since with the layout on several lines the
+marker's own line begins inside the enum.
 
 ## Parallel
 

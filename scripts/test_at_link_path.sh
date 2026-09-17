@@ -88,4 +88,40 @@ printf '%s\n' "$two_err" | grep -F -q -- "-l$work/libatlinkpath.a" \
     && fail "two-tu path became -lPATH: $two_err"
 "$work/bin/e2e2" || fail "two-tu binary exited nonzero"
 
+# A relative path resolves beside the file that wrote it, not the cwd:
+# a face in lib/ names ../lib/libatlinkpath.a, the program in app/ includes
+# the face, and the build runs from a third directory.
+mkdir -p "$work/face" "$work/app" "$work/elsewhere"
+cp "$work/libatlinkpath.a" "$work/face/libatlinkpath.a"
+printf '%s\n' \
+    '#ifndef AT_LINK_FACE_H' '#define AT_LINK_FACE_H' \
+    '@link("../face/libatlinkpath.a")' \
+    'int at_link_path_answer(void);' \
+    '#endif' > "$work/face/at_link_face.cch"
+printf '%s\n' \
+    '#include "../face/at_link_face.cch"' \
+    'int main(void) { return at_link_path_answer() == 42 ? 0 : 1; }' > "$work/app/rel_face.ccs"
+face_err="$(cd "$work/elsewhere" && "$ROOT_DIR/cc/bin/ccc" --verbose --no-cache \
+    --out-dir "$work/out" --bin-dir "$work/bin" \
+    build --link "$work/app/rel_face.ccs" -o "$work/bin/rel_face" 2>&1)" \
+    || fail "face-relative link failed: $face_err"
+face_ln="$(link_line "$face_err")"
+printf '%s\n' "$face_ln" | grep -F -q -- "$work/face/../face/libatlinkpath.a" \
+    || fail "face-relative path not resolved beside the face: $face_ln"
+"$work/bin/rel_face" || fail "face-relative binary exited nonzero"
+
+# The stdlib header tool writes the marker with the path resolved beside the
+# face, so a `<ccc/...>` face can state its own library.
+LH="$ROOT_DIR/out/cc/bin/lower_headers"
+if [ -x "$LH" ]; then
+    mkdir -p "$work/lowered"
+    "$LH" --ordered "$work/lowered" "$work/face/at_link_face.cch" >/dev/null 2>&1 \
+        || fail "lower_headers refused the face"
+    lowered_h="$(find "$work/lowered" -name 'at_link_face.h' | head -1)"
+    [ -n "$lowered_h" ] || fail "lower_headers wrote no at_link_face.h"
+    grep -F -q -- "__CC_LINK__ $work/face/../face/libatlinkpath.a" "$lowered_h" \
+        || fail "lowered face lacks the resolved marker: $(grep -n LINK "$lowered_h")"
+    grep -F -q -- '@link(' "$lowered_h" && fail "lowered face still carries raw @link"
+fi
+
 echo "[test_at_link_path] ok"

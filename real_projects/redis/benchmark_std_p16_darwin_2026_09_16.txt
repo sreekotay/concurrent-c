@@ -1,0 +1,130 @@
+=== Benchmark redis_std (P=16) ===
+Date: Wed Sep 16 16:58:21 UTC 2026
+Host: Darwin 25.5.0 arm64 ncpu=10 (Darwin arm64)
+Commit: c3be5997
+Command: CC_V2_STATS=1 INCLUDE_STD=1 UPSTREAM_PORT=6491 IDIOMATIC_PORT=6493 STD_PORT=6498 ./bench_robust.sh
+         (defaults: REPEATS=6 REQUESTS=500000 CLIENTS=50 PIPELINE=16 BENCH_TESTS=set,get,incr)
+Bin:    out/redis_idiomatic, out/redis_std (--release)
+Upstream: redis_c/src/redis-server (local MALLOC=libc build)
+Notes: three-way after prologue nested-ifndef fix; redis_std aligned to RedisKey.
+       Default ports 6391/6393 were busy (idiomatic listen error 7); used 649x.
+
+===== three-way (upstream, idiomatic, std) =====
+tmp dir: /var/folders/12/04b0tf2d79b7d7wdgzwx12yr0000gn/T/bench_robust.XXXXXX.s0xOihmIEs
+[warmup]
+   std       set   rps=2500000.00
+   upstream  set   rps=1865671.62
+   idiomatic set   rps=2732240.50
+   std       get   rps=2252252.25
+   upstream  get   rps=2369668.25
+   idiomatic get   rps=2762431.00
+   idiomatic incr  rps=2840909.00
+   upstream  incr  rps=2183406.00
+   std       incr  rps=1689189.12
+[mem] CC.MEMLOG post-warmup
+[round 1/6]
+   idiomatic set   rps=2747252.75
+   std       set   rps=1628664.38
+   upstream  set   rps=1805054.12
+   upstream  get   rps=2314814.75
+   std       get   rps=1666666.62
+   idiomatic get   rps=2673796.75
+   upstream  incr  rps=2304147.50
+   idiomatic incr  rps=2793296.00
+   std       incr  rps=1291989.62
+[round 2/6]
+   idiomatic set   rps=2631579.00
+   std       set   rps=1683501.75
+   upstream  set   rps=1879699.25
+   std       get   rps=1492537.25
+   upstream  get   rps=2293578.00
+   idiomatic get   rps=2717391.25
+   upstream  incr  rps=2347417.75
+   idiomatic incr  rps=2732240.50
+   std       incr  rps=1628664.38
+[round 3/6]
+   std       set   rps=1479290.00
+   idiomatic set   rps=2525252.50
+   upstream  set   rps=1838235.25
+   std       get   rps=1623376.62
+   upstream  get   rps=2272727.25
+   idiomatic get   rps=2604166.75
+   std       incr  rps=1497006.00
+   upstream  incr  rps=2183406.00
+   idiomatic incr  rps=2824858.75
+[round 4/6]
+   upstream  set   rps=1851851.75
+   idiomatic set   rps=2427184.50
+   std       set   rps=1639344.25
+   upstream  get   rps=2173913.00
+   std       get   rps=1633987.00
+   idiomatic get   rps=2673796.75
+   upstream  incr  rps=2283105.00
+   std       incr  rps=1633987.00
+   idiomatic incr  rps=2793296.00
+[round 5/6]
+   std       set   rps=1396648.00
+   idiomatic set   rps=2688172.00
+   upstream  set   rps=1748251.62
+   std       get   rps=1562500.00
+   upstream  get   rps=2252252.25
+   idiomatic get   rps=2688172.00
+   upstream  incr  rps=2283105.00
+   std       incr  rps=1308900.50
+   idiomatic incr  rps=2659574.50
+[round 6/6]
+   std       set   rps=1533742.25
+   upstream  set   rps=1547987.50
+   idiomatic set   rps=2500000.00
+   upstream  get   rps=2008032.12
+   idiomatic get   rps=2475247.50
+   std       get   rps=1562500.00
+   upstream  incr  rps=2283105.00
+   idiomatic incr  rps=2717391.25
+   std       incr  rps=1661129.62
+[mem] CC.MEMLOG final
+
+== bench_robust summary ==
+rounds=6 requests_per_round=500000 clients=50 bench_threads=1 pipeline=16 mget_keys=8 cc_workers=default
+labels=upstream,idiomatic,std include_sketch=0 include_parallel=0 include_std=1 include_go=0
+sample_interval=0.05s  samples_taken: upstream=291  idiomatic=291  std=291
+
+[SET]
+  label          mean   median      min      max   stddev    cv%
+  upstream     1.779M   1.822M   1.548M   1.880M   0.122M   6.8%
+  idiomatic    2.587M   2.578M   2.427M   2.747M   0.122M   4.7%
+  std          1.560M   1.581M   1.397M   1.684M   0.110M   7.0%
+  idiomatic/upstream median: 1.415x  (SEPARATED)
+  std/upstream median: 0.868x  (OVERLAP)
+  std/idiomatic median: 0.613x  (SEPARATED)
+
+[GET]
+  label          mean   median      min      max   stddev    cv%
+  upstream     2.219M   2.262M   2.008M   2.315M   0.114M   5.1%
+  idiomatic    2.639M   2.674M   2.475M   2.717M   0.088M   3.3%
+  std          1.590M   1.593M   1.493M   1.667M   0.063M   4.0%
+  idiomatic/upstream median: 1.182x  (SEPARATED)
+  std/upstream median: 0.704x  (SEPARATED)
+  std/idiomatic median: 0.596x  (SEPARATED)
+
+[INCR]
+  label          mean   median      min      max   stddev    cv%
+  upstream     2.281M   2.283M   2.183M   2.347M   0.054M   2.4%
+  idiomatic    2.753M   2.763M   2.660M   2.825M   0.061M   2.2%
+  std          1.504M   1.563M   1.292M   1.661M   0.167M  11.1%
+  idiomatic/upstream median: 1.210x  (SEPARATED)
+  std/upstream median: 0.685x  (SEPARATED)
+  std/idiomatic median: 0.566x  (SEPARATED)
+
+[RESOURCE PEAKS] (sampled every 0.05 s across the whole run)
+  label        peak_rss   peak_threads
+  upstream       12.9MB              3
+  idiomatic      18.3MB              4
+  std            16.0MB             11
+
+[MEM GAP] footprint − (map+key+value live); remainder ≈ runtime/fibers/overflow/frag
+  phase           footprint    logical        gap      map      key    value     arenas        src
+  owner-ready        1.41MB     42.5KB     1.37MB   42.5KB       0B       0B    16.05MB  mach_phys
+  post-warmup       17.67MB     5.74MB    11.93MB   4.03MB   1.72MB       0B    20.03MB  mach_phys
+  final             17.77MB     5.74MB    12.02MB   4.03MB   1.72MB       0B    20.03MB  mach_phys
+
