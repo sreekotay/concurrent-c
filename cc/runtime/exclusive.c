@@ -91,6 +91,9 @@ typedef struct CCExclusiveEntry {
     /* Freelist link. Never overlay `locked`: a stale acquire CAS would smash
      * Treiber next and later alloc would SEGV on a wild head (Linux ASan). */
     struct CCExclusiveEntry* pool_next;
+    /* Explicit pad: TCC does not round sizeof up to alignof(64). Sized for
+     * ILP32 host (smoke); LP64 TCC hosts are not a supported ccc build. */
+    char _cacheline_pad[20];
 } CCExclusiveEntry;
 #else
 typedef struct CCExclusiveEntry {

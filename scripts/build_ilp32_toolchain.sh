@@ -41,6 +41,10 @@ if [ -f third_party/tcc/Makefile ]; then
 fi
 make -C cc clean >/dev/null 2>&1 || true
 rm -rf out/cc out/cc-tcc out/bin out/runtime 2>/dev/null || true
+# Named ILP32 volumes may still hold a host-synced Darwin libbearssl.a
+# (rsync excludes build/ but does not --delete-excluded). That makes
+# CC_ENABLE_TLS=1 then fails the ccc link with undefined br_*.
+rm -rf third_party/bearssl/build
 
 printf '== TinyCC (patched, --config-cc_ext)\n'
 ./scripts/apply_tcc_patches.sh

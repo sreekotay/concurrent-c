@@ -58,6 +58,10 @@ ifeq ($(shell uname -s),Darwin)
 else
   LD_GC_SECTIONS := -Wl,--gc-sections
 endif
+# TinyCC's linker does not implement --gc-sections / -dead_strip.
+ifeq ($(CC_IS_TCC),1)
+  LD_GC_SECTIONS :=
+endif
 # UFCS requires the patched TCC extension (AST hooks). Enforce TCC_EXT=1.
 ifneq ($(TCC_EXT),1)
   $(error TCC_EXT must be 1 (patched TCC required for comptime / libtcc); set TCC_EXT=1 and ensure TCC_INC/TCC_LIB point to the patched tcc)
@@ -98,6 +102,9 @@ ifeq ($(CC_IS_TCC),1)
   # TCC on ARM cannot emit some ELF shared/TLS relocs; i386 is fine with tcc -shared.
   ifneq (,$(filter arm% armv%,$(shell uname -m 2>/dev/null)))
     RUNTIME_DYLIB_LINK_CC := cc
+    # TCC-built seed tools SIGBUS under qemu-user on armv7 when they parse;
+    # host-compile them with system cc (ccc itself stays TCC).
+    CLEAN_BOOT_CC := cc
   endif
   CFLAGS += -std=c11 -D_Thread_local= -D__thread=
   # liblfds has no TCC port (needs GCC __atomic_* / OS PAL).
@@ -240,6 +247,17 @@ LOWER_SRCS := $(filter-out %_test.c,$(wildcard lower/*.c))
 LOWER_OBJS := $(LOWER_SRCS:%.c=$(OBJDIR)/%.o)
 LOWER_LIB := $(OBJDIR)/liblower.a
 LOWER_CFLAGS := -std=c11 -Wall -Wextra -Werror -O2 -g
+# Host TCC: lower/*.c never sees $(CFLAGS) (dedicated pattern rule). Carry the
+# same -B / -Uarm / TLS stubs so the C11 reference tools link and arm32
+# does not expand the pre-defined `arm` token into commas.
+ifeq ($(CC_IS_TCC),1)
+  ifneq ($(TCC_INC_ABS),)
+    LOWER_CFLAGS += -B$(TCC_INC_ABS)
+  else
+    LOWER_CFLAGS += -B$(TCC_INC)
+  endif
+  LOWER_CFLAGS += -Uarm -Uarm_elf -D_Thread_local= -D__thread=
+endif
 CCLEX_OBJ := $(OBJDIR)/lower/lex_test.o
 CCLEX_BINARY := $(OUT_BINDIR)/cclex
 CCPARSE_OBJ := $(OBJDIR)/lower/parse_test.o
@@ -258,6 +276,28 @@ CLEAN_BOOT_DIR := $(CLEAN_BOOT_ROOT)/$(CLEAN_BOOT_VER)
 CLEAN_BOOT_OBJ := $(OBJDIR)/clean_boot
 CLEAN_BOOT_CFLAGS := -I$(CLEAN_BOOT_DIR) -I../out/include -I../cc/include -I../cc -I.. \
 	-O2 -ffunction-sections -fdata-sections -Werror=implicit-function-declaration
+CLEAN_BOOT_CC ?= $(CC)
+CLEAN_BOOT_LD_GC := $(LD_GC_SECTIONS)
+CLEAN_BOOT_LIBS :=
+ifeq ($(CC_IS_TCC),1)
+  ifneq ($(CLEAN_BOOT_CC),$(CC))
+    # Seed tools built with system cc: drop TCC -B / -Uarm; restore gc-sections.
+    # libatomic: GCC helpers for atomics in TCC-built shadow/runtime objs.
+    CLEAN_BOOT_CFLAGS := -I$(CLEAN_BOOT_DIR) -I../out/include -I../cc/include -I../cc -I.. \
+	-O2 -ffunction-sections -fdata-sections -Werror=implicit-function-declaration
+    ifneq ($(shell uname -s),Darwin)
+      CLEAN_BOOT_LD_GC := -Wl,--gc-sections
+      CLEAN_BOOT_LIBS := -latomic
+    endif
+  else
+    ifneq ($(TCC_INC_ABS),)
+      CLEAN_BOOT_CFLAGS += -B$(TCC_INC_ABS)
+    else
+      CLEAN_BOOT_CFLAGS += -B$(TCC_INC)
+    endif
+    CLEAN_BOOT_CFLAGS += -std=c11 -Uarm -Uarm_elf -D_Thread_local= -D__thread=
+  endif
+endif
 CLEAN_TOOLS_CC := $(OUT_BINDIR)/cclex_cc $(OUT_BINDIR)/ccparse_cc \
 	$(OUT_BINDIR)/cclower_cc $(OUT_BINDIR)/ccindex_cc
 
@@ -529,14 +569,29 @@ $(CLEAN_BOOT_OBJ)/lower_cch.o: $(CLEAN_BOOT_DIR)/lower_cch.c $(wildcard $(CLEAN_
 		$(LOWER_HEADERS_STAMP)
 	@test -n "$(CLEAN_BOOT_VER)" || (echo "missing $(CLEAN_BOOT_ROOT)/last-good"; exit 1)
 	@mkdir -p $(CLEAN_BOOT_OBJ)
-	$(CC) $(CLEAN_BOOT_CFLAGS) -c $< -o $@
+	$(CLEAN_BOOT_CC) $(CLEAN_BOOT_CFLAGS) -c $< -o $@
+
+# When seed tools are host-compiled with system cc (ARM+TCC), rebuild
+# concurrent_c.o with that cc so the link does not see TCC's external
+# `__builtin_ctzll` / friends. Depend on the TCC-built obj so the seed
+# runtime TU exists before this recompile (cold -j race).
+CLEAN_BOOT_RUNTIME_O := $(OBJDIR)/runtime/concurrent_c.o
+ifneq ($(CLEAN_BOOT_CC),$(CC))
+CLEAN_BOOT_RUNTIME_O := $(CLEAN_BOOT_OBJ)/concurrent_c.o
+$(CLEAN_BOOT_OBJ)/concurrent_c.o: $(OBJDIR)/runtime/concurrent_c.o $(TLS_LIB_DEP) | build-config
+	@mkdir -p $(dir $@)
+	$(CLEAN_BOOT_CC) $(CLEAN_BOOT_CFLAGS) -I../out/include -Isrc -Iinclude -Iruntime \
+		-DCC_RUNTIME_V3=$(CC_RUNTIME_V3) -DCC_V3_DIAGNOSTICS=$(CC_V3_DIAGNOSTICS) \
+		-D_FILE_OFFSET_BITS=64 -DCC_ENABLE_ASYNC $(if $(filter 1,$(CC_ENABLE_TLS)),-DCC_ENABLE_TLS -I$(BEARSSL_DIR)/inc,) \
+		-c $(OUT_RUNTIME)/concurrent_c.c -o $@
+endif
 
 $(OUT_BINDIR)/%_cc: $(CLEAN_BOOT_DIR)/%.c $(CLEAN_BOOT_OBJ)/lower_cch.o \
-		$(OBJDIR)/runtime/concurrent_c.o $(SHADOW_COMPTIME_LIB) $(TCC_LIB_DEP)
+		$(CLEAN_BOOT_RUNTIME_O) $(SHADOW_COMPTIME_LIB) $(TCC_LIB_DEP) $(TLS_LIB_DEP)
 	@mkdir -p $(dir $@) $(CLEAN_BOOT_OBJ)
-	$(CC) $(CLEAN_BOOT_CFLAGS) -c $< -o $(CLEAN_BOOT_OBJ)/$*.o
-	$(CC) -O2 $(LD_GC_SECTIONS) $(CLEAN_BOOT_OBJ)/$*.o $(CLEAN_BOOT_OBJ)/lower_cch.o \
-		$(abspath $(OBJDIR)/runtime/concurrent_c.o) $(LOWER_CC_COMPTIME_LIBS) -lm -o $@
+	$(CLEAN_BOOT_CC) $(CLEAN_BOOT_CFLAGS) -c $< -o $(CLEAN_BOOT_OBJ)/$*.o
+	$(CLEAN_BOOT_CC) -O2 $(CLEAN_BOOT_LD_GC) $(CLEAN_BOOT_CFLAGS) $(CLEAN_BOOT_OBJ)/$*.o $(CLEAN_BOOT_OBJ)/lower_cch.o \
+		$(abspath $(CLEAN_BOOT_RUNTIME_O)) $(LOWER_CC_COMPTIME_LIBS) $(TLS_LIB_DEP) -lm $(CLEAN_BOOT_LIBS) -o $@
 	@echo "built $@ from clean seed $(CLEAN_BOOT_VER)"
 
 .PHONY: clean-tools

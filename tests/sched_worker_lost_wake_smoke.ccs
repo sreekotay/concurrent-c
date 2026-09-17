@@ -67,12 +67,19 @@ int main(void) {
             fprintf(stderr, "FAIL sum got=%u want=%u\n", got, want);
             return 1;
         }
-        /* Quiesce, then every worker must come back as idle. main may be
-         * riding one worker, so allow for exactly one non-idle. */
-        int n = sched_v2_live_workers();
-        int need = n - (sched_v2_in_context() ? 1 : 0);
-        int idle = 0, tries;
+        /* Quiesce, then every live worker must come back as idle. main may
+         * be riding one worker, so allow for exactly one non-idle.
+         *
+         * Re-sample live workers each try: after the storm, sysmon settles
+         * the pool by retiring idle workers above the eager cap. A stale
+         * peak-n snapshot would demand idle>=10 after the pool has already
+         * shrunk to 2 — a false "lost" that is just settle. A truly lost
+         * worker (parked with is_idle=0) cannot be retired, so n stays
+         * high and idle stays low. */
+        int n = 0, need = 0, idle = 0, tries;
         for (tries = 0; tries < 200; tries++) {
+            n = sched_v2_live_workers();
+            need = n - (sched_v2_in_context() ? 1 : 0);
             idle = sched_v2_idle_workers();
             if (idle >= need) break;
             cc_sleep_ms(5);

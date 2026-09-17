@@ -4116,6 +4116,8 @@ static int cc__find_clean_tool(const char* name, char* dst, size_t cap) {
     }
     if (g_repo_root[0]) {
         if ((size_t)snprintf(dst, cap, "%s/out/cc/bin/%s", g_repo_root, name) < cap && access(dst, X_OK) == 0) return 0;
+        /* Host-TCC self-build lands tools under out/cc-tcc/bin (see cc/Makefile). */
+        if ((size_t)snprintf(dst, cap, "%s/out/cc-tcc/bin/%s", g_repo_root, name) < cap && access(dst, X_OK) == 0) return 0;
         if ((size_t)snprintf(dst, cap, "%s/bin/%s", g_repo_root, name) < cap && access(dst, X_OK) == 0) return 0;
     }
     /* An installed prefix: the tools ship beside ccc ($PREFIX/bin). */

@@ -35,11 +35,11 @@ int main(void) {
     if (v != 7) { printf("v=%d\n", v); return 2; }
     if (g_seen != 0) { printf("handler ran: %d\n", g_seen); return 3; }
 
-    run(0, 1) ?> 0;
+    (void)(run(0, 1) ?> 0);
     if (g_seen != (int)CC_ERR_CLOSED) { printf("io kind=%d\n", g_seen); return 4; }
 
     g_seen = 0;
-    run(1, 0) ?> 0;
+    (void)(run(1, 0) ?> 0);
     if (g_seen != (int)CC_ERR_INVALID_ARG) { printf("plain kind=%d\n", g_seen); return 5; }
 
     printf("ok\n");

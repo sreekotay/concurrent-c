@@ -42,16 +42,14 @@ int main(void) {
     for (int i = 0; i < ITERATIONS; i++) {
         {
             CCNursery outer = @create() !> @destroy;
-            if (!outer) { printf("FAIL: outer create\n"); return 1; }
 
             outer.spawn (() => [] {
                 {
                     CCNursery inner = @create() !> @destroy;
-                    if (!inner) { abort(); }
 
                     inner.spawn (() => [] {
                         cc_atomic_fetch_add(&g_count, 1);
-                    });
+                    }) !>;
                 }
             }) !>;
         }

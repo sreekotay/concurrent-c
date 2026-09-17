@@ -72,7 +72,8 @@ Run these when you changed the **build graph**, **bootstrap seed**, or before pu
 | Clean Linux i386 (Docker) | `./scripts/smoke_i386.sh` | before pushing a new `last-good`; catches GNU ld / Darwin-only seeds |
 | Same, host+backend = TinyCC | `CCC_HOST_CC=tcc ./scripts/smoke_i386.sh` | Linux / Docker ILP32 |
 | Clean Linux ARM32 (Docker) | `./scripts/smoke_arm32.sh` | same gate on `linux/arm/v7` (gnueabihf) |
-| Same, host+backend = TinyCC | `CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh` | Linux / Docker ILP32 |
+| Same, host TinyCC + gcc backend | `CCC_HOST_CC=tcc CCC_BACKEND_CC=cc ./scripts/smoke_arm32.sh` | preferred under qemu-user: full `CCC_HOST_CC=tcc` (TCC backend) can SIGBUS on `@parallel` |
+| Same, host+backend = TinyCC | `CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh` | native arm32; under Docker/qemu prefer gcc backend |
 
 `smoke_i386.sh` / `smoke_arm32.sh` mount the repo **read-only** and build in `/work` — they do not replace your host `out/`. Env and latest receipt: [ilp32-docker.md](ilp32-docker.md).
 

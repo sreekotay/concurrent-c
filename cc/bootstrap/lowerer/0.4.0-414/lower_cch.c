@@ -1964,7 +1964,7 @@ CcStmt *cc_stmt_label(CCSlice name, CcStmt *inner, CcSpan span, CCArena a) {
 
 CcDecl *cc_decl_var(CcType *type, CCSlice name, CcInit *init, CcSpan span, CCArena a) {
     CcDecl *d = cc_arena_alloc(a, sizeof(CcDecl), _Alignof(CcDecl));
-    CcVarDecl v;
+    CcVarDecl v = {0};
     memset(d, 0, sizeof(*d));
     d->span = span;
     d->attrs = CCVec_CcAttr_new(a);
@@ -1974,6 +1974,7 @@ CcDecl *cc_decl_var(CcType *type, CCSlice name, CcInit *init, CcSpan span, CCAre
     v.destroy = false;
     v.destroy_body = NULL;
     v.detach = false;
+    v.init_is_decl = false;
     d->k = (CcDeclK){ .kind = CcDeclK_var, .u.var = v };
     return d;
 }

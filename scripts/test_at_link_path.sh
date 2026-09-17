@@ -119,7 +119,10 @@ if [ -x "$LH" ]; then
         || fail "lower_headers refused the face"
     lowered_h="$(find "$work/lowered" -name 'at_link_face.h' | head -1)"
     [ -n "$lowered_h" ] || fail "lower_headers wrote no at_link_face.h"
+    # lower_headers may realpath the face dir (Darwin: /var → /private/var).
+    work_phys="$(cd "$work" && pwd -P)"
     grep -F -q -- "__CC_LINK__ $work/face/../face/libatlinkpath.a" "$lowered_h" \
+        || grep -F -q -- "__CC_LINK__ $work_phys/face/../face/libatlinkpath.a" "$lowered_h" \
         || fail "lowered face lacks the resolved marker: $(grep -n LINK "$lowered_h")"
     grep -F -q -- '@link(' "$lowered_h" && fail "lowered face still carries raw @link"
 fi

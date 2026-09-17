@@ -145,10 +145,12 @@ anonymous writable `/work` volume before building. Host trees are not modified.
 - Entrypoint rsync uses `--delete` so a named volume cannot keep stale
   `tests/` (or other sources) removed on the host. Excluded paths stay on
   dest: `/out/`, `/bin/`, `cc/bin/.ccc-bin`, `tools/cc_test` (legacy in-tree
-  harness), TinyCC artifacts (`config.mak`, `*.a`/`*.o`, `tcc`), and the
+  harness), BearSSL `third_party/bearssl/build/` (host `libbearssl.a` is
+  foreign-arch), TinyCC artifacts (`config.mak`, `*.a`/`*.o`, `tcc`), and the
   ARM32 smoke progress files. Omitting the excludes lets a volume pick up
-  Darwin `libtcc1.a` (breaks ARM comptime `__aeabi_*`) or a Mach-O
-  `tools/cc_test` (`Exec format error` mid-suite).
+  Darwin `libbearssl.a` (ccc link: undefined `br_*`), Darwin `libtcc1.a`
+  (breaks ARM comptime `__aeabi_*`), or a Mach-O `tools/cc_test`
+  (`Exec format error` mid-suite).
 - Inside a tree, `ccc` further shards host objects under
   `out/.cc-build/host/<fingerprint>/`.
 - Prefer the harness at `out/tools/cc_test` (`scripts/test.sh` builds it there)
