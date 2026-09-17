@@ -1,0 +1,14 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+int main(void) {
+    @errhandler(CCError e) { eprintln("err"); return 2; }
+    cc_arena_stack(a, kilobytes(64));
+    CCTurnstile ts@(2, 1, a) !> @destroy;
+    int n = 4;
+    @parallel wait (ts) for (i in 0..n) {
+        int name = i;
+        @stage (ts, 0, name) { eprintln(@string(`ticket ${i}`, @scratch)); }
+    } !>;
+    println("done");
+    return 0;
+}
