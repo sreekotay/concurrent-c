@@ -232,13 +232,21 @@ static char[:] fold_name(char[:] src, char* buf, size_t cap) {
     return out;
 }
 
-/* payload = argc - 1 (command name at args[0]). max < 0 → unbounded. */
-static bool payload_ok(size_t argc, size_t min, int max, int multiple) {
-    size_t n = argc > 0 ? argc - 1 : 0;
-    if (n < min) return 0;
-    if (max >= 0 && n > (size_t)max) return 0;
-    if (multiple > 0 && n % (size_t)multiple != 0) return 0;
-    return 1;
+/* Arguments after the command word: min..max, max < 0 unbounded. Off is
+ * a command error, so exec's handler answers -ERR. */
+static bool !>(CCError) arity(const RedisCmd* cmd, size_t min, int max) {
+    size_t n = cmd->argc > 0 ? cmd->argc - 1 : 0;
+    if (n < min || (max >= 0 && n > (size_t)max))
+        return cc_err(CC_ERR_INVALID_ARG, "ERR wrong number of arguments");
+    return cc_ok(true);
+}
+
+/* args[i] as an integer; anything else is the Redis error for it. */
+static int64_t !>(CCError) arg_i64(const RedisCmd* cmd, size_t i) {
+    int64_t v = cmd->args[i].to_i64() !> {
+        return cc_err(CC_ERR_INVALID_ARG, "ERR value is not an integer or out of range");
+    };
+    return cc_ok(v);
 }
 
 static bool !>(CCError) rr_cmd_next(RespReader* reader, RedisCmd* out,
@@ -371,7 +379,7 @@ static size_t unique_shards(RedisDb* db, char[:]* keys, size_t nkeys,
     return n;
 }
 
-/* --- Conn encode (sketch) ------------------------------------------------ */
+/* --- Conn encode --------------------------------------------------------- */
 /* Fixed wire bytes → lit(char[:]) (string lits coerce to CC_SLICE_LIT).
  * Interpolated headers → @string into @scratch, then one write into out.
  *
@@ -425,8 +433,6 @@ static bool !>(CCIoError) redis_conn_array_len(RedisConn* c, size_t n) {
 static bool !>(CCIoError) redis_conn_write_reply(RedisConn* c,
                                                  const RedisReply* reply) {
     @errhandler(CCIoError e) { return cc_err(e); }
-    if (!c || !reply)
-        return cc_err(cc_io_error(CC_ERROR(CC_ERR_INVALID_ARG, "conn write_reply: null")));
     @switch (*reply) {
     case .simple(s):
         c->lit("+") !>;
@@ -467,6 +473,10 @@ static bool !>(CCIoError) enc_result(RedisConnEnc enc,
     return enc->write_reply(&r);
 }
 
+static bool !>(CCIoError) enc_reply(RedisConnEnc enc, RedisReply r) {
+    return enc->write_reply(&r);
+}
+
 static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
     @switch (val) {
     case .str(s):
@@ -490,58 +500,62 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
     CCArena reply_arena = enc->reply_arena;
     DbCmdClock clock = {0};
     @switch (op) {
+    case .ping:
+        arity(cmd, 0, 1) !>;
+        if (cmd->argc == 2) return enc->bulk(cmd->args[1]);
+        return enc->pong();
+    case .echo:
+        arity(cmd, 1, 1) !>;
+        return enc->bulk(cmd->args[1]);
+    case .config_get: {
+        char sub[8];
+        arity(cmd, 2, 2) !>;
+        char[:] get = fold_name(cmd->args[1], sub, sizeof(sub));
+        @switch (get) {
+        case "GET":
+            break;
+        default:
+            return enc->err("unsupported command");
+        }
+        return enc_result(
+            enc, config_get_reply(cmd->args[2], enc->reply_arena));
+    }
     case .get: {
-        RedisEntry* cell;
-        if (!payload_ok(cmd->argc, 1, 1, 0))
-            return enc->err("wrong number of arguments");
-        cell = db_lookup_live_h(db, keys[0], &clock, cmd->key_hash);
+        arity(cmd, 1, 1) !>;
+        RedisEntry* cell = db_lookup_live_h(db, keys[0], &clock, cmd->key_hash);
         if (!cell) return enc->null();
         return enc_redis_value(enc, &cell->val);
     }
     case .set:
-        /* Clone under hold (sketch/go). Prep/install races under load. */
-        if (!payload_ok(cmd->argc, 2, 2, 0))
-            return enc->err("wrong number of arguments");
+        /* Clone under the hold: prep/install races under load. */
+        arity(cmd, 2, 2) !>;
         db_set_h(db, keys[0], keys[1], 0, cmd->key_hash) !>;
         return enc->ok();
     case .setnx:
-        if (!payload_ok(cmd->argc, 2, 2, 0))
-            return enc->err("wrong number of arguments");
+        arity(cmd, 2, 2) !>;
         return enc_result(enc, db_setnx(db, keys[0], keys[1], &clock));
     case .setex: {
-        char[:] secs_arg;
-        int64_t seconds;
-        if (!payload_ok(cmd->argc, 3, 3, 0))
-            return enc->err("wrong number of arguments");
-        secs_arg = keys[1];
-        seconds = secs_arg.to_i64() !>;
+        arity(cmd, 3, 3) !>;
+        int64_t seconds = arg_i64(cmd, 2) !>;
         db_set_with_ttl(db, keys[0], keys[2],
                         expire_seconds_to_rel_ms(seconds), &clock) !>;
         return enc->ok();
     }
     case .psetex: {
-        char[:] ms_arg;
-        int64_t ms;
-        if (!payload_ok(cmd->argc, 3, 3, 0))
-            return enc->err("wrong number of arguments");
-        ms_arg = keys[1];
-        ms = ms_arg.to_i64() !>;
+        arity(cmd, 3, 3) !>;
+        int64_t ms = arg_i64(cmd, 2) !>;
         db_set_with_ttl(db, keys[0], keys[2], ms, &clock) !>;
         return enc->ok();
     }
     case .append:
-        if (!payload_ok(cmd->argc, 2, 2, 0))
-            return enc->err("wrong number of arguments");
+        arity(cmd, 2, 2) !>;
         return enc_result(
             enc, db_append(db, keys[0], keys[1], reply_arena, &clock));
     case .strlen: {
-        RedisEntry* cell;
-        RedisValue* val;
-        if (!payload_ok(cmd->argc, 1, 1, 0))
-            return enc->err("wrong number of arguments");
-        cell = db_lookup_live(db, keys[0], &clock);
+        arity(cmd, 1, 1) !>;
+        RedisEntry* cell = db_lookup_live(db, keys[0], &clock);
         if (!cell) return enc->integer(0);
-        val = &cell->val;
+        RedisValue* val = &cell->val;
         @switch (val) {
         case .str:
             return enc->integer((int64_t)val->str.len());
@@ -554,87 +568,57 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
         return enc->integer(0);
     }
     case .type:
-        if (!payload_ok(cmd->argc, 1, 1, 0))
-            return enc->err("wrong number of arguments");
+        arity(cmd, 1, 1) !>;
         return enc->simple(db_lookup_live(db, keys[0], &clock) ? "string"
                                                                : "none");
     case .incr:
-        if (!payload_ok(cmd->argc, 1, 1, 0))
-            return enc->err("wrong number of arguments");
+        arity(cmd, 1, 1) !>;
         return enc_result(enc, db_incrby_h(db, keys[0], 1, &clock,
                                               cmd->key_hash));
     case .decr:
-        if (!payload_ok(cmd->argc, 1, 1, 0))
-            return enc->err("wrong number of arguments");
+        arity(cmd, 1, 1) !>;
         return enc_result(enc, db_incrby_h(db, keys[0], -1, &clock,
                                               cmd->key_hash));
     case .incrby: {
-        char[:] delta_arg;
-        int64_t delta;
-        if (!payload_ok(cmd->argc, 2, 2, 0))
-            return enc->err("wrong number of arguments");
-        delta_arg = keys[1];
-        delta = delta_arg.to_i64() !>;
+        arity(cmd, 2, 2) !>;
+        int64_t delta = arg_i64(cmd, 2) !>;
         return enc_result(enc, db_incrby_h(db, keys[0], delta, &clock,
                                               cmd->key_hash));
     }
     case .decrby: {
-        char[:] delta_arg;
-        int64_t delta;
-        int64_t neg;
-        if (!payload_ok(cmd->argc, 2, 2, 0))
-            return enc->err("wrong number of arguments");
-        delta_arg = keys[1];
-        delta = delta_arg.to_i64() !>;
-        neg = cc_sub_i64_checked(0, delta) !> {
+        arity(cmd, 2, 2) !>;
+        int64_t delta = arg_i64(cmd, 2) !>;
+        int64_t neg = cc_sub_i64_checked(0, delta) !> {
             return enc->err("decrement would overflow");
         };
         return enc_result(enc, db_incrby_h(db, keys[0], neg, &clock,
                                               cmd->key_hash));
     }
     case .expire: {
-        char[:] secs_arg;
-        int64_t seconds;
-        if (!payload_ok(cmd->argc, 2, 2, 0))
-            return enc->err("wrong number of arguments");
-        secs_arg = keys[1];
-        seconds = secs_arg.to_i64() !>;
+        arity(cmd, 2, 2) !>;
+        int64_t seconds = arg_i64(cmd, 2) !>;
         return enc_result(
             enc, db_expire_rel_ms(db, keys[0],
                                   expire_seconds_to_rel_ms(seconds), &clock));
     }
     case .pexpire: {
-        char[:] ms_arg;
-        int64_t ms;
-        if (!payload_ok(cmd->argc, 2, 2, 0))
-            return enc->err("wrong number of arguments");
-        ms_arg = keys[1];
-        ms = ms_arg.to_i64() !>;
+        arity(cmd, 2, 2) !>;
+        int64_t ms = arg_i64(cmd, 2) !>;
         return enc_result(enc, db_expire_rel_ms(db, keys[0], ms, &clock));
     }
     case .ttl:
-        if (!payload_ok(cmd->argc, 1, 1, 0))
-            return enc->err("wrong number of arguments");
-        {
-            RedisReply r = db_ttl(db, keys[0], 0, &clock);
-            return enc->write_reply(&r);
-        }
+        arity(cmd, 1, 1) !>;
+        return enc_reply(enc, db_ttl(db, keys[0], 0, &clock));
     case .pttl:
-        if (!payload_ok(cmd->argc, 1, 1, 0))
-            return enc->err("wrong number of arguments");
-        {
-            RedisReply r = db_ttl(db, keys[0], 1, &clock);
-            return enc->write_reply(&r);
-        }
+        arity(cmd, 1, 1) !>;
+        return enc_reply(enc, db_ttl(db, keys[0], 1, &clock));
     case .persist:
-        if (!payload_ok(cmd->argc, 1, 1, 0))
-            return enc->err("wrong number of arguments");
+        arity(cmd, 1, 1) !>;
         return enc_result(enc, db_persist(db, keys[0], &clock));
     case .del: {
         size_t i;
         int64_t removed = 0;
-        if (!payload_ok(cmd->argc, 1, -1, 0))
-            return enc->err("wrong number of arguments");
+        arity(cmd, 1, -1) !>;
         @for (i in 0..nkeys) {
             RedisEntry* cell = db_lookup_live(db, keys[i], &clock);
             if (!cell) continue;
@@ -646,8 +630,7 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
     case .exists: {
         size_t i;
         int64_t found = 0;
-        if (!payload_ok(cmd->argc, 1, -1, 0))
-            return enc->err("wrong number of arguments");
+        arity(cmd, 1, -1) !>;
         @for (i in 0..nkeys) {
             if (db_lookup_live(db, keys[i], &clock)) found++;
         }
@@ -655,10 +638,9 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
     }
     case .mget: {
         size_t i;
-        if (!payload_ok(cmd->argc, 1, -1, 0))
-            return enc->err("wrong number of arguments");
-        /* Sketch shape: header then bulks. Mid-encode Err truncates the
-         * array on the wire (conn closes) — same caveat as the sketch. */
+        arity(cmd, 1, -1) !>;
+        /* Header then bulks. A mid-encode Err truncates the array on the
+         * wire; the connection closes. */
         enc->array_len(nkeys) !>;
         @for (i in 0..nkeys) {
             RedisEntry* cell = db_lookup_live(db, keys[i], &clock);
@@ -671,21 +653,16 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
         return cc_ok(true);
     }
     case .mset:
-        if (!payload_ok(cmd->argc, 2, -1, 2))
-            return enc->err("wrong number of arguments");
+        arity(cmd, 2, -1) !>;
+        if (nkeys % 2) return enc->err("wrong number of arguments");
         db_mset(db, keys, nkeys) !>;
         return enc->ok();
     case .dbsize:
-        if (!payload_ok(cmd->argc, 0, 0, 0))
-            return enc->err("wrong number of arguments");
-        {
-            RedisReply r = db_dbsize(db, &clock);
-            return enc->write_reply(&r);
-        }
+        arity(cmd, 0, 0) !>;
+        return enc_reply(enc, db_dbsize(db, &clock));
     case .flushdb:
     case .flushall:
-        if (!payload_ok(cmd->argc, 0, 1, 0))
-            return enc->err("wrong number of arguments");
+        arity(cmd, 0, 1) !>;
         (void)db_flush(db);
         return enc->ok();
     case .keys: {
@@ -697,8 +674,7 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
         char[:]* hits = NULL;
         size_t matched = 0, cap = 0;
         size_t si, i;
-        if (!payload_ok(cmd->argc, 1, 1, 0))
-            return enc->err("wrong number of arguments");
+        arity(cmd, 1, 1) !>;
         pattern = keys[0];
         if (pattern.len > (size_t)k_keys_pattern_max)
             return enc->err("KEYS pattern too long");
@@ -740,8 +716,7 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
     case .cc_memlog: {
         const char* phase = "cc-memlog";
         char phase_buf[64];
-        if (!payload_ok(cmd->argc, 0, 1, 0))
-            return enc->err("wrong number of arguments");
+        arity(cmd, 0, 1) !>;
         if (cmd->argc >= 2 && keys[0].ptr && keys[0].len > 0) {
             size_t n = keys[0].len < sizeof(phase_buf) - 1 ? keys[0].len
                                                            : sizeof(phase_buf) - 1;
@@ -753,8 +728,6 @@ static bool !>(CCIoError) enc_redis_value(RedisConnEnc enc, RedisValue* val) {
         redis_mem_report_impl(db, phase);
         return enc->ok();
     }
-    default:
-        return enc->err("internal");
     }
 }
 
@@ -765,8 +738,8 @@ static bool !>(CCIoError) enc_unsupported(RedisConnEnc enc) {
     return cc_ok(false);
 }
 
-/* Hold + work + encode (redis.go / sketch execute).
- * redis_op() is the only string-switch; case groups are the hold class.
+/* Hold, then exec under it. redis_op() is the only string switch; the
+ * case groups are the hold class.
  * Result E is CCIoError only (encode/socket). Command/db CCError is mapped
  * to -ERR inside exec via enc_fail.
  * Ok(true) = keep client; Ok(false) = reply already encoded, close after flush
@@ -779,28 +752,9 @@ static bool !>(CCIoError) enc_unsupported(RedisConnEnc enc) {
 
     @switch (op) {
     case .ping:
-        if (!payload_ok(cmd->argc, 0, 1, 0))
-            return enc->err("wrong number of arguments");
-        if (cmd->argc == 2) return enc->bulk(cmd->args[1]);
-        return enc->pong();
     case .echo:
-        if (!payload_ok(cmd->argc, 1, 1, 0))
-            return enc->err("wrong number of arguments");
-        return enc->bulk(cmd->args[1]);
-    case .config_get: {
-        char sub[8];
-        char[:] get;
-        if (cmd->argc != 3) return enc->err("wrong number of arguments");
-        get = fold_name(cmd->args[1], sub, sizeof(sub));
-        @switch (get) {
-        case "GET":
-            break;
-        default:
-            return enc->err("unsupported command");
-        }
-        return enc_result(
-            enc, config_get_reply(cmd->args[2], enc->reply_arena));
-    }
+    case .config_get:
+        return exec(db, cmd, enc, op);
 
     case .get:
     case .set:
