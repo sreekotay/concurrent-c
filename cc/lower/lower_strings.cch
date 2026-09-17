@@ -717,9 +717,14 @@ static void sr_scope_store_out(SrScope* sc, CcExpr* e, CCSlice nm, CcExpr* b) {
     }
 }
 
-/* Whether this statement list should take and give back the watermark. The
- * declarations are collected first: an assignment may precede, in the walk
- * order, the declaration of the name it stores to. */
+/* Whether this statement list should take and give back the watermark. Only
+ * direct declarations count: a nested block (or `@switch` case) that binds
+ * `@scratch` reclaims on its own list. Walking into nested stmts used to
+ * attribute those binds to the outer list, so a switch body got
+ * `checkpoint`/`@defer` before the first `case` — jumped over on entry,
+ * then poison on every restore path (host `brk` after a `return`).
+ * Escape analysis still walks nested statements: an assignment into an
+ * outer name may sit inside a loop or case. */
 static bool sr_scope_owns_scratch(TStep* st, CcStmtList* list) {
     CcLowerer* L = st->L;
     CcVisitor v;
@@ -731,10 +736,7 @@ static bool sr_scope_owns_scratch(TStep* st, CcStmtList* list) {
     sc.L = L;
     sc.binds = false;
     sc.escapes = false;
-    memset(&v, 0, sizeof(v));
-    v.stmt = sr_scope_stmt;
-    v.env = &sc;
-    for (i = 0; i < n; i++) CcStmt_walk(*list->get_ptr(i), v);
+    for (i = 0; i < n; i++) sr_scope_stmt(*list->get_ptr(i), &sc);
     if (!sc.binds) return false;
     memset(&v, 0, sizeof(v));
     v.expr = sr_scope_expr;

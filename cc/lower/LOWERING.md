@@ -172,10 +172,11 @@ outside it. `@detach` suppresses it.
 **`@defer stmt`, `@defer(ok) stmt`, `@defer(err) stmt`:** same scope-exit
 machinery; `(ok)` runs only on a `return cc_ok(...)` or fallthrough of a
 Result function, `(err)` only on `return cc_err(...)` or a handler exit.
-`@cancel_defer name;` clears the named entry. The current lowerer keeps a
-per-function `__cc_defer_hw` high-water counter and a cleanup label
-(`goto_cleanup`); the clean lowerer emits the deferred statements inline
-at each exit, in reverse order, which is what the `#line` pinning needs.
+`@cancel_defer name;` clears the named entry. Soft returns (any function
+that registers a site) assign `__cc_retval` before unwinding: a bare
+`return;` in `void !>(E)` is `cc_ok_SPEC()`, matching a valued
+`return cc_ok(v)` / `return cc_err(e)`. Leaving `__cc_retval` unset made
+callers observe a garbage Err.
 
 **Result methods.** `r.is_ok()` → `(r).ok`, `r.is_err()` → `!(r).ok`,
 `r.value()` → `((r).ok ? (r).u.value : (cc_error_exit_result(...), (r).u.value))`,
@@ -619,6 +620,12 @@ so the bound form is not wrapped. Both spellings of it are the bound form:
 a declaration initializer (`CCString s = @string(..., @scratch);`) and an
 assignment whose stored value is the template (`s = @string(..., @scratch);`,
 through parentheses, a cast, and the arms of a ternary).
+
+A bound product belongs to the statement list that **directly** declares the
+name. Nested blocks reclaim on their own list; a `@switch` body does not
+take a watermark for a bind that lives inside a `case` arm (that would put
+`checkpoint`/`@defer` before the first case label, which case entry jumps
+over).
 
 ## Header mode
 

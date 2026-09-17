@@ -1,0 +1,59 @@
+/*
+ * Bare `return;` in `void !>(E)` with `@destroy` must soft-return Ok.
+ * Before the fix, cleanup left `__cc_retval` uninitialized and the caller
+ * saw a garbage Err (often a SIGSEGV on e.message).
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct Box {
+    int n;
+    int* hits;
+} Box;
+
+static void Box_destroy(Box* b) {
+    if (b && b->hits) (*b->hits)++;
+}
+
+@typehooks on Box {
+    .destroy = Box_destroy,
+};
+
+static void !>(CCError) work(int* hits, int fail) {
+    @errhandler(CCError e) { return cc_err(e); }
+    Box b = { .n = 1, .hits = hits } @destroy;
+    if (fail) return cc_err(CC_ERR_INVALID_ARG, "boom");
+    return;
+}
+
+int main(void) {
+    int hits = 0;
+    @errhandler(CCError e) {
+        fprintf(stderr, "unexpected: %s\n", e.message ? e.message : "?");
+        return 1;
+    }
+    work(&hits, 0) !>;
+    if (hits != 1) {
+        fprintf(stderr, "FAIL destroy hits=%d want 1\n", hits);
+        return 1;
+    }
+    {
+        @errhandler(CCError e) {
+            if (!e.message || strcmp(e.message, "boom") != 0) {
+                fprintf(stderr, "FAIL err msg=%s\n", e.message ? e.message : "?");
+                return 1;
+            }
+            if (hits != 2) {
+                fprintf(stderr, "FAIL destroy-on-err hits=%d want 2\n", hits);
+                return 1;
+            }
+            println("void_result_bare_return_soft_ok_smoke: OK");
+            return 0;
+        }
+        work(&hits, 1) !>;
+        fprintf(stderr, "FAIL: error did not reach handler\n");
+        return 1;
+    }
+}

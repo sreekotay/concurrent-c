@@ -401,15 +401,34 @@ static void cl_register_destroy(CFn* fn, CcStmt* s, CcDecl* d, CcVarDecl v, CcSt
 
 /* ---- exits ------------------------------------------------------------------ */
 
-/* `return e;` -> `{ __cc_retval = e; <unwind to the function scope>; goto __cc_cleanup; }` */
+/* `return e;` -> `{ __cc_retval = e; <unwind to the function scope>; goto __cc_cleanup; }`.
+ * A bare `return;` in `void !>(E)` is Ok: without that, cleanup returns an
+ * uninitialized `__cc_retval` and the caller sees a garbage Err. */
 static CcStmt* cl_soft_return(CFn* fn, CcStmt* s, CcExpr* value) {
     CcLowerer* L = fn->L;
     CcSpan sp = s->span;
     CcStmt* blk = lw_block(L, sp);
-    if (fn->ret && value)
+    if (fn->ret && value) {
         lw_push(blk, lw_expr_stmt(L, lw_assign(L, lw_ident(L, cl_lit("__cc_retval"), sp), value, sp), sp));
-    else if (value)
+    } else if (fn->ret && !value && fn->ret_is_result) {
+        CcIndex* ix = L->ix;
+        CCSlice canon = ix->canon(fn->ret);
+        CcTypeInfo* ti = canon.len ? ix->type_get(canon) : NULL;
+        /* void Ok may be a missing result_value or a named `void` (index). */
+        bool ok_void = ti && ti->is_result &&
+            (!ti->result_value || CcType_is_void(ti->result_value) ||
+             slice_eq(ix->canon(ti->result_value), cstr_slice("void")));
+        if (ok_void) {
+            CCString fname = @string(`cc_ok_${ti->name}`, L->arena);
+            CcExpr* ok = lw_call0(L, lw_keep(L, &fname), sp);
+            lw_push(blk, lw_expr_stmt(L, lw_assign(L, lw_ident(L, cl_lit("__cc_retval"), sp), ok, sp), sp));
+        } else {
+            CCString m = @string(`bare 'return;' in a Result-returning function needs an Ok value; write 'return cc_ok(...);'`, L->arena);
+            lw_error(L, sp, m);
+        }
+    } else if (value) {
         lw_push(blk, lw_expr_stmt(L, value, sp));   /* `return f();` in a void function */
+    }
     cl_unwind(fn, cl_function_scope(fn), false, blk);
     lw_push(blk, lw_goto(L, cl_lit("__cc_cleanup"), sp));
     return blk;

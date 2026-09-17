@@ -1,0 +1,45 @@
+/*
+ * Bound `@string(..., @scratch)` inside a `@switch` case reclaims on the
+ * case block — not on the switch body (checkpoint before `case` is jumped
+ * over; restore then poisons and the host may `brk` after a Result return).
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+#include <stdio.h>
+
+@variant Op {
+    ping: void;
+    strlen_num: void;
+};
+
+@noblock static bool !>(CCError) exec(Op op, int64_t n) {
+    @errhandler(CCError e) { return cc_err(e); }
+    @switch (op) {
+    case .ping:
+        return cc_ok(true);
+    case .strlen_num: {
+        CCString text = @string(`${n}`, @scratch);
+        return cc_ok(text.len > 0);
+    }
+    }
+    return cc_ok(false);
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "unexpected: %s\n", e.message ? e.message : "?");
+        return 1;
+    }
+    bool ok = exec((Op){ .ping = {} }, 0) !>;
+    if (!ok) {
+        eprintln("ping arm failed");
+        return 1;
+    }
+    ok = exec((Op){ .strlen_num = {} }, 42) !>;
+    if (!ok) {
+        eprintln("strlen_num arm failed");
+        return 1;
+    }
+    println("scratch_switch_case_reclaim_smoke: OK");
+    return 0;
+}

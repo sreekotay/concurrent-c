@@ -1,0 +1,9 @@
+=== Benchmark redis_std after locality + parse/KEYS fixes (P=16, Darwin) ===
+Date: Thu Sep 17 01:00:59 UTC 2026
+Host: Darwin 25.5.0 arm64 ncpu=10
+Commit: e8d93a09 + uncommitted redis rewrite
+
+===== alone =====
+tmp dir: /var/folders/12/04b0tf2d79b7d7wdgzwx12yr0000gn/T/bench_robust.XXXXXX.ujmtSrkSrN
+[warmup]
+./bench_robust.sh: line 348: 61072 Trace/BPT trap: 5       env $env_prefix "$STD_BIN" "127.0.0.1:$STD_PORT" > "$TMP_DIR/std.log" 2>&1
