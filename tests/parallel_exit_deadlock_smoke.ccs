@@ -10,7 +10,6 @@
 #define HI 20
 
 static int for_late(void) {
-    @errhandler(CCError e) cc_error_exit(e);
     int i;
     @parallel for (i in 0..N) {
         if (i == HI)
@@ -21,7 +20,6 @@ static int for_late(void) {
 
 /* HI may claim first and skip LO. Waiting for LO hangs. */
 static int for_two(void) {
-    @errhandler(CCError e) cc_error_exit(e);
     int i;
     @parallel for (i in 0..N) {
         if (i == LO)
@@ -34,7 +32,6 @@ static int for_two(void) {
 
 /* Return upgrades break. A skipped break ticket is not joined as a return. */
 static int for_ret_brk(void) {
-    @errhandler(CCError e) cc_error_exit(e);
     int i;
     @parallel for (i in 0..N) {
         if (i == LO)
@@ -46,7 +43,6 @@ static int for_ret_brk(void) {
 }
 
 static int nested_for(void) {
-    @errhandler(CCError e) cc_error_exit(e);
     int i, j;
     @parallel for (i in 0..8) {
         @parallel for (j in 0..8) {
@@ -133,7 +129,6 @@ static int wait_before_stage(void) {
 
 #pragma(@parallel) off
 static int seq_for_ret(void) {
-    @errhandler(CCError e) cc_error_exit(e);
     int i;
     @parallel for (i in 0..N) {
         if (i == 0)

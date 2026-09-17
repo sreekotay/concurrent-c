@@ -367,7 +367,7 @@ static CCIoAct !>(CCError) session_send_one(Session* s) {
             if (e.base.kind == CC_IO_BUSY)
                 return cc_ok((CCIoAct){ .wait_out = {} });
             session_clear_send(s);
-            return cc_err(e);
+            return cc_err(e.base);
         };
         if (n > 0) {
             s->send_off += n;
@@ -395,7 +395,7 @@ static CCIoAct !>(CCError) session_send_one(Session* s) {
                 if (e.base.kind == CC_IO_BUSY)
                     return cc_ok((CCIoAct){ .wait_out = {} });
                 session_clear_send(s);
-                return cc_err(e);
+                return cc_err(e.base);
             };
             block_hold_drop(&bh);
             if (n > 0) {
@@ -1129,6 +1129,10 @@ int main(int argc, char** argv) {
 
     @errhandler(CCError err) {
         cc_error_log(err);
+        return 1;
+    }
+    @errhandler(CCIoError ioe) {
+        cc_error_log(ioe.base);
         return 1;
     }
 

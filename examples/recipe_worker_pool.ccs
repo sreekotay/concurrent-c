@@ -18,7 +18,7 @@
 #define NUM_JOBS    9
 
 static void worker(int[~ <] jobs_rx, int[~ >] done_tx) {
-    @errhandler(CCError e) cc_error_exit(e);
+    @errhandler(CCIoError e) cc_error_exit(e.base);
     int job;
     while (cc_io_avail(jobs_rx.recv(&job))) {
         println(@string(`worker: processed job ${job}`, @scratch));
@@ -27,7 +27,7 @@ static void worker(int[~ <] jobs_rx, int[~ >] done_tx) {
 }
 
 static void feed(int[~4 >] tx, int n) {
-    @errhandler(CCError e) cc_error_exit(e);
+    @errhandler(CCIoError e) cc_error_exit(e.base);
     int j;
     @for (j in 1..(n + 1)) {
         int v = (int)j;

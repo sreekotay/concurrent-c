@@ -1,9 +1,8 @@
 /*
- * I/O error type: CCError general face (`@typeview … { as: base; }`) +
- * os_code payload.
- *
- * CCIoError is usable as CCError through `base` — same preference order as
- * UFCS / @errhandler / cc_err (exact E, else unique as-face path to F).
+ * I/O error type: a CCError plus the OS code. It is its own error type, not
+ * a CCError: an I/O Result reaches an `@errhandler(CCIoError)`, and a
+ * function that answers with CCError converts at the site it chose to
+ * (`e.base`), as one that answers with CCIoError does with `cc_io_error(e)`.
  */
 #ifndef CC_IO_ERROR_H
 #define CC_IO_ERROR_H
@@ -27,14 +26,10 @@ typedef struct {
     int32_t os_code; /* errno or platform code; 0 when not applicable. */
 } CCIoError;
 
-@typeview on CCIoError {
-    as: base;
-};
-
 static inline CCIoError cc_io_error_os(CCErrorKind kind, int os_code) {
     CCIoError e;
-    /* Face must carry a printable message: as-face projection to CCError drops
-     * os_code, and the script default handler prints the face alone. */
+    /* The base carries a printable message: `e.base` is what a CCError
+     * reader sees, without os_code. */
     e.base = CC_ERROR(kind, cc_error_kind_str(kind));
     e.os_code = (int32_t)os_code;
     return e;
@@ -44,7 +39,7 @@ static inline CCIoError __cc_io_error_from_kind(CCErrorKind kind) {
     return cc_io_error_os(kind, 0);
 }
 
-/* Copy a generic CCError into the as: face (os_code = 0). */
+/* Wrap a generic CCError (os_code = 0). */
 static inline CCIoError __cc_io_error_from_cc_error(CCError e) {
     CCIoError r;
     r.base = e;
@@ -52,7 +47,7 @@ static inline CCIoError __cc_io_error_from_cc_error(CCError e) {
     return r;
 }
 
-/* `cc_io_error(x)` — CCErrorKind construct, or CCError → Io (as: face). */
+/* `cc_io_error(x)` — from a CCErrorKind, or wrapping a CCError. */
 #define cc_io_error(__x__) _Generic((__x__), \
     CCError:                __cc_io_error_from_cc_error, \
     default:                __cc_io_error_from_kind)((__x__))

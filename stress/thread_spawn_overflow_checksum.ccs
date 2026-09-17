@@ -59,7 +59,6 @@ static uintptr_t expected_checksum(int tasks) {
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     /* Force the pathological tiny bounded queue.  cc__sched_exec_lazy
      * reads this on first use, so it must be set before any spawn. */
     setenv("CC_SPAWN_QUEUE_CAP", "4", 1);

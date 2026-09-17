@@ -7,6 +7,7 @@
 
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
+    @errhandler(CCIoError e) { cc_error_log(e.base); return 1; }
     int a = 0;
     int b = 0;
     CCParallel h = @parallel {

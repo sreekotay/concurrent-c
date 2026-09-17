@@ -465,7 +465,6 @@ static int write_ppm(const char* path, const uint8_t* fb, int w, int h) {
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
 
     int smoke = env_truth("RT_SMOKE");
     int w = env_int("RT_WIDTH", smoke ? 48 : 400);

@@ -12,7 +12,6 @@ typedef struct ReplyHolder {
 } ReplyHolder;
 
 @noblock static inline bool queue_reply(ReplyHolder* holder, RedisReply* reply) {
-    @errhandler(CCError e) cc_error_exit(e);
     bool !>(CCIoError) sent =
         holder->tx.try_send_into(
             (slot, arena) => [reply] {

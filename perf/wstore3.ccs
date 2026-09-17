@@ -521,7 +521,6 @@ static void slot_rotate(CCEpochShard* s, int l, int i) {
 }
 
 static void note_hold(CCEpochShard* s, const char* verb, double us, size_t n) {
-    @errhandler(CCError e) cc_error_exit(e);
     s->waves++;
     s->wave_sum_us += us;
     if (us > s->wave_max_us) s->wave_max_us = us;
@@ -904,7 +903,6 @@ static size_t rss_kib(void) {
 }
 
 static void print_mem(CCEpochKeys* st, const char* when) {
-    @errhandler(CCError e) cc_error_exit(e);
     size_t commit = 0, epochs = 0, live = 0, mapn = 0;
     size_t rss;
     for (int i = 0; i < st->nshards; i++) {
@@ -1073,7 +1071,6 @@ typedef struct Reporter {
 } Reporter;
 
 static void reporter(Reporter* rp) {
-    @errhandler(CCError e) cc_error_exit(e);
     CCEpochKeys* st = rp->st;
     println("#      t_s      keys logical_KiB commit_KiB rss_KiB drains dropped reinsert  waves rehash      ops");
     for (;;) {

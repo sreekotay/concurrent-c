@@ -81,7 +81,6 @@ static double run_once(void) {
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     g_iterations = env_int_or("CC_BUF_ITERS", DEFAULT_ITERATIONS);
     g_samples = env_int_or("CC_BUF_SAMPLES", DEFAULT_SAMPLES);
     println(@string(`perf_buffered_base: cap=${CHANNEL_CAPACITY} iters=${g_iterations} samples=${g_samples}`, @scratch));

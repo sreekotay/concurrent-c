@@ -32,7 +32,6 @@ void torture_nesting(int depth) {
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     println(@string(`=================================================================`, @scratch));
     println(@string(`NURSERY TORTURE: Nesting ${TORTURE_DEPTH} levels of nurseries`, @scratch));
     println(@string(`=================================================================

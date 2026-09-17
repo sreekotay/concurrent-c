@@ -36,7 +36,6 @@ static void batch_n(int n) {
 }
 
 int main(int argc, char** argv) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
 
     const char* mode = (argc > 1) ? argv[1] : "batch";
     int warm = (argc > 2) ? atoi(argv[2]) : 0;

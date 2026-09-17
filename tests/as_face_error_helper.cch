@@ -1,0 +1,23 @@
+/* Helper for the as:-face error tests: an error type of the tests' own
+ * that is a CCError through its `base` face, so a CCError handler, a
+ * `cc_err(e)` into a CCError Result and a binder projection read it. */
+#ifndef AS_FACE_ERROR_HELPER_CCH
+#define AS_FACE_ERROR_HELPER_CCH
+
+typedef struct {
+    CCError base;
+    int code; /* detail the face drops */
+} AppError;
+
+@typeview on AppError {
+    as: base;
+};
+
+static inline AppError app_error(CCErrorKind kind, int code) {
+    AppError e;
+    e.base = CC_ERROR(kind, cc_error_kind_str(kind));
+    e.code = code;
+    return e;
+}
+
+#endif

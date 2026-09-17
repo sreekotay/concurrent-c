@@ -92,7 +92,6 @@ static void bench_unbuffered(void) {
  * is rejected; the dummy local is the kick.
  */
 static void bench_unbuffered_par(void) {
-    @errhandler(CCError e) cc_error_exit(e);
     int[~ >] tx;
     int[~ <] rx;
     cc_channel_pair(&tx, &rx);
@@ -118,7 +117,6 @@ static void bench_unbuffered_par(void) {
 
 /* Single-threaded throughput (no contention) */
 static void bench_single_thread(void) {
-    @errhandler(CCError e) cc_error_exit(e);
     int[~1000 >] tx;
     int[~1000 <] rx;
     cc_channel_pair(&tx, &rx);
@@ -141,7 +139,6 @@ static void bench_single_thread(void) {
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     println("perf_channel_throughput: measuring channel performance");
     
     bench_single_thread();

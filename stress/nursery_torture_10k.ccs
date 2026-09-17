@@ -38,7 +38,6 @@ void recursive_nursery(int depth) {
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     setvbuf(stdout, NULL, _IONBF, 0);
     println(@string(`=================================================================`, @scratch));
     println(@string(`NURSERY TORTURE: Nesting ${TORTURE_DEPTH} levels deep`, @scratch));

@@ -5,6 +5,11 @@
 #include <ccc/cc_runtime.cch>
 #include <ccc/stdio.cch>
 
+static void !>(CCError) say_ok(void) {
+    println("named-ok");
+    return cc_ok();
+}
+
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
 
@@ -12,7 +17,7 @@ int main(void) {
         CCNursery n = cc_nursery_create() !> @destroy;
         n.spawn(() => {
             @errhandler(CCError e) cc_error_exit(e);
-            println("named-ok");
+            say_ok() !>;
         }) !>;
     }
     println("main-ok");

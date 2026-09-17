@@ -4,7 +4,6 @@
 #include <stdio.h>
 
 static int !>(CCError) early_ok(void) {
-    @errhandler(CCError e) { return cc_err(e); }
     return cc_ok(1);
 }
 

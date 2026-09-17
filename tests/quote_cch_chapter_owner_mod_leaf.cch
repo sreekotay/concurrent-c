@@ -7,7 +7,6 @@
  * is one includer among others; no unit owns the bodies. */
 int !>(CCError) chapter_owner_leaf_step(int x) {
     /* CHAPTER_OWNER_LEAF_BODY_MUST_NOT_SPLICE */
-    @errhandler(CCError e) { return cc_err(e); }
     return cc_ok(x);
 }
 

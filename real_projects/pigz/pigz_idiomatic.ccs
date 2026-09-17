@@ -122,7 +122,6 @@ static CompressedResult* !>(CCError) compress_slice(CCSlice data,
 }
 
 static void !>(CCError) write_all(CCFile* f, CCSlice s) {
-    @errhandler(CCError e) { return cc_err(e); }
     size_t nw = f->write(s) !>;
     if (nw != s.len)
         return cc_err(CC_ERR_IO, "write");

@@ -51,10 +51,6 @@ void cc_fiber_dump_state(const char* reason);
 }
 
 int main(void) {
-    @errhandler(CCIoError e) {
-        fprintf(stderr, "channel err: %s\n", e.message);
-        return 1;
-    }
     printf("unbuffered_debug: %d senders, %d receivers, %d msgs each\n",
            NUM_SENDERS, NUM_RECEIVERS, MSGS_PER);
     fflush(stdout);

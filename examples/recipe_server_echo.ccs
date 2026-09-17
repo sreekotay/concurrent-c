@@ -33,7 +33,6 @@
 
 /* In-process client: connect, send, read the echo, stop the server. */
 static void run_test_client(CCServer* srv) {
-    @errhandler(CCError e) cc_error_exit(e);
     @defer srv->shutdown();
     CCSocket sock = cc_tcp_connect(PORT, sizeof(PORT) - 1) !>(e) {
         eprintln(@string(`dial error: ${e}`, @scratch));
@@ -72,6 +71,7 @@ static bool parse_test_flag(int argc, char** argv) {
 
 int main(int argc, char** argv) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
+    @errhandler(CCIoError ioe) { cc_error_log(ioe.base); return 1; }
 
     bool test_mode = parse_test_flag(argc, argv);
 

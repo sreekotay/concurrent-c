@@ -1296,16 +1296,20 @@ char* cc_script_rewrite_source(const char* path,
         "/* .shcc entry: auto prelude */\n"
         "#include <ccc/script/prelude.cch>\n"
         "\n";
-    /* Print bangs (`println() !>;`) are `void !>(CCPrintError)` and do
-     * not as: to CCError — keep a typed handler so selection does not fall
-     * through to a host C type error on the CCError hoist cell. */
+    /* One typed handler per error type a statement-level `!>` can raise:
+     * print bangs are `void !>(CCPrintError)`, I/O is `!>(CCIoError)`,
+     * and neither is a CCError. Selection is by exact type (§3.1). */
     static const char default_eh[] =
-        "    @errhandler(CCPrintError pe) {\n"
-        "        (void)cc_eprintln(cc_print_error_str(pe));\n"
+        "    @errhandler(CCPrintError __cc_default_pe) {\n"
+        "        (void)cc_eprintln(cc_print_error_str(__cc_default_pe));\n"
         "        return 1;\n"
         "    }\n"
-        "    @errhandler(CCError e) {\n"
-        "        (void)cc_eprintln(cc_error_str(e));\n"
+        "    @errhandler(CCIoError __cc_default_ie) {\n"
+        "        (void)cc_eprintln(cc_io_error_str(__cc_default_ie));\n"
+        "        return 1;\n"
+        "    }\n"
+        "    @errhandler(CCError __cc_default_e) {\n"
+        "        (void)cc_eprintln(cc_error_str(__cc_default_e));\n"
         "        return 1;\n"
         "    }\n"
         "\n";
@@ -1423,12 +1427,16 @@ char* cc_script_rewrite_source(const char* path,
              * `\n`), so without it `@errhandler` sticks to `{` on one line
              * and later statements fail to parse. */
             static const char task_eh[] =
-                "\n    @errhandler(CCPrintError pe) {\n"
-                "        (void)cc_eprintln(cc_print_error_str(pe));\n"
+                "\n    @errhandler(CCPrintError __cc_default_pe) {\n"
+                "        (void)cc_eprintln(cc_print_error_str(__cc_default_pe));\n"
                 "        return 1;\n"
                 "    }\n"
-                "    @errhandler(CCError e) {\n"
-                "        (void)cc_eprintln(cc_error_str(e));\n"
+                "    @errhandler(CCIoError __cc_default_ie) {\n"
+                "        (void)cc_eprintln(cc_io_error_str(__cc_default_ie));\n"
+                "        return 1;\n"
+                "    }\n"
+                "    @errhandler(CCError __cc_default_e) {\n"
+                "        (void)cc_eprintln(cc_error_str(__cc_default_e));\n"
                 "        return 1;\n"
                 "    }\n"
                 "\n";

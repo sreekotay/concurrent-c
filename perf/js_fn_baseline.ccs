@@ -62,7 +62,6 @@ static double g_ms[64];
 static int g_samples = 7;
 
 static double report_ns(const char *mode, long long per) {
-    @errhandler(CCError e) cc_error_exit(e);
     double m = median(g_ms, g_samples);
     double ns = m * 1e6 / (double)per;
     println(@string(` ${mode} ${m} ms ${ns} ns/call`, @scratch));

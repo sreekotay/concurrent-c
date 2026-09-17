@@ -10,7 +10,6 @@ static int destatic_cell = 4;
 int destatic_table[] = { 1, 2, 3 };
 
 static int !>(CCError) destatic_step(int x) {
-    @errhandler(CCError e) { return cc_err(e); }
     return cc_ok(x);
 }
 

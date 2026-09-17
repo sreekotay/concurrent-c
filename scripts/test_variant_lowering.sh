@@ -122,15 +122,16 @@ emitted4="$out_dir/variant_packed_lvalue_projection_smoke.c"
 # per-arm overlay structs are emitted
 grep -qF 'typedef struct { Handle h; } PCell__cc_ov_h;' "$emitted4" \
   || fail "packed lowering did not emit the per-arm overlay struct"
-# address-of a packed arm: &overlay->arm is a real payload pointer
-# (parens around the cast operand are optional in the emit)
-grep -qE 'handle_bump\(&\(\(PCell__cc_ov_h\*\)\(?pc\)?\)->h\)' "$emitted4" \
+# address-of a packed arm: &overlay->arm is a real payload pointer.
+# What is pinned is the form, not the printer: the space before a cast's
+# `*` and the parens around its operand are the printer's to choose.
+grep -qE 'handle_bump\(&\(\(PCell__cc_ov_h ?\*\)\(?pc\)?\)->h\)' "$emitted4" \
   || fail "address-of a packed arm did not lower to an overlay payload pointer"
 # in-place member mutation writes through the overlay lvalue
-grep -qE '\(\(PCell__cc_ov_h\*\)\(?pc\)?\)->h\.gen = 2' "$emitted4" \
+grep -qE '\(\(PCell__cc_ov_h ?\*\)\(?pc\)?\)->h\.gen = 2' "$emitted4" \
   || fail "in-place packed arm member mutation did not lower to an overlay lvalue"
 # address-of a value-form packed arm (base address-taken)
-grep -qF '&((PCell__cc_ov_num*)&(d))->num' "$emitted4" \
+grep -qE '&\(\(PCell__cc_ov_num ?\*\)\(?&\(d\)\)?\)->num' "$emitted4" \
   || fail "address-of a value-form packed arm did not lower to an overlay pointer"
 # the packed projection must NOT go through the value-returning getter
 if grep -q 'PCell__cc_get_h(pc)\.gen = ' "$emitted4"; then
@@ -147,7 +148,7 @@ SRC5=tests/variant_packed_arm_method_smoke.ccs
 emitted5="$out_dir/variant_packed_arm_method_smoke.c"
 "$CCC" build --no-cache --emit-c-only "$SRC5" -o "$emitted5" >/dev/null 2>&1 \
   || fail "emit-c-only build of $SRC5 failed"
-grep -qE 'cc_string_as_slice\(&\(\(PMV__cc_ov_str\*\)\(?v\)?\)->str\)' "$emitted5" \
+grep -qE 'cc_string_as_slice\(&\(\(PMV__cc_ov_str ?\*\)\(?v\)?\)->str\)' "$emitted5" \
   || fail "packed arm UFCS method call did not resolve through the overlay receiver"
 
 echo "[test_variant_lowering] OK"

@@ -20,10 +20,6 @@
 }
 
 int main(void) {
-    @errhandler(CCIoError e) {
-        fprintf(stderr, "channel err: %s\n", e.message);
-        return 1;
-    }
     int[~10 >] tx;
     int[~10 <] rx;
     cc_channel_pair(&tx, &rx);

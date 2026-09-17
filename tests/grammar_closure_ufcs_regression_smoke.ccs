@@ -25,7 +25,6 @@ static size_t !>(CCError) mk_seven(void) {
 
 /* bug 2: Result-typed local named `a` ... */
 static size_t result_local_a(void) {
-    @errhandler(CCError e) cc_error_exit(e);
     size_t !>(CCError) a = mk_seven();
     if (a.is_err()) return 0;
     return a.value();

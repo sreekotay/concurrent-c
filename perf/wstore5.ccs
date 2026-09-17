@@ -386,7 +386,6 @@ static void bucket_push_free(Bucket* b, Entry* e) {
 }
 
 static Entry* !>(CCError) bucket_pop_or_bump(CCEpochShard* s, Bucket* b) {
-    @errhandler(CCError err) { return cc_err(err); }
     Entry* e;
     if (b->free_head) {
         e = b->free_head;
@@ -446,7 +445,6 @@ static int never_open_page(CCEpochShard* s) {
 }
 
 static bool !>(CCError) never_prepare(CCEpochShard* s) {
-    @errhandler(CCError e) { return cc_err(e); }
     Bucket* np = never_cur(s);
     if (never_has_room(np)) {
         if (!np->recs.valid())
@@ -699,7 +697,6 @@ static void slot_rotate(CCEpochShard* s, int l, int i) {
 }
 
 static void note_hold(CCEpochShard* s, const char* verb, double us, size_t n) {
-    @errhandler(CCError e) cc_error_exit(e);
     s->waves++;
     s->wave_sum_us += us;
     if (us > s->wave_max_us) s->wave_max_us = us;
@@ -819,7 +816,6 @@ static int sweep_more(CCEpochShard* s) {
 }
 
 static void !>(CCError) sweep_wave(CCEpochShard* s) {
-    @errhandler(CCError e) { return cc_err(e); }
     CCArena stolen[RECLAIM_CAP];
     size_t stolen_n = 0;
     size_t n;
@@ -1162,7 +1158,6 @@ static size_t rss_kib(void) {
 }
 
 static void print_mem(CCEpochKeys* st, const char* when) {
-    @errhandler(CCError e) cc_error_exit(e);
     size_t commit = 0, epochs = 0, live = 0, mapn = 0;
     size_t rss;
     for (int i = 0; i < st->nshards; i++) {
@@ -1331,7 +1326,6 @@ typedef struct Reporter {
 } Reporter;
 
 static void reporter(Reporter* rp) {
-    @errhandler(CCError e) cc_error_exit(e);
     CCEpochKeys* st = rp->st;
     println("#      t_s      keys logical_KiB commit_KiB rss_KiB drains dropped reinsert  waves rehash      ops");
     for (;;) {

@@ -250,7 +250,6 @@ static RespParse gen_try_read_args_buffered(RespReader* r,
                                                   size_t cap,
                                                   size_t* out_argc,
                                                   CCError* err) {
-    @errhandler(CCError e) cc_error_exit(e);
     /* Loop so Redis-style no-ops (blank inline `\r\n`, empty multibulk `*0`)
      * are consumed without killing the connection; keep reading until a
      * real command, incomplete frame, or hard error. */
@@ -641,7 +640,6 @@ static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
 
 
 static bool write_all(CCSocket* sock, char[:] data) {
-    @errhandler(CCError e) cc_error_exit(e);
     size_t off = 0;
     const int write_deadline_ms = 1000;
     CCDeadline deadline = cc_deadline_after_ms(write_deadline_ms);
@@ -818,7 +816,6 @@ typedef struct OwnerReplyEnv {
 } OwnerReplyEnv;
 
 static void* owner_reply_entry(void* env, intptr_t slot_i, intptr_t arena_i) {
-    @errhandler(CCError e) cc_error_exit(e);
     OwnerReplyEnv* e = (OwnerReplyEnv*)env;
     RedisReply* slot = (RedisReply*)slot_i;
     CCArena arena = *(CCArena*)arena_i;
@@ -875,11 +872,6 @@ static void* owner_reply_entry(void* env, intptr_t slot_i, intptr_t arena_i) {
 
         RedisConn* conn = req->conn;
         @defer owner_release_pending(conn, &req);
-        @errhandler(CCError e) {
-            if (req) { redis_conn_release_slot(conn, req); req = NULL; }
-            cc_channel_close(conn->reply_tx, cc_io_error(e));
-            return 0;
-        }
 
         /* Reserve-then-write (explicit CCClosure2 — see owner_reply_entry). */
         OwnerReplyEnv build_env = { .db = &db, .req = req };
@@ -929,7 +921,6 @@ static void* owner_reply_entry(void* env, intptr_t slot_i, intptr_t arena_i) {
 }
 
 @noblock static RedisPipeline drain_pipeline_window(RedisConn* conn, RedisPipelineWindow* window) {
-    @errhandler(CCError e) cc_error_exit(e);
     if (!window) return (RedisPipeline){ .reply_closed = {} };
     @defer reply_arena_reset(conn);
     while (window->replies_pending > 0) {

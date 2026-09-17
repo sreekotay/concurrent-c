@@ -42,7 +42,7 @@ int main(void) {
         int b = 0;
         CCParallel h = @parallel {
             @serial {
-                @errhandler(CCError e) { h.fail(e); return; }
+                @errhandler(CCIoError e) { h.fail(e.base); return; }
                 bool did = h.cancel() !>;
                 a = did ? 1 : 0;
             }

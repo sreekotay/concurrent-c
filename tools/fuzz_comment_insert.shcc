@@ -168,7 +168,6 @@ typedef struct {
 
 static FzRun !>(CCError) fz_run_build_run(const char* scratch, const char* src_path,
                                           int timeout_sec, CCArena* arena) {
-    @errhandler(CCError e) { return cc_err(e); }
     char outd[1024], bind[1024], tmo[32];
     snprintf(outd, sizeof(outd), "%s/out", scratch);
     snprintf(bind, sizeof(bind), "%s/bin", scratch);

@@ -19,7 +19,7 @@
 /* Writes two lines to `path`. If `inject_error` is nonzero, returns an
  * error after the first line — exercising the @defer(err) rollback. */
 void !>(CCError) write_report(const char* path, int inject_error) {
-    @errhandler(CCError e) cc_error_exit(e);
+    @errhandler(CCIoError e) cc_error_exit(e.base);
     CCFile f = CC_FILE_CLOSED @destroy;
     f.create(path) !>;
 

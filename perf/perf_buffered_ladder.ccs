@@ -48,7 +48,6 @@ static void sort_doubles(double* arr, int n) {
 }
 
 static double bench_loop_local_once(void) {
-    @errhandler(CCError e) cc_error_exit(e);
     volatile int64_t checksum_a = 0;
     volatile int64_t checksum_b = 0;
     double start = time_now_ms();
@@ -94,7 +93,6 @@ static double bench_loop_two_fiber_once(void) {
 }
 
 static double bench_chan_single_once(void) {
-    @errhandler(CCError e) cc_error_exit(e);
     int[~1000 >] tx_h;
     int[~1000 <] rx_h;
     cc_channel_pair(&tx_h, &rx_h);
@@ -159,7 +157,6 @@ static double median_ops(double (*fn)(void)) {
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     g_iterations = env_int_or("CC_BUF_ITERS", DEFAULT_ITERATIONS);
     g_samples = env_int_or("CC_BUF_SAMPLES", DEFAULT_SAMPLES);
     println(@string(`perf_buffered_ladder: cap=${CHANNEL_CAPACITY} iters=${g_iterations} samples=${g_samples}`, @scratch));

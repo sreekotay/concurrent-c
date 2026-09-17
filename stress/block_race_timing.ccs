@@ -26,7 +26,6 @@
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     println(@string(`block_race_timing: ${ITERATIONS} iterations (correctness test)`, @scratch));
     
     int a_wins = 0;

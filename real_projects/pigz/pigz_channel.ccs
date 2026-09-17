@@ -113,11 +113,6 @@ static CompressedResult* compress_block(Block* blk, int level) {
 
 static bool write_all_or_fail(CCFile* f, CCSlice data, const char* what) {
     /* Soft-catch IoError so eprintln !>; can use a CCError handler (not re-enter). */
-    @errhandler(CCError e) {
-        cc_error_log(e);
-        g_pipeline_error.store(1);
-        return false;
-    }
     size_t n = f->write(data) !>(e) {
         eprintln(@string(`${what} failed kind=${e.base.kind} os=${e.os_code}`,
                          @scratch));
@@ -170,7 +165,6 @@ int compress_file(const char* in_path, const char* out_path) {
         CCNursery consumer = cc_nursery_create() !> @destroy;
 
         consumer.spawn(() => [out_ptr, results_rx] {
-            @errhandler(CCError e) cc_error_exit(e);
             CompressedResult* item = NULL;
             long expect_seq = 0;
             while (true) {
@@ -253,7 +247,6 @@ int compress_file(const char* in_path, const char* out_path) {
 }
 
 int main(int argc, char* argv[]) {
-    @errhandler(CCError e) { return cc_err_log(e); }
 
     if (argc < 2) {
         eprintln(@string(`Usage: ${argv[0]} <file>`, @scratch));

@@ -3,10 +3,6 @@
 #include <string.h>
 
 int main(void) {
-    @errhandler(CCError e) {
-        fprintf(stderr, "fatal: %s\n", e.message);
-        return 1;
-    }
 
     CCArena arena = cc_arena_heap(kilobytes(1)) @destroy;
     if (!arena.valid()) return 1;

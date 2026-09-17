@@ -264,7 +264,6 @@ int cc_server_start_n(CCServer* srv) {
 
 /* A server listening on `addr` ("host:port"). */
 CCServer !>(CCError) cc_server_listen(CCSlice addr) {
-    @errhandler(CCError e) { return cc_err(e); }
     CCServer srv;
     cc_server_init(&srv);
     srv.ln = cc_tcp_listen(addr) !>(e) {

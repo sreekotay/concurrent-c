@@ -320,7 +320,7 @@ typedef struct {
 };
 
 int main(void) {
-    @errhandler(CCError e) cc_error_exit(e);
+    @errhandler(CCIoError e) cc_error_exit(e.base);
     Temp t = {0};
     t.tag = 1;
     t.create("/tmp/tv.txt") !>;
@@ -393,7 +393,7 @@ typedef struct {
 };
 
 int main(void) {
-    @errhandler(CCError e) cc_error_exit(e);
+    @errhandler(CCIoError e) cc_error_exit(e.base);
     Fam_alpha a = {0};
     Fam_beta b = {0};
     a.create("/tmp/tv_glob_a.txt") !>;
@@ -667,7 +667,7 @@ static void temp_file_unlink(TempFile* t) {
 };
 
 int main(void) {
-    @errhandler(CCError e) cc_error_exit(e);
+    @errhandler(CCIoError e) cc_error_exit(e.base);
     TempFile t = {0} @destroy { t.close(); };  /* close, then unlink, then idempotent embed teardown */
     t.path = @slice("/tmp/tv_together.txt");
     t.create(t.path) !>;

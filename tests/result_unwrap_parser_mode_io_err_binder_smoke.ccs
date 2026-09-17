@@ -20,10 +20,6 @@ static void consume_io_err(CCIoError e) {
 }
 
 static bool remove_dir(const char* path) {
-    @errhandler(CCError e) {
-        fprintf(stderr, "outer kind=%d\n", (int)e.kind);
-        return false;
-    }
     // Expression-position `!>(e)` binder — untyped.  Body passes `e` to
     // a `CCIoError`-typed parameter.  This is the F8 shape.
     return cc_dir_remove(cc_slice_cstr(path)) !>(e) {

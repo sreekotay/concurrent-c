@@ -11,7 +11,6 @@ static void !>(CCError) walk_nl(WalkL *L, WalkD d, const WalkM *m, size_t from,
     size_t i = 0;
     size_t rec_n = n;
     int nls = 0;
-    @errhandler(CCError e) { return cc_err(e); }
     (void)L;
     (void)d;
     (void)m;

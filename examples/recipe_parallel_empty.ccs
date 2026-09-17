@@ -28,7 +28,7 @@ static void consume(int[~4 <] rx, cc_atomic_int* sum) {
 }
 
 static void produce(int[~4 >] tx) {
-    @errhandler(CCError e) cc_error_exit(e);
+    @errhandler(CCIoError e) cc_error_exit(e.base);
     int i;
     for (i = 1; i <= 3; i++) {
         tx.send(i) !>;

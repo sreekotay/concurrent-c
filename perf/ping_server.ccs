@@ -17,7 +17,6 @@ static int env_int_or_default(const char* name, int fallback, int min_value) {
 }
 
 static size_t write_all(CCSocket* sock, const char* data, size_t len) {
-    @errhandler(CCError e) cc_error_exit(e);
     size_t off = 0;
     while (off < len) {
         size_t n = cc_socket_write(sock, data + off, len - off) !>(e) {

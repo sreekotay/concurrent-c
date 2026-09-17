@@ -188,7 +188,6 @@ static double median_syntax_ms(void) {
 }
 
 static void print_breakdown(const char* label, Breakdown b) {
-    @errhandler(CCError e) cc_error_exit(e);
     double ops = g_total_spawns / (b.total_ms / 1000.0);
     double pct_construct = b.total_ms > 0.0 ? (100.0 * b.construct_ms / b.total_ms) : 0.0;
     double pct_spawn = b.total_ms > 0.0 ? (100.0 * b.spawn_ms / b.total_ms) : 0.0;
@@ -202,7 +201,6 @@ static void print_breakdown(const char* label, Breakdown b) {
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     g_total_spawns = env_int_or("CC_SPAWN_TOTAL", DEFAULT_TOTAL_SPAWNS);
     g_batch_size = env_int_or("CC_SPAWN_BATCH", DEFAULT_BATCH_SIZE);
     g_samples = env_int_or("CC_SPAWN_SAMPLES", DEFAULT_SAMPLES);

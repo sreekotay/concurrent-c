@@ -184,7 +184,7 @@ int cc_io_sess_flush(CCIoSess* io) {
     while (io->out_off < data.len) {
         char[:] rest = data.sub(io->out_off, data.len);
         size_t n = io->try_write(rest) !>(e) {
-            if (e.kind == CC_IO_BUSY) return 0;
+            if (e.base.kind == CC_IO_BUSY) return 0;
             return -1;
         };
         io->out_off += n;
@@ -726,7 +726,6 @@ static CCIoSess* cc_io_row_new(CCServer* srv, int fd, CCArenaPool* pool) {
 /* Fill while responding. Peer SHUT_WR → clear want_in (helper so !> return
  * stays local). Hard I/O errors propagate. */
 static int !>(CCIoError) cc_io_fill_while_out(CCIoSess* io) {
-    @errhandler(CCIoError e) { return cc_err(e); }
     int got = io->fill() !>(e) {
         if (e.base.kind == CC_ERR_CLOSED) {
             io->want_in = 0;
@@ -741,7 +740,6 @@ static int !>(CCIoError) cc_io_fill_while_out(CCIoSess* io) {
  * arm_mx: optional lock around tape.arm only (NULL = uncontended serial). */
 static int !>(CCError) cc_io_arm(CCIoSess* io, CCTape* tape, int id,
                                  pthread_mutex_t* arm_mx) {
-    @errhandler(CCError e) { return cc_err(e); }
     if (arm_mx) pthread_mutex_lock(arm_mx);
     tape->arm(id, io) !>(e) {
         if (arm_mx) pthread_mutex_unlock(arm_mx);
@@ -760,6 +758,7 @@ static int !>(CCError) cc_io_arm(CCIoSess* io, CCTape* tape, int id,
 static int !>(CCError) cc_io_ready(CCIoSess* io, CCTape* tape, int id,
                                    CCReady r, pthread_mutex_t* arm_mx) {
     @errhandler(CCError e) { return cc_err(e); }
+    @errhandler(CCIoError e) { return cc_err(e.base); }
     if (cc_ready_bad(r)) {
         io->dead = 1;
         return cc_ok(-1);

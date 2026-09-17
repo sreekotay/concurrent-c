@@ -44,6 +44,7 @@ int main(void) {
     CCNursery clients = @create() !> @destroy;
     clients.spawn(() => [srvp, port] {
         @errhandler(CCError e) { cc_error_log(e); srvp->shutdown(); return NULL; }
+        @errhandler(CCIoError e) { cc_error_log(e.base); srvp->shutdown(); return NULL; }
         cc_arena_stack(a, 4096);
         CCString addr = @string(`127.0.0.1:${port}`, a);
         const char* addr_c = addr.cstr(a) !>;

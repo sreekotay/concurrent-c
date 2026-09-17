@@ -29,7 +29,6 @@ static double time_now_ms(void) {
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     println("spawn_fiber_direct: measuring direct fiber spawn throughput");
 
     double start = time_now_ms();

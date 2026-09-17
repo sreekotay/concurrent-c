@@ -15,6 +15,7 @@ static int g_fail;
 
 static void worker(CCTurnstile* t, int i) {
     @errhandler(CCError e) cc_error_exit(e);
+    @errhandler(CCIoError e) cc_error_exit(e.base);
     int k;
     for (k = 0; k < STAGES; k++) {
         t->wait(k, i) !>;
@@ -56,6 +57,7 @@ static int fail_probe(void) {
 
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
+    @errhandler(CCIoError e) { cc_error_log(e.base); return 1; }
 
     if (unarmed_probe() != 0) {
         fprintf(stderr, "FAIL unarmed/reclaim\n");
@@ -76,7 +78,6 @@ int main(void) {
         for (i = 0; i < N; i++) {
             t.enter(i) !>;
             nur.spawn(() => [i, tp] {
-                @errhandler(CCError e) cc_error_exit(e);
                 worker(tp, i);
             }) !>;
         }

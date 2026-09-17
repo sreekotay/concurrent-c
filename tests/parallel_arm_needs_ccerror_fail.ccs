@@ -1,0 +1,21 @@
+/* The join raises `CCError`, so a function whose arms unwrap needs an
+ * `@errhandler(CCError)`. This one carries a handler -- for `CCIoError`
+ * alone -- and that is not the one the record after the join reaches. */
+#include <ccc/std/prelude.cch>
+
+static int !>(CCIoError) step(int x) {
+    if (x == 2)
+        return cc_err(cc_io_error(CC_ERR_TIMEOUT));
+    return cc_ok(x);
+}
+
+int main(void) {
+    @errhandler(CCIoError e) { cc_error_log(e.base); return 1; }
+    int a = 0;
+    int b = 0;
+    @parallel {
+        @serial { a = step(1) !>; }
+        @serial { b = step(2) !>; }
+    } !>.wait()!>;
+    return a + b;
+}

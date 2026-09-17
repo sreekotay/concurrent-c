@@ -1,0 +1,19 @@
+/* A macro whose arms answer with different error types: the `!>` reads
+ * off the macro's body every error the expansion can answer with and
+ * dispatches on the one that arrives, each to the handler its type
+ * selects. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int !>(CCIoError) io_fail(void) { return cc_err(cc_io_error_os(CC_ERR_CLOSED, 9)); }
+static int !>(CCError) plain_fail(void) { return cc_err(CC_ERR_INVALID_ARG, "plain"); }
+#define fail_m(x) _Generic((x), double: io_fail, default: plain_fail)()
+
+int main(void) {
+    @errhandler(CCError e) { printf("ccerror: %s\n", e.message); }
+    @errhandler(CCIoError e) { printf("io: kind=%d os=%d\n", (int)e.base.kind, (int)e.os_code); }
+    fail_m(1.0) !>;
+    fail_m(1) !>;
+    printf("done\n");
+    return 0;
+}

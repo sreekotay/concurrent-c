@@ -8,7 +8,6 @@
 #include <stdio.h>
 
 static int beside_face_double(int x) {
-    @errhandler(CCError e) { (void)e; return -1; }
     return 2 * x;
 }
 

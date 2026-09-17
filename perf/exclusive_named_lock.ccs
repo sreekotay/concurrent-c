@@ -180,7 +180,6 @@ static double run_zipf(int workers, int iters, int spins, int keys) {
 }
 
 static double run_serial_fastpath(int64_t iters) {
-    @errhandler(CCError e) cc_error_exit(e);
     g_rows[0].value = 0;
     CCExclusive excl = g_excl;
     CCExclusiveMutex m = excl.mutex(1000);

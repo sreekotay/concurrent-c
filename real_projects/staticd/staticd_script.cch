@@ -488,7 +488,6 @@ static ScriptReply !>(CCError) pages_materialize_js(CCQjsVal* out, CCArena arena
     CCQjsVal st, bd, ct, hdrs;
     int64_t code = 200;
     char[:] body;
-    @errhandler(CCError e) { return cc_err(e); }
 
     st = out->get("status") !>(e) {
         (void)e;
@@ -564,7 +563,6 @@ static ScriptReply !>(CCError) pages_run_js(PagesEngines* e, int pages_fd,
                                             char[:] method, char[:] path,
                                             char[:] query, char[:] body,
                                             CCArena arena) {
-    @errhandler(CCError err) { return cc_err(err); }
     CCSlice src;
     char[:] stripped;
     CCString wrap;
@@ -623,7 +621,6 @@ static ScriptReply !>(CCError) pages_materialize_py(CCPyObj* out, CCArena arena)
     CCPyObj st, bd, ct, hdrs;
     long long code = 200;
     char[:] body;
-    @errhandler(CCError e) { return cc_err(e); }
 
     st = out->get("status") !>(e) {
         (void)e;

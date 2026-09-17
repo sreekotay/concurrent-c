@@ -42,7 +42,6 @@ static const char *mode_name(Mode m) {
 }
 
 int run_arena(Mode mode, size_t root, size_t n, volatile size_t *sink) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     CCArena a;
     size_t i;
     size_t live = 0;
@@ -94,7 +93,6 @@ int run_arena(Mode mode, size_t root, size_t n, volatile size_t *sink) {
 }
 
 int run_raw(size_t n, volatile size_t *sink) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     unsigned char **ptrs;
     size_t i;
     size_t live = 0;
@@ -129,7 +127,6 @@ int run_raw(size_t n, volatile size_t *sink) {
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     size_t n = env_zu("ARENA_MALLOC_COST_N", 800000);
     size_t root = env_zu("ARENA_MALLOC_COST_ROOT", 64u * 1024u); /* tiny root → force spill */
     size_t fat_root = env_zu("ARENA_MALLOC_COST_FAT_ROOT", 16u * 1024u * 1024u);

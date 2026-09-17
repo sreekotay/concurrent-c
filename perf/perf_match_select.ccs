@@ -20,7 +20,6 @@ static double time_now_ms(void) {
 
 /* Single channel recv (baseline) */
 static void bench_single_channel(void) {
-    @errhandler(CCError e) cc_error_exit(e);
     int[~100 >] tx;
     int[~100 <] rx;
     cc_channel_pair(&tx, &rx);
@@ -50,7 +49,6 @@ static void bench_single_channel(void) {
 
 /* Two-channel select - one always ready */
 static void bench_two_channel_one_ready(void) {
-    @errhandler(CCError e) cc_error_exit(e);
     int[~100 >] tx1, tx2;
     int[~100 <] rx1, rx2;
     cc_channel_pair(&tx1, &rx1);
@@ -92,7 +90,6 @@ static void bench_two_channel_one_ready(void) {
 
 /* Two-channel select - alternating */
 static void bench_two_channel_alternating(void) {
-    @errhandler(CCError e) cc_error_exit(e);
     int[~100 >] tx1, tx2;
     int[~100 <] rx1, rx2;
     cc_channel_pair(&tx1, &rx1);
@@ -138,7 +135,6 @@ static void bench_two_channel_alternating(void) {
 
 /* Four-channel select */
 static void bench_four_channel(void) {
-    @errhandler(CCError e) cc_error_exit(e);
     int[~100 >] tx1, tx2, tx3, tx4;
     int[~100 <] rx1, rx2, rx3, rx4;
     cc_channel_pair(&tx1, &rx1);
@@ -198,7 +194,6 @@ static void bench_four_channel(void) {
    in closures is complex. The sequential tests above cover select performance. */
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     println("perf_match_select: measuring cc_chan_match_select performance");
     
     bench_single_channel();

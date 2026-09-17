@@ -36,7 +36,6 @@ static uint32_t lcg(uint32_t *s) {
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     size_t n = env_zu("MIX_LIFE_N", 200000);
     /* Equal-budget with split peer: default = MIX_LIFE_TOTAL_ROOT (32MiB). */
     size_t total_root = env_zu("MIX_LIFE_TOTAL_ROOT", 32u * 1024u * 1024u);

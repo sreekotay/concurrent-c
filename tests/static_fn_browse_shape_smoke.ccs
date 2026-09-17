@@ -61,10 +61,6 @@ static void gui_draw_browse_shape(BBrowse *br, int focused, int x0, int y0,
     float cw;
     int cols, meta_w;
     BVec m0;
-    @errhandler(CCError e) {
-        (void)e;
-        return;
-    }
     if (!br) return;
     m0.x = 8;
     m0.y = 0;

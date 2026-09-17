@@ -62,6 +62,23 @@ typedef struct CcLowerer {
      * the walk, for the same reason `res_dests` is. */
     CcExprList ctor_sites;
     Vec::[CcTypeInfoRef] ctor_specs;
+    /* `@errhandler` reach, keyed by the span of the statement that declares
+     * it: one source handler, one entry, however many scopes carry the node.
+     * A closure entry, a `@parallel` thunk and an `@async` poll body each
+     * take the very handler the function they stand in declared, so a bit
+     * per scope would read a copy as dead and the original with it. Keyed
+     * this way the analysis can only under-report: a handler some scope
+     * reaches is reached everywhere it stands. */
+    Vec::[uint32_t] eh_reached;  /* a site picked it */
+    Vec::[uint32_t] eh_matched;  /* a site raised its type, whichever handler took it */
+    /* Handlers whose scope closed with nothing having reached them, held
+     * until the whole unit is lowered: a closure entry, a `@parallel` thunk
+     * and an `@async` poll body are declarations of their own, and the one
+     * that reaches a handler can be lowered after the function that declared
+     * it. Judged when there is no lowering left to change the answer. */
+    Vec::[uint32_t] eh_pend_first;
+    Vec::[uint32_t] eh_pend_last;
+    CcNameList eh_pend_type;
     /* Every call a `x.m(...)` became, and at the same index the `m` the site
      * wrote. The callee UFCS resolves to can be an overload name
      * (`cc_nursery_spawn_closure0`) that the program never mentions, so a

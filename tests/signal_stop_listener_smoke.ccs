@@ -57,6 +57,7 @@ static void raiser(void) {
 
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
+    @errhandler(CCIoError ioe) { cc_error_log(ioe.base); return 1; }
 
     /* 1. held delivery */
     {

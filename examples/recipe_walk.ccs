@@ -44,7 +44,7 @@ int main(void) {
      *    dst.copy_overlap is overlap-safe copy (source stays live).
      *    Ownership transfer is cc_move / return / send_take. */
     buf.fill('x') !>;
-    char[:] hi = {'H', 'i'};
+    char[:] hi = "Hi";
     buf.copy(hi) !>;
     char[:] mid = buf.sub(2, 4);
     mid.copy_overlap(hi) !>;

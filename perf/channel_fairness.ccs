@@ -28,7 +28,6 @@ typedef struct {
 cc_atomic_int g_worker_counts[NUM_WORKERS];
 
 void print_distribution(const char* label) {
-    @errhandler(CCError e) cc_error_exit(e);
     println(@string(`\n=== ${label} ===`, @scratch));
     println("Distribution:");
     int total = 0;
@@ -140,7 +139,6 @@ void run_test_small_buffer(void) {
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     println("Channel Fairness Benchmark");
     println("==========================");
     println("Demonstrates fiber scheduler fairness issue.");

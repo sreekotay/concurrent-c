@@ -107,7 +107,6 @@ static double bench_nursery_api_once(void) {
 }
 
 static double bench_raw_batch_once(void) {
-    @errhandler(CCError e) cc_error_exit(e);
     double start = time_now_ms();
     for (int batch = 0; batch < total_batches(); batch++) {
         CCTask tasks[g_batch_size];
@@ -165,7 +164,6 @@ static double median_ops(double (*fn)(void)) {
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     if (cc_scheduler_init() != 0) {
         eprintln("cc_scheduler_init failed");
         return 1;

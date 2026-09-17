@@ -4,13 +4,14 @@
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
+    @errhandler(CCIoError e) cc_error_exit(e.base);
     long long[~4 >] tx;
     long long[~4 <] rx;
     CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
     CCNursery n = cc_nursery_create() !> @destroy;
     (void)n.close(tx);
     n.spawn(() => [tx] {
-        @errhandler(CCError e) cc_error_exit(e);
+        @errhandler(CCIoError e) cc_error_exit(e.base);
         tx.send(7) !>;
     }) !>;
     long long v;

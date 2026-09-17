@@ -27,14 +27,14 @@ int main(void) {
     b.tag = 2;
 
     a.create("tmp/typeview_glob_as_a.txt") !>(e) {
-        fprintf(stderr, "create: %s\n", cc_error_str(e));
+        fprintf(stderr, "create: %s\n", cc_io_error_str(e));
         return 1;
     };
     assert(cc_is_ok(a.write(CC_SLICE_LIT("A\n"))));
     a.close();
 
     b.create("tmp/typeview_glob_as_b.txt") !>(e) {
-        fprintf(stderr, "create: %s\n", cc_error_str(e));
+        fprintf(stderr, "create: %s\n", cc_io_error_str(e));
         return 1;
     };
     assert(cc_is_ok(b.write(CC_SLICE_LIT("B\n"))));

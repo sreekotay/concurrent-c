@@ -71,6 +71,57 @@ if bad:
 PYEOF
 }
 
+# (3) every physical line of the return-through-cleanup blob maps to the
+# return's own source line.  One physical line, or several that each carry
+# their own `#line`, both satisfy it; drift does not.
+check_blob_pinned_to() {  # <emitted.c> <src> <return-line>
+  python3 - "$1" "$2" "$3" <<'PYEOF'
+import re, sys
+cfile, src, want = sys.argv[1], sys.argv[2], int(sys.argv[3])
+srcbase = src.rsplit("/", 1)[-1]
+# The blob, by the names both the store and the jump are spelled with.
+# `int __cc_retval;` in the prologue is the slot, not the blob: it has no
+# `=` and no `return`, so it does not match.
+BLOB = re.compile(r'__cc_retval\s*=|return\s+__cc_retval|'
+                  r'goto\s+__cc_cleanup\b|__cc_cleanup\s*:')
+cur_file = None
+nxt = None  # mapped line of the next physical line
+gotos = labels = 0
+bad = []
+for i, ln in enumerate(open(cfile, errors="replace"), 1):
+    m = re.match(r'\s*#\s*line\s+(\d+)(?:\s+"([^"]*)")?', ln)
+    if m:
+        if m.group(2) is not None:
+            cur_file = m.group(2)
+        nxt = int(m.group(1))
+        continue
+    mapped = nxt
+    if nxt is not None:
+        nxt += 1
+    if not (cur_file and cur_file.rsplit("/", 1)[-1] == srcbase):
+        continue
+    if not BLOB.search(ln):
+        continue
+    if re.search(r'goto\s+__cc_cleanup\b', ln):
+        gotos += 1
+    if re.search(r'__cc_cleanup\s*:', ln):
+        labels += 1
+    if mapped != want:
+        bad.append((i, mapped, ln.strip()))
+if not gotos or not labels:
+    print(f"[test_async_line_map] FAIL: no return-through-cleanup blob in "
+          f"{cfile} ({gotos} goto, {labels} label; defer lowering shape "
+          f"drifted)", file=sys.stderr)
+    sys.exit(1)
+if bad:
+    i, mapped, text = bad[0]
+    print(f"[test_async_line_map] FAIL: {len(bad)} line(s) of the "
+          f"return-through-cleanup blob do not map to {srcbase}:{want}; "
+          f"first is {cfile}:{i} mapped {mapped} ({text})", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+}
+
 # Fixture emit is cheap; owner is the heavy full lower — overlap them.
 # Need `build --emit-c-only` (not --emit-c-inspect): inspect stops before
 # async poll/frame lowering.
@@ -105,13 +156,14 @@ grep -q '__cc_async_owner_loop_[0-9]*_poll' "$owner_emitted" \
   || fail "owner_loop poll fn not found in emitted C (async lowering shape drifted)"
 check_no_map_past_eof "$owner_emitted" "$OWNER_SRC" || exit 1
 
-# (3) Focused pin for the return-through-cleanup blob (pass_defer_syntax.c):
-# a `@defer`-carrying fn whose final statement is a `return` places the
-# lowered cleanup blob (`__cc_retval = (...); __cc_ret_set = 1; goto ...`)
-# right at EOF.  Emitting that blob across three physical lines with no
-# per-line ledger entry inflated the mapping +2 and pushed the trailing
-# lines' #line past the source's EOF.  The blob must stay one physical line
-# mapped to the return's true source line.
+# (3) Focused pin for the return-through-cleanup blob: a `@defer`-carrying
+# fn whose final statement is a `return` places the lowered blob (the store
+# into the return slot, then the jump to the cleanup label) right at EOF.
+# Emitting that blob across several physical lines with no per-line ledger
+# entry inflates the mapping and pushes the trailing lines' #line past the
+# source's EOF.  What the blob owes is the mapping, not a shape: every line
+# of it maps to the return's own source line, whether it is written as one
+# physical line or as several that each re-#line.
 mini="$out_dir/defer_return_eof.ccs"
 mini_c="$out_dir/defer_return_eof.c"
 cat > "$mini" <<'CCS'
@@ -129,12 +181,10 @@ int worker(void) {
 CCS
 "$CCC" build --no-cache --emit-c-only "$mini" -o "$mini_c" >/dev/null 2>&1 \
   || fail "emit-c-only build of the defer/return EOF fixture failed"
-grep -q '__cc_ret_set = 1; goto __cc_cleanup; }' "$mini_c" \
-  || fail "return-cleanup blob not emitted on one physical line (drift-prone shape)"
-# Cleanup label + soft-return lines must stay pinned to the return's real
-# source line (re-#line each physical line — not a fake <cc-synthetic> file).
-grep -q '#line 10 "' "$mini_c" \
-  || fail "return site #line 10 missing for cleanup pin"
+# `return r;` is line 10 of the fixture above: the blob is its, and the
+# cleanup label and soft return are pinned there too — a real source line,
+# not a fake <cc-synthetic> file.
+check_blob_pinned_to "$mini_c" "$mini" 10 || exit 1
 check_no_map_past_eof "$mini_c" "$mini" || exit 1
 
 echo "[test_async_line_map] OK"

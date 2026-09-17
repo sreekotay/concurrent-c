@@ -46,7 +46,6 @@ int[~ <] g_rx;
 CCChan* g_ch;
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     println(@string(`unbuffered_rendezvous: ${NUM_PAIRS} pairs x ${MSGS_PER_PAIR} msgs`, @scratch));
 
     g_ch = cc_channel_pair(&g_tx, &g_rx);

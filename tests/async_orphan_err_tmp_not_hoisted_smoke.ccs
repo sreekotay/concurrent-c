@@ -21,7 +21,6 @@ static bool !>(CCError) may_fail(int x) {
 }
 
 @async int worker(int limit) {
-    @errhandler(CCError e) { (void)e; return 1; }
     int i = 0;
     while (i < limit) {
         /* Statement-position !> expands into a `{ ... }` block that

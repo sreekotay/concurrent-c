@@ -57,7 +57,7 @@ int main(void) {
     o.outer_tag = 1;
     o.mid.mid_tag = 2;
     o.create("tmp/as_transitive_smoke.txt") !>(e) {
-        fprintf(stderr, "create: %s\n", cc_error_str(e));
+        fprintf(stderr, "create: %s\n", cc_io_error_str(e));
         return 1;
     };
 

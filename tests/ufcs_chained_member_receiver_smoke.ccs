@@ -14,7 +14,6 @@ typedef struct Conn {
 } Conn;
 
 static bool queue(Conn* c, int* p) {
-    @errhandler(CCError e) { (void)e; return false; }
     // `c->tx.send(p)` — receiver is `c->tx`, method is `send`.
     return c->tx.send(p) !>(e) { (void)e; return false; };
 }

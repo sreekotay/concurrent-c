@@ -1,0 +1,11 @@
+/* Fail oracle: an I/O Result is not a CCError. A bare `!>` on one under a
+ * `CCError`-only handler names the io type and the handlers in scope. */
+#include <ccc/std/prelude.cch>
+
+static int !>(CCIoError) io_two(void) { return cc_ok(2); }
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    int b = io_two() !>;
+    return b - 2;
+}

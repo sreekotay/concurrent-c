@@ -79,7 +79,6 @@ static void* consumer_main(void* arg) {
 }
 
 static double run_once(void) {
-    @errhandler(CCError e) cc_error_exit(e);
     CCChanTx tx = {0};
     CCChanRx rx = {0};
     g_channel = cc_chan_pair_create_returning(CHANNEL_CAPACITY,
@@ -110,7 +109,6 @@ static double run_once(void) {
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     if (cc_scheduler_init() != 0) {
         eprintln("cc_scheduler_init failed");
         return 1;

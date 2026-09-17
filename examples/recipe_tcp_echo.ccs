@@ -36,7 +36,7 @@
 
 /* Echo every received chunk until the peer closes. */
 static void handle_client(CCSocket sock) {
-    @errhandler(CCError e) cc_error_exit(e);
+    @errhandler(CCIoError e) cc_error_exit(e.base);
     cc_arena_stack(a, kilobytes(4));
 
     CCNetError peer_err = CC_NET_OK;
@@ -62,7 +62,6 @@ static void handle_client(CCSocket sock) {
 
 /* In-process client: connect, send, read echo, close. */
 static void run_test_client(void) {
-    @errhandler(CCError e) cc_error_exit(e);
     CCSocket sock = cc_tcp_connect(PORT, sizeof(PORT) - 1) !>(e) {
         eprintln(@string(`dial error: ${e}`, @scratch));
         return;

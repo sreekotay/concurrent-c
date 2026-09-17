@@ -10,7 +10,7 @@
 
 #include <stddef.h>
 
-#define CC_HOST_PROFILE_SCHEMA 3
+#define CC_HOST_PROFILE_SCHEMA 4
 
 /* The C version CC requires of a host toolchain — the probe rejects a host
  * that cannot compile C11 `max_align_t` — and therefore the version every
@@ -29,7 +29,10 @@
  * in-process libtcc; harmless on non-ARM where the macros are absent.
  * Prefer `__arm__` for architecture tests. */
 #define CC_TCC_ARCH_ID_UNDEF " -Uarm -Uarm_elf"
-#define CC_TCC_HOST_OPTIONS CC_HOST_C_STD_OPTION CC_TCC_ARCH_ID_UNDEF
+/* TinyCC does not implement C11 thread-local storage; neutralize the keywords
+ * (ccc frontend TLS is process-scoped under TINYC). Match cc/Makefile. */
+#define CC_TCC_TLS_STUB " -D_Thread_local= -D__thread="
+#define CC_TCC_HOST_OPTIONS CC_HOST_C_STD_OPTION CC_TCC_ARCH_ID_UNDEF CC_TCC_TLS_STUB
 
 typedef struct CCHostCcProfile {
     char cc_path[1024];

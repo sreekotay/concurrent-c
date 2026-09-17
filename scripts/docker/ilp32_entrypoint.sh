@@ -27,6 +27,9 @@ printf '== sync %s -> %s (writable sandbox)\n' "$SRC" "$WORK"
 # Arch boundary: /out is the sandbox's product tree (see docs/ilp32-docker.md).
 # Host third_party/tcc often has Darwin/arm64 config.mak + libtcc1.a; syncing
 # those onto a named ILP32 volume silently breaks comptime (missing __aeabi_*).
+# Host third_party/bearssl/build/libbearssl.a is likewise foreign-arch (Mach-O
+# on Darwin); syncing it makes TLS=1 then fails the ccc link with undefined
+# br_* (GNU ld skips incompatible members).
 # Legacy in-tree tools/cc_test (Mach-O) must not overwrite an ELF harness.
 # --delete drops dest files removed from the host (stale tests/ on a named
 # volume). Excluded paths are kept on dest (not --delete-excluded).
@@ -38,6 +41,7 @@ rsync -a --delete \
   --exclude '/tools/cc_test' \
   --exclude '/tools/cc_test.dSYM' \
   --exclude 'real_projects/pigz/out/' \
+  --exclude '/third_party/bearssl/build/' \
   --exclude '/third_party/tcc/config.mak' \
   --exclude '/third_party/tcc/config.h' \
   --exclude '/third_party/tcc/config.texi' \

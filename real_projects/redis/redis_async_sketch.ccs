@@ -425,7 +425,6 @@ static bool !>(CCIoError) read_cmd(BufReader::[CCSocket]* br, CCArena arena, Cmd
 }
 
 static void handle_client(CCSocket client, CCShardMap* maps) {
-    @errhandler(CCError e) { (void)e; return; }
     char read_buf[K_READ_BUF];
     BufReader::[CCSocket] br;
     cc_arena_stack(out_arena, K_OUT_BUF);
@@ -462,6 +461,7 @@ static void handle_client(CCSocket client, CCShardMap* maps) {
 
 int main(int argc, char** argv) {
     @errhandler(CCError err) { cc_error_log(err); return 1; }
+    @errhandler(CCIoError ioe) { cc_error_log(ioe.base); return 1; }
 
     const char* addr = argc > 1 ? argv[1] : k_listen;
     CCShardMap maps = {0};

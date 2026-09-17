@@ -28,7 +28,6 @@ static size_t bulk_size(size_t i) {
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     size_t tip_rounds = env_zu("ARENA_MEM_TIP_ROUNDS", 400);
     size_t tip_steps = env_zu("ARENA_MEM_TIP_STEPS", 5000);
     size_t tip_root = env_zu("ARENA_MEM_TIP_ROOT", 8u * 1024u * 1024u);

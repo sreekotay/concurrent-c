@@ -5,11 +5,16 @@
 #include <ccc/std/io.cch>
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    @errhandler(CCIoError e) { cc_error_log(e.base); return 1; }
     CCFile f@("/dev/null") !>(e) {
         println(@string(`open failed`, @scratch));
         return 1;
     } @destroy;
+    /* the same create with no site handler: this one is what the scope
+     * handler is for */
+    CCFile g@("/dev/null") !> @destroy;
+    (void)f;
+    (void)g;
     println("ok");
     return 0;
 }

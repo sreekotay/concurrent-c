@@ -6,7 +6,7 @@
 #include <stdio.h>
 
 static int kick_pause(CCParallel* h, int* stuck, int* done) {
-    @errhandler(CCError e) { (void)e; return -1; }
+    @errhandler(CCIoError e) { (void)e.base; return -1; }
     while (!*stuck)
         cc_yield();
     if (!(h->pause() !>))
@@ -28,7 +28,7 @@ static int hold_then_run(CCParallel* h, int* stuck) {
 }
 
 static int kick_cancel(CCParallel* h, int* stuck) {
-    @errhandler(CCError e) { (void)e; return -1; }
+    @errhandler(CCIoError e) { (void)e.base; return -1; }
     while (!*stuck)
         cc_yield();
     h->pause() !>;

@@ -194,7 +194,6 @@ static uint32_t render_seq(uint32_t d, double x, double y, double size) {
 }
 
 static uint32_t render_par(uint32_t d, double x, double y, double size) {
-    @errhandler(CCError e) cc_error_exit(e);
     double h;
     double xh, yh;
     uint32_t d1;
@@ -218,7 +217,6 @@ static uint32_t render_par(uint32_t d, double x, double y, double size) {
 }
 
 static uint32_t render_cut(uint32_t d, double x, double y, double size) {
-    @errhandler(CCError e) cc_error_exit(e);
     double h;
     double xh, yh;
     uint32_t d1;
@@ -266,7 +264,6 @@ static uint32_t run_on_fiber(render_fn fn) {
 }
 
 static double time_once(render_fn fn, uint32_t expect, int on_fiber) {
-    @errhandler(CCError e) cc_error_exit(e);
     double t0 = now_ms();
     uint32_t r = on_fiber ? run_on_fiber(fn) : fn(0, -1.0, -1.0, 2.0);
     double t1 = now_ms();
@@ -301,7 +298,6 @@ static uint32_t env_u32(const char* key, uint32_t fallback) {
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     g_depth = env_u32("CC_PAR_DEPTH", 8);
     g_cut = env_u32("CC_PAR_CUT", 3);
     g_samples = (int)env_u32("CC_PAR_SAMPLES", 3);

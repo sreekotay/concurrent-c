@@ -554,6 +554,13 @@ static int get_run_timeout_for_test(const char* stem, int default_timeout_sec) {
         if (t) return t;
     }
     if (strcmp(stem, "chan_park_wake_lostwake_stress_smoke") == 0) return 20;
+    /* 300 hybrid send/recv/close rounds; ~12–15s alone under -O0, over the
+     * 10s default even without --jobs. */
+    if (strcmp(stem, "v2_channel_lostwake_stress_smoke") == 0) return 60;
+    /* Cold `ccc` + same-second cache key churn; shells out enough to miss 10s. */
+    if (strcmp(stem, "cache_key_same_second_smoke") == 0) return 60;
+    /* 400 close/wake-all rounds; ~12s alone under -O0, over the 10s default. */
+    if (strcmp(stem, "chan_close_wakeall_idempotent_smoke") == 0) return 60;
     /* 4×200k turnstile wait/pass; ~1–2s alone, headroom under --jobs. */
     if (strcmp(stem, "turnstile_concurrent_churn_smoke") == 0) return 30;
     if (strcmp(stem, "exclusive_gate_churn_smoke") == 0) return 20;

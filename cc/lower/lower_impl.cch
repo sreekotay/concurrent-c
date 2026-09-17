@@ -28,6 +28,11 @@ CcLowerer cc_lowerer_new(CcUnit* u, CcIndex* ix, CcLowerOpts opts, CcDiags* ds) 
     L.dest_bodies = vec_new::[CcDeclRef](u->arena);
     L.ufcs_sites = vec_new::[CcExprRef](u->arena);
     L.ufcs_meths = vec_new::[CCSlice](u->arena);
+    L.eh_reached = vec_new::[uint32_t](u->arena);
+    L.eh_matched = vec_new::[uint32_t](u->arena);
+    L.eh_pend_first = vec_new::[uint32_t](u->arena);
+    L.eh_pend_last = vec_new::[uint32_t](u->arena);
+    L.eh_pend_type = vec_new::[CCSlice](u->arena);
     return L;
 }
 

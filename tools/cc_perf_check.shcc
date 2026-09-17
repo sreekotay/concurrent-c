@@ -68,11 +68,6 @@ static Metrics !>(CCError) load_metrics(char[:0] path, CCArena* arena) {
 }
 
 static void check_eq(CCArena* arena, Metrics base, Metrics cur, char[:] name) {
-    @errhandler(CCError e) {
-        CCString em = @string(`${cc_error_str(e)}`, arena);
-        (void)em.eprintln();
-        return;
-    }
     double* b = base.get_ptr(name);
     double* n = cur.get_ptr(name);
     if (!b || !n) {
@@ -94,11 +89,6 @@ static void check_eq(CCArena* arena, Metrics base, Metrics cur, char[:] name) {
 }
 
 static void check_le(CCArena* arena, Metrics base, Metrics cur, char[:] name) {
-    @errhandler(CCError e) {
-        CCString em = @string(`${cc_error_str(e)}`, arena);
-        (void)em.eprintln();
-        return;
-    }
     double* b = base.get_ptr(name);
     double* n = cur.get_ptr(name);
     if (!b || !n) {
@@ -121,11 +111,6 @@ static void check_le(CCArena* arena, Metrics base, Metrics cur, char[:] name) {
 }
 
 static void check_loc(CCArena* arena, Metrics base, Metrics cur, char[:] name) {
-    @errhandler(CCError e) {
-        CCString em = @string(`${cc_error_str(e)}`, arena);
-        (void)em.eprintln();
-        return;
-    }
     double* b = base.get_ptr(name);
     double* n = cur.get_ptr(name);
     if (!b || !n) {
@@ -150,11 +135,6 @@ static void check_loc(CCArena* arena, Metrics base, Metrics cur, char[:] name) {
 }
 
 static void check_wall(CCArena* arena, Metrics base, Metrics cur) {
-    @errhandler(CCError e) {
-        CCString em = @string(`${cc_error_str(e)}`, arena);
-        (void)em.eprintln();
-        return;
-    }
     char[:] name = @slice("wall_real_seconds");
     double* b = base.get_ptr(name);
     double* n = cur.get_ptr(name);

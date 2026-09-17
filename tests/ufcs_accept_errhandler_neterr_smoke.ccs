@@ -12,10 +12,6 @@ static void take_net_err(CCNetError e) {
 }
 
 int main(void) {
-    @errhandler(CCError e) {
-        fprintf(stderr, "fatal: %s\n", e.message ? e.message : "unknown");
-        return 1;
-    }
 
     /* Closed listener: accept fails immediately with a CCNetError. */
     CCListener ln = {.fd = -1, .flags = 0, .watcher = NULL};
