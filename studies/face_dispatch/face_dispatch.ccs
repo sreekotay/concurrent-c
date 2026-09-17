@@ -1,0 +1,18 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+/* Does a bare !> on a CCIoError result, with only a CCError handler in
+ * scope, dispatch to that handler through the as: face? */
+static bool !>(CCIoError) io_fail(void) {
+    return cc_err(cc_io_error(CC_ERROR(CC_ERR_IO, "socket gone")));
+}
+static bool !>(CCIoError) like_exec(void) {
+    @errhandler(CCError e) { eprintln("CCError handler ran (via face)"); return cc_ok(false); }
+    io_fail() !>;
+    eprintln("fell through");
+    return cc_ok(true);
+}
+int main(void) {
+    bool r = like_exec() !>(e) { eprintln("propagated as CCIoError"); return 0; };
+    eprintln(r ? "ok(true)" : "ok(false)");
+    return 0;
+}
