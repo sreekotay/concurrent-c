@@ -19,3 +19,21 @@ answered by a second write to the dead socket. One line fixes it
 as `execute` already has). The design point is section 1.3's cost: a
 face extends a handler's reach, and the reach crosses a policy line the
 file's own header draws.
+
+## Return of a Result under an exact handler (seed 0.4.0-411)
+
+`redis_std.ccs` `exec` carries a comment that a top-level
+`@errhandler(CCIoError e)` makes `return enc->…()` lower to brk on
+the Ok path, and works around it with `!>(e) { return cc_err(e); }` at
+five sites. Three probes on 0.4.0-411:
+
+| Probe | Shape | Result |
+|-------|-------|--------|
+| `return_under_handler.ccs` | one exact handler, `return g();` | Ok and Err paths correct |
+| `return_two_handlers.ccs` | `CCIoError` re-raise plus `CCError` to `-ERR`, `@switch` on a variant, `return enc->m()` through a typeview pointer | Ok, `-ERR` as Ok, and I/O re-raise all correct |
+| `return_two_handlers_scratch.ccs` | the same with `@string(…, @scratch)` inside a case | ping: ok(true);echo(-1): -ERR written, ok(true);echo(fail): io err (expected); |
+
+The "brk" in the comment is the switch-scratch-reclaim defect fixed in
+main's `796b454` ("@scratch reclaim before @switch cases jumped over
+init (host brk)"). On 411 the top-level handler is the right form and
+the five per-site handlers and the comment can go.
