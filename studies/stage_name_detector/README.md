@@ -29,3 +29,18 @@ pass. Evaluate-once temporaries at the stage fix that for reached
 stages; the diagnostic covers the rest.
 
 Toolchain: seed `0.4.0-404`, built in this tree.
+
+## Update, seed 0.4.0-411
+
+`body_local.ccs` (a stage named by a body local) is now refused by the
+lowerer with its own diagnostic:
+
+```
+'@stage' names 'name', which the body declares: a stage name is a ticket
+fact that must exist before the body runs; it may read the loop variable,
+the 'worker' binder, and names of the enclosing frame
+```
+
+That is the fix this README asked for. `bad_name.ccs` (a wrong but legal
+name) is unchanged: loud on the parallel schedule, silent on the
+sequential one.
