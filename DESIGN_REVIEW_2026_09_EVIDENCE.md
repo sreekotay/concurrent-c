@@ -59,10 +59,14 @@ Work:
   place of "on successful construction" (getting-started, cheatsheet,
   language-concepts).
 
-| A bare `!>` on a `CCIoError` result with only a `CCError` handler in scope dispatches through the face; `redis_std.ccs` `exec` does this in `.mget` and `.keys`, so an I/O failure is answered by a `-ERR` write on the dead socket, against the file's own header | `studies/face_dispatch/` | design (face reach) |
+| A bare `!>` on a `CCIoError` result with only a `CCError` handler in scope dispatches through the face; `redis_std.ccs` `exec` does this in `.mget` and `.keys`, so an I/O failure is answered by a `-ERR` write on the dead socket, against the file's own header | `studies/face_dispatch/` | decided: face removed in 0.4.0-412 (`cc_io_error.cch`); `redis_std.ccs` on main still carries the per-site handlers and the comment |
 
 | `redis_std.ccs` `exec` works around "a top-level `CCIoError` handler makes `return enc->…()` lower to brk on Ok" with five per-site `!>(e) { return cc_err(e); }`; on 0.4.0-411 the shape lowers correctly in three probes, including `@scratch` inside a `@switch` case; the defect was `796b454`'s switch-scratch-reclaim, now fixed | `studies/face_dispatch/return_*.ccs` | fixed (workaround can go) |
 | Comment-held policy in `redis_std.ccs` v3: six items; enforcers named (face removal ×2, lowerer fix ×1, `@noblock` check, KEYS hold parameter, and one already enforced by the `Encode` view hiding `io`) | review discussion 2026-09-17 | design |
+
+| Seeds 412 to 414: `CCIoError` standalone; teaching code changed ~25 handler lines to `@errhandler(CCIoError e) cc_error_exit(e.base)` (diff `796b454..cd7bd22` over `examples/`, `docs/`) | git diff | design (decided) |
+| A handler nothing in its scope raises is refused: "handles an error nothing in its scope raises"; a shadowed handler warns | `tests/errhandler_unraised_fail.*`, `errhandler_stack_deep_smoke.build_stderr` | design (decided) |
+| An unwrap through a macro with no declared `E` dispatches to the innermost `CCError` handler; a macro whose arms answer with different types dispatches per arriving type | `tests/errhandler_untyped_unwrap_ambient_smoke.ccs`, `errhandler_macro_mixed_dispatch_smoke.ccs` | design |
 
 ## 2. Arena as lifetime
 
@@ -197,6 +201,7 @@ Implementation, from `cc/include/ccc/cc_arena.cch` and `cc_slice.cch`:
 | Construct census across specimens: brace join 27, `spawn` 20, dest attach 13, `@parallel for` 27, wait-for 12, `@stage` 29, `seq` 3, `n.spawn` 25, `adopt` 2, `fail` 5, `leave` 1 (curl), user `cc_parallel_honor` 0 | grep over `real_projects/`, `examples/`, cctext, rlsw-cc, stylo-cc | observation |
 | Host-queue faces not on the bag: retract, detach with leftover, poll-empty, grow/shrink after plant | `docs/plans/tickets_and_nursery_gaps.md` §1 | unimplemented |
 | Adopt is cancel-only; `h1.wait()` does not wait `h2` | spec §8.11.1; tickets plan §5 | design |
+| Seed 413: an arm's unhandled `!>` crosses an immediate-wait join as `CCError` (a `CCIoError` through `base`); another error type must be handled in the arm | spec §8.11.1; `tests/parallel_join_raises_ccerror_smoke.ccs`, `parallel_arm_needs_ccerror_fail.compile_err` | design (decided) |
 | Turnstile is a face over `cc_exclusive_gate_{wait,pass,fail}` named cells: `wait(i)` touches name `base+i`, `pass(i)` touches `base+i+1`, `i <= 0` never waits (`cc_turnstile.cch:106-137`); cells are first-touch, two touchers, second frees (`cc_exclusive.cch:182-187`) | headers | design |
 | All 13 `@stage` sites across specimens and recipes name the ticket by the loop index (`(ts, 0, i)`, `(ts.read, i)`, `(ts.write, i)`); no non-monotone name in tests | grep | observation |
 | The stage lowering emits turnstile calls only (face or index form) and passes the same args to wait and pass (`lower_parallel.cch:3300-3345`) | lowerer | design |

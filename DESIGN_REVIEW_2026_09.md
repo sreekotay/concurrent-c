@@ -142,8 +142,20 @@ an empty catch, and a face extends its reach; discarding handlers belong
 on narrow types. And widening is the one type-global piece of an
 otherwise scope-local model.
 
-**Open.** Whether widening may also be admitted at a handler, so one scope
-accepts a narrow type through its face while another refuses.
+**Decided, seeds 412 to 414.** `CCIoError` has no face. An I/O Result
+reaches an `@errhandler(CCIoError)` or nothing. A scope that answers
+with `CCError` converts where it chooses to, `e.base`, and the other
+direction is `cc_io_error(e)`. No error type in the tree widens
+implicitly now, so the one type-global piece is gone and widening is a
+line at a site. The cost was paid in the teaching code: about
+twenty-five handler lines became `@errhandler(CCIoError e)
+cc_error_exit(e.base)`, and a scope that meets both kinds writes two
+handlers. A handler naming two types on one line remains available if
+that pair proves common. Two rules landed with it. A handler no unwrap
+in its scope reaches is refused: it says the scope can fail that way,
+and it cannot. A handler a nearer one shadows is allowed with a
+warning. And an unwrap through a macro that declares no `E` dispatches
+to the innermost `CCError` handler, never to the last one declared.
 
 ### 1.4 The ledger
 
@@ -197,6 +209,8 @@ policy; privileging it is a library bias.
 - `@noblock` and `@nonblocking` outside `@async` bodies.
 - Warning against a custom `E` as if it were a mistake. A custom `E`
   without a face is how handling is required; with a face it is a payload.
+- A handler for an error nothing in its scope raises. Refused since
+  seed 412.
 
 ---
 
@@ -535,7 +549,7 @@ reconstructs the job beside it.
 
 | Construct | Fact | Stated at | Enforced by |
 |-----------|------|-----------|-------------|
-| `@parallel { a = f(); b = g(); }` | these arms are independent and all done here | the brace | the join; racing arms undefined |
+| `@parallel { a = f(); b = g(); }` | these arms are independent and all done here; an arm's unhandled unwrap crosses the join as `CCError` | the brace | the join; racing arms undefined |
 | `@parallel (pred)` / `seq (cond)` / `#pragma(@parallel) off` | the schedule below this cut is sequential | the predicate or the directive | one body, two lowerings |
 | `@parallel for (i in lo..hi)` | iterations are independent | the range | bisection; `break` as a shared stop |
 | `@parallel wait (ts) for` + `@stage (gate, name…)` | at most `cap` tickets in flight; this block runs after the name it waits on is passed and before it passes its own | the cap, the gate, the name | a named one-shot cell, two touchers; a failed pass wakes the waiter `err` |
@@ -578,6 +592,13 @@ joins. On the sequential schedule the caller parks on the host-thread
 path, which the detector does not scan, and the program hangs with
 nothing printed. The floor is a floor only where the park is a
 fiber's, and it is loud only if it names what the program named.
+
+Since seed 413 an arm's unhandled unwrap crosses an immediate-wait join
+as a `CCError` whatever the arm unwrapped, a `CCIoError` through its
+base. The join is a rendezvous and not an operation of its own, and
+what it reports is that an arm failed; the frame needs a `CCError`
+handler for that record to reach, and any other error type is handled
+inside the arm.
 
 The nursery is the join set underneath `@parallel`: a wait-for's `h.n`
 is one, a dest's bodies are its children, EMPTY is its event. It is
