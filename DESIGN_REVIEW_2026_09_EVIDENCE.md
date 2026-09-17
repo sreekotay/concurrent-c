@@ -59,6 +59,8 @@ Work:
   place of "on successful construction" (getting-started, cheatsheet,
   language-concepts).
 
+| A bare `!>` on a `CCIoError` result with only a `CCError` handler in scope dispatches through the face; `redis_std.ccs` `exec` does this in `.mget` and `.keys`, so an I/O failure is answered by a `-ERR` write on the dead socket, against the file's own header | `studies/face_dispatch/` | design (face reach) |
+
 ## 2. Arena as lifetime
 
 | Observation | Where | Tag |
