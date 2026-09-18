@@ -52,12 +52,12 @@ test -x "$CCC" || die "ccc not executable: $CCC"
 backend_want="${CCC_BACKEND_CC:-}"
 if [ -z "$backend_want" ]; then
   case "$(basename "${CCC_HOST_CC:-cc}")" in
-    tcc) backend_want=tcc ;;
+    tcc) backend_want=ccc ;;
   esac
 fi
 if [ -n "$backend_want" ]; then
   case "$(basename "$backend_want")" in
-    tcc) export CC="$ROOT_DIR/third_party/tcc/tcc" ;;
+    ccc|tcc) export CC="$ROOT_DIR/third_party/tcc/tcc" ;;
     *) export CC="$backend_want" ;;
   esac
 elif [ -z "${CC:-}" ]; then

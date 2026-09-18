@@ -3,7 +3,7 @@
 #
 # From a macOS/Linux host with Docker:
 #   ./scripts/smoke_i386.sh
-#   CCC_HOST_CC=tcc ./scripts/smoke_i386.sh   # self-build ccc + suite backend=tcc
+#   CCC_HOST_CC=tcc ./scripts/smoke_i386.sh   # self-build ccc; backend = patched tcc (ccc)
 #
 # Mounts the repo read-only and builds in an anonymous /work volume so host
 # cc/out/tcc artifacts are not replaced with i386 objects.

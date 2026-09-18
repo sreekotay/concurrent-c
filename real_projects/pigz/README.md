@@ -42,10 +42,10 @@ make test      # gzip round-trip for pigz / pigz_cc / idiomatic / channel / hybr
 ../../scripts/pigz_i386.sh
 ../../scripts/pigz_arm32.sh
 # Optional: PIGZ_BENCH_MB=50 PIGZ_BENCH_WORKERS=8 PIGZ_BENCH_RUNS=3 ../../scripts/pigz_i386.sh
-# TinyCC as the ccc backend (original pigz.c still gcc):
+# TinyCC as ccc host + product backend = in-tree patched TCC (CCC_BACKEND_CC=ccc):
 #   CCC_HOST_CC=tcc ../../scripts/pigz_i386.sh
 #   CCC_HOST_CC=tcc ../../scripts/pigz_arm32.sh
-# Numbers: docs/ilp32-docker.md
+# Numbers / gate: docs/ilp32-docker.md
 ```
 
 ## Benchmark Data (auto-downloaded, not checked in)

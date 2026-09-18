@@ -3,7 +3,7 @@
 #
 # From a macOS/Linux host with Docker:
 #   ./scripts/smoke_arm32.sh
-#   CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh   # self-build ccc with TinyCC
+#   CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh   # self-build ccc; backend = patched tcc (ccc)
 #
 # Mounts the repo read-only and builds in an anonymous /work volume so host
 # cc/out/tcc artifacts are not replaced with arm32 objects.

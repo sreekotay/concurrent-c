@@ -12,8 +12,69 @@ index d21f1cad..cfff431b 100644
  VPATH = $(TOPSRC)
  -LTCC = $(TOP)/$(LIBTCC)
  
+diff --git a/arm-gen.c b/arm-gen.c
+index 81fa185a..8ea44421 100644
+--- a/arm-gen.c
++++ b/arm-gen.c
+@@ -1417,7 +1417,11 @@ void gfunc_prolog(Sym *func_sym)
+   {
+     n++;
+     struct_ret = 1;
++#ifdef TCC_ARM_EABI
++    func_vc = 16; /* Offset from fp past {r10,fp,ip,lr} */
++#else
+     func_vc = 12; /* Offset from fp of the place to store the result */
++#endif
+   }
+   for(sym2 = sym->next; sym2 && (n < 4 || nf < 16); sym2 = sym2->next) {
+     size = type_size(&sym2->type, &align);
+@@ -1449,7 +1453,14 @@ void gfunc_prolog(Sym *func_sym)
+     nf=(nf+1)&-2; /* nf => HARDFLOAT => EABI */
+     o(0xED2D0A00|nf); /* save s0-s15 on stack if needed */
+   }
++#ifdef TCC_ARM_EABI
++  /* 16-byte frame: push {fp,ip,lr} alone is 12 bytes and leaves fp at
++   * 4-mod-8, so 8-byte locals / _Atomic uint64_t SIGBUS (LDREXD). Include
++   * callee-saved r10 so SP and fp stay 8-aligned (AAPCS). */
++  o(0xE92D5C00); /* save r10, fp, ip, lr */
++#else
+   o(0xE92D5800); /* save fp, ip, lr */
++#endif
+   o(0xE1A0B00D); /* mov fp, sp */
+   func_sub_sp_offset = ind;
+   o(0xE1A00000); /* nop, leave space for stack adjustment in epilog */
+@@ -1493,7 +1504,11 @@ from_stack:
+       addr = (n + nf + sn) * 4;
+       sn += size;
+     }
++#ifdef TCC_ARM_EABI
++    gfunc_set_param(sym, addr + 16, 0);
++#else
+     gfunc_set_param(sym, addr + 12, 0);
++#endif
+   }
+   last_itod_magic=0;
+   leaffunc = 1;
+@@ -1526,11 +1541,16 @@ void gfunc_epilog(void)
+     }
+   }
+ #endif
++#ifdef TCC_ARM_EABI
++  o(0xE89BAC00); /* restore r10, fp, sp, pc */
++#else
+   o(0xE89BA800); /* restore fp, sp, pc */
++#endif
+   diff = (-loc + 3) & -4;
+ #ifdef TCC_ARM_EABI
++  /* fp is 0-mod-8; keep SP 8-aligned at public calls. */
+   if(!leaffunc)
+-    diff = ((diff + 11) & -8) - 4;
++    diff = (diff + 7) & -8;
+ #endif
+   if(diff > 0) {
+     x=stuff_const(0xE24BD000, diff); /* sub sp,fp,# */
 diff --git a/tcc.h b/tcc.h
-index e7a2f1e2..77881772 100644
+index e7a2f1e2..2eda5b62 100644
 --- a/tcc.h
 +++ b/tcc.h
 @@ -452,6 +452,11 @@ typedef struct TokenSym {
@@ -28,7 +89,7 @@ index e7a2f1e2..77881772 100644
  #ifdef TCC_TARGET_PE
  typedef unsigned short nwchar_t;
  #else
-@@ -1872,7 +1876,7 @@ dwarf_read_uleb128(unsigned char **ln, unsigned char *end)
+@@ -1872,7 +1877,7 @@ dwarf_read_uleb128(unsigned char **ln, unsigned char *end)
  {
      unsigned char *cp = *ln;
      uint64_t retval = 0;
@@ -37,7 +98,7 @@ index e7a2f1e2..77881772 100644
      for (i = 0; i < DWARF_MAX_128; i++) {
  	uint64_t byte = dwarf_read_1(cp, end);
          retval |= (byte & 0x7f) << (i * 7);
-@@ -1887,7 +1891,7 @@ dwarf_read_sleb128(unsigned char **ln, unsigned char *end)
+@@ -1887,7 +1892,7 @@ dwarf_read_sleb128(unsigned char **ln, unsigned char *end)
  {
      unsigned char *cp = *ln;
      int64_t retval = 0;

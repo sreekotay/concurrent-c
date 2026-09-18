@@ -16,7 +16,7 @@ third_party/tcc/           ← Git submodule pinned to origin/upstream-mob
     │
     ▼  make tcc-patch-apply  (working tree becomes dirty; ignore=dirty)
 third_party/tcc-patches/
-    └── 0001-cc-ext-hooks.patch   ← single upstream-mirror → tree diff
+    └── 0001-cc-ext-hooks.patch   ← CONFIG_CC_EXT hooks + ARM EABI 16-byte frame
 ```
 
 No tinycc-fork pushes are required for day-to-day CC hook work. Optional fork
@@ -30,6 +30,7 @@ superproject does not pin them.
 | `Makefile` | `-DCONFIG_CC_EXT` when `CONFIG_cc_ext=yes` |
 | `tcc.h` | `CC_TCC_EXT_AVAILABLE`; dwarf `unsigned i` |
 | `tccpp.c` | `#line` negative-delta fix |
+| `arm-gen.c` | EABI `push {r10,fp,ip,lr}` so fp stays 8-aligned |
 
 Stub-AST, ExtParser, UFCS tolerance, and `=>` lexing were removed once
 product lowering no longer needed them in libtcc.

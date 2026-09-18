@@ -16,7 +16,10 @@ Toolchain:
 - A `ccc` driver (`out/cc/bin/ccc` or wrapper `cc/bin/ccc`) that lowers `.ccs` → C (with `#line` source maps) and then compiles/links with the host C compiler (`cc`, `clang`, …).
 - A lightweight, statically linked runtime/stdlib (header-first, prefixed APIs) under `cc/include/ccc` and `cc/runtime`.
 - A test runner (`tools/cc_test`) that drives `cc/bin/ccc` end-to-end.
-- Vendored TinyCC runs **comptime** (`CONFIG_CC_EXT`); it can also be selected as a host-C backend if desired. TinyCC support does not require a CC language fork of TCC; the current compatibility patch is ~1.8 KB against a pinned pristine upstream mob.
+- Vendored TinyCC runs **comptime** (`CONFIG_CC_EXT`) and is the ILP32 product
+  C backend when `CCC_BACKEND_CC=ccc` (in-tree patched `third_party/tcc/tcc`).
+  The delta is `third_party/tcc-patches/0001-cc-ext-hooks.patch`
+  (`CONFIG_CC_EXT` plus the ARM EABI 8-byte frame).
 
 ```c
 #include <ccc/cc_runtime.cch>      // nurseries, channels, core runtime
@@ -258,20 +261,20 @@ Or: `make test TCC_EXT=1 TCC_INC=third_party/tcc TCC_LIB=../third_party/tcc/libt
 Test conventions: `tests/README.md`. Build driver / cache / outputs: [build spec](spec/concurrent-c-build.md). Channel close + deadlock patterns: `examples/recipe_channel_pipeline.ccs`, [getting started](docs/getting-started.md).
 
 **Linux ILP32.** Docker cold smokes on i386 and `linux/arm/v7`
-(gnueabihf / armhf, QEMU on Apple Silicon): curated suite **0 failures**
-with host+backend **gcc** or **TinyCC** (`./scripts/smoke_i386.sh`,
-`./scripts/smoke_arm32.sh`, and `CCC_HOST_CC=tcc` variants). pigz compare:
-all three binaries (`pigz`, `pigz_idiomatic`, `pigz_cc`) ELF 32-bit and
-gunzip-clean on i386 and ARM32 with gcc or TinyCC backend (2026-09-03 receipt,
-seed 0.3.4-294). Receipts: [docs/ilp32-docker.md](docs/ilp32-docker.md).
+(gnueabihf / armhf, QEMU on Apple Silicon): curated suite with host **gcc** or
+**TinyCC** (`./scripts/smoke_i386.sh`, `./scripts/smoke_arm32.sh`, and
+`CCC_HOST_CC=tcc` variants). With `CCC_HOST_CC=tcc`, product compile/link
+defaults to the in-tree patched TCC (`CCC_BACKEND_CC=ccc` →
+`third_party/tcc/tcc`). pigz compare and receipts:
+[docs/ilp32-docker.md](docs/ilp32-docker.md).
 
 ### Updating TCC
 
-TinyCC is the **comptime** engine (and an optional host-C backend). TinyCC
-support does not require a CC language fork of TCC; the current compatibility
-patch is ~1.8 KB against a pinned pristine upstream mob
-(`third_party/tcc-patches/0001-cc-ext-hooks.patch`, pin `origin/upstream-mob`
-on `https://github.com/sreekotay/tinycc.git`).
+TinyCC is the **comptime** engine and the optional ILP32 product C backend
+(`CCC_BACKEND_CC=ccc`). Patches live under `third_party/tcc-patches/` against
+a pinned pristine upstream mob (`origin/upstream-mob` on
+`https://github.com/sreekotay/tinycc.git`): `0001-cc-ext-hooks.patch`
+(`CONFIG_CC_EXT` / libtcc, and the ARM EABI 8-byte frame in `arm-gen.c`).
 
 ```bash
 make tcc-patch-apply
@@ -280,8 +283,8 @@ make tcc-update-check
 ```
 
 `third_party/tcc` is usually detached HEAD (parent pins the commit). CC hook
-edits ride the patch file (`make tcc-patch-regen`); the applied working tree
-is intentionally dirty.
+edits, including the ARM frame, ride `0001` (`make tcc-patch-regen`).
+The applied working tree is intentionally dirty.
 
 Upgrade loop: bump the submodule pin → `tcc-patch-apply` → fix →
 `tcc-patch-regen` → `tcc-update-check`.

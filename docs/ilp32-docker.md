@@ -14,14 +14,27 @@ Darwin 32-bit targets are not supported.
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `CCC_HOST_CC` | `cc` | Host C compiler used to **build** `ccc` (and TinyCC first). Set to `tcc` for a TinyCC self-build of `ccc`. |
-| `CCC_BACKEND_CC` | (matches host) | Host C compiler for `ccc build` / `ccc run` in the curated suite. When `CCC_HOST_CC=tcc` and this is unset, the suite uses the in-tree `third_party/tcc/tcc`. Set to `cc` or `tcc` to force. |
+| `CCC_HOST_CC` | `cc` | C compiler used to **build** `ccc` (and TinyCC first). `tcc` = self-build `ccc` with the in-tree patched TinyCC. |
+| `CCC_BACKEND_CC` | `ccc` when host is `tcc`, else `cc` | C compiler for product `ccc build` / `ccc run`. `ccc` or `tcc` → in-tree patched `third_party/tcc/tcc` (same binary `ccc` vendors for libtcc / comptime). `cc` → system gcc. |
 | `BUILD` | `debug` | `debug` or `release` |
 | `CCC_ILP32_JOBS` | `nproc` | Parallel make jobs inside the sandbox |
 
+### TCC gate
+
+The ILP32 TinyCC gate is **host TinyCC + product backend = ccc’s patched TinyCC**:
+
+```bash
+CCC_HOST_CC=tcc ./scripts/smoke_i386.sh
+CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh
+# equivalent explicit backend:
+CCC_HOST_CC=tcc CCC_BACKEND_CC=ccc ./scripts/smoke_arm32.sh
+```
+
+`CCC_BACKEND_CC=ccc` resolves to `third_party/tcc/tcc` after `apply_tcc_patches.sh` (CC hooks + ARM EABI 8-byte frame). Use `CCC_BACKEND_CC=cc` to force system gcc for product code while still building `ccc` with TinyCC.
+
 ```bash
 ./scripts/smoke_i386.sh                         # host+backend = system cc (gcc)
-CCC_HOST_CC=tcc ./scripts/smoke_i386.sh         # host+backend = TinyCC
+CCC_HOST_CC=tcc ./scripts/smoke_i386.sh         # host tcc, backend = patched tcc
 ./scripts/smoke_arm32.sh                        # same matrix on ARM32
 CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh
 ```
@@ -37,9 +50,9 @@ CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh
 | Command | Host CC | Backend | Result |
 |---------|---------|---------|--------|
 | `./scripts/smoke_i386.sh` | gcc (`cc`) | gcc | **0 failures** |
-| `CCC_HOST_CC=tcc ./scripts/smoke_i386.sh` | TinyCC | TinyCC | **0 failures** |
+| `CCC_HOST_CC=tcc ./scripts/smoke_i386.sh` | TinyCC | patched `ccc` TCC | **0 failures** |
 | `./scripts/smoke_arm32.sh` | gcc (`cc`) | gcc | **0 failures** |
-| `CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh` | TinyCC | TinyCC | **0 failures** |
+| `CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh` | TinyCC | patched `ccc` TCC | **0 failures** |
 
 ### Pigz compare — 2026-09-03
 
@@ -50,7 +63,7 @@ All three binaries (`pigz`, `pigz_idiomatic`, `pigz_cc`) build, 4 MiB-gunzip, an
 
 **Scripts:** `./scripts/pigz_i386.sh`, `./scripts/pigz_arm32.sh` — `pigz.c`, `pigz_idiomatic` (chained dict), `pigz_cc`.  
 **Input:** 20 MB Silesia concat; pigz / `pigz_cc` `-p 4`; `pigz_idiomatic` uses runtime cores (`CC_WORKERS` unset).  
-**Compile:** original pigz `cc -O3`; `.ccs` via `ccc -O --release`. `CCC_HOST_CC=tcc` builds `ccc` and the product backend with TinyCC; `pigz.c` stays gcc.
+**Compile:** original pigz `cc -O3`; `.ccs` via `ccc -O --release`. `CCC_HOST_CC=tcc` builds `ccc` with TinyCC and defaults the product backend to the in-tree patched TCC (`CCC_BACKEND_CC=ccc`); `pigz.c` stays gcc.
 
 `pigz_cc` (~1.3k lines) is the gated large-TU emit stress on ARM32 TCC self-build
 (it caught a TCC-built lowerer crash in 0.3.4-293, fixed in 0.3.4-294).
@@ -61,7 +74,7 @@ TinyCC self-build (`CCC_HOST_CC=tcc`). Optional split host/backend on ARM32
 (gcc-built lowerer, TCC product backend):
 
 ```bash
-FORCE_TOOLCHAIN=1 CCC_HOST_CC=cc CCC_BACKEND_CC=tcc ./scripts/pigz_arm32.sh
+FORCE_TOOLCHAIN=1 CCC_HOST_CC=cc CCC_BACKEND_CC=ccc ./scripts/pigz_arm32.sh
 ```
 
 QEMU user-mode — relative ILP32 only; not comparable to host Darwin or across arches.
@@ -70,7 +83,7 @@ QEMU user-mode — relative ILP32 only; not comparable to host Darwin or across 
 |--------|-----------|------------|
 | gcc host + gcc backend | [ilp32_i386_2026_08_30.txt](../real_projects/pigz/benchmarks/ilp32_i386_2026_08_30.txt) | [ilp32_arm32_2026_08_30.txt](../real_projects/pigz/benchmarks/ilp32_arm32_2026_08_30.txt) |
 | TinyCC self-build (`CCC_HOST_CC=tcc`) | [ilp32_i386_tcc_2026_08_30.txt](../real_projects/pigz/benchmarks/ilp32_i386_tcc_2026_08_30.txt) | [ilp32_arm32_tcc_2026_09_03.txt](../real_projects/pigz/benchmarks/ilp32_arm32_tcc_2026_09_03.txt) |
-| gcc host + TCC backend (`CCC_HOST_CC=cc CCC_BACKEND_CC=tcc`) | — | [ilp32_arm32_gcc_host_tcc_backend_2026_09_03.txt](../real_projects/pigz/benchmarks/ilp32_arm32_gcc_host_tcc_backend_2026_09_03.txt) |
+| gcc host + patched TCC backend (`CCC_HOST_CC=cc CCC_BACKEND_CC=ccc`) | — | [ilp32_arm32_gcc_host_tcc_backend_2026_09_03.txt](../real_projects/pigz/benchmarks/ilp32_arm32_gcc_host_tcc_backend_2026_09_03.txt) |
 
 ### gcc backend
 
@@ -96,7 +109,7 @@ QEMU user-mode — relative ILP32 only; not comparable to host Darwin or across 
 
 ### TCC backend
 
-`FORCE_TOOLCHAIN=1 CCC_HOST_CC=tcc ./scripts/pigz_i386.sh` / `./scripts/pigz_arm32.sh` — original `pigz.c` still gcc; `ccc` host + product backend = TinyCC. Split host/backend on ARM32: `CCC_HOST_CC=cc CCC_BACKEND_CC=tcc`.
+`FORCE_TOOLCHAIN=1 CCC_HOST_CC=tcc ./scripts/pigz_i386.sh` / `./scripts/pigz_arm32.sh` — original `pigz.c` still gcc; `ccc` built with TinyCC; product backend defaults to patched in-tree TCC (`CCC_BACKEND_CC=ccc`). Override with `CCC_BACKEND_CC=cc` (gcc product) or `CCC_HOST_CC=cc CCC_BACKEND_CC=ccc` (gcc-built `ccc`, patched TCC product).
 
 #### i386 (linux/386)
 
@@ -133,7 +146,7 @@ Requires Docker with `linux/386` (QEMU on Apple Silicon is fine; slower).
 ```bash
 # One shot (builds image, runs harness)
 ./scripts/smoke_i386.sh
-CCC_HOST_CC=tcc ./scripts/smoke_i386.sh   # self-build ccc + suite backend=tcc
+CCC_HOST_CC=tcc ./scripts/smoke_i386.sh   # self-build ccc; backend = patched tcc (ccc)
 ```
 
 `smoke_i386.sh` mounts the repo at `/src` **read-only** and syncs it into an
@@ -198,7 +211,7 @@ RO `/src` + `/work` entrypoint pattern:
 
 ```bash
 ./scripts/smoke_arm32.sh
-CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh   # self-build ccc + suite backend=tcc
+CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh   # self-build ccc; backend = patched tcc (ccc)
 ```
 
 - Dockerfile: `scripts/docker/Dockerfile.arm32` (`arm32v7/debian:bookworm`)
@@ -211,10 +224,10 @@ Optional pigz compare (named volumes `ccc-ilp32-work` / `ccc-arm32-work`):
 
 ```bash
 ./scripts/pigz_i386.sh
-CCC_HOST_CC=tcc ./scripts/pigz_i386.sh   # ccc backend = TinyCC; pigz.c still gcc
+CCC_HOST_CC=tcc ./scripts/pigz_i386.sh   # backend = patched tcc (ccc); pigz.c still gcc
 ./scripts/pigz_arm32.sh
 CCC_HOST_CC=tcc ./scripts/pigz_arm32.sh
-FORCE_TOOLCHAIN=1 CCC_HOST_CC=cc CCC_BACKEND_CC=tcc ./scripts/pigz_arm32.sh  # split
+FORCE_TOOLCHAIN=1 CCC_HOST_CC=cc CCC_BACKEND_CC=ccc ./scripts/pigz_arm32.sh  # split
 ```
 
 Manual equivalent:

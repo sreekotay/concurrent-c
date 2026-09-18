@@ -70,10 +70,10 @@ Run these when you changed the **build graph**, **bootstrap seed**, or before pu
 |------|---------|------|
 | Wipe local `out/` and rebuild from `last-good` | `./scripts/smoke_bootstrap_fresh.sh` | after seed promote, or “does cold make still work?” |
 | Clean Linux i386 (Docker) | `./scripts/smoke_i386.sh` | before pushing a new `last-good`; catches GNU ld / Darwin-only seeds |
-| Same, host+backend = TinyCC | `CCC_HOST_CC=tcc ./scripts/smoke_i386.sh` | Linux / Docker ILP32 |
+| Same, host TinyCC + patched TCC backend | `CCC_HOST_CC=tcc ./scripts/smoke_i386.sh` | Linux / Docker ILP32 (`CCC_BACKEND_CC=ccc` → in-tree patched `tcc`) |
 | Clean Linux ARM32 (Docker) | `./scripts/smoke_arm32.sh` | same gate on `linux/arm/v7` (gnueabihf) |
-| Same, host TinyCC + gcc backend | `CCC_HOST_CC=tcc CCC_BACKEND_CC=cc ./scripts/smoke_arm32.sh` | preferred under qemu-user: full `CCC_HOST_CC=tcc` (TCC backend) can SIGBUS on `@parallel` |
-| Same, host+backend = TinyCC | `CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh` | native arm32; under Docker/qemu prefer gcc backend |
+| Same, host TinyCC + patched TCC backend | `CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh` | product C via in-tree patched TCC (`CCC_BACKEND_CC=ccc`) |
+| Same, host TinyCC + gcc product | `CCC_HOST_CC=tcc CCC_BACKEND_CC=cc ./scripts/smoke_arm32.sh` | isolate lowerer-under-TCC from product codegen |
 
 `smoke_i386.sh` / `smoke_arm32.sh` mount the repo **read-only** and build in `/work` — they do not replace your host `out/`. Env and latest receipt: [ilp32-docker.md](ilp32-docker.md).
 
@@ -85,7 +85,7 @@ Optional **large-TU emit stress** (after lowerer changes that touch stmt / walk 
 | Candidates | Other big `.ccs` worth spot-checking with `ccc build --no-cache` | `npm/cc-python/src/cc_python.ccs` (~4.4k), `real_projects/stylo-cc/engine/stylebench_cc.ccs` (~2k), `vscode/cc-lsp/cc_lsp.ccs` (~1.3k), `real_projects/redis/redis_owner.ccs` (~1.2k), `perf/wstore5.ccs` (~1.5k) |
 | Pattern smokes | `@for (&… in …)` / zip / grower shrink | `tests/for_in_mut_*`, `tests/for_in_mut_walk_peel_smoke.c` |
 
-Sensitive config: **`CCC_HOST_CC=tcc` on ARM32** — TCC host-compiles the bootstrap seed. Split `CCC_HOST_CC=cc CCC_BACKEND_CC=tcc` isolates product TCC codegen from lowerer host codegen. See [ilp32-docker.md](ilp32-docker.md#pigz-compare).
+Sensitive config: **`CCC_HOST_CC=tcc` on ARM32** — TCC host-compiles the bootstrap seed; product defaults to the same in-tree patched TCC (`CCC_BACKEND_CC=ccc`). Split with `CCC_BACKEND_CC=cc` or `CCC_HOST_CC=cc CCC_BACKEND_CC=ccc` to isolate host vs product. See [ilp32-docker.md](ilp32-docker.md#tcc-gate).
 
 ## Where the time goes
 
