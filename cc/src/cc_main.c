@@ -5429,6 +5429,50 @@ static int cc__write_module_stages_for_clean(const char* unit_path, const char* 
     return 0;
 }
 
+/* Directory the clean lowerer should treat as the root of quoted local
+ * headers, when the unit is not in the toolchain tree. An install's
+ * `g_repo_root` is the prefix; a dev `ccc`'s is this checkout. Neither
+ * contains another project's `core/foo.cch`, and `--quote-dir` is only the
+ * directory the unit was written in, so `tests/x.ccs` cannot name
+ * `../core/foo.cch`. The stage lives under the project's `out/`, inside
+ * that project's checkout when it has one. */
+static int cc__project_root_for_unit(const char* in_path, char* out, size_t cap) {
+    char abs[PATH_MAX];
+    char dir[PATH_MAX];
+    const char* tool = g_repo_root[0] ? g_repo_root : g_cc_include;
+    char tool_abs[PATH_MAX];
+    if (!in_path || !out || cap < 2) return -1;
+    if (!realpath(in_path, abs)) return -1;
+    if (tool && tool[0]) {
+        if (realpath(tool, tool_abs)) tool = tool_abs;
+        if (cc__path_under_root(abs, tool)) return -1;
+    }
+    snprintf(dir, sizeof(dir), "%s", abs);
+    for (;;) {
+        char marker[PATH_MAX];
+        char* slash;
+        if (snprintf(marker, sizeof(marker), "%s/.git", dir) < (int)sizeof(marker) &&
+            access(marker, F_OK) == 0) {
+            if (strlen(dir) >= cap) return -1;
+            memcpy(out, dir, strlen(dir) + 1);
+            return 0;
+        }
+        slash = strrchr(dir, '/');
+        if (!slash || slash == dir) break;
+        *slash = '\0';
+    }
+    {
+        size_t n = strlen(g_out_root);
+        char proj[PATH_MAX];
+        if (n > 4 && strcmp(g_out_root + n - 4, "/out") == 0 && n - 4 < sizeof(proj)) {
+            memcpy(proj, g_out_root, n - 4);
+            proj[n - 4] = '\0';
+            if (realpath(proj, out) && cc__path_under_root(abs, out)) return 0;
+        }
+    }
+    return -1;
+}
+
 static int cc__run_clean_lowerer(const char* in_path, const char* c_out,
                                  const char* quote_dir, int no_line,
                                  const char* modules_path, int verbose) {
@@ -5436,6 +5480,8 @@ static int cc__run_clean_lowerer(const char* in_path, const char* c_out,
     char schema[PATH_MAX];
     char insts[PATH_MAX];
     char facs[PATH_MAX];
+    char source_root[PATH_MAX];
+    const char* root_arg;
     char* argv[28];
     int argc = 0, rc;
     long long t0 = cc__now_ms();
@@ -5462,7 +5508,10 @@ static int cc__run_clean_lowerer(const char* in_path, const char* c_out,
     argv[argc++] = (char*)"-I";
     argv[argc++] = incdir;
     argv[argc++] = (char*)"--root";
-    argv[argc++] = g_repo_root[0] ? g_repo_root : g_cc_include;
+    root_arg = g_repo_root[0] ? g_repo_root : g_cc_include;
+    if (cc__project_root_for_unit(in_path, source_root, sizeof(source_root)) == 0)
+        root_arg = source_root;
+    argv[argc++] = (char*)root_arg;
     argv[argc++] = (char*)"--h-root";
     argv[argc++] = hroot;
     argv[argc++] = (char*)"--known-types";
@@ -7007,6 +7056,18 @@ static int cc__compile_c_to_obj(const CCBuildOptions* opt,
         char inc[PATH_MAX + 8];
         snprintf(inc, sizeof(inc), " -I%s", extra_include_dir);
         strncat(cmd, inc, sizeof(cmd) - strlen(cmd) - 1);
+    }
+    {
+        /* A module unit is compiled from out/.cc-build/clean, and the
+         * toolchain root on this command is the install prefix. A plain
+         * header the face included (`<core/ui_cmd.h>`) lives in the project,
+         * which is neither of those. */
+        char proj[PATH_MAX];
+        char inc[PATH_MAX + 8];
+        if (c_path && cc__project_root_for_unit(c_path, proj, sizeof(proj)) == 0) {
+            snprintf(inc, sizeof(inc), " -I%s", proj);
+            strncat(cmd, inc, sizeof(cmd) - strlen(cmd) - 1);
+        }
     }
     /* On the clean path `extra_include_dir` is the emit directory, not the
      * unit's own: the C being compiled lives under out/.cc-build/clean. A
