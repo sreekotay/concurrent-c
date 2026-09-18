@@ -5510,7 +5510,9 @@ T a, b;
 } !>.wait()!>;
 ```
 
-The block holds one or more arms. An arm is `name = expr;` where `name` is a simple identifier already in scope, `@serial { … }` (§8.11.2), or an expression statement with no assignment (no named write; the expression runs). After `.wait()`, every named write is visible and every expression arm has completed.
+The block holds one or more arms. An arm is `name = expr;` where `name` is a simple identifier already in scope, `@serial { … }` (§8.11.2), or an expression statement with no assignment (no named write; the expression runs). An assignment arm whose `expr` ends in a bare `!>` is ill-formed: the unwrap is in expression position, so its handler must diverge (§3.1 invariant 6), and in an arm the only way to diverge is to leave the arm — which `@serial { name = expr !>; }` says and the bare form does not. An attached `!>(e) { … }` whose body diverges is well-formed on an assignment arm. After `.wait()`, every named write is visible and every expression arm has completed.
+
+The immediate-wait join answers with `void !>(CCError)` in every shape, including one whose arms cannot fail: a caller that handles it goes on working when the runtime gains a failure it does not report today. Where there is no exit cell (§8.11) nothing is checked at run time, so the promise costs the handler on the page and not an instruction.
 
 Two handles join by waiting them as effect arms of a new `@parallel`:
 

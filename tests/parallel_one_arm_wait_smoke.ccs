@@ -8,6 +8,7 @@ static void bump(void) {
 }
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     int a = 0;
     @parallel {
         a = 41;

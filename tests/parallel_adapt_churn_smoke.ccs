@@ -22,6 +22,7 @@ static uint32_t sum_seq(uint32_t d, uint32_t i) {
 }
 
 static uint32_t sum_par(uint32_t d, uint32_t i) {
+    @errhandler(CCError e) cc_error_exit(e);
     if (d >= DEPTH)
         return i;
     uint32_t left = 0;

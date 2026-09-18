@@ -16,6 +16,7 @@ static uint32_t sum_seq(uint32_t d, uint32_t i) {
 }
 
 static uint32_t sum_par(uint32_t d, uint32_t i) {
+    @errhandler(CCError e) cc_error_exit(e);
     if (d >= DEPTH)
         return i;
     uint32_t left = 0;
@@ -28,6 +29,7 @@ static uint32_t sum_par(uint32_t d, uint32_t i) {
 }
 
 static int three_arm(int x) {
+    @errhandler(CCError e) cc_error_exit(e);
     int a = 0;
     int b = 0;
     int c = 0;

@@ -48,6 +48,7 @@ static void spin_ms(double ms) {
 }
 
 static uint32_t storm_tree(uint32_t d, uint32_t i) {
+    @errhandler(CCError e) cc_error_exit(e);
     if (d >= g_storm_depth || g_storm_stop)
         return i;
     uint32_t left = 0;

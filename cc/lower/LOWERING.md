@@ -828,6 +828,14 @@ handlers `script_entry` opens a synthetic `main` or `@task` body with name
 their binders in the reserved prefix and are exempt: the script did not
 write them.
 
+The immediate-wait join calls `pl_eh_type_why` whatever its arms do, so the
+frame carries an `@errhandler(CCError)` in every shape, and the handler is
+marked reached there even when this shape emits no check: the type is the
+promise, and a handler kept for a promise the lowering can currently
+discharge for free is not a dead one. A dest-bound construct keeps the older
+rule -- its arms are fibers, and only the ones that raise need the frame to
+carry a handler.
+
 An arm that exits -- a `return`, or a bare `!>` -- does so through the
 block's exit cell, which the join reads once every arm has finished. The
 error half of that cell is a `CCError`, whatever the arm unwrapped: the join

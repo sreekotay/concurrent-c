@@ -23,6 +23,7 @@
 #include <ccc/stdio.cch>
 
 int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
 
     int snapshot = 42;
     println("=== names on the page ===");

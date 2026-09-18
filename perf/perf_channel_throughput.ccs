@@ -92,6 +92,7 @@ static void bench_unbuffered(void) {
  * is rejected; the dummy local is the kick.
  */
 static void bench_unbuffered_par(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     int[~ >] tx;
     int[~ <] rx;
     cc_channel_pair(&tx, &rx);

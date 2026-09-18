@@ -719,7 +719,20 @@ static CcStmt* parse_parallel(P* p) {
                         break;
                     case .expr(es):
                         if (es.e && !es.body) {
-                            if (expr_assign_to_ident(es.e, &target, &rhs)) classified = true;
+                            if (expr_assign_to_ident(es.e, &target, &rhs)) {
+                                /* `a = f() !>;` puts the unwrap in expression
+                                 * position, where its handler must diverge
+                                 * (there is no value for `a` on the error
+                                 * path). In an arm the only way to diverge is
+                                 * to leave the arm, and `@serial` is where
+                                 * that is spelled. */
+                                CcExpr* bare_op = NULL;
+                                if (expr_unwrap_operand(rhs, &bare_op)) {
+                                    CCString m = @string(`an assignment arm cannot unwrap with a bare '!>': wrap it as '${at_serial} { ... }', or handle it at the site with '!>(e) { ... }'`, p->arena);
+                                    err_at(p, afirst, m);
+                                }
+                                classified = true;
+                            }
                             else { rhs = es.e; classified = true; }
                         }
                         break;

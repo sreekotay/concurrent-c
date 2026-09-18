@@ -1,0 +1,16 @@
+/* The join answers with `void !>(CCError)` in every shape, not only where
+ * the arms can fail. A caller that handles it today keeps working when the
+ * runtime gains a failure it does not report yet. */
+#include <ccc/std/prelude.cch>
+
+static int plain(int v) { return v; }
+
+int main(void) {
+    int a = 0;
+    int b = 0;
+    @parallel {
+        a = plain(1);
+        b = plain(2);
+    } !>.wait()!>;
+    return a + b;
+}

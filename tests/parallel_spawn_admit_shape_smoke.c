@@ -103,6 +103,7 @@ int main(void) {
     const char* cheap_fix =
         "#include <ccc/std/prelude.cch>\n"
         "int main(void) {\n"
+        "    @errhandler(CCError e) { return 1; }\n"
         "    int a = 0, b = 0;\n"
         "    @parallel {\n"
         "        a = 1;\n"
@@ -214,6 +215,7 @@ int main(void) {
         const char* one_fix =
             "#include <ccc/std/prelude.cch>\n"
             "int main(void) {\n"
+            "    @errhandler(CCError e) { return 1; }\n"
             "    int a = 0;\n"
             "    @parallel {\n"
             "        a = 41;\n"
@@ -241,6 +243,7 @@ int main(void) {
         const char* gated_fix =
             "#include <ccc/std/prelude.cch>\n"
             "int main(void) {\n"
+            "    @errhandler(CCError e) { return 1; }\n"
             "    int a = 0, b = 0, spawn = 0;\n"
             "    @parallel (spawn) {\n"
             "        a = 10;\n"

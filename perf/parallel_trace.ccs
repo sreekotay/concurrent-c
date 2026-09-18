@@ -194,6 +194,7 @@ static uint32_t render_seq(uint32_t d, double x, double y, double size) {
 }
 
 static uint32_t render_par(uint32_t d, double x, double y, double size) {
+    @errhandler(CCError e) cc_error_exit(e);
     double h;
     double xh, yh;
     uint32_t d1;
@@ -217,6 +218,7 @@ static uint32_t render_par(uint32_t d, double x, double y, double size) {
 }
 
 static uint32_t render_cut(uint32_t d, double x, double y, double size) {
+    @errhandler(CCError e) cc_error_exit(e);
     double h;
     double xh, yh;
     uint32_t d1;

@@ -1970,14 +1970,14 @@ static void pl_splice(CcStmt* dst, CcStmt* src) {
     for (i = 0; i < n; i++) lw_push(dst, *from->get_ptr(i));
 }
 
-/* The error type the exit cell carries: `CCError`, whatever the arms
+/* The error type the join answers with: `CCError`, whatever the arms
  * themselves raise. The join is a rendezvous, not an operation of its own:
  * what it reports is that an arm failed. An arm stores what makes its error
  * a `CCError` -- one it raises as it stands, a `CCIoError` through its
  * `base` -- and the join raises the record where the block stands, into the
  * `CCError` handler the function carries. Empty when the function carries
  * none, with the diagnostic emitted. */
-static CCSlice pl_eh_type(PStep* st, CcSpan sp) {
+static CCSlice pl_eh_type_why(PStep* st, CcSpan sp, bool arms_raise) {
     CcLowerer* L = st->L;
     CCSlice want = cstr_slice("CCError");
     size_t n = st->eh_top.len();
@@ -1990,14 +1990,33 @@ static CCSlice pl_eh_type(PStep* st, CcSpan sp) {
             default: break;
         }
         if (!et) continue;
-        if (slice_eq(L->ix->canon(et), want)) return want;
+        if (slice_eq(L->ix->canon(et), want)) {
+            /* the join reaches it, whether or not this shape emits a check:
+             * the type is the promise, and a handler kept for a promise the
+             * lowering can currently discharge for free is not a dead one */
+            uint32_t key = t->span.first;
+            size_t nr = L->eh_reached.len();
+            size_t k;
+            bool seen = false;
+            for (k = 0; k < nr && !seen; k++) seen = *L->eh_reached.get_ptr(k) == key;
+            if (!seen) L->eh_reached.push(key);
+            return want;
+        }
     }
     {
         CCString m = cc_string_new();
-        m.push_cstr("an arm that unwraps raises after the join, into an '@errhandler(CCError e)' on the function it stands in, and this function declares none; declare one above the block, or handle the Result in the arm with '!>(e) { ... }'", L->arena);
+        if (arms_raise)
+            m.push_cstr("an arm that unwraps raises after the join, into an '@errhandler(CCError e)' on the function it stands in, and this function declares none; declare one above the block, or handle the Result in the arm with '!>(e) { ... }'", L->arena);
+        else
+            m.push_cstr("a '@parallel' join answers with 'void !>(CCError)' -- in every shape, so a caller is ready for a failure this one cannot have yet -- and this function declares no '@errhandler(CCError e)'; declare one above the block", L->arena);
         lw_error(L, sp, m);
     }
     return cc_slice_empty();
+}
+
+/* The arms raise: the join carries what they claimed. */
+static CCSlice pl_eh_type(PStep* st, CcSpan sp) {
+    return pl_eh_type_why(st, sp, true);
 }
 
 /* `@errhandler(E __cc_pe) { <claim>; <leave> }`: a handler an arm that
@@ -2329,8 +2348,16 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
         }
     }
     if (hspell.len && !pl_dest_caps_ok(st, w, p, hbase, sp)) return;
-    if (raise_any) {
-        pj_ety = pl_eh_type(st, sp);
+    if (raise_any || !hspell.len) {
+        /* (the message says which of the two reasons applies) */
+        /* An immediate-wait join answers with `void !>(CCError)` in every
+         * shape, so a caller is ready for a failure the runtime does not
+         * report today and may tomorrow. Where the arms cannot fail there is
+         * no exit cell and nothing is checked at run time -- the promise
+         * costs the handler on the page, not an instruction. A dest-bound
+         * construct keeps its own rule: its arms are fibers, and only the
+         * ones that raise need the frame to carry a handler. */
+        pj_ety = pl_eh_type_why(st, sp, raise_any);
         if (!pj_ety.len) return;
     }
     if ((pj_any || raise_any) && first == 1) {
