@@ -1,7 +1,7 @@
-/* `#pragma(@linenumbers) off` omits every `#line` from the emitted C,
- * the one the driver prepends to a comptime stage included; with the
- * pragma absent, every `#line` names the unit the user wrote, never
- * the stage under the build cache (spec 1.8). */
+/* `#pragma(@linenumbers) off` and `--no-line` omit every `#line` from the
+ * emitted C, the one the driver prepends to a comptime stage included.
+ * With neither, every `#line` names the unit the user wrote, never the
+ * stage under the build cache (spec 1.8). */
 CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
 
 CCCommand off = cc_command(arena, @slice("./cc/bin/ccc"));
@@ -54,6 +54,74 @@ stage_line.arg("out/linenumbers_on_fixture.c");
 rc = stage_line.status() !>;
 if (rc == 0) {
     "a #line names the comptime stage instead of the unit".println();
+    return 1;
+}
+
+/* `--no-line` is the command-line form of the pragma. The unit has no
+ * `#pragma(@linenumbers)`, so a driver that only forwards the pragma still
+ * writes `#line`, and those name the cache copy with an absolute path. */
+CCCommand flag = cc_command(arena, @slice("./cc/bin/ccc"));
+flag.arg("--emit-c-only");
+flag.arg("--no-cache");
+flag.arg("--no-line");
+flag.arg("tests/linenumbers_on_fixture.ccs");
+flag.arg("-o");
+flag.arg("out/noline_flag_fixture.c");
+flag.inherit_stdio();
+rc = flag.status() !>;
+if (rc != 0) {
+    "emit failed: --no-line".println();
+    return 1;
+}
+CCCommand flag_line = cc_command(arena, @slice("grep"));
+flag_line.arg("-q");
+flag_line.arg("^#line");
+flag_line.arg("out/noline_flag_fixture.c");
+rc = flag_line.status() !>;
+if (rc == 0) {
+    "a #line survived --no-line".println();
+    return 1;
+}
+CCCommand flag_abs = cc_command(arena, @slice("grep"));
+flag_abs.arg("-q");
+flag_abs.arg("#line .*\"/");
+flag_abs.arg("out/noline_flag_fixture.c");
+rc = flag_abs.status() !>;
+if (rc == 0) {
+    "an absolute #line survived --no-line".println();
+    return 1;
+}
+
+/* Same flag, written outside out/: that is the vendored-tree emit. */
+CCCommand vendored = cc_command(arena, @slice("./cc/bin/ccc"));
+vendored.arg("--emit-c-only");
+vendored.arg("--no-cache");
+vendored.arg("--no-line");
+vendored.arg("tests/linenumbers_on_fixture.ccs");
+vendored.arg("-o");
+vendored.arg("/tmp/cc_noline_flag_smoke.c");
+vendored.inherit_stdio();
+rc = vendored.status() !>;
+if (rc != 0) {
+    "emit failed: --no-line outside out/".println();
+    return 1;
+}
+CCCommand vendored_line = cc_command(arena, @slice("grep"));
+vendored_line.arg("-q");
+vendored_line.arg("^#line");
+vendored_line.arg("/tmp/cc_noline_flag_smoke.c");
+rc = vendored_line.status() !>;
+if (rc == 0) {
+    "a #line survived --no-line outside out/".println();
+    return 1;
+}
+CCCommand vendored_abs = cc_command(arena, @slice("grep"));
+vendored_abs.arg("-q");
+vendored_abs.arg("#line .*\"/");
+vendored_abs.arg("/tmp/cc_noline_flag_smoke.c");
+rc = vendored_abs.status() !>;
+if (rc == 0) {
+    "an absolute #line survived --no-line outside out/".println();
     return 1;
 }
 return 0;

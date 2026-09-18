@@ -6330,8 +6330,8 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
              * `@linenumbers` operand would otherwise be lowered past as if
              * the line were not there. And it has to be this file: the
              * comptime stage below prepends a `#line`, behind which the
-             * recogniser sees no pragma at all. `@linenumbers off` is handed
-             * on as `--no-line`. */
+             * recogniser sees no pragma at all. `@linenumbers off` and the
+             * command-line `--no-line` are both handed on as `--no-line`. */
             {
                 size_t rn = 0;
                 char* raw = cc__read_all_file(clean_orig, &rn);
@@ -6383,6 +6383,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
                 if (cc__write_module_stages_for_clean(clean_orig, dir, clean_modules) != 0) return -1;
                 cc__prof_span("clean_module_stages", t_st);
             }
+            if (g_no_line) clean_no_line = 1;
             if (cc__run_clean_lowerer(opt->in_path, clean_c, clean_qdir, clean_no_line, clean_modules, opt->verbose) != 0) return -1;
             {
                 /* compile time, on the lowered unit: the blocks run as the
