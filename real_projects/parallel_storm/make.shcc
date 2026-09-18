@@ -16,7 +16,6 @@
 
 static int storm_make(const char* goal) {
     CCArena a = cc_arena_heap(kilobytes(64)) @destroy;
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     @errhandler(CCIoError e) {
         eprintln(cc_io_error_str(e));
         return 1;

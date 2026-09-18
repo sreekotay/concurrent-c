@@ -270,7 +270,11 @@ struct fiber_v2 {
     void* current_deadline_scope;
     CCNurseryHost* saved_nursery;
     CCNurseryHost* admission_nursery;
-    void* par_gate; /* CCParallel*; cancel wakes parks on this fiber */
+    /* Cancel gate. attach release-stores the handle while this fiber may
+     * already be inside a receive; every receive acquire-loads it. A fiber
+     * that has not seen the store is not cancelled. The flag on the handle
+     * is already atomic — this pointer is the edge that names it. */
+    void *_Atomic par_gate;
     int   par_slot; /* dest live-index slot; -1 if not listed */
 
     /* R1 — user-facing async backtrace metadata.
@@ -1372,7 +1376,7 @@ static fiber_v2* fiber_v2_alloc(void) {
             f->last_thread_id = -1;
             f->saved_nursery = NULL;
             f->admission_nursery = NULL;
-            f->par_gate = NULL;
+            atomic_store_explicit(&f->par_gate, NULL, memory_order_relaxed);
             f->par_slot = -1;
             f->nb_inherit = 0;
             f->nb_live = 0;
@@ -1402,7 +1406,7 @@ static fiber_v2* fiber_v2_alloc(void) {
     f->current_deadline_scope = NULL;
     f->saved_nursery = NULL;
     f->admission_nursery = NULL;
-    f->par_gate = NULL;
+    atomic_store_explicit(&f->par_gate, NULL, memory_order_relaxed);
     f->par_slot = -1;
     atomic_store_explicit(&f->join_waiter_fiber, NULL, memory_order_relaxed);
     wake_primitive_init(&f->done_wake);
@@ -1425,7 +1429,7 @@ static void fiber_v2_free(fiber_v2* f) {
     f->current_deadline_scope = NULL;
     f->saved_nursery = NULL;
     f->admission_nursery = NULL;
-    f->par_gate = NULL;
+    atomic_store_explicit(&f->par_gate, NULL, memory_order_relaxed);
     f->par_slot = -1;
     f->nb_inherit = 0;
     f->nb_live = 0;
@@ -2149,7 +2153,7 @@ static void thread_v2_run_fiber(int tid, fiber_v2* f) {
          * has released it. Claim is exclusive with wait / leave /
          * admit-reap. Dest-attached fibers are not nursery worker-frees
          * — if claim loses, the joiner that took the slot frees. */
-        void* gate = f->par_gate;
+        void* gate = sched_v2_fiber_par_gate(f);
         int claimed = 0;
         if (gate)
             claimed = cc_parallel_claim_child(gate, f);
@@ -2472,11 +2476,13 @@ void sched_v2_fiber_clear_park_deadline(fiber_v2* f) {
 }
 
 void sched_v2_fiber_set_par_gate(fiber_v2* f, void* gate) {
-    if (f) f->par_gate = gate;
+    if (!f) return;
+    atomic_store_explicit(&f->par_gate, gate, memory_order_release);
 }
 
 void* sched_v2_fiber_par_gate(fiber_v2* f) {
-    return f ? f->par_gate : NULL;
+    if (!f) return NULL;
+    return atomic_load_explicit(&f->par_gate, memory_order_acquire);
 }
 
 void sched_v2_fiber_set_par_slot(fiber_v2* f, int slot) {
