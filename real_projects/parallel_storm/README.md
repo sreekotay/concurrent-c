@@ -23,8 +23,8 @@ Three forks on the buffer page:
 | `quad` | same tree, `@parallel (d < STORM_CUT)` (default cut 3) |
 
 The tile page is the same quadtree fork as buffer `unbound` / `quad`
-(not scanlines). The tree is the join: the leaf `put_rgb`s; drop is
-`wait()`. Default framebuffer is 1024².
+(not scanlines), plus `noblock` (capacity Cut). The tree is the join:
+the leaf `put_rgb`s; drop is `wait()`. Default framebuffer is 1024².
 
 Raylib is a **not-in-git** fetch (`vendor/raylib`, gitignored). The CC page
 does not include `raylib.h` — `storm_rl.c` is the window.
@@ -54,7 +54,7 @@ Click to look. Esc releases the mouse. WASD move, shift sprint, Q quit.
 | `STORM_W` / `STORM_H` | 1024×1024 | framebuffer |
 | `STORM_WIN_W` / `STORM_WIN_H` | 1024×1024 | window |
 | `STORM_GRID` | 64 | XZ DDA march steps (sphere lattice) |
-| `STORM_MODE` | `for` (`storm`) / `quad` (`storm_tile`) | see above |
+| `STORM_MODE` | `for`/`unbound`/`quad` (`storm`); `quad`/`unbound`/`noblock` (`storm_tile`) | |
 | `STORM_CUT` | 3 | quadtree spawn levels |
 | `STORM_SEQ=1` | 0 | sequential, no spawn |
 | `STORM_SHADE=0` | 1 | skip hit/shade (cheap leaf); isolate spawn/FB |

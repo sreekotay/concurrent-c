@@ -22,6 +22,12 @@
  * be waiting on itself. A site that asks for it and does not get it dies
  * rather than running.
  *
+ * `noblock` is the same wait-for form with a different offer: the arms are
+ * equal work. While the child still forks the arms are fibers; the last
+ * wave is worklets, and that worklet is sealed: every site under it is
+ * the arms in order, with no enter or leave. Adapt / CHURN do not
+ * classify the site.
+ *
  * What the form can still carry and this step does not lower — a predicate,
  * `cache`, and the dest forms — is a diagnostic naming it. A concurrency
  * construct that quietly ran as something else would be a program that
@@ -753,7 +759,7 @@ static void pl_env_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
  * site runs its arms in order, nothing is spawned and the thunks are
  * called on the caller instead. */
 static void pl_fire_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
-                          CCSlice bind, bool spawn, bool compact,
+                          CCSlice bind, bool spawn, bool noblock, bool compact,
                           PCapList* caps, CCSlice target, CCSlice join_cell, CcSpan sp) {
     CCSlice thunk = pl_name(L, id, k, "_thunk");
     CCSlice e = pl_name(L, id, k, "_e");
@@ -782,6 +788,7 @@ static void pl_fire_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
         (void)site;
         (void)denied;
         (void)compact;
+        (void)noblock;
         return;
     }
     if (spawn) {
@@ -794,6 +801,30 @@ static void pl_fire_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
         (void)site;
         (void)denied;
         (void)compact;
+        (void)noblock;
+        return;
+    }
+    if (noblock) {
+        /* Fork when a worker is idle; Cut returns INVALID and the join
+         * spells the arm. No deny_fast / CHURN. */
+        CcStmt* cut = lw_block(L, sp);
+        CcExpr* invalid;
+        if (compact) pl_env_fill(L, blk, id, k, caps, target, bind, join_cell, sp);
+        lw_push(blk, lw_expr_stmt(L, lw_assign(L, lw_ident(L, task, sp),
+                                               lw_call2(L, compact ? cstr_slice("cc_parallel_spawn_arm_noblock")
+                                                                    : cstr_slice("cc_parallel_spawn_noblock"),
+                                                        lw_ident(L, thunk, sp),
+                                                        cc_expr_unary(CC_OP_ADDR, lw_ident(L, e, sp), sp, L->arena),
+                                                        sp), sp), sp));
+        invalid = cc_expr_binary(CC_OP_EQ,
+                                 cc_expr_member(lw_ident(L, task, sp), cstr_slice("kind"), false, sp, L->arena),
+                                 lw_ident(L, cstr_slice("CC_TASK_KIND_INVALID"), sp), sp, L->arena);
+        lw_push(cut, lw_expr_stmt(L, lw_assign(L, lw_ident(L, denied, sp),
+                                               lw_text(L, @string(`1`, L->arena), sp), sp), sp));
+        lw_push(cut, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_note_denied"),
+                                              lw_ident(L, cstr_slice("__cc_pt"), sp), sp), sp));
+        lw_push(blk, lw_if(L, invalid, cut, NULL, sp));
+        (void)site;
         return;
     }
     {
@@ -828,7 +859,7 @@ static void pl_fire_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
 static void pl_spawn_stmts(CcLowerer* L, CcStmt* blk, uint32_t id, uint32_t k,
                            PCapList* caps, CCSlice target, CCSlice bind, CcSpan sp) {
     pl_env_stmts(L, blk, id, k, caps, target, bind, cc_slice_empty(), false, sp);
-    pl_fire_stmts(L, blk, id, k, bind, false, false, NULL, cc_slice_empty(), cc_slice_empty(), sp);
+    pl_fire_stmts(L, blk, id, k, bind, false, false, false, NULL, cc_slice_empty(), cc_slice_empty(), sp);
 }
 
 /* The arm on the caller: the same thunk a spawn would have run, called
@@ -1887,10 +1918,25 @@ static CCSlice pl_handle_spell(CcLowerer* L, CcParallel p, bool* declared, CCSli
 
 static bool pl_reject(CcLowerer* L, CcParallel p, CcSpan sp) {
     CCString m;
+    if (p.spawn && p.noblock) {
+        m = @string(`'${"@"}parallel' takes 'spawn' or 'noblock', not both`, L->arena);
+        lw_error(L, sp, m);
+        return true;
+    }
     if (p.spawn && (p.pred || p.seq)) {
         /* a gate that denies runs the arms on the caller in order, which is
          * the one schedule `spawn` says this site does not have */
         m = @string(`'${"@"}parallel spawn' does not take a gate: a denied site runs its arms in order, which is what 'spawn' rules out`, L->arena);
+        lw_error(L, sp, m);
+        return true;
+    }
+    if (p.noblock && (p.pred || p.seq)) {
+        m = @string(`'${"@"}parallel noblock' does not take a gate: Cut is capacity, not a predicate`, L->arena);
+        lw_error(L, sp, m);
+        return true;
+    }
+    if (p.noblock && (p.bind.len || p.target)) {
+        m = @string(`'${"@"}parallel noblock' does not bind a handle: Cut may run an arm on the caller`, L->arena);
         lw_error(L, sp, m);
         return true;
     }
@@ -2201,6 +2247,7 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
     size_t n = armv->len();
     size_t i;
     size_t first = 1;           /* the first arm the runtime is offered; 0 when none stays on the caller */
+    size_t offer = 1;           /* noblock offers every arm; Cut still inlines them */
     uint32_t id;
     CcStmt* blk;
     CCSlice hspell;
@@ -2306,6 +2353,14 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
     }
     id = st->next_id++;
     blk = lw_block(L, sp);
+    /* Arm count, so the runtime can divide this piece into equal shares.
+     * enter/leave bracket the site; a spawned arm inherits the share. */
+    if (p.noblock) {
+        int narms = (int)n;
+        CCString ns = @string(`${narms}`, L->arena);
+        lw_push(blk, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_noblock_enter"),
+                                              lw_text(L, ns, sp), sp), sp));
+    }
     hspell = pl_handle_spell(L, p, &hdeclared, &hbase);
     /* An arm that leaves for a thunk is gone by the time the walk reaches
      * the statement, so whatever `@parallel` it holds is lowered here,
@@ -2421,7 +2476,8 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
     inlines = vec_new::[CCSlice](L->arena);
     capsv = vec_new::[PCapList](L->arena);
     /* skip names the first spawned arm's site/thunk; a one-arm wait-for
-     * has neither, and the only arm already runs on the caller */
+     * has neither, and the only arm already runs on the caller.
+     * noblock uses the same skip frame with capacity Cut, not CHURN. */
     try_skip = compact && !gated && first == 1 && n > first && !pj_ty.len;
     gate_fast = compact && gated && first == 1 && !pj_ty.len;
     if (gate_fast) {
@@ -2445,8 +2501,12 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
                                                 lw_ident(L, cstr_slice("__cc_pt"), sp), who, sp), sp));
     }
     /* every arm but the first is offered to the runtime -- the first too,
-     * when it is the one worker of a dest-live construct */
-    for (i = first; i < n; i++) {
+     * when it is the one worker of a dest-live construct. noblock offers
+     * every arm: they are equal, so the caller does not keep one. The Cut
+     * skip frame still runs them inline. */
+    if (p.noblock && first == 1)
+        offer = 0;
+    for (i = offer; i < n; i++) {
         CcParallelArm* arm = armv->get_ptr(i);
         PScan sc;
         PCapList caps;
@@ -2542,7 +2602,7 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
             }
         }
         pl_env_stmts(L, body, id, (uint32_t)i, &caps, arm->target, hspell, pj_ptr, compact, sp);
-        if (!gated) pl_fire_stmts(L, body, id, (uint32_t)i, hspell, p.spawn, compact,
+        if (!gated) pl_fire_stmts(L, body, id, (uint32_t)i, hspell, p.spawn, p.noblock, compact,
                                     &caps, arm->target, pj_ptr, sp);
     }
     if (gated) {
@@ -2559,7 +2619,7 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
             for (i = first; i < n; i++) {
                 CcParallelArm* arm = armv->get_ptr(i);
                 PCapList* cp = capsv.get_ptr(i - first);
-                pl_fire_stmts(L, body, id, (uint32_t)i, hspell, false, compact,
+                pl_fire_stmts(L, body, id, (uint32_t)i, hspell, false, false, compact,
                                 cp, arm->target, pj_ptr, sp);
             }
         } else {
@@ -2570,7 +2630,7 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
             for (i = first; i < n; i++) {
                 CcParallelArm* arm = armv->get_ptr(i);
                 PCapList* cp = capsv.get_ptr(i - first);
-                pl_fire_stmts(L, fire, id, (uint32_t)i, hspell, false, compact,
+                pl_fire_stmts(L, fire, id, (uint32_t)i, hspell, false, false, compact,
                                 cp, arm->target, pj_ptr, sp);
             }
             lw_push(blk, lw_if(L, lw_not(L, lw_ident(L, gname, sp), sp), fire, NULL, sp));
@@ -2579,7 +2639,7 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
     /* the first arm stays here -- unless it is the one worker of a
      * dest-live construct, which has no kick: that arm was spawned and
      * attached above, and the caller goes on past the binding */
-    if (first == 1) {
+    if (first == 1 && offer == first) {
         CcParallelArm* arm = armv->get_ptr(0);
         /* it reads the caller's own names, so its exit is spelled as
          * written -- and it leaves through the join, not out of the
@@ -2638,8 +2698,8 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
         }
     } else if (!hspell.len) {
         /* the block joins before it ends; a bound handle joins later */
-        for (i = first; i < n; i++)
-            pl_join_stmts(L, body, id, (uint32_t)i, p.spawn, compact, *inlines.get_ptr(i - first), sp);
+        for (i = offer; i < n; i++)
+            pl_join_stmts(L, body, id, (uint32_t)i, p.spawn, compact, *inlines.get_ptr(i - offer), sp);
         lw_push(body, lw_expr_stmt(L, lw_call1(L, cstr_slice("cc_parallel_deny_leave"),
                                               lw_ident(L, cstr_slice("__cc_pt"), sp), sp), sp));
     } else if (hdeclared) {
@@ -2653,7 +2713,14 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
          * enlarge that walk — the same split for CHURN skip and for a
          * false gated predicate. */
         bool ok = true;
-        CCSlice fs = pl_spell_arm(L, armv->get_ptr(0));
+        /* Arm 0's spell has to be taken before the thunk rewrite when
+         * noblock offers that arm: the skip frame runs the original
+         * expression, not the capture refs. */
+        CCSlice fs;
+        if (offer == 0 && inlines.len() > 0)
+            fs = *inlines.get_ptr(0);
+        else
+            fs = pl_spell_arm(L, armv->get_ptr(0));
         PCapList dests = vec_new::[PCapRef](L->arena);
         PCapList pcaps = vec_new::[PCapRef](L->arena);
         PScan sc;
@@ -2712,14 +2779,18 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
             st->made.push(par);
             lw_push(skipb, lw_expr_stmt(L, lw_ident(L, fs, sp), sp));
             for (i = first; i < n; i++)
-                pl_run_inline(L, skipb, id, (uint32_t)i, *inlines.get_ptr(i - first), sp);
+                pl_run_inline(L, skipb, id, (uint32_t)i, *inlines.get_ptr(i - offer), sp);
             lw_push(parb, pl_gated_par_call(L, id, &dests, &pcaps, sp));
             if (try_skip) {
-                CCSlice site = pl_name(L, id, (uint32_t)first, "_site");
-                CCSlice thunk = pl_name(L, id, (uint32_t)first, "_thunk");
-                cond = lw_call2(L, cstr_slice("cc_parallel_churn_skip"),
-                                cc_expr_unary(CC_OP_ADDR, lw_ident(L, site, sp), sp, L->arena),
-                                lw_ident(L, thunk, sp), sp);
+                if (p.noblock) {
+                    cond = lw_call0(L, cstr_slice("cc_parallel_noblock_cut"), sp);
+                } else {
+                    CCSlice site = pl_name(L, id, (uint32_t)first, "_site");
+                    CCSlice thunk = pl_name(L, id, (uint32_t)first, "_thunk");
+                    cond = lw_call2(L, cstr_slice("cc_parallel_churn_skip"),
+                                    cc_expr_unary(CC_OP_ADDR, lw_ident(L, site, sp), sp, L->arena),
+                                    lw_ident(L, thunk, sp), sp);
+                }
             } else {
                 cond = lw_ident(L, gname, sp);
             }
@@ -2729,14 +2800,19 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
              * their addresses: a by-value helper would write copies.
              * Skip stays in this function. */
             CcStmt* skipb = lw_block(L, sp);
-            CCSlice site = pl_name(L, id, (uint32_t)first, "_site");
-            CCSlice thunk = pl_name(L, id, (uint32_t)first, "_thunk");
-            CcExpr* cond = lw_call2(L, cstr_slice("cc_parallel_churn_skip"),
-                                    cc_expr_unary(CC_OP_ADDR, lw_ident(L, site, sp), sp, L->arena),
-                                    lw_ident(L, thunk, sp), sp);
+            CcExpr* cond;
+            if (p.noblock) {
+                cond = lw_call0(L, cstr_slice("cc_parallel_noblock_cut"), sp);
+            } else {
+                CCSlice site = pl_name(L, id, (uint32_t)first, "_site");
+                CCSlice thunk = pl_name(L, id, (uint32_t)first, "_thunk");
+                cond = lw_call2(L, cstr_slice("cc_parallel_churn_skip"),
+                                cc_expr_unary(CC_OP_ADDR, lw_ident(L, site, sp), sp, L->arena),
+                                lw_ident(L, thunk, sp), sp);
+            }
             lw_push(skipb, lw_expr_stmt(L, lw_ident(L, fs, sp), sp));
             for (i = first; i < n; i++)
-                pl_run_inline(L, skipb, id, (uint32_t)i, *inlines.get_ptr(i - first), sp);
+                pl_run_inline(L, skipb, id, (uint32_t)i, *inlines.get_ptr(i - offer), sp);
             lw_push(blk, lw_if(L, cond, skipb, slow, sp));
         } else {
             pl_splice(blk, slow);
@@ -2763,7 +2839,22 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
             lw_push(blk, lw_expr_stmt(L, lw_text(L, t, sp), sp));
         }
     }
-    s->k = blk->k;
+    if (p.noblock)
+        lw_push(blk, lw_expr_stmt(L, lw_call0(L, cstr_slice("cc_parallel_noblock_leave"), sp), sp));
+    if (p.noblock) {
+        /* The seal is one load. Under a worklet the share only shrinks,
+         * so this site is the arms and nothing else — no enter, no leave,
+         * no admit. The open path is the block built above. */
+        CcStmt* tail = lw_block(L, sp);
+        CcStmt* site;
+        for (i = 0; i < inlines.len(); i++)
+            pl_run_inline(L, tail, id, (uint32_t)i, *inlines.get_ptr(i), sp);
+        site = lw_if(L, lw_call0(L, cstr_slice("cc_parallel_noblock_sealed"), sp),
+                     tail, blk, sp);
+        s->k = site->k;
+    } else {
+        s->k = blk->k;
+    }
     st->any = true;
 }
 

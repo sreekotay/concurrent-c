@@ -180,6 +180,7 @@ static void compress_and_write_i(CompressJob* job, int i) {
 
 static void spawn_compress_all(CompressJob* job, int n) {
     @errhandler(CCError e) cc_error_exit(e);
+    @errhandler(CCIoError e) cc_error_exit(e.base);
 
     int i;
     PigzTurnstile* ts = job->ts;
@@ -206,6 +207,7 @@ static void compress_all_blocks(CompressJob* job, int n, int seq) {
 
 void !>(CCError) compress_file(const char* in_path, const char* out_path) {
     @errhandler(CCError e) { return cc_err(e); }
+    @errhandler(CCIoError e) { return cc_err(e.base); }
 
     g_bytes_in.store(0);
     g_bytes_out.store(0);

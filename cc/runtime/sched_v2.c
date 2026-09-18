@@ -21,6 +21,7 @@
 #include "fiber_internal.h"
 #include "minicoro.h"
 
+#include <stdint.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,6 +44,50 @@
  * repoints it at the real queue counter. */
 static volatile size_t g_par_depth_boot = 0;
 volatile size_t* __cc_par_depth_addr = &g_par_depth_boot;
+
+/* Idle-worker cell for `@parallel noblock` Cut. Boots at zero (Cut) so
+ * pre-init reads do not Fork; init repoints at g_v2.idle_workers. */
+static volatile int g_par_idle_boot = 0;
+volatile int* __cc_par_idle_addr = &g_par_idle_boot;
+
+/* Live worklets (queued + running) and worker-pool size for capacity Cut. */
+static _Atomic size_t g_v2_worklets_live = 0;
+static volatile size_t g_par_worklet_boot = 0;
+volatile size_t* __cc_par_worklet_addr = &g_par_worklet_boot;
+static volatile int g_par_nworkers_boot = 0;
+volatile int* __cc_par_nworkers_addr = &g_par_nworkers_boot;
+
+/* `@parallel noblock` admit/cut reasons (always on; dump under CC_V2_STATS). */
+static _Atomic uint64_t g_par_noblock_fork = 0;
+static _Atomic uint64_t g_par_noblock_cut_idle = 0;
+static _Atomic uint64_t g_par_noblock_cut_ready = 0;
+static _Atomic uint64_t g_par_noblock_cut_cap = 0;
+static _Atomic uint64_t g_par_noblock_cut_nested = 0;
+static _Atomic uint64_t g_v2_worklet_spawn = 0;
+static _Atomic uint64_t g_v2_noblock_fiber_spawn = 0;
+static _Atomic uint64_t g_v2_worklet_run = 0;
+static _Atomic uint64_t g_v2_worklet_join_fast = 0;
+static _Atomic uint64_t g_v2_worklet_join_spin = 0;
+static _Atomic uint64_t g_v2_worklet_join_park = 0;
+static _Atomic uint64_t g_v2_worklet_join_help = 0;
+
+void __cc_par_noblock_note_fork(void) {
+    atomic_fetch_add_explicit(&g_par_noblock_fork, 1, memory_order_relaxed);
+}
+void __cc_par_noblock_note_cut_idle(void) {
+    atomic_fetch_add_explicit(&g_par_noblock_cut_idle, 1, memory_order_relaxed);
+}
+void __cc_par_noblock_note_cut_ready(void) {
+    atomic_fetch_add_explicit(&g_par_noblock_cut_ready, 1, memory_order_relaxed);
+}
+void __cc_par_noblock_note_cut_cap(void) {
+    atomic_fetch_add_explicit(&g_par_noblock_cut_cap, 1, memory_order_relaxed);
+}
+void __cc_par_noblock_note_cut_nested(void) {
+    atomic_fetch_add_explicit(&g_par_noblock_cut_nested, 1, memory_order_relaxed);
+}
+
+/* cc_parallel_noblock_prepare is defined after sched_v2_try_expand_pool. */
 
 /* ============================================================================
  * v2_slock: short-critical-section lock
@@ -243,6 +288,16 @@ struct fiber_v2 {
     const char* diag_file;
     int         diag_line;
 
+    /* Noblock share captured at spawn. Swapped onto the worker for the
+     * mco_resume only, so a park keeps this fiber's frames and the next
+     * fiber on the worker does not see them. nb_live is 0 until the first
+     * resume has installed num/den; a later resume must not reset. */
+    int        nb_inherit;
+    int        nb_live;
+    uint64_t   nb_num;
+    uint64_t   nb_den;
+    void*      nb_stack;
+
     /* Intrusive linked list for free list */
     fiber_v2*  next;
     fiber_v2*  all_next;
@@ -277,6 +332,61 @@ static void v2_queue_init(v2_queue* q) {
     q->tail = NULL;
     atomic_store_explicit(&q->count, 0, memory_order_relaxed);
     atomic_store_explicit(&q->pops, 0, memory_order_relaxed);
+}
+
+/* Worklet queue: same lock shape as the fiber ready queue, but nodes are
+ * heap records (not intrusive on a fiber). Drained on the worker C stack. */
+struct cc_worklet {
+    void* (*fn)(void*);
+    void* arg;
+    _Atomic int done;
+    wake_primitive done_wake;
+    cc__fiber* _Atomic join_waiter_fiber;
+    struct cc_worklet* next;
+    /* Share of the root this arm carries (num/den). A fresh stack would
+     * treat the arm as the whole job and split it again. */
+    uint64_t share_num;
+    uint64_t share_den;
+};
+
+typedef struct {
+    v2_slock mu;
+    cc_worklet* head;
+    cc_worklet* tail;
+    _Atomic size_t count;
+} worklet_queue;
+
+static void worklet_queue_init(worklet_queue* q) {
+    v2_slock_init(&q->mu);
+    q->head = NULL;
+    q->tail = NULL;
+    atomic_store_explicit(&q->count, 0, memory_order_relaxed);
+}
+
+static void worklet_queue_push(worklet_queue* q, cc_worklet* w) {
+    w->next = NULL;
+    v2_slock_lock(&q->mu);
+    if (q->tail)
+        q->tail->next = w;
+    else
+        q->head = w;
+    q->tail = w;
+    atomic_fetch_add_explicit(&q->count, 1, memory_order_relaxed);
+    v2_slock_unlock(&q->mu);
+}
+
+static cc_worklet* worklet_queue_pop(worklet_queue* q) {
+    v2_slock_lock(&q->mu);
+    cc_worklet* w = q->head;
+    if (w) {
+        q->head = w->next;
+        if (!q->head)
+            q->tail = NULL;
+        atomic_fetch_sub_explicit(&q->count, 1, memory_order_relaxed);
+        w->next = NULL;
+    }
+    v2_slock_unlock(&q->mu);
+    return w;
 }
 
 /* Returns the pre-push count (i.e. queue depth before this push).
@@ -368,6 +478,11 @@ struct sched_v2_state {
 
     /* Single global ready queue */
     v2_queue ready_queue;
+
+    /* Noblock worklets: drained on worker C stacks, no fiber. */
+    worklet_queue worklets;
+    v2_slock worklet_free_mu;
+    cc_worklet* worklet_free;
 
     /* Fiber free list.
      *
@@ -781,6 +896,9 @@ static _Atomic int g_v2_running_workers = 0;
  * see g_v2_grow_escalate_ticks.
  */
 static int g_v2_eager_threads = 2;
+/* Set by cc_parallel_noblock_prepare after filling the pool; sysmon must
+ * not settle back to eager while noblock is in use. */
+static _Atomic int g_v2_noblock_pool_pinned = 0;
 static int g_v2_grow_recheck_us = 25;
 /* Hold threshold, in "microseconds per pop per worker": the pool is
  * considered healthy while each worker averages at least one pop per
@@ -981,12 +1099,35 @@ static void sched_v2_diag_scan_fibers(uint64_t state_counts[FIBER_V2_STATE_COUNT
     pthread_mutex_unlock(&g_v2.all_fibers_mu);
 }
 
+/* Share of the root a noblock piece still owns, as num/den. Enter pushes
+ * the parent and divides den by that site's arm count. 64 frames is the
+ * enter/leave nest, not a grain: past it the site Cuts. */
+#define CC_NB_NEST 64
+typedef struct cc_nb_frame {
+    uint64_t num;
+    uint64_t den;
+    int split;
+    int as_fiber; /* child still forks: arms are fibers, so the join can park */
+} cc_nb_frame;
+typedef struct cc_nb_stack {
+    uint64_t num;
+    uint64_t den;
+    int split;
+    int as_fiber;
+    int sp;
+    int overflow;
+    cc_nb_frame stk[CC_NB_NEST];
+} cc_nb_stack;
+
 /* Per-thread state */
 #if defined(__TINYC__)
 #define tls_v2_thread_id (cc_rt_tls_get()->v2_thread_id)
 #define tls_v2_my_generation (cc_rt_tls_get()->v2_my_generation)
 #define tls_v2_current_fiber (*(fiber_v2**)&(cc_rt_tls_get()->v2_current_fiber))
 #define tls_v2_dispatch_seq (cc_rt_tls_get()->v2_dispatch_seq)
+#define tls_v2_in_worklet (cc_rt_tls_get()->v2_in_worklet)
+#define tls_v2_noblock_depth (cc_rt_tls_get()->v2_noblock_depth)
+#define tls_nb_slot (*(cc_nb_stack**)&(cc_rt_tls_get()->v2_nb))
 #else
 static __thread int tls_v2_thread_id = -1;
 static __thread uint64_t tls_v2_my_generation = 0;
@@ -996,7 +1137,166 @@ static __thread fiber_v2* tls_v2_current_fiber = NULL;
  * still running after one tick" without any wall-clock read on the hot
  * path. Starts at 1 so that 0 unambiguously means "no fiber running". */
 static __thread uint64_t tls_v2_dispatch_seq = 0;
+/* Nesting depth while draining a noblock worklet on this C stack. Help-join
+ * may run a child worklet inline; depth must nest, not clobber. */
+static __thread int tls_v2_in_worklet = 0;
+/* Nesting depth of `@parallel noblock` sites on this stack. The Fork
+ * decision is the share, not this depth. */
+static __thread int tls_v2_noblock_depth = 0;
+static __thread cc_nb_stack* tls_nb_slot = NULL;
+static __thread cc_worklet* tls_worklet_free = NULL;
+static __thread int tls_worklet_free_n = 0;
 #endif
+
+int __cc_par_in_worklet(void) {
+    return tls_v2_in_worklet;
+}
+
+static cc_nb_stack* nb_get(void) {
+    if (!tls_nb_slot) {
+        cc_nb_stack* nb = (cc_nb_stack*)calloc(1, sizeof(*nb));
+        if (!nb)
+            return NULL;
+        nb->num = 1;
+        nb->den = 1;
+        tls_nb_slot = nb;
+    }
+    return tls_nb_slot;
+}
+
+/* num/den is this piece of the root. True when it is still larger than
+ * one share of the workers. */
+static int nb_over_share(uint64_t num, uint64_t den, int nworkers) {
+    uint64_t w;
+    if (nworkers <= 1 || num == 0 || den == 0)
+        return 0;
+    w = (uint64_t)nworkers;
+    if (num > UINT64_MAX / w)
+        return 1;
+    return num * w > den;
+}
+
+/* The one split just under a share. Take it only when it shortens the
+ * longest worker: ceil(P/W)/P against ceil(P*narms/W)/(P*narms). A pack
+ * that already divides evenly does not. */
+static int nb_extra_wave(uint64_t num, uint64_t den, int nworkers, int narms) {
+    uint64_t w, scale, pieces, next, ca, cb;
+    if (nworkers <= 1 || narms < 2 || num == 0 || den < num)
+        return 0;
+    if (nb_over_share(num, den, nworkers))
+        return 0;
+    w = (uint64_t)nworkers;
+    if (w > UINT64_MAX / (uint64_t)narms)
+        return 0;
+    scale = w * (uint64_t)narms;
+    if (num > UINT64_MAX / scale || num * scale <= den)
+        return 0;
+    pieces = den / num;
+    if (pieces == 0 || pieces > UINT64_MAX / (uint64_t)narms)
+        return 0;
+    next = pieces * (uint64_t)narms;
+    ca = (pieces + w - 1) / w;
+    cb = (next + w - 1) / w;
+    if (next != 0 && ca > UINT64_MAX / next)
+        return 0;
+    if (pieces != 0 && cb > UINT64_MAX / pieces)
+        return 0;
+    return ca * next > cb * pieces;
+}
+
+void cc_parallel_noblock_enter(int narms) {
+    cc_nb_stack* nb;
+    int nworkers;
+    uint64_t num, den;
+    cc_parallel_noblock_prepare();
+    tls_v2_noblock_depth++;
+    nb = nb_get();
+    if (!nb)
+        return;
+    if (nb->sp >= CC_NB_NEST) {
+        nb->overflow++;
+        nb->split = 0;
+        nb->as_fiber = 0;
+        return;
+    }
+    nb->stk[nb->sp].num = nb->num;
+    nb->stk[nb->sp].den = nb->den;
+    nb->stk[nb->sp].split = nb->split;
+    nb->stk[nb->sp].as_fiber = nb->as_fiber;
+    nb->sp++;
+    nworkers = *__cc_par_nworkers_addr;
+    num = nb->num ? nb->num : 1;
+    den = nb->den ? nb->den : 1;
+    /* Arms are equal. Fork while this piece is larger than one share.
+     * One split past that still forks when it shortens the longest
+     * worker; the child of that wave is a worklet and stays sealed.
+     * A child that itself still forks is a fiber, so the join can park. */
+    {
+        uint64_t child_den = den;
+        int too_big = 0;
+        int child_too_big = 0;
+        if (narms >= 2) {
+            if (den > UINT64_MAX / (uint64_t)narms)
+                child_den = UINT64_MAX;
+            else
+                child_den = den * (uint64_t)narms;
+        }
+        if (narms >= 2 && nworkers > 1 &&
+            (nb_over_share(num, den, nworkers) ||
+             nb_extra_wave(num, den, nworkers, narms)))
+            too_big = 1;
+        if (narms >= 2 && nworkers > 1 &&
+            (nb_over_share(num, child_den, nworkers) ||
+             nb_extra_wave(num, child_den, nworkers, narms)))
+            child_too_big = 1;
+        if (too_big && child_too_big) {
+            nb->split = 1;
+            nb->as_fiber = 1;
+        } else if (too_big) {
+            nb->split = 1;
+            nb->as_fiber = 0;
+        } else {
+            nb->split = 0;
+            nb->as_fiber = 0;
+        }
+        if (narms >= 2) {
+            nb->den = child_den;
+            nb->num = num;
+        }
+    }
+}
+
+void cc_parallel_noblock_leave(void) {
+    cc_nb_stack* nb;
+    if (tls_v2_noblock_depth > 0)
+        tls_v2_noblock_depth--;
+    nb = tls_nb_slot;
+    if (!nb)
+        return;
+    if (nb->overflow > 0) {
+        nb->overflow--;
+        return;
+    }
+    if (nb->sp <= 0)
+        return;
+    nb->sp--;
+    nb->num = nb->stk[nb->sp].num;
+    nb->den = nb->stk[nb->sp].den;
+    nb->split = nb->stk[nb->sp].split;
+    nb->as_fiber = nb->stk[nb->sp].as_fiber;
+}
+
+int __cc_par_noblock_split(void) {
+    return tls_nb_slot && tls_nb_slot->split;
+}
+
+int __cc_par_noblock_as_fiber(void) {
+    return tls_nb_slot && tls_nb_slot->as_fiber;
+}
+
+int __cc_par_noblock_depth(void) {
+    return tls_v2_noblock_depth;
+}
 bool cc_nursery_is_cancelled_host(const CCNurseryHost* n);
 void cc_nursery_notify_child_done(CCNurseryHost* n);
 
@@ -1074,6 +1374,8 @@ static fiber_v2* fiber_v2_alloc(void) {
             f->admission_nursery = NULL;
             f->par_gate = NULL;
             f->par_slot = -1;
+            f->nb_inherit = 0;
+            f->nb_live = 0;
             atomic_store_explicit(&f->done, 0, memory_order_relaxed);
             atomic_store_explicit(&f->wait_ticket, 0, memory_order_relaxed);
             atomic_store_explicit(&f->join_waiter_fiber, NULL, memory_order_relaxed);
@@ -1125,6 +1427,8 @@ static void fiber_v2_free(fiber_v2* f) {
     f->admission_nursery = NULL;
     f->par_gate = NULL;
     f->par_slot = -1;
+    f->nb_inherit = 0;
+    f->nb_live = 0;
     /* Clear detector metadata so the next spawn starts clean and the
      * detector never observes stale park_obj/suppress/external-wait state
      * on a pooled fiber. */
@@ -1292,6 +1596,24 @@ static int sched_v2_try_expand_pool(void) {
     return 1;
 }
 
+void cc_parallel_noblock_prepare(void) {
+    /* First noblock site: bring the pool up. Sysmon grow keys off queue
+     * depth, but worklets leave the queue while running, so deferred grow
+     * sees false slack. Pin the pool afterward so settle does not shrink
+     * it between frames. */
+    static _Atomic int filled = 0;
+    sched_v2_ensure_init();
+    if (atomic_load_explicit(&filled, memory_order_relaxed))
+        return;
+    while (atomic_load_explicit(&g_v2.num_threads, memory_order_acquire)
+           < g_v2.max_threads) {
+        if (!sched_v2_try_expand_pool())
+            break;
+    }
+    atomic_store_explicit(&g_v2_noblock_pool_pinned, 1, memory_order_relaxed);
+    atomic_store_explicit(&filled, 1, memory_order_relaxed);
+}
+
 /* Ask sysmon to consider growing the pool. First requester per episode
  * pays one wake syscall; everyone else sees the flag already set. */
 static void sched_v2_request_grow(void) {
@@ -1313,8 +1635,8 @@ static int sched_v2_grow_or_defer(void) {
     return 0;
 }
 
-/* No idle worker while the ready queue is non-empty. Still grow when
- * we are under the eager cap (inline thread #2) or the queue is deeper
+/* No idle worker while ready or worklet queues are non-empty. Still grow
+ * when under the eager cap (inline thread #2) or either queue is deeper
  * than the live pool. Skip otherwise: SPSC rendezvous and 2-arm join
  * ping-pong have ready<=n and must not CAS grow_pending / poke sysmon
  * on every handshake. Sysmon's tick is the safety net. */
@@ -1322,7 +1644,9 @@ static void sched_v2_grow_if_backlogged(void) {
     int n = atomic_load_explicit(&g_v2.num_threads, memory_order_acquire);
     size_t ready = atomic_load_explicit(&g_v2.ready_queue.count,
                                         memory_order_relaxed);
-    if (n < g_v2_eager_threads || ready > (size_t)n) {
+    size_t worklets = atomic_load_explicit(&g_v2.worklets.count,
+                                           memory_order_relaxed);
+    if (n < g_v2_eager_threads || ready > (size_t)n || worklets > (size_t)n) {
         (void)sched_v2_grow_or_defer();
         return;
     }
@@ -1330,6 +1654,35 @@ static void sched_v2_grow_if_backlogged(void) {
 }
 
 static void thread_v2_run_fiber(int tid, fiber_v2* f);
+
+/* Install this fiber's noblock share for the resume. Returns 1 if the
+ * caller's slot was swapped out and must be restored. First resume
+ * resets the stack to the share captured at spawn; a resume after park
+ * keeps the frames enter already pushed. */
+static int nb_resume_install(fiber_v2* f, cc_nb_stack** prev_out) {
+    cc_nb_stack* nb;
+    if (!f || !f->nb_inherit)
+        return 0;
+    nb = (cc_nb_stack*)f->nb_stack;
+    if (!nb) {
+        nb = (cc_nb_stack*)calloc(1, sizeof(*nb));
+        if (!nb)
+            return 0;
+        f->nb_stack = nb;
+        f->nb_live = 0;
+    }
+    if (!f->nb_live) {
+        memset(nb, 0, sizeof(*nb));
+        nb->num = f->nb_num ? f->nb_num : 1;
+        nb->den = f->nb_den ? f->nb_den : 1;
+        f->nb_live = 1;
+    }
+    *prev_out = tls_nb_slot;
+    tls_nb_slot = nb;
+    return 1;
+}
+
+static void thread_v2_run_worklet(cc_worklet* w);
 
 static void sched_v2_enqueue_runnable_ex(fiber_v2* f, int prefer_local) {
     int prev = v2_queue_push(&g_v2.ready_queue, f);
@@ -1378,6 +1731,17 @@ static void sched_v2_enqueue_runnable(fiber_v2* f) {
 static void sched_v2_wake(int worker_hint) {
     if (worker_hint >= 0 && worker_hint == tls_v2_thread_id) {
         while (atomic_load_explicit(&g_v2.running, memory_order_acquire)) {
+            cc_worklet* w = worklet_queue_pop(&g_v2.worklets);
+            if (w) {
+                V2_STAT_INC(g_v2_worker_self_drain);
+                thread_v2_run_worklet(w);
+                if (atomic_load_explicit(&g_v2.threads[worker_hint].generation,
+                                         memory_order_acquire)
+                    != tls_v2_my_generation) {
+                    return;
+                }
+                continue;
+            }
             fiber_v2* f = v2_queue_pop(&g_v2.ready_queue);
             if (!f) {
                 /* Spin-before-park: rather than immediately return and
@@ -1403,12 +1767,28 @@ static void sched_v2_wake(int worker_hint) {
 #else
                     __asm__ volatile("" ::: "memory");
 #endif
+                    if (atomic_load_explicit(&g_v2.worklets.count,
+                                             memory_order_acquire) > 0) {
+                        w = worklet_queue_pop(&g_v2.worklets);
+                        if (w) break;
+                    }
                     if (atomic_load_explicit(&g_v2.ready_queue.count,
                                              memory_order_acquire) > 0) {
                         f = v2_queue_pop(&g_v2.ready_queue);
                         if (f) break;
                         /* Lost the race to another drainer; keep spinning. */
                     }
+                }
+                if (w) {
+                    V2_STAT_INC(g_v2_worker_spin_hit);
+                    V2_STAT_INC(g_v2_worker_self_drain);
+                    thread_v2_run_worklet(w);
+                    if (atomic_load_explicit(&g_v2.threads[worker_hint].generation,
+                                             memory_order_acquire)
+                        != tls_v2_my_generation) {
+                        return;
+                    }
+                    continue;
                 }
                 if (!f) {
                     V2_STAT_INC(g_v2_worker_spin_miss);
@@ -1460,7 +1840,8 @@ static void sched_v2_wake(int worker_hint) {
      * here before the idle_workers check so the pairing is airtight. */
     atomic_thread_fence(memory_order_seq_cst);
 
-    while (atomic_load_explicit(&g_v2.ready_queue.count, memory_order_relaxed) > 0) {
+    while (atomic_load_explicit(&g_v2.ready_queue.count, memory_order_relaxed) > 0 ||
+           atomic_load_explicit(&g_v2.worklets.count, memory_order_relaxed) > 0) {
         /* Producer-side admission gate: if we're already at the active
          * target, issuing another wake just produces a ulock_wake syscall
          * whose only effect is to make an extra worker cycle through
@@ -1489,6 +1870,183 @@ static void sched_v2_wake(int worker_hint) {
 /* ============================================================================
  * Run fiber + post-yield commit
  * ============================================================================ */
+
+static cc_worklet* worklet_alloc(void) {
+    cc_worklet* w = NULL;
+#if !defined(__TINYC__)
+    if (tls_worklet_free) {
+        w = tls_worklet_free;
+        tls_worklet_free = w->next;
+        tls_worklet_free_n--;
+    }
+#endif
+    if (!w) {
+        v2_slock_lock(&g_v2.worklet_free_mu);
+        w = g_v2.worklet_free;
+        if (w)
+            g_v2.worklet_free = w->next;
+        v2_slock_unlock(&g_v2.worklet_free_mu);
+    }
+    if (!w) {
+        w = (cc_worklet*)malloc(sizeof(*w));
+        if (!w)
+            return NULL;
+        wake_primitive_init(&w->done_wake);
+    }
+    w->fn = NULL;
+    w->arg = NULL;
+    w->next = NULL;
+    w->share_num = 1;
+    w->share_den = 1;
+    atomic_store_explicit(&w->done, 0, memory_order_relaxed);
+    atomic_store_explicit(&w->join_waiter_fiber, NULL, memory_order_relaxed);
+    return w;
+}
+
+static void worklet_release(cc_worklet* w) {
+    if (!w)
+        return;
+    w->fn = NULL;
+    w->arg = NULL;
+#if !defined(__TINYC__)
+    if (tls_worklet_free_n < 64) {
+        w->next = tls_worklet_free;
+        tls_worklet_free = w;
+        tls_worklet_free_n++;
+        return;
+    }
+#endif
+    v2_slock_lock(&g_v2.worklet_free_mu);
+    w->next = g_v2.worklet_free;
+    g_v2.worklet_free = w;
+    v2_slock_unlock(&g_v2.worklet_free_mu);
+}
+
+static void thread_v2_run_worklet(cc_worklet* w) {
+    void* (*fn)(void*) = w->fn;
+    void* arg = w->arg;
+    cc_nb_stack* nb = nb_get();
+    cc_nb_stack saved;
+    int have_nb = nb != NULL;
+    CCParTls* pt = cc__par_tls();
+    int saved_seal = pt ? pt->nb_sealed : 0;
+    atomic_fetch_add_explicit(&g_v2_worklet_run, 1, memory_order_relaxed);
+    if (pt)
+        pt->nb_sealed = 1;
+    if (have_nb) {
+        saved = *nb;
+        nb->num = w->share_num ? w->share_num : 1;
+        nb->den = w->share_den ? w->share_den : 1;
+        nb->split = 0;
+        nb->sp = 0;
+        nb->overflow = 0;
+    }
+    tls_v2_in_worklet++;
+    if (fn)
+        (void)fn(arg);
+    tls_v2_in_worklet--;
+    if (pt)
+        pt->nb_sealed = saved_seal;
+    if (have_nb)
+        *nb = saved;
+    atomic_fetch_sub_explicit(&g_v2_worklets_live, 1, memory_order_relaxed);
+    atomic_store_explicit(&w->done, 1, memory_order_release);
+    atomic_thread_fence(memory_order_seq_cst);
+    {
+        cc__fiber* waiter =
+            atomic_exchange_explicit(&w->join_waiter_fiber, NULL, memory_order_acq_rel);
+        if (waiter)
+            cc__fiber_unpark_tagged(waiter, CC_FIBER_UNPARK_REASON_TASK_DONE);
+    }
+    wake_primitive_wake_all(&w->done_wake);
+}
+
+cc_worklet* sched_v2_worklet_spawn(void* (*fn)(void*), void* arg) {
+    cc_worklet* w;
+    if (!fn)
+        return NULL;
+    sched_v2_ensure_init();
+    w = worklet_alloc();
+    if (!w)
+        return NULL;
+    w->fn = fn;
+    w->arg = arg;
+    {
+        cc_nb_stack* nb = nb_get();
+        w->share_num = nb ? nb->num : 1;
+        w->share_den = nb ? nb->den : 1;
+    }
+    atomic_fetch_add_explicit(&g_v2_worklets_live, 1, memory_order_relaxed);
+    worklet_queue_push(&g_v2.worklets, w);
+    atomic_fetch_add_explicit(&g_v2_worklet_spawn, 1, memory_order_relaxed);
+    sched_v2_wake(-1);
+    return w;
+}
+
+void sched_v2_worklet_join(cc_worklet* w) {
+    if (!w)
+        return;
+    if (atomic_load_explicit(&w->done, memory_order_acquire)) {
+        atomic_fetch_add_explicit(&g_v2_worklet_join_fast, 1, memory_order_relaxed);
+        worklet_release(w);
+        return;
+    }
+    /* A fiber published these arms and has to stay live for the result
+     * slots, but it must not keep the worker. Park. The pool runs the
+     * worklets. A free worker takes the head otherwise. Do not unlink
+     * this arm to run it here while one is idle. */
+    while (!atomic_load_explicit(&w->done, memory_order_acquire)) {
+        int idle;
+        size_t queued;
+        cc_worklet* other;
+        if (cc__fiber_in_context()) {
+            atomic_store_explicit(&w->join_waiter_fiber,
+                                  (cc__fiber*)cc__fiber_current(),
+                                  memory_order_release);
+            atomic_thread_fence(memory_order_seq_cst);
+            if (atomic_load_explicit(&w->done, memory_order_acquire))
+                break;
+            cc__fiber_clear_pending_unpark();
+            CC_FIBER_PARK_IF(&w->done, 0, "sched_v2_worklet_join");
+            continue;
+        }
+        idle = *__cc_par_idle_addr;
+        queued = atomic_load_explicit(&g_v2.worklets.count, memory_order_acquire);
+        if (idle > 0 && queued > 0 && sched_v2_try_wake_one()) {
+            sched_yield();
+            continue;
+        }
+        other = worklet_queue_pop(&g_v2.worklets);
+        if (other) {
+            if (other == w) {
+                atomic_fetch_add_explicit(&g_v2_worklet_join_fast, 1, memory_order_relaxed);
+                thread_v2_run_worklet(w);
+                worklet_release(w);
+                return;
+            }
+            atomic_fetch_add_explicit(&g_v2_worklet_join_help, 1, memory_order_relaxed);
+            thread_v2_run_worklet(other);
+            continue;
+        }
+        if (atomic_load_explicit(&w->done, memory_order_acquire))
+            break;
+        if (tls_v2_in_worklet) {
+            sched_yield();
+            continue;
+        }
+        {
+            uint32_t wait_val =
+                atomic_load_explicit(&w->done_wake.value, memory_order_acquire);
+            if (atomic_load_explicit(&w->done, memory_order_acquire))
+                break;
+            wake_primitive_wait(&w->done_wake, wait_val);
+        }
+    }
+    atomic_fetch_add_explicit(&g_v2_worklet_join_park, 1, memory_order_relaxed);
+    if (cc__fiber_in_context())
+        atomic_store_explicit(&w->join_waiter_fiber, NULL, memory_order_relaxed);
+    worklet_release(w);
+}
 
 static void thread_v2_run_fiber(int tid, fiber_v2* f) {
     int raw = atomic_load_explicit(&f->state, memory_order_acquire);
@@ -1552,7 +2110,12 @@ static void thread_v2_run_fiber(int tid, fiber_v2* f) {
         }
     }
 
-    mco_result res = mco_resume(f->coro);
+    mco_result res;
+    cc_nb_stack* prev_nb = NULL;
+    int nb_on = nb_resume_install(f, &prev_nb);
+    res = mco_resume(f->coro);
+    if (nb_on)
+        tls_nb_slot = prev_nb;
 
     tls_v2_current_fiber = NULL;
     atomic_fetch_add_explicit(&g_v2_sysmon_stall_detect, 1, memory_order_relaxed);
@@ -2193,7 +2756,8 @@ static void* thread_v2_main(void* arg) {
         atomic_thread_fence(memory_order_seq_cst);
 
         /* Recheck: work appeared after we marked ourselves idle. */
-        if (atomic_load_explicit(&g_v2.ready_queue.count, memory_order_acquire) > 0) {
+        if (atomic_load_explicit(&g_v2.ready_queue.count, memory_order_acquire) > 0 ||
+            atomic_load_explicit(&g_v2.worklets.count, memory_order_acquire) > 0) {
             if (atomic_exchange_explicit(&g_v2.threads[tid].is_idle, 0, memory_order_acq_rel)) {
                 atomic_fetch_sub_explicit(&g_v2.idle_workers, 1, memory_order_acq_rel);
             }
@@ -2205,7 +2769,8 @@ static void* thread_v2_main(void* arg) {
         if (atomic_exchange_explicit(&g_v2.threads[tid].is_idle, 0, memory_order_acq_rel)) {
             atomic_fetch_sub_explicit(&g_v2.idle_workers, 1, memory_order_acq_rel);
         }
-        if (atomic_load_explicit(&g_v2.ready_queue.count, memory_order_acquire) > 0) {
+        if (atomic_load_explicit(&g_v2.ready_queue.count, memory_order_acquire) > 0 ||
+            atomic_load_explicit(&g_v2.worklets.count, memory_order_acquire) > 0) {
             V2_STAT_INC(g_v2_worker_busy_from_wake);
         }
     }
@@ -2474,8 +3039,11 @@ static void* sched_v2_sysmon_main(void* arg) {
 
         /* Deferred pool growth: decide grow/hold once per recheck window. */
         if (atomic_load_explicit(&g_v2_grow_pending, memory_order_acquire)) {
-            size_t depth = atomic_load_explicit(&g_v2.ready_queue.count,
+            size_t ready = atomic_load_explicit(&g_v2.ready_queue.count,
                                                 memory_order_relaxed);
+            size_t wdepth = atomic_load_explicit(&g_v2.worklets.count,
+                                                 memory_order_relaxed);
+            size_t depth = ready > wdepth ? ready : wdepth;
             int n = atomic_load_explicit(&g_v2.num_threads, memory_order_acquire);
             int admit_ok = (g_v2_target_active <= 0 ||
                             atomic_load_explicit(&g_v2_running_workers,
@@ -2586,13 +3154,18 @@ static void* sched_v2_sysmon_main(void* arg) {
         /* Syscall-age eviction runs every tick: cheap scan, high payoff. */
         sched_v2_sysmon_evict_aged_workers();
 
-        /* Empty queue + spare workers: release extras down to the eager cap. */
+        /* Empty queues + spare workers: release extras down to the eager cap.
+         * Noblock pins the pool (worklets leave the queue while running, so
+         * settle would otherwise see false slack and shrink mid-frame). */
         {
             size_t depth = atomic_load_explicit(&g_v2.ready_queue.count,
                                                  memory_order_relaxed);
+            size_t wdepth = atomic_load_explicit(&g_v2.worklets.count,
+                                                 memory_order_relaxed);
             int n = atomic_load_explicit(&g_v2.num_threads, memory_order_acquire);
             int idle = atomic_load_explicit(&g_v2.idle_workers, memory_order_acquire);
-            if (depth == 0 && idle > 0 && n > g_v2_eager_threads)
+            if (depth == 0 && wdepth == 0 && idle > 0 && n > g_v2_eager_threads &&
+                !atomic_load_explicit(&g_v2_noblock_pool_pinned, memory_order_relaxed))
                 sched_v2_settle_pool();
         }
 
@@ -2613,7 +3186,8 @@ static void* sched_v2_sysmon_main(void* arg) {
          * some worker is parked and the queue was already deep won't
          * wake anyone, but this tick will, bounded to ~V2_SYSMON_INTERVAL_MS
          * (20ms). Producer-exceeds-drainer bursts self-heal here. */
-        if (atomic_load_explicit(&g_v2.ready_queue.count, memory_order_relaxed) > 0 &&
+        if ((atomic_load_explicit(&g_v2.ready_queue.count, memory_order_relaxed) > 0 ||
+             atomic_load_explicit(&g_v2.worklets.count, memory_order_relaxed) > 0) &&
             atomic_load_explicit(&g_v2.idle_workers, memory_order_relaxed) > 0) {
             sched_v2_wake(-1);
         }
@@ -2868,6 +3442,20 @@ static void sched_v2_atexit_dump_stats(void) {
             (unsigned long long)atomic_load_explicit(&g_v2_sysmon_evicted_total, memory_order_relaxed),
             (long long)atomic_load_explicit(&g_v2_orphans_alive, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_orphans_cap_hit, memory_order_relaxed));
+    fprintf(stderr, "[sched_v2 stats] noblock: fork=%llu cut_idle=%llu cut_ready=%llu cut_cap=%llu cut_nested=%llu fiber=%llu\n",
+            (unsigned long long)atomic_load_explicit(&g_par_noblock_fork, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_par_noblock_cut_idle, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_par_noblock_cut_ready, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_par_noblock_cut_cap, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_par_noblock_cut_nested, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_noblock_fiber_spawn, memory_order_relaxed));
+    fprintf(stderr, "[sched_v2 stats] worklet: spawn=%llu run=%llu join_fast=%llu join_spin=%llu join_help=%llu join_park=%llu\n",
+            (unsigned long long)atomic_load_explicit(&g_v2_worklet_spawn, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_worklet_run, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_worklet_join_fast, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_worklet_join_spin, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_worklet_join_help, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_worklet_join_park, memory_order_relaxed));
 }
 
 static void sched_v2_init_impl(void) {
@@ -2878,10 +3466,19 @@ static void sched_v2_init_impl(void) {
     atomic_store_explicit(&g_v2.running, 1, memory_order_release);
     atomic_store_explicit(&g_v2.idle_workers, 0, memory_order_relaxed);
     v2_queue_init(&g_v2.ready_queue);
+    worklet_queue_init(&g_v2.worklets);
+    v2_slock_init(&g_v2.worklet_free_mu);
+    g_v2.worklet_free = NULL;
     /* Publish the ready-depth cell for the lowering's inline @parallel
      * deny gate (cc_sched.cch). _Atomic size_t read as volatile size_t:
      * same object representation; the gate only needs a relaxed load. */
     __cc_par_depth_addr = (volatile size_t*)&g_v2.ready_queue.count;
+    /* Same layout contract as depth: _Atomic int/size_t as volatile. */
+    __cc_par_idle_addr = (volatile int*)&g_v2.idle_workers;
+    /* Capacity Cut reads live outstanding worklets, not queue depth:
+     * running worklets have left the queue but still occupy a worker. */
+    __cc_par_worklet_addr = (volatile size_t*)&g_v2_worklets_live;
+    __cc_par_nworkers_addr = (volatile int*)&g_v2.num_threads;
     v2_slock_init(&g_v2.free_list_mu);
     pthread_mutex_init(&g_v2.all_fibers_mu, NULL);
     g_v2.all_fibers = NULL;
@@ -3598,7 +4195,9 @@ fiber_v2* sched_v2_spawn(void* (*fn)(void*), void* arg) {
     return sched_v2_spawn_in_nursery(fn, arg, NULL);
 }
 
-fiber_v2* sched_v2_spawn_in_nursery(void* (*fn)(void*), void* arg, CCNurseryHost* nursery) {
+static fiber_v2* sched_v2_spawn_finish(void* (*fn)(void*), void* arg,
+                                       CCNurseryHost* nursery,
+                                       int nb_inherit, uint64_t nb_num, uint64_t nb_den) {
     sched_v2_ensure_init();
 
     fiber_v2* f = fiber_v2_alloc();
@@ -3608,6 +4207,10 @@ fiber_v2* sched_v2_spawn_in_nursery(void* (*fn)(void*), void* arg, CCNurseryHost
     f->entry_arg = arg;
     f->saved_nursery = nursery;
     f->admission_nursery = nursery;
+    f->nb_inherit = nb_inherit;
+    f->nb_live = 0;
+    f->nb_num = nb_num ? nb_num : 1;
+    f->nb_den = nb_den ? nb_den : 1;
     atomic_store_explicit(&f->suspends, 0, memory_order_relaxed);
     /* Do NOT create/init the coroutine here.
      *
@@ -3623,6 +4226,23 @@ fiber_v2* sched_v2_spawn_in_nursery(void* (*fn)(void*), void* arg, CCNurseryHost
 
     sched_v2_enqueue_runnable(f);
 
+    return f;
+}
+
+fiber_v2* sched_v2_spawn_in_nursery(void* (*fn)(void*), void* arg, CCNurseryHost* nursery) {
+    return sched_v2_spawn_finish(fn, arg, nursery, 0, 1, 1);
+}
+
+/* Noblock arm whose child still forks. The fiber carries the post-enter
+ * share so its own sites keep dividing, and it can park at the join
+ * without pinning the worker. */
+fiber_v2* sched_v2_spawn_noblock(void* (*fn)(void*), void* arg) {
+    cc_nb_stack* nb = nb_get();
+    uint64_t num = (nb && nb->num) ? nb->num : 1;
+    uint64_t den = (nb && nb->den) ? nb->den : 1;
+    fiber_v2* f = sched_v2_spawn_finish(fn, arg, NULL, 1, num, den);
+    if (f)
+        atomic_fetch_add_explicit(&g_v2_noblock_fiber_spawn, 1, memory_order_relaxed);
     return f;
 }
 

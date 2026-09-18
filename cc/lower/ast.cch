@@ -430,9 +430,10 @@ typedef struct CcParallelArm {
     CcStmt* serial;             /* the @serial block */
     bool unwrap;
 } CcParallelArm;
-typedef struct CcParallel {     /* @parallel [spawn] [(pred)] [seq (cond)] { arms } [tail]; CCParallel h = @parallel { ... } */
+typedef struct CcParallel {     /* @parallel [spawn|noblock] [(pred)] [seq (cond)] { arms } [tail]; CCParallel h = @parallel { ... } */
     Vec::[CcParallelArm] arms;
     bool spawn;
+    bool noblock;               /* Fork when a worker is idle; Cut → inline otherwise (no adapt) */
     CcExpr* pred;
     CcExpr* seq;
     CcExpr* wait;               /* `wait (ts)` / `worker (w)` / `cache (...)` written on the arms form: kept as

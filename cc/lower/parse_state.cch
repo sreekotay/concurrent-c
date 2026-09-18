@@ -31,7 +31,7 @@ typedef enum Kw {
     KW_TYPEOF3, KW_ALIGNOF2, KW_ALIGNOF3, KW_ASM, KW_ASM2, KW_ASM3, KW_THREAD, KW_INT128,
     KW_DECLSPEC, KW_BUILTIN_VA_LIST, KW_FORCEINLINE, KW_FLOAT128, KW_NULLPTR_T, KW_ALIGNAS2, KW_ALIGNOF4,
     /* Concurrent-C bare words (contextual: ordinary names elsewhere) */
-    KW_IN, KW_UNSAFE, KW_SPAWN, KW_SEQ, KW_WAIT, KW_CACHE, KW_WORKER, KW_ON, KW_AS, KW_ASYNC,
+    KW_IN, KW_UNSAFE, KW_SPAWN, KW_NOBLOCK, KW_SEQ, KW_WAIT, KW_CACHE, KW_WORKER, KW_ON, KW_AS, KW_ASYNC,
     KW_CLOSING, KW_TYPE, KW_CC_GENERIC_FACTORY, KW_CC_GENERIC_FACTORY_EXTEND,
     KW_COUNT
 } Kw;
@@ -48,7 +48,7 @@ static const char* const cc__kw_text[KW_COUNT] = {
     "__const", "__const__", "__volatile", "__volatile__", "__signed", "__signed__", "__typeof__", "__typeof",
     "typeof", "__alignof__", "__alignof", "__asm__", "__asm", "asm", "__thread", "__int128",
     "__declspec", "__builtin_va_list", "__forceinline", "__float128", "nullptr_t", "alignas", "alignof",
-    "in", "unsafe", "spawn", "seq", "wait", "cache", "worker", "on", "as", "async",
+    "in", "unsafe", "spawn", "noblock", "seq", "wait", "cache", "worker", "on", "as", "async",
     "closing", "type", "CC_GENERIC_FACTORY", "CC_GENERIC_FACTORY_EXTEND",
 };
 

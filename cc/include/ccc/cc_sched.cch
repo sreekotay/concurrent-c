@@ -48,6 +48,7 @@ typedef int CCTaskIntptrKind;
 #define CC_TASK_KIND_FIBER   4
 #define CC_TASK_KIND_POOL    5
 #define CC_TASK_KIND_FIBER_V2 6
+#define CC_TASK_KIND_WORKLET 7
 #define CC_TASK_INTPTR_KIND_INVALID 0
 #define CC_TASK_INTPTR_KIND_FUTURE  2
 #define CC_TASK_INTPTR_KIND_POLL    3
@@ -61,6 +62,7 @@ typedef enum {
     CC_TASK_KIND_FIBER = 4,   /* M:N fiber (from cc_fiber_spawn_task) */
     CC_TASK_KIND_POOL  = 5,   /* M:N pool task (transparent runtime pooling) */
     CC_TASK_KIND_FIBER_V2 = 6, /* V2 hybrid scheduler fiber */
+    CC_TASK_KIND_WORKLET = 7, /* C-stack worklet (`@parallel noblock`) */
 } CCTaskKind;
 
 /* Opaque CCTask struct - the actual layout is implementation detail.
@@ -155,9 +157,13 @@ int cc_scheduler_stats(CCSchedulerStats* out);
  * admit (`@parallel spawn`, dest-live, dest-attach) uses
  * `cc_parallel_spawn_admit`: no adapt deny. Remaining INVALID is
  * real spawn failure — the lowering dies; it does not inline.
+ * `@parallel noblock` uses `cc_parallel_spawn_noblock`: the arms are
+ * equal work. A child that still forks is a fiber; the last wave is a
+ * worklet; otherwise Cut (INVALID → inline). No adapt.
  * `n.spawn` is uncapped. */
 CCTask cc_parallel_spawn(void* (*fn)(void*), void* arg);
 CCTask cc_parallel_spawn_admit(void* (*fn)(void*), void* arg);
+CCTask cc_parallel_spawn_noblock(void* (*fn)(void*), void* arg);
 void cc_parallel_join(CCTask t);
 
 /* Wait-for @parallel join handle: kind + fiber, not a 128-byte CCTask.
@@ -173,7 +179,60 @@ typedef struct CCParJoin {
 #endif
 
 CCParJoin cc_parallel_spawn_arm(void* (*fn)(void*), void* arg);
+CCParJoin cc_parallel_spawn_arm_noblock(void* (*fn)(void*), void* arg);
 void cc_parallel_join_arm(CCParJoin j);
+
+/* Worker-pool cells for `@parallel noblock` (set at sched init; boots
+ * Cut-safe). Fork while the piece is larger than one share, and one
+ * split past that when it shortens the longest worker. That last wave
+ * is worklets; a child that still forks is a fiber. */
+extern volatile int* __cc_par_idle_addr;
+extern volatile size_t* __cc_par_depth_addr;
+extern volatile size_t* __cc_par_worklet_addr;
+extern volatile int* __cc_par_nworkers_addr;
+
+/* Bring up the worker pool before the first admit read. Without this,
+ * boot idle=0 Cuts forever and never reaches worklet_spawn's ensure_init
+ * (storm_tile runs on main; pow2 already inits via fiber spawn). */
+void cc_parallel_noblock_prepare(void);
+
+/* `narms` is this site's arm count. Divides the current piece into that
+ * many equal shares and records whether those arms Fork. */
+void cc_parallel_noblock_enter(int narms);
+void cc_parallel_noblock_leave(void);
+int __cc_par_noblock_split(void);
+
+/* Always-on noblock admit/cut tallies. Dump with CC_V2_STATS=1. */
+void __cc_par_noblock_note_fork(void);
+void __cc_par_noblock_note_cut_idle(void);
+void __cc_par_noblock_note_cut_ready(void);
+void __cc_par_noblock_note_cut_cap(void);
+void __cc_par_noblock_note_cut_nested(void);
+int __cc_par_in_worklet(void);
+int __cc_par_noblock_depth(void);
+
+static inline int cc_parallel_noblock_admit(void) {
+    int nworkers;
+    cc_parallel_noblock_prepare();
+    /* Enter already divided this piece by the arm count. Split is set
+     * when the arms are a fiber or a worklet, not once the piece is
+     * already one share. */
+    if (!__cc_par_noblock_split()) {
+        __cc_par_noblock_note_cut_nested();
+        return 0;
+    }
+    nworkers = *__cc_par_nworkers_addr;
+    if (nworkers <= 1) {
+        __cc_par_noblock_note_cut_idle();
+        return 0;
+    }
+    __cc_par_noblock_note_fork();
+    return 1;
+}
+
+static inline int cc_parallel_noblock_cut(void) {
+    return !cc_parallel_noblock_admit();
+}
 
 /* ----------------------------------------------------------------------------
  * Inline deny gate for lowered @parallel spawns.
@@ -255,6 +314,9 @@ typedef struct CCParTls {
     uint32_t real_tick;
     struct CCParallel* deny_dest[CC_PAR_DENY_STACK];
     unsigned char deny_flag[CC_PAR_DENY_STACK];
+    /* Set for the whole run of a noblock worklet. Descendants are a
+     * smaller share and cannot fork; the site is the inline arms. */
+    int nb_sealed;
 } CCParTls;
 
 #if defined(CC_PARSER_MODE) || defined(__TINYC__)
@@ -321,6 +383,20 @@ static inline int cc_parallel_churn_skip(void** slot, void* (*fn)(void*)) {
 static inline void cc__par_note_inline_arm(CCParTls* pt) {
     if (!pt) pt = cc__par_tls();
     pt->denials++;
+}
+#endif
+
+/* One load. A noblock worklet has already been cut to one share, so every
+ * site under it is the arms in order. Native hosts read the TLS cell;
+ * TCC goes through the pthread bundle. */
+#if defined(CC_PARSER_MODE) || defined(__TINYC__)
+static inline int cc_parallel_noblock_sealed(void) {
+    CCParTls* pt = cc__par_tls();
+    return pt && pt->nb_sealed;
+}
+#else
+static inline int cc_parallel_noblock_sealed(void) {
+    return __cc_par_tls.nb_sealed;
 }
 #endif
 

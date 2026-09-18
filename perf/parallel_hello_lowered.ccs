@@ -204,7 +204,7 @@ static uint32_t sum_nur(uint32_t d, uint32_t i) {
     cc_nursery_spawn(n, sum_nur_thunk, &er) !>;
     atomic_fetch_add_explicit(&g_spawns, 1, memory_order_relaxed);
 
-    cc_nursery_destroy(n);
+    cc_nursery_destroy(&n);
     atomic_fetch_add_explicit(&g_joins, 1, memory_order_relaxed);
     return u24(left + right);
 }

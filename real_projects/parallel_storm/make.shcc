@@ -77,6 +77,13 @@ static int run_tile_unbound() {
 }
 
 /**
+ * @task Same join, @parallel noblock (idle Cut) at every split.
+ */
+static int run_tile_noblock() {
+    return storm_run_mode("noblock", "run-tile");
+}
+
+/**
  * @task Remove out/ and the raylib objects.
  */
 static int clean() {

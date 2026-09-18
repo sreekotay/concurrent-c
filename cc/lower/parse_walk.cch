@@ -907,6 +907,7 @@ static void dump_stmt_c(Dump* d, const CcStmt* s, int depth) {
         case .parallel(pa):
             if (pa.bind.len) dump_name(d, pa.bind);
             if (pa.spawn) fputs(" spawn", d->out);
+            if (pa.noblock) fputs(" noblock", d->out);
             if (pa.worker.len) { fputs(" worker(", d->out); dump_slice(d, pa.worker); fputc(')', d->out); }
             dump_pos(d, s->span);
             dump_type(d, pa.bind_type, depth + 1);

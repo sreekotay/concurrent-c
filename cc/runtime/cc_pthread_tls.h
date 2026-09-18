@@ -34,6 +34,9 @@ typedef struct cc_rt_tls {
     uint64_t v2_my_generation;
     void* v2_current_fiber;  /* fiber_v2* */
     uint64_t v2_dispatch_seq;
+    int v2_in_worklet;
+    int v2_noblock_depth;
+    void* v2_nb;             /* cc_nb_stack* (noblock share of the root) */
     unsigned deadlock_suppress_depth;
     unsigned external_wait_depth;
     cc_rt_tls_wake_batch wake_batch;

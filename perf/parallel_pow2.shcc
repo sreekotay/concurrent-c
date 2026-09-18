@@ -6,15 +6,16 @@
  *   pow2(1n+p)  = pow2(p) + pow2(p)
  *
  * Same fork family as parallel_hello.ccs: seq / `@parallel { }` /
- * `@parallel (d > depth - cut)`. `d` counts down from the root; the
- * predicate spawns the first `CC_PAR_CUT` levels (hello's `d < cut`
- * with `d` counting up). The leaf is `1`; the tree is the join.
+ * `@parallel noblock` / `@parallel (d > depth - cut)`. `d` counts down
+ * from the root; the predicate spawns the first `CC_PAR_CUT` levels
+ * (hello's `d < cut` with `d` counting up). The leaf is `1`; the tree
+ * is the join.
  *
  *   CC_PAR_DEPTH    default 20  (pow2(20n) in the sketch)
  *   CC_PAR_SAMPLES  default 5
  *   CC_PAR_CUT      default 8   — spawn that many levels from the root
  *   CC_PAR_BARE     default 1; 0 skips the ungated `par` row
- *   CC_PAR_ONLY=par skip seq/cut; loop par `CC_PAR_SAMPLES` times (profile)
+ *   CC_PAR_ONLY=par|noblock  skip other rows; loop that row
  */
 #include <stdint.h>
 #include <stdlib.h>
@@ -76,6 +77,19 @@ static uint32_t pow2_par(uint32_t d) {
     @parallel {
         a = pow2_par(d - 1);
         b = pow2_par(d - 1);
+    } !>.wait()!>;
+    return a + b;
+}
+
+static uint32_t pow2_noblock(uint32_t d) {
+    @errhandler(CCError e) cc_error_exit(e);
+    uint32_t a = 0;
+    uint32_t b = 0;
+    if (d == 0)
+        return 1;
+    @parallel noblock {
+        a = pow2_noblock(d - 1);
+        b = pow2_noblock(d - 1);
     } !>.wait()!>;
     return a + b;
 }
@@ -155,13 +169,14 @@ if (g_cut > g_depth)
 int bare = (int)env_u32("CC_PAR_BARE", 1);
 uint32_t expect = 1u << g_depth;
 const char* only = getenv("CC_PAR_ONLY");
-if (only && strcmp(only, "par") == 0) {
+if (only && (strcmp(only, "par") == 0 || strcmp(only, "noblock") == 0)) {
+    pow2_fn fn = strcmp(only, "noblock") == 0 ? pow2_noblock : pow2_par;
     int i;
     int n = g_samples;
-    (void)time_once(pow2_par, expect, 1);
+    (void)time_once(fn, expect, 1);
     for (i = 0; i < n; i++)
-        (void)time_once(pow2_par, expect, 1);
-    @string(`parallel_pow2 par-only: depth=${g_depth} n=${n} expect=${expect}`, @scratch).println();
+        (void)time_once(fn, expect, 1);
+    @string(`parallel_pow2 ${only}-only: depth=${g_depth} n=${n} expect=${expect}`, @scratch).println();
     return 0;
 }
 if (g_samples > SAMPLE_CAP)
@@ -169,8 +184,10 @@ if (g_samples > SAMPLE_CAP)
 
 double seq_ms = median_of(pow2_seq, expect, 0);
 double par_ms = 0.0;
+double noblock_ms = median_of(pow2_noblock, expect, 1);
 double cut_ms = median_of(pow2_cut, expect, 1);
 double vs_par = 0.0;
+double vs_noblock = noblock_ms > 0.0 ? seq_ms / noblock_ms : 0.0;
 double vs_cut = cut_ms > 0.0 ? seq_ms / cut_ms : 0.0;
 
 if (bare) {
@@ -184,5 +201,6 @@ if (bare)
     @string(` par ${expect} ${par_ms} ms vs_seq ${vs_par}x (@parallel { })`, @scratch).println();
 else
     "  par  skipped  (CC_PAR_BARE=0)".println();
+@string(` noblock ${expect} ${noblock_ms} ms vs_seq ${vs_noblock}x (@parallel noblock)`, @scratch).println();
 @string(` cut ${expect} ${cut_ms} ms vs_seq ${vs_cut}x (@parallel (d>depth-${g_cut}))`, @scratch).println();
 return 0;

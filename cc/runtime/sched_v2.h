@@ -123,4 +123,11 @@ void   sched_v2_check_deadlock(void);
 uint64_t sched_v2_fiber_publish_wait_ticket(fiber_v2* f);
 int sched_v2_fiber_wait_ticket_matches(fiber_v2* f, uint64_t ticket);
 
+/* Worklets: short non-parking fn(arg) on a worker C stack (no fiber).
+ * Used by `@parallel noblock`. Join mirrors sched_v2_join (fiber park vs
+ * wake_primitive). NULL spawn = OOM. Capacity Cut is the caller's job. */
+typedef struct cc_worklet cc_worklet;
+cc_worklet* sched_v2_worklet_spawn(void* (*fn)(void*), void* arg);
+void        sched_v2_worklet_join(cc_worklet* w);
+
 #endif /* CC_SCHED_V2_H */

@@ -35,7 +35,6 @@ typedef struct {
 
 /* Helpers for repeated fail-closed I/O and ownership patterns. */
 static inline void report_io_error(const char* what, CCIoError err) {
-    @errhandler(CCError e) { cc_error_log(e); return; }
     eprintln(@string(`Error: ${what} (kind=${err.base.kind} os=${err.os_code})`,
                      @scratch));
 }
@@ -45,11 +44,6 @@ static inline void mark_pipeline_error(void) {
 }
 
 static inline bool write_all_or_fail(CCFile* f, CCSlice data, const char* what) {
-    @errhandler(CCError e) {
-        cc_error_log(e);
-        g_pipeline_error.store(1);
-        return false;
-    }
     size_t n = f->write(data) !>(e) {
         eprintln(@string(`${what} failed kind=${e.base.kind} os=${e.os_code}`,
                          @scratch));
@@ -65,11 +59,6 @@ static inline bool write_all_or_fail(CCFile* f, CCSlice data, const char* what) 
 }
 
 static inline bool sync_file_or_fail(CCFile* f, const char* what) {
-    @errhandler(CCError e) {
-        cc_error_log(e);
-        g_pipeline_error.store(1);
-        return false;
-    }
     size_t ignored = f->sync() !>(e) {
         eprintln(@string(`${what} failed kind=${e.base.kind} os=${e.os_code}`,
                          @scratch));
@@ -88,7 +77,6 @@ static bool copy_path_checked(char* dst, size_t dst_cap, const char* src, const 
     if (!dst || dst_cap == 0 || !src) return false;
     CCString s = @string(`${src}`, @scratch);
     if (s.failed()) {
-        @errhandler(CCError e) { cc_error_log(e); mark_pipeline_error(); return false; }
         eprintln(@string(`Error: ${what} path too long: ${src}`, @scratch));
         mark_pipeline_error();
         return false;
@@ -96,7 +84,6 @@ static bool copy_path_checked(char* dst, size_t dst_cap, const char* src, const 
     const char* c = cc_string_cstr(&s, __cc_str_scratch);
     size_t n = c ? strlen(c) : 0;
     if (n >= dst_cap) {
-        @errhandler(CCError e) { cc_error_log(e); mark_pipeline_error(); return false; }
         eprintln(@string(`Error: ${what} path too long: ${src}`, @scratch));
         mark_pipeline_error();
         return false;
@@ -109,14 +96,12 @@ static bool build_suffixed_path(char* dst, size_t dst_cap, const char* path, con
     if (!dst || dst_cap == 0 || !path || !suffix) return false;
     CCString s = @string(`${path}${suffix}`, @scratch);
     if (s.failed()) {
-        @errhandler(CCError e) { cc_error_log(e); return false; }
         eprintln(@string(`pigz_cc: output path too long: ${path}${suffix}`, @scratch));
         return false;
     }
     const char* c = cc_string_cstr(&s, __cc_str_scratch);
     size_t n = c ? strlen(c) : 0;
     if (n >= dst_cap) {
-        @errhandler(CCError e) { cc_error_log(e); return false; }
         eprintln(@string(`pigz_cc: output path too long: ${path}${suffix}`, @scratch));
         return false;
     }
@@ -126,7 +111,6 @@ static bool build_suffixed_path(char* dst, size_t dst_cap, const char* path, con
 
 static bool open_output_checked(CCFile* file, const char* path) {
     if (!file || !path) return false;
-    @errhandler(CCError e) { cc_error_log(e); mark_pipeline_error(); return false; }
     if (!g.force && !path_is_stdout(path) && access(path, F_OK) == 0) {
         eprintln(@string(`pigz_cc: ${path} exists -- use -f to overwrite`, @scratch));
         mark_pipeline_error();
@@ -200,7 +184,7 @@ static size_t* hits_at(unsigned char* buf, size_t block) {
 }
 
 static void !>(CCError) write_all(CCFile* f, CCSlice s) {
-    @errhandler(CCError e) { return cc_err(e); }
+    @errhandler(CCIoError e) { return cc_err(e.base); }
     size_t nw = f->write(s) !>;
     if (nw != s.len)
         return cc_err(CC_ERR_IO, "write");
@@ -868,7 +852,6 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
         /* Keep the writer outside the producer scopes so producer-owned close()
          * can close channels as soon as the upstream task exits. */
         CCClosure0 decomp_writer_task = () => [out_ptr, decompressed_rx, decompressed_ch, p_total_out] {
-            @errhandler(CCError e) cc_error_exit(e);
             DecompChunk chunk;
             while (true) {
                 bool !>(CCIoError) recv_res = decompressed_rx.recv(&chunk);
@@ -1058,7 +1041,6 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
 
 /* Process a single path (file or directory) recursively (matches pigz.c:4600-4620) */
 int process_path(char[:0] path, int num_workers, int level, int strategy) {
-    @errhandler(CCError e) { return cc_err_log(e); }
     if (!path.ptr || path.len == 0) {
         /* Stdin - no stat needed */
         g.mtime = 0;
@@ -1246,7 +1228,6 @@ static void pigz_apply_opts(const PigzOpts *opts, int64_t *num_workers,
 }
 
 int main(int argc, char *argv[]) {
-    @errhandler(CCError e) { return cc_err_log(e); }
     bool show_version = false;
     int64_t num_workers = 4;
     bool user_set_num_workers = false;

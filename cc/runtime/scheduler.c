@@ -367,7 +367,47 @@ const struct timespec* cc_deadline_as_timespec(const CCDeadline* d, struct times
 }
 
 size_t sched_v2_ready_depth(void);
+int    sched_v2_idle_workers(void);
 uint32_t sched_v2_current_fiber_suspends(void);
+extern volatile int* __cc_par_idle_addr;
+extern volatile size_t* __cc_par_depth_addr;
+extern volatile size_t* __cc_par_worklet_addr;
+extern volatile int* __cc_par_nworkers_addr;
+
+void __cc_par_noblock_note_fork(void);
+void __cc_par_noblock_note_cut_idle(void);
+void __cc_par_noblock_note_cut_ready(void);
+void __cc_par_noblock_note_cut_cap(void);
+void __cc_par_noblock_note_cut_nested(void);
+void cc_parallel_noblock_prepare(void);
+void cc_parallel_noblock_enter(int narms);
+void cc_parallel_noblock_leave(void);
+int __cc_par_noblock_split(void);
+int __cc_par_in_worklet(void);
+int __cc_par_noblock_depth(void);
+
+typedef struct cc_worklet cc_worklet;
+cc_worklet* sched_v2_worklet_spawn(void* (*fn)(void*), void* arg);
+void        sched_v2_worklet_join(cc_worklet* w);
+fiber_v2*   sched_v2_spawn_noblock(void* (*fn)(void*), void* arg);
+int         __cc_par_noblock_as_fiber(void);
+
+/* Same predicate as cc_parallel_noblock_admit in cc_sched.cch. */
+static int cc_par_noblock_admit(void) {
+    int nworkers;
+    cc_parallel_noblock_prepare();
+    if (!__cc_par_noblock_split()) {
+        __cc_par_noblock_note_cut_nested();
+        return 0;
+    }
+    nworkers = *__cc_par_nworkers_addr;
+    if (nworkers <= 1) {
+        __cc_par_noblock_note_cut_idle();
+        return 0;
+    }
+    __cc_par_noblock_note_fork();
+    return 1;
+}
 
 /* ============================================================================
  * Adaptive spawn gate (CC_PAR_ADAPT, default on).
@@ -749,7 +789,49 @@ CCTask cc_parallel_spawn_admit(void* (*fn)(void*), void* arg) {
     return cc_fiber_spawn_task(fn, arg);
 }
 
+/* `@parallel noblock`: the arms are equal. A child that still forks is a
+ * fiber (it publishes the next split and parks). The last wave is a
+ * worklet. Otherwise Cut (INVALID) and the lowering runs the arm inline. */
+CCTask cc_parallel_spawn_noblock(void* (*fn)(void*), void* arg) {
+    CCTask invalid;
+    memset(&invalid, 0, sizeof(invalid));
+    if (!fn)
+        return invalid;
+    tls_par_spawn_calls++;
+    if (!cc_par_noblock_admit()) {
+        tls_par_denials++;
+        return invalid;
+    }
+    if (__cc_par_noblock_as_fiber()) {
+        fiber_v2* f = sched_v2_spawn_noblock(fn, arg);
+        if (!f) {
+            tls_par_denials++;
+            return invalid;
+        }
+        cc_task_bind_fiber_v2(&invalid, f);
+        return invalid;
+    }
+    {
+        cc_worklet* w = sched_v2_worklet_spawn(fn, arg);
+        if (!w) {
+            tls_par_denials++;
+            return invalid;
+        }
+        /* Compact wait-for uses spawn_arm_noblock; this CCTask path is
+         * only for non-compact. Pack the worklet pointer like a fiber. */
+        invalid.kind = CC_TASK_KIND_WORKLET;
+        memcpy(invalid._data, &w, sizeof(w));
+        return invalid;
+    }
+}
+
 void cc_parallel_join(CCTask t) {
+    if (t.kind == CC_TASK_KIND_WORKLET) {
+        cc_worklet* w = NULL;
+        memcpy(&w, t._data, sizeof(w));
+        sched_v2_worklet_join(w);
+        return;
+    }
     (void)cc_block_on_intptr(t);
 }
 
@@ -761,10 +843,49 @@ CCParJoin cc_parallel_spawn_arm(void* (*fn)(void*), void* arg) {
     return j;
 }
 
+CCParJoin cc_parallel_spawn_arm_noblock(void* (*fn)(void*), void* arg) {
+    CCParJoin j;
+    j.kind = (int)CC_TASK_KIND_INVALID;
+    j.fiber = NULL;
+    if (!fn) {
+        tls_par_denials++;
+        return j;
+    }
+    tls_par_spawn_calls++;
+    if (!cc_par_noblock_admit()) {
+        tls_par_denials++;
+        return j;
+    }
+    if (__cc_par_noblock_as_fiber()) {
+        fiber_v2* f = sched_v2_spawn_noblock(fn, arg);
+        if (!f) {
+            tls_par_denials++;
+            return j;
+        }
+        j.kind = (int)CC_TASK_KIND_FIBER_V2;
+        j.fiber = (void*)f;
+        return j;
+    }
+    {
+        cc_worklet* w = sched_v2_worklet_spawn(fn, arg);
+        if (!w) {
+            tls_par_denials++;
+            return j;
+        }
+        j.kind = (int)CC_TASK_KIND_WORKLET;
+        j.fiber = (void*)w;
+        return j;
+    }
+}
+
 void cc_parallel_join_arm(CCParJoin j) {
     CCTask t;
     if (j.kind == (int)CC_TASK_KIND_INVALID)
         return;
+    if (j.kind == (int)CC_TASK_KIND_WORKLET) {
+        sched_v2_worklet_join((cc_worklet*)j.fiber);
+        return;
+    }
     cc_task_bind_fiber_v2(&t, j.fiber);
     if (j.kind != (int)CC_TASK_KIND_FIBER_V2)
         t.kind = (CCTaskKind)j.kind;

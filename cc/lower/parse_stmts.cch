@@ -504,6 +504,7 @@ static CcStmt* parse_parallel(P* p) {
     uint32_t first = p->i;
     CcStmt* s;
     bool spawn = false;
+    bool noblock = false;
     CcExpr* pred = NULL;
     CcExpr* seq = NULL;
     CcExpr* wait = NULL;
@@ -526,6 +527,7 @@ static CcStmt* parse_parallel(P* p) {
     }
     for (;;) {
         if (accept_kw(p, KW_SPAWN)) { spawn = true; continue; }
+        if (accept_kw(p, KW_NOBLOCK)) { noblock = true; continue; }
         if (at_p(p, CC_P_LPAREN)) {
             uint32_t open = p->i;
             adv(p);
@@ -558,6 +560,11 @@ static CcStmt* parse_parallel(P* p) {
     if (at_kw(p, KW_FOR) || at_word(p, "for")) {
         uint32_t open = p->i + 1;
         CcParallelFor pf;
+        if (noblock) {
+            const char* at_parallel = "@" "parallel";
+            CCString m = @string(`'${at_parallel} noblock' does not combine with for or wait`, p->arena);
+            err_here(p, m);
+        }
         for_in_blank(&pf.loop, p->arena);
         pf.loop.is_at_for = p->t[p->i].kind == CC_TK_AT_WORD;
         pf.spawn = spawn;
@@ -629,6 +636,7 @@ static CcStmt* parse_parallel(P* p) {
         Vec::[CcParallelArm] arms = vec_new::[CcParallelArm](p->arena);
         pa.arms = arms;
         pa.spawn = spawn;
+        pa.noblock = noblock;
         pa.pred = pred;
         pa.seq = seq;
         pa.wait = wait;

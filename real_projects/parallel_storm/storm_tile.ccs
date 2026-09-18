@@ -8,6 +8,7 @@
  *
  *   STORM_MODE=quad      default — @parallel (d < STORM_CUT)
  *   STORM_MODE=unbound   @parallel { } at every split
+ *   STORM_MODE=noblock   @parallel noblock (arms are equal work)
  *   STORM_SEQ=1          sequential walk, no spawn
  */
 #include <ccc/std/prelude.cch>
@@ -111,8 +112,34 @@ static int render_quad(uint32_t d, int x0, int y0, int size) {
     return nw + ne + sw + se;
 }
 
+static int render_noblock(uint32_t d, int x0, int y0, int size) {
+    @errhandler(CCError e) cc_error_exit(e);
+    int half;
+    int nw = 0;
+    int ne = 0;
+    int sw = 0;
+    int se = 0;
+    if (d >= g_qdepth || size <= 1) {
+        fill_tile(x0, y0, size);
+        return 0;
+    }
+    half = size / 2;
+    if (half < 1) {
+        fill_tile(x0, y0, size);
+        return 0;
+    }
+    @parallel noblock {
+        nw = render_noblock(d + 1, x0, y0, half);
+        ne = render_noblock(d + 1, x0 + half, y0, half);
+        sw = render_noblock(d + 1, x0, y0 + half, half);
+        se = render_noblock(d + 1, x0 + half, y0 + half, half);
+    } !>.wait()!>;
+    return nw + ne + sw + se;
+}
+
 #define MODE_QUAD 0
 #define MODE_UNBOUND 1
+#define MODE_NOBLOCK 2
 
 static int parse_mode(void) {
     const char* s = getenv("STORM_MODE");
@@ -120,6 +147,8 @@ static int parse_mode(void) {
         return MODE_QUAD;
     if (strcmp(s, "unbound") == 0)
         return MODE_UNBOUND;
+    if (strcmp(s, "noblock") == 0)
+        return MODE_NOBLOCK;
     return -1;
 }
 
@@ -131,6 +160,8 @@ static void render_frame(int mode, int seq) {
     }
     if (mode == MODE_UNBOUND)
         (void)render_unbound(0, 0, 0, cover);
+    else if (mode == MODE_NOBLOCK)
+        (void)render_noblock(0, 0, 0, cover);
     else
         (void)render_quad(0, 0, 0, cover);
 }
@@ -171,7 +202,7 @@ int main(void) {
     if (grid > 16)
         grid = 16;
     if (mode < 0) {
-        eprintln("storm_tile: STORM_MODE must be quad or unbound");
+        eprintln("storm_tile: STORM_MODE must be quad, unbound, or noblock");
         return 1;
     }
 
@@ -210,6 +241,9 @@ int main(void) {
     if (mode == MODE_UNBOUND) {
         title = "parallel_storm tile unbound";
         mode_name = "unbound";
+    } else if (mode == MODE_NOBLOCK) {
+        title = "parallel_storm tile noblock";
+        mode_name = "noblock";
     }
     if (seq)
         mode_name = "seq";
