@@ -1200,11 +1200,13 @@ static long long lw_ms(void) {
     return (long long)tv.tv_sec * 1000 + (long long)tv.tv_usec / 1000;
 }
 
-/* Which constructs this unit's own tokens spell. A pass that rewrites one
- * of them walks the whole tree to find it; a unit that never wrote it has
- * nothing to find, and the walk is the time. A construct arrives on this
- * tape: a factory splice happens after these passes, and a comptime block
- * is text of this unit. */
+/* Which of these passes this unit can actually need. Each one walks the
+ * whole tree, so a unit that cannot hit it skips the walk. The test is the
+ * tokens, not the headline spelling: forin also rewrites `T[n].len` and
+ * rejects `.access`; chan also retires `@closing` and rewrites `cc_chan_*`;
+ * strswitch rewrites a `switch` on a slice even when every arm is `default`;
+ * async builds closure nodes the closures pass has to lower, and a `=>`
+ * inside a `#define` is one preprocessor line, not a fat-arrow token. */
 typedef struct LwNeed {
     bool deadline;
     bool parallel;
@@ -1236,22 +1238,36 @@ static LwNeed lw_scan_need(CcUnit* u) {
         if (t->kind == CC_TK_AT_WORD) {
             if (CcToken_is_at(t, "with_deadline")) n.deadline = true;
             else if (CcToken_is_at(t, "parallel")) n.parallel = true;
-            else if (CcToken_is_at(t, "async") || CcToken_is_at(t, "await")) n.async_ = true;
+            else if (CcToken_is_at(t, "async") || CcToken_is_at(t, "await") ||
+                     CcToken_is_at(t, "blocking") || CcToken_is_at(t, "nonblocking") ||
+                     CcToken_is_at(t, "noblock"))
+                n.async_ = true;
             else if (CcToken_is_at(t, "for")) n.forin = true;
+            else if (CcToken_is_at(t, "closing")) n.chan = true;
         } else if (t->kind == CC_TK_PUNCT && t->punct == CC_P_FAT_ARROW) {
             n.closures = true;
         } else if (t->kind == CC_TK_PUNCT && t->punct == CC_P_LBRACKET && i + 1 < nt) {
             const CcToken* nx = tp->toks.get_ptr(i + 1);
             if (nx->kind == CC_TK_PUNCT && nx->punct == CC_P_TILDE) n.chan = true;
-        } else if (t->kind == CC_TK_PP && lw_pp_has(t->text, "#pragma(@parallel)")) {
-            n.parallel = true;
-        } else if (t->kind == CC_TK_IDENT && CcToken_is_ident(t, "case") && i + 1 < nt) {
-            const CcToken* nx = tp->toks.get_ptr(i + 1);
-            if (nx->kind == CC_TK_STRING) n.strswitch = true;
+        } else if (t->kind == CC_TK_PP) {
+            if (lw_pp_has(t->text, "#pragma(@parallel)")) n.parallel = true;
+            if (lw_pp_has(t->text, "=>")) n.closures = true;
+        } else if (t->kind == CC_TK_IDENT) {
+            if (CcToken_is_ident(t, "case") && i + 1 < nt) {
+                const CcToken* nx = tp->toks.get_ptr(i + 1);
+                if (nx->kind == CC_TK_STRING) n.strswitch = true;
+            }
+            if (CcToken_is_ident(t, "switch")) n.strswitch = true;
+            if (CcToken_is_ident(t, "len") || CcToken_is_ident(t, "access")) n.forin = true;
+            if (lw_pp_has(t->text, "chan_") || lw_pp_has(t->text, "Chan") ||
+                lw_pp_has(t->text, "channel"))
+                n.chan = true;
         }
         if (n.deadline && n.parallel && n.async_ && n.chan && n.closures && n.forin && n.strswitch)
             break;
     }
+    /* autoblock builds a closure node. The source has no `=>`. */
+    if (n.async_) n.closures = true;
     return n;
 }
 
