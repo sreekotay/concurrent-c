@@ -341,14 +341,21 @@ TCC_PATCH_STAMP := $(TCC_INC)/.cc_patches_applied
 # newer than every prereq and the rule stays quiescent.
 $(TCC_PATCH_STAMP): $(wildcard ../third_party/tcc-patches/000*.patch) \
                     $(wildcard $(TCC_INC)/tcc.h $(TCC_INC)/tccgen.c \
-                               $(TCC_INC)/tccpp.c $(TCC_INC)/libtcc.c)
+                               $(TCC_INC)/tccpp.c $(TCC_INC)/libtcc.c \
+                               $(TCC_INC)/arm-gen.c $(TCC_INC)/Makefile)
 	@cd .. && bash scripts/apply_tcc_patches.sh
 	@cd $(TCC_INC) && ([ -f config.mak ] || ./configure) && \
 	  (grep -q CONFIG_cc_ext config.mak || echo 'CONFIG_cc_ext=yes' >> config.mak)
 	@touch $@
+# TCC's own makefile only rebuilds the native target. A patch that changes
+# a cross file (arm-gen.c on arm64 Darwin) leaves libtcc.a untouched, so the
+# suite's "patch newer than libtcc.a" check stays red after a no-op make.
+# Drop the native objects and compile them again. arm-tcc is the compiler
+# that actually includes arm-gen.c (TCC_ARM_EABI); the host archive does not.
 ifneq ($(suffix $(TCC_LIB)),.a)
 $(TCC_LIB)/libtcc.a: $(TCC_PATCH_STAMP)
-	@cd $(TCC_LIB) && $(MAKE) libtcc.a libtcc1.a
+	@cd $(TCC_LIB) && rm -f tcc libtcc.a libtcc1.a *.o && \
+	  $(MAKE) libtcc.a tcc libtcc1.a arm-tcc
 endif
 
 # Lower .cch headers to .h files (must run before examples that use generated C)
