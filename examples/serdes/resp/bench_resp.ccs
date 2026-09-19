@@ -81,7 +81,6 @@ static long hand_parse(const char* s, size_t n, HArg* args, int max_args, unsign
 
 int main(int argc, char** argv) {
     CCArena pa = cc_arena_create(kilobytes(4));
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
 
     int NCMD = argc > 1 ? atoi(argv[1]) : 100000;
     int K = argc > 2 ? atoi(argv[2]) : 30, T = argc > 3 ? atoi(argv[3]) : 3;
