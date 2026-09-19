@@ -32,7 +32,6 @@ static int scale_n(int quick, int full, int soak) {
 }
 
 void result_ok(const char *name, int pass) {
-    @errhandler(CCError e) { cc_error_log(e); return; }
     const char *ok_str = pass ? "true" : "false";
     println(@string(`RESULT ok_${name} ${ok_str}`, @scratch));
 }

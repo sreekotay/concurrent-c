@@ -38,7 +38,6 @@ static int on_keep(void* env, int id, CCSlice v) {
 }
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
 
     const char* num = "int x = 1'000;";
     if (!C23Tok_match(num, strlen(num))) {

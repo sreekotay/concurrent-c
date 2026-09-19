@@ -952,11 +952,6 @@ static size_t check_snap(CCArena a, CheckSnap *snap, LspDiag *ds, size_t cap) {
 }
 
 static void check_waiter(CheckKick *kick) {
-    @errhandler(CCError e) {
-        cc_error_log(e);
-        free(kick);
-        return;
-    }
     CheckSnap *snap;
     LspDiag ds[DIAG_CAP];
     size_t n;
@@ -1017,10 +1012,6 @@ static void kick_check(CCSlice uri, unsigned delay_ms) {
     {
         CCNursery n = g_nurs;
         n.spawn(() => [kick] {
-                @errhandler(CCError e) {
-                    cc_error_log(e);
-                    free(kick);
-                }
                 check_waiter(kick);
             }) !>(e) {
             (void)e;
@@ -1203,7 +1194,6 @@ static int serve_stdio(void) {
 }
 
 static int run_check_file(const char *path) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
     CCArena a = cc_arena_heap(megabytes(4)) @destroy;
     LspDiag ds[DIAG_CAP];
     size_t i, n;
