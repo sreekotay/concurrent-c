@@ -4401,6 +4401,7 @@ static int cc__exec_comptime_blocks_for_clean(const char* raw, size_t raw_len,
     size_t nblocks = 0;
     size_t harvest_off;
     size_t prelude_mark = 0;
+    int quote_dir_set = 0;
     if (!buf) return -1;
     memcpy(buf, raw, raw_len);
     buf[raw_len] = '\0';
@@ -4413,8 +4414,10 @@ static int cc__exec_comptime_blocks_for_clean(const char* raw, size_t raw_len,
         char rtdir[PATH_MAX];
         snprintf(hroot, sizeof(hroot), "%s/.cc-build/clean", g_out_root);
         setenv("CC_CT_INCLUDE_FIRST", hroot, 1);
-        if (g_clean_quote_dir[0])
+        if (g_clean_quote_dir[0]) {
             setenv("SHADOW_QUOTE_DIR", g_clean_quote_dir, 1);
+            quote_dir_set = 1;
+        }
         rtdir[0] = '\0';
         if (g_repo_root[0]) snprintf(rtdir, sizeof(rtdir), "%s/out/cc/lib", g_repo_root);
         if (!rtdir[0] || access(rtdir, R_OK) != 0) {
@@ -4429,12 +4432,18 @@ static int cc__exec_comptime_blocks_for_clean(const char* raw, size_t raw_len,
         if (!lowered) {
             fprintf(stderr, "cc: cannot read %s\n", c_path);
             free(buf);
+            if (quote_dir_set) unsetenv("SHADOW_QUOTE_DIR");
             return -1;
         }
         blocks = cc__cut_lowered_blocks(lowered, &lowered_len, &nblocks);
         if (nblocks) {
             FILE* f = fopen(c_path, "wb");
-            if (!f) { free(lowered); free(buf); return -1; }
+            if (!f) {
+                free(lowered);
+                free(buf);
+                if (quote_dir_set) unsetenv("SHADOW_QUOTE_DIR");
+                return -1;
+            }
             fwrite(lowered, 1, lowered_len, f);
             fclose(f);
         }
@@ -4442,7 +4451,12 @@ static int cc__exec_comptime_blocks_for_clean(const char* raw, size_t raw_len,
     cc_reset_included_cch_sources();
     t = cc__now_ms();
     r = cc_rewrite_local_cch_includes_to_lowered_headers(buf, len, in_path);
-    if (cc_local_header_lower_failed()) { free(r); free(buf); return -1; }
+    if (cc_local_header_lower_failed()) {
+        free(r);
+        free(buf);
+        if (quote_dir_set) unsetenv("SHADOW_QUOTE_DIR");
+        return -1;
+    }
     if (r) { free(buf); buf = r; len = strlen(buf); }
     cc__prof_span("    ct_rewrite_local", t);
     t = cc__now_ms();
@@ -4457,6 +4471,7 @@ static int cc__exec_comptime_blocks_for_clean(const char* raw, size_t raw_len,
     if (cc__append_harvest(&buf, &len, strdup("/*__cc_ct_harvest*/")) != 0) {
         free(lowered);
         free(buf);
+        if (quote_dir_set) unsetenv("SHADOW_QUOTE_DIR");
         return -1;
     }
     /* What the includes just stopped carrying.
@@ -4472,6 +4487,7 @@ static int cc__exec_comptime_blocks_for_clean(const char* raw, size_t raw_len,
         cc__append_harvest(&buf, &len, cc_harvest_header_comptime_functions()) != 0 ||
         cc__append_harvest(&buf, &len, cc_harvest_local_header_comptime_blocks()) != 0) {
         free(buf);
+        if (quote_dir_set) unsetenv("SHADOW_QUOTE_DIR");
         return -1;
     }
     cc__prof_span("    ct_harvest", t);
@@ -4483,6 +4499,7 @@ static int cc__exec_comptime_blocks_for_clean(const char* raw, size_t raw_len,
     if (cc_comptime_prepare_source_ex(&buf, &len, in_path,
                                       CC_PREPARE_ALL & ~CC_PREPARE_COMPTIME_VALUE) != 0) {
         free(buf);
+        if (quote_dir_set) unsetenv("SHADOW_QUOTE_DIR");
         return -1;
     }
     cc__prof_span("    ct_prepare_all", t);
@@ -4508,6 +4525,10 @@ static int cc__exec_comptime_blocks_for_clean(const char* raw, size_t raw_len,
     cc__free_lowered_blocks(blocks, nblocks);
     free(lowered);
     free(buf);
+    /* Module children fork+exec and inherit the environment. Leaving this
+     * set makes their quoted-include walk prefer the user's unit dir over
+     * the face's `#line`, so a sibling like `server_poll.ccs` is missed. */
+    if (quote_dir_set) unsetenv("SHADOW_QUOTE_DIR");
     return rc;
 }
 

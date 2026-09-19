@@ -601,11 +601,17 @@ clean-tools: $(CLEAN_TOOLS_CC)
 # Rebuild the clean tools from their sources with the tools in hand (the
 # seeded ones on a fresh tree). Each lands beside the one that lowered it
 # and moves into place whole, so the lowerer never overwrites itself.
+#
+# cclower goes last: all four tools share the object of module `lower`,
+# and its cache key folds the bytes of the lowerer that emitted the C
+# (cc_face_module_key). Replacing cclower_cc before a sibling is built
+# gives that sibling a different key for the same sources, so the 74k-line
+# lower_cch.c is lowered and host-compiled at -O2 a second time.
 lower-cc: $(CCC_SCRIPT) $(LOWER_HEADERS_STAMP) $(CLEAN_TOOLS_CC)
 	bin/ccc build --lowerer=clean lower/cclex.ccs -o $(OUT_BINDIR)/cclex_cc.new && mv -f $(OUT_BINDIR)/cclex_cc.new $(OUT_BINDIR)/cclex_cc
 	bin/ccc build --lowerer=clean lower/ccparse.ccs -o $(OUT_BINDIR)/ccparse_cc.new && mv -f $(OUT_BINDIR)/ccparse_cc.new $(OUT_BINDIR)/ccparse_cc
-	bin/ccc build --lowerer=clean lower/cclower.ccs --ld-flags "$(LOWER_CC_COMPTIME_LIBS)" -o $(OUT_BINDIR)/cclower_cc.new && mv -f $(OUT_BINDIR)/cclower_cc.new $(OUT_BINDIR)/cclower_cc
 	bin/ccc build --lowerer=clean lower/ccindex.ccs -o $(OUT_BINDIR)/ccindex_cc.new && mv -f $(OUT_BINDIR)/ccindex_cc.new $(OUT_BINDIR)/ccindex_cc
+	bin/ccc build --lowerer=clean lower/cclower.ccs --ld-flags "$(LOWER_CC_COMPTIME_LIBS)" -o $(OUT_BINDIR)/cclower_cc.new && mv -f $(OUT_BINDIR)/cclower_cc.new $(OUT_BINDIR)/cclower_cc
 
 # Seed line: last-good names the pin the tools above are host-compiled
 # from, and the version ccc reports. Promote a new seed: scripts/ship_seed.sh --promote.

@@ -3399,38 +3399,29 @@ static bool cc__struct_of(CcIndex* ix, CCSlice name, int depth, CcRecordType* ou
     return false;
 }
 
-/* The `as:` faces of every `@typeview` whose subject matches `name`. */
-static void cc__view_faces_of(CcIndex* ix, CcUnit* u, CcDecl* d, CcTypeview tv, CCSlice name, CcNameList* faces) {
-    CCSlice subj = cc__hook_subject_text(ix, u, d->span);
-    bool matches;
-    CcHookEntryList* entryv = &tv.entries;
-    size_t k;
-    size_t n = entryv->len();
-    if (subj.len && subj.ptr[subj.len - 1] == '*' && subj.len > 1 && subj.ptr[subj.len - 2] == '_')
-        matches = name.len > subj.len - 1 && memcmp(name.ptr, subj.ptr, subj.len - 1) == 0;
-    else
-        matches = cc__eq(name, subj);
-    if (!matches) return;
-    for (k = 0; k < n; k++) {
-        CcHookEntry* e = entryv->get_ptr(k);
-        CcViewItemList* itemv = &e->items;
-        size_t j;
-        size_t ni = itemv->len();
-        if (!cc__eqc(e->key, "as")) continue;
-        for (j = 0; j < ni; j++) {
-            CcViewItem* vi = itemv->get_ptr(j);
-            if (vi->name.len) faces->push(vi->name);
-        }
+static size_t cc__decl_total(CcIndex* ix) {
+    CcUnitList* unitv = &ix->units;
+    size_t i;
+    size_t n = 0;
+    size_t nu = unitv->len();
+    for (i = 0; i < nu; i++) {
+        CcUnit* u = *unitv->get_ptr(i);
+        n += u->decls.len();
     }
+    return n;
 }
 
-/* `@typeview on Subject { as: field; }` faces of a type: the field names. */
-static CcNameList cc__view_faces(CcIndex* ix, CCSlice name) {
-    CcNameList faces = vec_new::[CCSlice](ix->arena);
+/* One pass over the units. Later asks match the subject list, which is the
+ * typeviews, not every declaration. Rebuilt when a unit gains a declaration
+ * (a splice), so a view added after the first ask is still seen. */
+static void cc__view_faces_build(CcIndex* ix) {
     CcUnitList* unitv = &ix->units;
     size_t i;
     size_t nu = unitv->len();
-    name = cc__strip_tag(name);
+    ix->vf_subj = vec_new::[CCSlice](ix->arena);
+    ix->vf_begin = vec_new::[size_t](ix->arena);
+    ix->vf_count = vec_new::[size_t](ix->arena);
+    ix->vf_name = vec_new::[CCSlice](ix->arena);
     for (i = 0; i < nu; i++) {
         CcUnit* u = *unitv->get_ptr(i);
         CcDeclList* declv = &u->decls;
@@ -3439,10 +3430,66 @@ static CcNameList cc__view_faces(CcIndex* ix, CCSlice name) {
         for (k = 0; k < nd; k++) {
             CcDecl* d = *declv->get_ptr(k);
             @switch (d->k) {
-                case .typeview(tv): cc__view_faces_of(ix, u, d, tv, name, &faces); break;
+                case .typeview(tv): {
+                    CCSlice subj = cc__hook_subject_text(ix, u, d->span);
+                    CcHookEntryList* entryv = &tv.entries;
+                    size_t e;
+                    size_t ne = entryv->len();
+                    size_t begin = ix->vf_name.len();
+                    size_t added = 0;
+                    if (!subj.len) break;
+                    for (e = 0; e < ne; e++) {
+                        CcHookEntry* en = entryv->get_ptr(e);
+                        CcViewItemList* itemv = &en->items;
+                        size_t j;
+                        size_t ni = itemv->len();
+                        if (!cc__eqc(en->key, "as")) continue;
+                        for (j = 0; j < ni; j++) {
+                            CcViewItem* vi = itemv->get_ptr(j);
+                            if (!vi->name.len) continue;
+                            ix->vf_name.push(vi->name);
+                            added++;
+                        }
+                    }
+                    if (!added) break;
+                    ix->vf_subj.push(subj);
+                    ix->vf_begin.push(begin);
+                    ix->vf_count.push(added);
+                    break;
+                }
                 default: break;
             }
         }
+    }
+    ix->vf_ndecls = cc__decl_total(ix);
+    ix->vf_ok = 1;
+}
+
+static void cc__view_faces_ensure(CcIndex* ix) {
+    if (ix->vf_ok && ix->vf_ndecls == cc__decl_total(ix)) return;
+    cc__view_faces_build(ix);
+}
+
+/* `@typeview on Subject { as: field; }` faces of a type: the field names. */
+static CcNameList cc__view_faces(CcIndex* ix, CCSlice name) {
+    CcNameList faces = vec_new::[CCSlice](ix->arena);
+    size_t i;
+    size_t n;
+    cc__view_faces_ensure(ix);
+    name = cc__strip_tag(name);
+    n = ix->vf_subj.len();
+    for (i = 0; i < n; i++) {
+        CCSlice subj = *ix->vf_subj.get_ptr(i);
+        bool matches;
+        size_t begin = *ix->vf_begin.get_ptr(i);
+        size_t cnt = *ix->vf_count.get_ptr(i);
+        size_t j;
+        if (subj.len && subj.ptr[subj.len - 1] == '*' && subj.len > 1 && subj.ptr[subj.len - 2] == '_')
+            matches = name.len > subj.len - 1 && memcmp(name.ptr, subj.ptr, subj.len - 1) == 0;
+        else
+            matches = cc__eq(name, subj);
+        if (!matches) continue;
+        for (j = 0; j < cnt; j++) faces.push(*ix->vf_name.get_ptr(begin + j));
     }
     return faces;
 }

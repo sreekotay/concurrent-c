@@ -229,6 +229,16 @@ typedef struct CcIndex {
     int expansion_depth;        /* nesting of macro / factory expansions being indexed */
     uint32_t n_expansions;
     uint32_t n_expansion_errors;    /* parse errors inside expansions (not reported as diagnostics) */
+    /* `@typeview` `as:` faces, built once per declaration count. A method
+     * resolve and an `as:` walk both ask for the faces of one subject;
+     * scanning every declaration of every unit on each ask is most of
+     * lowering. */
+    Vec::[CCSlice] vf_subj;
+    Vec::[size_t] vf_begin;         /* index into vf_name, parallel to vf_subj */
+    Vec::[size_t] vf_count;
+    Vec::[CCSlice] vf_name;
+    size_t vf_ndecls;
+    int vf_ok;
 } CcIndex;
 
 CcIndex* cc_index_new(Vec::[CCSlice] include_dirs, CCSlice quote_dir, CcDiags* ds, CCArena a);

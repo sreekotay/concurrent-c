@@ -9,6 +9,9 @@
 #include "print_impl.cch"
 #include "index_impl.cch"
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/time.h>
 
 CcLowerer cc_lowerer_new(CcUnit* u, CcIndex* ix, CcLowerOpts opts, CcDiags* ds) {
     CcLowerer L;
@@ -1191,35 +1194,118 @@ static void lw_fwd_typedefs(CcLowerer* L) {
     }
 }
 
+static long long lw_ms(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (long long)tv.tv_sec * 1000 + (long long)tv.tv_usec / 1000;
+}
+
+/* Which constructs this unit's own tokens spell. A pass that rewrites one
+ * of them walks the whole tree to find it; a unit that never wrote it has
+ * nothing to find, and the walk is the time. A construct arrives on this
+ * tape: a factory splice happens after these passes, and a comptime block
+ * is text of this unit. */
+typedef struct LwNeed {
+    bool deadline;
+    bool parallel;
+    bool async_;
+    bool chan;
+    bool closures;
+    bool forin;
+    bool strswitch;
+} LwNeed;
+
+static bool lw_pp_has(CCSlice s, const char* lit) {
+    size_t n = 0;
+    size_t i;
+    while (lit[n]) n++;
+    if (s.len < n || !s.ptr) return false;
+    for (i = 0; i + n <= s.len; i++)
+        if (memcmp(s.ptr + i, lit, n) == 0) return true;
+    return false;
+}
+
+static LwNeed lw_scan_need(CcUnit* u) {
+    LwNeed n;
+    CcTape* tp = &u->tape;
+    size_t i;
+    size_t nt = tp->toks.len();
+    memset(&n, 0, sizeof(n));
+    for (i = 0; i < nt; i++) {
+        const CcToken* t = tp->toks.get_ptr(i);
+        if (t->kind == CC_TK_AT_WORD) {
+            if (CcToken_is_at(t, "with_deadline")) n.deadline = true;
+            else if (CcToken_is_at(t, "parallel")) n.parallel = true;
+            else if (CcToken_is_at(t, "async") || CcToken_is_at(t, "await")) n.async_ = true;
+            else if (CcToken_is_at(t, "for")) n.forin = true;
+        } else if (t->kind == CC_TK_PUNCT && t->punct == CC_P_FAT_ARROW) {
+            n.closures = true;
+        } else if (t->kind == CC_TK_PUNCT && t->punct == CC_P_LBRACKET && i + 1 < nt) {
+            const CcToken* nx = tp->toks.get_ptr(i + 1);
+            if (nx->kind == CC_TK_PUNCT && nx->punct == CC_P_TILDE) n.chan = true;
+        } else if (t->kind == CC_TK_PP && lw_pp_has(t->text, "#pragma(@parallel)")) {
+            n.parallel = true;
+        } else if (t->kind == CC_TK_IDENT && CcToken_is_ident(t, "case") && i + 1 < nt) {
+            const CcToken* nx = tp->toks.get_ptr(i + 1);
+            if (nx->kind == CC_TK_STRING) n.strswitch = true;
+        }
+        if (n.deadline && n.parallel && n.async_ && n.chan && n.closures && n.forin && n.strswitch)
+            break;
+    }
+    return n;
+}
+
+/* Order is the meaning: ct blocks and comptime values first, then the
+ * checks that read the program as written (own, typeof), then the
+ * constructs that become ordinary statements (deadline, chan, async,
+ * parallel, closures, create, forin), then slices before generics, generics
+ * before UFCS, variants before UFCS and Results, UFCS before Results,
+ * slice args after the method call is plain, strings after the slots are
+ * C, asargs after an error binder is a declaration, strswitch last but
+ * cleanup. drop / regions / forwards / banner run after the steps. */
 void CcLowerer_lower_unit(CcLowerer* L) {
-    CcLowerer_ct_blocks(L); /* first: a compile-time block is a function to every step */
-    CcLowerer_comptime(L);  /* then: a value the user asked for at compile time is a constant to every step */
-    CcLowerer_own(L);       /* then, before any rewrite: the ownership checks read the program as written */
-    CcLowerer_typeof(L);    /* likewise: `type_of(T)` names a type by its spelling, as written */
-    CcLowerer_typeof_members(L);  /* then fold its members: a constant where C wants one */
-    CcLowerer_includes(L);
-    CcLowerer_deadline(L);  /* before the rest: a deadline body is ordinary statements to every one of them */
-    CcLowerer_chan(L);      /* before them: an endpoint is the runtime handle before anything
-                               captures it, spells it into a frame, or copies it into an arm */
-    CcLowerer_async(L);     /* then: an async body is an ordinary body to every step after it */
-    CcLowerer_parallel(L);  /* then: an arm becomes an ordinary function the later steps walk */
-    CcLowerer_closures(L);  /* then: the body becomes a function the later steps walk */
-    CcLowerer_create(L);    /* before UFCS: the constructor becomes an ordinary call */
-    CcLowerer_forin(L);     /* after create: the walk subject is an ordinary value */
-    CcLowerer_slices(L);    /* before generics: it reads `T[:]` as written */
-    CcLowerer_generics(L);  /* before UFCS: a local of `Vec::[T]` is typed by its instance name */
-    CcLowerer_variants(L);  /* before UFCS and Results: projections are plain members after it */
-    CcLowerer_ufcs(L);      /* before Results: an unwrap needs the plain call to type its Result */
-    CcLowerer_slice_args(L);/* after UFCS: a method call is a plain call by now */
-    CcLowerer_strings(L);   /* after them: a slot spells the C it will be */
-    CcLowerer_results(L);
-    CcLowerer_asargs(L);   /* after Results: an error binder is a named declaration by now */
-    CcLowerer_strswitch(L);/* last but cleanup: the subject it spells is the C it will be */
-    CcLowerer_cleanup(L);
-    lw_drop_cc_only(L);   /* after the steps: the index reads faces off the unit's declarations */
-    lw_ct_regions(L);     /* after the drop: the block functions stay, between their markers */
-    lw_fwd_typedefs(L);   /* after them: the records the steps spliced need forwards too */
-    lw_banner(L);
+    int prof = 0;
+    long long t0 = 0;
+    LwNeed need = lw_scan_need(L->unit);
+    {
+        const char* e = getenv("CC_CCC_PROFILE");
+        prof = e && e[0] == '1';
+    }
+#define LW_STEP(name, call) \
+    do { \
+        long long _dt; \
+        if (prof) t0 = lw_ms(); \
+        call; \
+        if (prof) { _dt = lw_ms() - t0; if (_dt > 0) fprintf(stderr, "cclower_profile: pass %-18s %5lld ms\n", name, _dt); } \
+    } while (0)
+    LW_STEP("ct_blocks", CcLowerer_ct_blocks(L));
+    LW_STEP("comptime", CcLowerer_comptime(L));
+    LW_STEP("own", CcLowerer_own(L));
+    LW_STEP("typeof", CcLowerer_typeof(L));
+    LW_STEP("typeof_members", CcLowerer_typeof_members(L));
+    LW_STEP("includes", CcLowerer_includes(L));
+    if (need.deadline) LW_STEP("deadline", CcLowerer_deadline(L));
+    if (need.chan) LW_STEP("chan", CcLowerer_chan(L));
+    if (need.async_) LW_STEP("async", CcLowerer_async(L));
+    if (need.parallel) LW_STEP("parallel", CcLowerer_parallel(L));
+    if (need.closures) LW_STEP("closures", CcLowerer_closures(L));
+    LW_STEP("create", CcLowerer_create(L));
+    if (need.forin) LW_STEP("forin", CcLowerer_forin(L));
+    LW_STEP("slices", CcLowerer_slices(L));
+    LW_STEP("generics", CcLowerer_generics(L));
+    LW_STEP("variants", CcLowerer_variants(L));
+    LW_STEP("ufcs", CcLowerer_ufcs(L));
+    LW_STEP("slice_args", CcLowerer_slice_args(L));
+    LW_STEP("strings", CcLowerer_strings(L));
+    LW_STEP("results", CcLowerer_results(L));
+    LW_STEP("asargs", CcLowerer_asargs(L));
+    if (need.strswitch) LW_STEP("strswitch", CcLowerer_strswitch(L));
+    LW_STEP("cleanup", CcLowerer_cleanup(L));
+    LW_STEP("drop_cc_only", lw_drop_cc_only(L));
+    LW_STEP("ct_regions", lw_ct_regions(L));
+    LW_STEP("fwd_typedefs", lw_fwd_typedefs(L));
+    LW_STEP("banner", lw_banner(L));
+#undef LW_STEP
 }
 
 #endif

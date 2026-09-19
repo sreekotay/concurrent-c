@@ -2506,6 +2506,8 @@ static void pl_lower(PStep* st, CcStmt* s, CcParallel p) {
      * skip frame still runs them inline. */
     if (p.noblock && first == 1)
         offer = 0;
+    else
+        offer = first;
     for (i = offer; i < n; i++) {
         CcParallelArm* arm = armv->get_ptr(i);
         PScan sc;
