@@ -29,11 +29,13 @@ so `personality(ADDR_NO_RANDOMIZE)` works.
 ./scripts/stress_sanitize.sh tsan
 ./scripts/stress_sanitize.sh sanitizers   # both
 
-# real_projects mains (pigz_idiomatic, pigz_channel, pigz_cc, redis_idiomatic, levenshtein)
+# real_projects mains (pigz_*, redis_idiomatic, staticd, levenshtein)
 ./scripts/real_projects_sanitize.sh asan
 ./scripts/real_projects_sanitize.sh tsan
 ./scripts/real_projects_sanitize.sh fuzz   # ASan binaries + random inputs
 ./scripts/real_projects_sanitize.sh all
+# One specimen only (e.g. staticd Makefile `make asan` / `make tsan`):
+REAL_SANITIZE_ONLY=staticd ./scripts/real_projects_sanitize.sh tsan
 # Darwin auto-uses Docker for runtime (ASan+fibers hang on host); Linux CI is native.
 ```
 
@@ -159,11 +161,11 @@ Harness forces `CC=clang`. Levenshtein **import** under TSan is skipped
 
 | Command | Result |
 |---------|--------|
-| `./scripts/real_projects_sanitize.sh asan` | **OK** — pigz_idiomatic run, pigz_cc build, redis smoke, levenshtein import |
-| `./scripts/real_projects_sanitize.sh tsan` | **OK** — same mains; levenshtein import **SKIP** (dlopen); server stderr scanned for late TSan reports |
+| `./scripts/real_projects_sanitize.sh asan` | **OK** — pigz_idiomatic run, pigz_cc build, redis/staticd build, levenshtein import |
+| `./scripts/real_projects_sanitize.sh tsan` | **OK** — same mains + redis/staticd HTTP smokes; levenshtein import **SKIP** (dlopen); server stderr scanned for late TSan reports |
 | `./scripts/real_projects_sanitize.sh fuzz` | **OK** — light ASan pigz input fuzz |
 
-Nightly: [`.github/workflows/bridge-asan-nightly.yml`](../.github/workflows/bridge-asan-nightly.yml) runs bridge ASan fuzz, TSan dlopen gate, wire libFuzzer, chaos, and real_projects asan/tsan/fuzz. Redis smoke under ASan is skipped (fiber fake-stack CHECK on GHA clang); TSan still runs that smoke.
+Nightly: [`.github/workflows/bridge-asan-nightly.yml`](../.github/workflows/bridge-asan-nightly.yml) runs bridge ASan fuzz, TSan dlopen gate, wire libFuzzer, chaos, and real_projects asan/tsan/fuzz. Redis and staticd smoke under ASan are skipped (fiber fake-stack CHECK on GHA clang); TSan still runs those smokes. staticd smoke is fixture GETs only (no TLS / pages / wrk); TSan loads `scripts/tsan_fiber.supp`.
 
 ### Bridge addon ASan
 

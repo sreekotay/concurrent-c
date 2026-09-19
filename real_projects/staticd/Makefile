@@ -10,24 +10,28 @@ DARKHTTPD_BIN = $(OUT_DIR)/darkhttpd
 REPO_CC = ../../cc
 REPO_ROOT = ../..
 
-.PHONY: all staticd darkhttpd fixtures clean setup smoke bench ws stress string_tpl tls
+.PHONY: all staticd darkhttpd fixtures clean setup smoke bench ws stress string_tpl tls asan tsan \
+	stage-server-modules
 
 all: staticd
 
 $(OUT_DIR):
 	mkdir -p $(OUT_DIR)
 
-# Build BearSSL and a TLS runtime, then staticd.
-tls:
-	$(MAKE) -C $(REPO_ROOT) bearssl
-	$(MAKE) -C $(REPO_CC)
-	$(MAKE) staticd
+# server.cch stages under out/.cc-build/modules/; member .ccs must resolve
+# as symlinks to the face dir (same layout as scripts/real_projects_sanitize.sh).
+stage-server-modules: | $(OUT_DIR)
+	mkdir -p $(OUT_DIR)/.cc-build/modules
+	@for f in server_poll.ccs server_poll.cch server_serve.ccs; do \
+		ln -sfn $(abspath $(REPO_CC)/include/ccc/std)/$$f \
+			$(OUT_DIR)/.cc-build/modules/$$f; \
+	done
 
 $(OUT_DIR)/staticd: staticd.ccs staticd_ws.cch \
 		staticd_http.cch staticd_block.cch staticd_fs.cch staticd_script.cch \
 		$(REPO_CC)/include/ccc/std/server.cch $(REPO_CC)/include/ccc/std/server_serve.ccs \
 		$(REPO_CC)/include/ccc/std/server_poll.cch $(REPO_CC)/include/ccc/std/server_poll.ccs \
-		| $(OUT_DIR)
+		| $(OUT_DIR) stage-server-modules
 	CFLAGS="$(EXTRA_CFLAGS) $${CFLAGS:-}" $(CCC) -O -o $@ staticd.ccs --release
 
 staticd: $(OUT_DIR)/staticd
@@ -62,6 +66,14 @@ ws: staticd
 # Adversarial storms (see ../../stress/staticd/staticd_stress.md).
 stress: staticd fixtures
 	cd ../.. && CHAOS_SCALE=$${CHAOS_SCALE:-quick} ./stress/staticd/run.sh
+
+# ASan / TSan via shared harness (binaries under out/real_sanitize/, not out/).
+# Source of truth: ../../scripts/real_projects_sanitize.sh — Darwin auto-Docker.
+asan:
+	cd $(REPO_ROOT) && REAL_SANITIZE_ONLY=staticd ./scripts/real_projects_sanitize.sh asan
+
+tsan:
+	cd $(REPO_ROOT) && REAL_SANITIZE_ONLY=staticd ./scripts/real_projects_sanitize.sh tsan
 
 # Isolated RSS (fresh process per cell). Override with DURATION=5 REPEATS=3 …
 bench: staticd fixtures

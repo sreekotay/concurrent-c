@@ -1,0 +1,70 @@
+/* IdTable::[V] — holes on drop, pack only on compact(). */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct SmokeRow {
+    int payload;
+} SmokeRow;
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(64));
+    IdTable::[SmokeRow] t;
+    SmokeRow* p;
+    SmokeRow* held;
+    int id1, id2, id3;
+    uint32_t g1, g3;
+    size_t i;
+    int sum;
+
+    if (!cc_arena_is_live(arena)) return 1;
+    t = id_table_new::[SmokeRow](arena);
+    if (!t) return 2;
+
+    id1 = t->put((SmokeRow){ .payload = 10 });
+    id2 = t->put((SmokeRow){ .payload = 20 });
+    if (id1 <= 0 || id2 <= 0 || id1 == id2) return 3;
+    if (t->len() != 2 || t->span() != 2) return 4;
+    g1 = t->gen(id1);
+    if (g1 == 0 || t->gen(id2) == 0 || t->gen(id2) == g1) return 5;
+
+    held = t->get(id2);
+    if (!held || held->payload != 20) return 6;
+    if (t->drop(id1) != 0) return 7;
+    if (t->get(id1) != NULL) return 8;
+    if (t->get(id2) != held) return 9; /* drop did not move the other row */
+    if (t->len() != 1 || t->span() != 2) return 10;
+    if (t->at(0, NULL) != NULL) return 11; /* hole where id1 was */
+
+    t->compact();
+    if (t->len() != 1 || t->span() != 1) return 12;
+    p = t->get(id2);
+    if (!p || p->payload != 20) return 13;
+
+    id3 = t->put((SmokeRow){ .payload = 30 });
+    if (id3 != id1) return 14; /* LIFO id recycle */
+    g3 = t->gen(id3);
+    if (g3 == 0 || g3 == g1) return 15;
+    if (t->len() != 2) return 16;
+
+    sum = 0;
+    for (i = 0; i < t->span(); i++) {
+        int id = 0;
+        p = t->at(i, &id);
+        if (!p || id <= 0) return 17;
+        sum += p->payload;
+    }
+    if (sum != 50) return 18;
+
+    if (cc_id_unpack_id(cc_id_pack(id2, g1)) != id2) return 19;
+    if (cc_id_unpack_gen(cc_id_pack(id2, t->gen(id2))) != t->gen(id2)) return 20;
+
+    if (t->drop(id2) != 0 || t->drop(id3) != 0) return 21;
+    if (t->len() != 0) return 22;
+    t->compact();
+    if (t->span() != 0) return 23;
+
+    printf("id_table_smoke ok\n");
+    t->destroy();
+    cc_arena_free(&arena);
+    return 0;
+}

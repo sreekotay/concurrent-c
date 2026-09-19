@@ -3,10 +3,10 @@
  * server_poll.ccs (kqueue / epoll / poll), a member as well. Both splice
  * into the module unit that server.cch roots.
  *
- * Connections live in Table::[int, CCConnRow] keyed by WaitId (≥1).
+ * Connections live in IdTable::[CCConnRow] (WaitId ≥1 over Table dense rows).
  * Kernel udata / wake hits name WaitId — never dense pack index.
- * `id_di` is WaitId → dense index for O(1) row(). `cc_tape_close` requires
- * an empty table (abort otherwise); worker exit is `worker_tape_exit` only.
+ * `cc_tape_close` requires an empty table (abort otherwise); worker exit is
+ * `worker_tape_exit` only.
  */
 #pragma(@module) "server"
 #ifndef CC_STD_SERVER_POLL_CCH
@@ -64,16 +64,13 @@ typedef struct CCConnRow {
     int step_busy; /* app step claimed (home or stealer); not armed until done */
 } CCConnRow;
 
-/* Incomplete: concrete Table::[int, CCConnRow]* lives in server_poll.ccs. */
-struct CCTapeConns;
+/* Incomplete: concrete IdTable::[CCConnRow]* lives in server_poll.ccs. */
+struct CCIdTableConn;
 
 /*
  * One worker's wait face. Owner: `cc_server_worker` (arena `wa`).
- *   conns     — WaitId → row (opaque table handle)
- *   id_di     — WaitId → dense index+1 (0 absent); O(1) row() without hash
- *   hits      — CCWaitHit storage for the current wake (cleared next wait)
- *   id_free   — recycled WaitIds
- *   id_stamp  — monotonic gen for udata (ABA)
+ *   ids        — IdTable::[CCConnRow] (WaitId + gen stamp + dense walk)
+ *   hits       — CCWaitHit storage for the current wake (cleared next wait)
  *   wake_epoch — bumps each wait(); pairs with row hit_epoch for O(1) dedup
  *   backend_fd — kqueue/epoll, or -1 for poll
  * Listen is not a conn row; spare_fd is EMFILE recovery only.
@@ -81,12 +78,8 @@ struct CCTapeConns;
  */
 typedef struct CCTape {
     CCServer* srv;
-    struct CCTapeConns* conns;
-    Vec::[uint32_t] id_di;
+    struct CCIdTableConn* ids;
     Vec::[CCWaitHit] hits;
-    Vec::[int] id_free;
-    int id_next;
-    uint32_t id_stamp;
     uint32_t wake_epoch;
     int listening;
     int spare_fd;
@@ -142,8 +135,9 @@ int cc_tape_watch(CCTape* w, CCIoSess* io);
 /* Unwatch fd, delete WaitId, recycle id. -1 = desync. */
 int cc_tape_drop_id(CCTape* w, int id);
 size_t cc_tape_nconns(CCTape* w);
+size_t cc_tape_span(CCTape* w);
 CCConnRow* cc_tape_row(CCTape* w, int id);
-/* Dense pack walk (reap / deadline). id out via *out_id. */
+/* Walk [0, span()). Null = hole (drop does not pack). Poll compacts first. */
 CCConnRow* cc_tape_dense_at(CCTape* w, size_t di, int* out_id);
 
 #endif /* CC_STD_SERVER_POLL_CCH */

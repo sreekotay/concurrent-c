@@ -1137,11 +1137,15 @@ static int conn_drop_id(CCTape* tape, CCArenaPool* slots, ServeCtx* ctx,
 
 static int cc_tape_reap(CCTape* tape, CCArenaPool* slots, ServeCtx* ctx) {
     size_t di = 0;
-    while (di < tape->nconns()) {
+    while (di < tape->span()) {
         int id = 0;
         CCConnRow* row = tape->dense_at(di, &id);
         CCIoSess* io;
-        if (!row || id <= 0) return -1;
+        if (!row) {
+            di++;
+            continue;
+        }
+        if (id <= 0) return -1;
         if (row->step_busy) {
             di++;
             continue;
@@ -1152,6 +1156,7 @@ static int cc_tape_reap(CCTape* tape, CCArenaPool* slots, ServeCtx* ctx) {
             continue;
         }
         if (conn_drop_id(tape, slots, ctx, id) < 0) return -1;
+        di++;
     }
     return 0;
 }
@@ -1160,11 +1165,16 @@ static int cc_tape_reap(CCTape* tape, CCArenaPool* slots, ServeCtx* ctx) {
 static void worker_tape_exit(CCTape* tape, CCArenaPool* slots, ServeCtx* ctx) {
     size_t di = 0;
     if (!tape) return;
-    while (di < tape->nconns()) {
+    while (di < tape->span()) {
         int id = 0;
         CCConnRow* row = tape->dense_at(di, &id);
-        if (!row || id <= 0) break;
+        if (!row) {
+            di++;
+            continue;
+        }
+        if (id <= 0) break;
         if (conn_drop_id(tape, slots, ctx, id) < 0) break;
+        di++;
     }
     tape->close();
 }
@@ -1340,7 +1350,7 @@ static void cc_server_worker(ServeCtx* ctx) {
          * mark dead but reap after step so ready WaitIds stay valid
          * while this batch drains. */
         if (ep.idle() || now != deadline_sec) {
-            size_t n = tape.nconns();
+            size_t n = tape.span();
             size_t di;
             deadline_sec = now;
             for (di = 0; di < n; di++) {

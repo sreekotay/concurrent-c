@@ -12,7 +12,8 @@
 # + skip run, or --docker for a full Linux pass. Ubuntu CI runs full.
 #
 # Mains: pigz_idiomatic (wait-for + dict chain), pigz_channel, pigz_cc (build),
-# redis_idiomatic (+ smoke), levenshtein. See docs/sanitizers.md.
+# redis_idiomatic (+ smoke), staticd (+ HTTP smoke), levenshtein.
+# See docs/sanitizers.md. Filter with REAL_SANITIZE_ONLY=staticd,redis,…
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -52,13 +53,14 @@ if [[ "$DOCKER" -eq 1 ]]; then
     -e REAL_FUZZ_N="${REAL_FUZZ_N:-40}" \
     -e REAL_SANITIZE_TIMEOUT="${REAL_SANITIZE_TIMEOUT:-120}" \
     -e REAL_FUZZ_SEED="${REAL_FUZZ_SEED:-1}" \
+    -e REAL_SANITIZE_ONLY="${REAL_SANITIZE_ONLY:-}" \
     -w /work \
     ubuntu:24.04 bash -lc '
       set -euo pipefail
       export DEBIAN_FRONTEND=noninteractive
       apt-get update -qq
       apt-get install -y -qq build-essential clang python3 python3-dev \
-        zlib1g-dev libzopfli-dev pkg-config rsync ca-certificates >/dev/null
+        zlib1g-dev libzopfli-dev pkg-config rsync ca-certificates curl >/dev/null
       # rsync 24 = vanished source file (host TCC rebuild mid-copy); retry once.
       rsync_src() {
         rsync -a --delete \
@@ -179,7 +181,28 @@ can_run_sanitized() {
   [[ "$HOST_OS" != "Darwin" ]]
 }
 
+# Optional filter: REAL_SANITIZE_ONLY=staticd or comma list (pigz,redis,staticd,…).
+should_run() {
+  local name="$1"
+  local only="${REAL_SANITIZE_ONLY:-}"
+  [[ -z "$only" ]] && return 0
+  case ",${only}," in
+    *",${name},"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+tsan_options() {
+  local supp="$ROOT/scripts/tsan_fiber.supp"
+  if [[ -f "$supp" ]]; then
+    echo "halt_on_error=1:suppressions=${supp}"
+  else
+    echo "halt_on_error=1"
+  fi
+}
+
 build_run_pigz_idiomatic() {
+  should_run pigz || return 0
   local san="$1"
   local flags ld
   flags="$(san_flags "$san")"
@@ -200,7 +223,7 @@ build_run_pigz_idiomatic() {
   printf 'hello real_projects sanitize\n' >"$OUT/pigz_in.txt"
   rm -f "$OUT/pigz_in.txt.gz"
   export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0:halt_on_error=1:detect_stack_use_after_return=0}"
-  export TSAN_OPTIONS="${TSAN_OPTIONS:-halt_on_error=1}"
+  export TSAN_OPTIONS="${TSAN_OPTIONS:-$(tsan_options)}"
   if ! run_timeout "$bin" "$OUT/pigz_in.txt"; then
     fail "pigz_idiomatic run"
     return
@@ -215,6 +238,7 @@ build_run_pigz_idiomatic() {
 # Wait-for + cache(zs) + dict hop: take[] snapshot of a loop-carried slot.
 # Two runs must byte-match (ordered write + copied tail).
 build_run_pigz_idiomatic_dict() {
+  should_run pigz || return 0
   local san="$1"
   local flags
   flags="$(san_flags "$san")"
@@ -234,7 +258,7 @@ build_run_pigz_idiomatic_dict() {
   python3 -c "open(r'$OUT/pw_in.bin','wb').write((b'The quick brown fox\n')*50000)"
   unset CC_WORKERS || true
   export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0:halt_on_error=1:detect_stack_use_after_return=0}"
-  export TSAN_OPTIONS="${TSAN_OPTIONS:-halt_on_error=1}"
+  export TSAN_OPTIONS="${TSAN_OPTIONS:-$(tsan_options)}"
   rm -f "$OUT/pw_in.bin.gz"
   if ! run_timeout "$bin" "$OUT/pw_in.bin"; then
     fail "pigz_idiomatic dict run 1"
@@ -259,6 +283,7 @@ build_run_pigz_idiomatic_dict() {
 }
 
 build_run_pigz_channel() {
+  should_run pigz || return 0
   local san="$1"
   local flags ld
   flags="$(san_flags "$san")"
@@ -279,7 +304,7 @@ build_run_pigz_channel() {
   printf 'hello real_projects sanitize\n' >"$OUT/pigz_ch_in.txt"
   rm -f "$OUT/pigz_ch_in.txt.gz"
   export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0:halt_on_error=1:detect_stack_use_after_return=0}"
-  export TSAN_OPTIONS="${TSAN_OPTIONS:-halt_on_error=1}"
+  export TSAN_OPTIONS="${TSAN_OPTIONS:-$(tsan_options)}"
   if ! run_timeout "$bin" "$OUT/pigz_ch_in.txt"; then
     fail "pigz_channel run"
     return
@@ -292,6 +317,7 @@ build_run_pigz_channel() {
 }
 
 build_pigz_cc() {
+  should_run pigz || return 0
   local san="$1"
   local flags
   flags="$(san_flags "$san")"
@@ -309,6 +335,7 @@ build_pigz_cc() {
 }
 
 build_run_redis() {
+  should_run redis || return 0
   local san="$1"
   local flags
   flags="$(san_flags "$san")"
@@ -335,7 +362,7 @@ build_run_redis() {
     return
   fi
   export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0:halt_on_error=1:detect_stack_use_after_return=0}"
-  export TSAN_OPTIONS="${TSAN_OPTIONS:-halt_on_error=1}"
+  export TSAN_OPTIONS="${TSAN_OPTIONS:-$(tsan_options)}"
   local out errf="$OUT/redis_smoke_${san}.err"
   local srv_errf="$OUT/redis_server_${san}.err"
   rm -f "$srv_errf"
@@ -369,7 +396,113 @@ build_run_redis() {
   esac
 }
 
+# server.cch stages under out/.cc-build/modules/; quoted member .ccs must
+# resolve beside that copy. Symlink members from the face directory so a
+# fresh lower finds them (same layout as a face-dir build).
+stage_server_module_members() {
+  local mod="$ROOT/out/.cc-build/modules"
+  local std="$ROOT/cc/include/ccc/std"
+  mkdir -p "$mod"
+  local f
+  for f in server_poll.ccs server_poll.cch server_serve.ccs; do
+    [ -f "$std/$f" ] || continue
+    ln -sfn "$std/$f" "$mod/$f"
+  done
+}
+
+# HTTP/1.1 file server: build into OUT/, short fixture GET smoke (no wrk / peers).
+# TLS needs BearSSL in the toolchain (optional); pages need QuickJS / libpython —
+# this lane smokes static fixtures only. ASan runtime smoke skipped like redis
+# (fiber fake-stack CHECK on some clang); TSan covers the smoke.
+build_run_staticd() {
+  should_run staticd || return 0
+  local san="$1"
+  local flags
+  flags="$(san_flags "$san")"
+  local bin="$OUT/staticd_${san}"
+  local fix="$ROOT/real_projects/staticd/fixtures"
+  echo -e "${CYA}[$san]${NC} staticd + HTTP smoke"
+  stage_server_module_members
+  if ! "$CCC" build --no-cache -g \
+      real_projects/staticd/staticd.ccs -o "$bin" \
+      --cc-flags "$flags" --ld-flags "$flags"; then
+    fail "staticd build"
+    return
+  fi
+  if ! can_run_sanitized; then
+    skip "staticd smoke (Darwin ASan/TSan runtime — use --docker / Linux CI)"
+    ok "staticd build"
+    return
+  fi
+  if [[ "$san" == asan ]]; then
+    skip "staticd smoke under ASan (fiber fake-stack CHECK; covered by TSan smoke)"
+    ok "staticd build"
+    return
+  fi
+  if [[ ! -f "$fix/1kb.bin" || ! -f "$fix/4kb.html" || ! -f "$fix/index.html" ]]; then
+    if ! (cd "$ROOT/real_projects/staticd" && ./gen_fixtures.sh); then
+      fail "staticd fixtures"
+      return
+    fi
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    skip "staticd smoke (need curl)"
+    ok "staticd build"
+    return
+  fi
+  export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0:halt_on_error=1:detect_stack_use_after_return=0}"
+  export TSAN_OPTIONS="${TSAN_OPTIONS:-$(tsan_options)}"
+  local port=$((19080 + ($$ % 200)))
+  local srv_errf="$OUT/staticd_server_${san}.err"
+  local pid=""
+  rm -f "$srv_errf"
+  "$bin" --listen "127.0.0.1:${port}" --root "$fix" --workers 1 \
+    >"$OUT/staticd_server_${san}.out" 2>"$srv_errf" &
+  pid=$!
+  local i code=0
+  for i in $(seq 1 50); do
+    if curl -sS -o /dev/null --connect-timeout 0.2 \
+         "http://127.0.0.1:${port}/index.html" 2>/dev/null; then
+      break
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then
+      code=1
+      break
+    fi
+    sleep 0.1
+  done
+  if [[ "$code" -ne 0 ]] || ! kill -0 "$pid" 2>/dev/null; then
+    [ -s "$srv_errf" ] && { echo "--- staticd server stderr ---"; tail -60 "$srv_errf"; }
+    fail "staticd smoke (server died)"
+    wait "$pid" 2>/dev/null || true
+    return
+  fi
+  local path status
+  for path in /index.html /1kb.bin /4kb.html; do
+    status="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 2 \
+      "http://127.0.0.1:${port}${path}" || echo 000)"
+    if [[ "$status" != "200" ]]; then
+      echo "GET ${path} → HTTP ${status}"
+      [ -s "$srv_errf" ] && { echo "--- staticd server stderr ---"; tail -60 "$srv_errf"; }
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      fail "staticd smoke ${path}"
+      return
+    fi
+  done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  if [ -s "$srv_errf" ] && grep -qiE 'ThreadSanitizer|AddressSanitizer|data race|heap-use-after-free' "$srv_errf"; then
+    echo "--- staticd server stderr (sanitizer) ---"
+    tail -60 "$srv_errf"
+    fail "staticd smoke sanitizer report"
+    return
+  fi
+  ok "staticd"
+}
+
 build_run_levenshtein() {
+  should_run levenshtein || return 0
   local san="$1"
   local flags
   flags="$(san_flags "$san")"
@@ -417,6 +550,7 @@ run_san() {
   build_run_pigz_channel "$san"
   build_pigz_cc "$san"
   build_run_redis "$san"
+  build_run_staticd "$san"
   build_run_levenshtein "$san"
 }
 

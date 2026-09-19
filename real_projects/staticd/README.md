@@ -144,7 +144,18 @@ curl -D- -H 'Range: bytes=0-15' http://127.0.0.1:8080/4kb.html | head
                             # handshake rejects, fragment/unmasked/oversize)
 make stress                 # adversarial storms (../../stress/staticd)
 CHAOS_SCALE=full make stress
+make asan                   # REAL_SANITIZE_ONLY=staticd → shared harness
+make tsan                   # TSan + short fixture HTTP smoke (Linux / Docker)
 ```
+
+Sanitizers go through
+[`scripts/real_projects_sanitize.sh`](../../scripts/real_projects_sanitize.sh)
+(instrumented binary under `out/real_sanitize/staticd_{asan,tsan}`, not
+`out/staticd`). Darwin auto-routes to Docker (host ASan+fibers hangs). ASan
+is build + skip-run on the fiber fake-stack path (same as redis); TSan runs
+a short curl smoke on fixtures. TLS / QuickJS / CPython pages are not in
+that smoke — use `correctness.sh` / `make tls` for those. Details:
+[`docs/sanitizers.md`](../../docs/sanitizers.md).
 
 Missing nginx / darkhttpd / caddy are skipped. Traversal may be 400, 403, or
 404; staticd is 403. Adversarial catalog:

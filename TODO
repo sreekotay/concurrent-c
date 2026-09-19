@@ -8,6 +8,7 @@ Not “C, but with more conveniences,” and not “trust the programmer instead
 - release(name); //also release bool if already released
 - comptime at the right time - e.g. mimetype
 - promote Table from staticd - compare to wstore5
+- IdTable::[V] extracted (WaitId over Table); freelist-stable dense slots only if steal needs it
   standing: ./perf/compare_table_wstore.sh stand
   twin: perf/wstore_table.ccs (Table + CCTemporalIndex wheel; in-place rows)
 - areana - consider size slabs vs age heapds - 3 tier reconsider

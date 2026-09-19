@@ -107,6 +107,7 @@ builds/runs the tiny fixture (needs the `stylo/` submodule + generated
 ```
 
 Covers the main specimens (`pigz_idiomatic`, `pigz_cc` build, `redis_idiomatic` +
-smoke, `levenshtein`). Darwin auto-uses Docker for runtime (host ASan/TSan +
-fibers hang). Latest ASan + TSan receipts:
-[`docs/sanitizers.md`](../docs/sanitizers.md).
+smoke, `staticd` + HTTP smoke, `levenshtein`). Filter with
+`REAL_SANITIZE_ONLY=staticd` (also `make -C real_projects/staticd asan|tsan`).
+Darwin auto-uses Docker for runtime (host ASan/TSan + fibers hang). Latest
+ASan + TSan receipts: [`docs/sanitizers.md`](../docs/sanitizers.md).
