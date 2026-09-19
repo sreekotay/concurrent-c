@@ -1,0 +1,25 @@
+/* `@grammar(cli)` is an AFTER_PRELUDE emit. ArrayMap's factory puts the
+ * fallback hash prototypes in `#else` of `#ifdef CC_MAP_HASH_<key>`. size_t
+ * has that macro, so a splice that stops on the first line of the `#else`
+ * compiles the grammar type away. */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/cli.cch>
+#include <stdio.h>
+
+typedef ArrayMap::[size_t, int] Postings;
+
+@grammar(cli) HashOpts {~~~~
+    help: flag -h, --help desc "Show this help"
+~~~~}
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(4));
+    Postings m;
+    HashOpts opts = {0};
+    if (!cc_arena_is_live(arena)) return 1;
+    m = array_map_new::[size_t, int](arena);
+    if (!m) return 2;
+    if (opts.help) return 3;
+    printf("ok\n");
+    return 0;
+}

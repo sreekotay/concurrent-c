@@ -3664,6 +3664,10 @@ static int cc__emit_plan_block_references_container(const char* src, size_t bloc
     return !typedef_uses_only_predeclared_vec_char;
 }
 
+static size_t cc__emit_skip_pp_region(const char* src, size_t len, size_t line_start);
+static int cc__emit_line_is_map_hash_guard(const char* src, size_t line_start,
+                                           size_t line_end);
+
 size_t cc_emit_plan_compute_prelude_insert_pos(const char* src, size_t len) {
     size_t insert_pos = 0;
     /* Directives are skipped one line at a time, which walks straight INTO a
@@ -3706,6 +3710,11 @@ size_t cc_emit_plan_compute_prelude_insert_pos(const char* src, size_t len) {
             continue;
         }
         if (p < line_end && src[p] == '#') {
+            /* Outside both arms, not on the `#else` fallback prototypes. */
+            if (cc__emit_line_is_map_hash_guard(src, line_start, line_end)) {
+                insert_pos = cc__emit_skip_pp_region(src, len, line_start);
+                continue;
+            }
             size_t d = p + 1;
             while (d < line_end && (src[d] == ' ' || src[d] == '\t')) d++;
             if ((d + 2 <= line_end && memcmp(src + d, "if", 2) == 0)) {
@@ -3779,6 +3788,62 @@ size_t cc_emit_plan_compute_prelude_insert_pos(const char* src, size_t len) {
         break;
     }
     return insert_pos;
+}
+
+/* Line after the `#endif` that closes the `#if` / `#ifdef` / `#ifndef`
+ * starting at `line_start`. `len` when the region is not closed. */
+static size_t cc__emit_skip_pp_region(const char* src, size_t len, size_t line_start) {
+    int depth = 0;
+    size_t pos = line_start;
+    while (pos < len) {
+        size_t line_end = pos;
+        size_t p;
+        while (line_end < len && src[line_end] != '\n') line_end++;
+        p = pos;
+        while (p < line_end && (src[p] == ' ' || src[p] == '\t' || src[p] == '\r')) p++;
+        if (p < line_end && src[p] == '#') {
+            size_t d = p + 1;
+            while (d < line_end && (src[d] == ' ' || src[d] == '\t')) d++;
+            /* `#if` / `#ifdef` / `#ifndef` — same loose prefix as the walk
+             * below. `#endif` does not start with `if`. */
+            if (d + 2 <= line_end && memcmp(src + d, "if", 2) == 0)
+                depth++;
+            else if (d + 5 <= line_end && memcmp(src + d, "endif", 5) == 0 &&
+                     (d + 5 == line_end || !cc_is_ident_char(src[d + 5])) &&
+                     depth > 0) {
+                depth--;
+                if (depth == 0)
+                    return (line_end < len) ? line_end + 1 : line_end;
+            }
+        }
+        pos = (line_end < len) ? line_end + 1 : line_end;
+    }
+    return len;
+}
+
+/* Factory product: `#ifdef CC_MAP_HASH_<key>` then only `#define`s, and the
+ * fallback prototypes live in the `#else`. The first ordinary line of that
+ * region is therefore the dead arm whenever the key already has a hash
+ * (`CC_MAP_HASH_size_t` is always set). An AFTER_PRELUDE fragment spliced
+ * there — `@grammar(cli)`, anything else — is compiled out. */
+static int cc__emit_line_is_map_hash_guard(const char* src, size_t line_start,
+                                           size_t line_end) {
+    size_t p = line_start;
+    size_t op;
+    while (p < line_end && (src[p] == ' ' || src[p] == '\t' || src[p] == '\r')) p++;
+    if (p >= line_end || src[p] != '#') return 0;
+    p++;
+    while (p < line_end && (src[p] == ' ' || src[p] == '\t')) p++;
+    if (p + 5 <= line_end && memcmp(src + p, "ifdef", 5) == 0 &&
+        (p + 5 == line_end || !cc_is_ident_char(src[p + 5])))
+        op = p + 5;
+    else if (p + 6 <= line_end && memcmp(src + p, "ifndef", 6) == 0 &&
+             (p + 6 == line_end || !cc_is_ident_char(src[p + 6])))
+        op = p + 6;
+    else
+        return 0;
+    while (op < line_end && (src[op] == ' ' || src[op] == '\t')) op++;
+    return op + 12 <= line_end && memcmp(src + op, "CC_MAP_HASH_", 12) == 0;
 }
 
 size_t cc_emit_plan_compute_container_anchor(const char* src, size_t len) {

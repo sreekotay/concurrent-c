@@ -69,7 +69,7 @@ static size_t hand_write(const Feed* f, char* dst) {
 
 int main(int argc, char** argv) {
     CCArena pa = cc_arena_create(kilobytes(4));
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    @errhandler(CCIoError e) { cc_error_log(e.base); return 1; }
 
     const char* path = argc > 1 ? argv[1] : "examples/serdes/json/twitter.json";
     CCFile inf = cc_file_open(path) !> @destroy;

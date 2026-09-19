@@ -39,7 +39,7 @@ static int cb(void* env, int id, CCSlice v){ (void)env;(void)id; g_keeps++; g_by
 
 int main(int argc, char** argv) {
     CCArena pa = cc_arena_create(kilobytes(4));
-    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    @errhandler(CCIoError e) { cc_error_log(e.base); return 1; }
 
     const char* fn = argc > 1 ? argv[1] : "twitter.json";
     int K = argc > 2 ? atoi(argv[2]) : 100, T = argc > 3 ? atoi(argv[3]) : 3;
