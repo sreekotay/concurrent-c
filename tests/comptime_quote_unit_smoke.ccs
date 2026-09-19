@@ -1,0 +1,18 @@
+/* `#include "ct_quote_unit.h"` names a header beside this unit. Comptime
+ * compiles the unit from a memory buffer, so that header is visible only
+ * when the unit directory is on the include path — not only when the
+ * working directory is this directory. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include "ct_quote_unit.h"
+
+@comptime {
+    char b[64];
+    snprintf(b, sizeof(b), "enum { CT_QUOTE_UNIT = %d };\n", ct_quote_unit_val());
+    cc_emit_cstr(CC_EMIT_AT_COMPTIME_SITE, b);
+}
+
+int main(void) {
+    printf("%d\n", CT_QUOTE_UNIT);
+    return CT_QUOTE_UNIT == 41 ? 0 : 1;
+}

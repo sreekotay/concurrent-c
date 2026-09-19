@@ -524,13 +524,27 @@ static int cc__input_is_shcc(CCUnitKind unit_kind, const char* path) {
     return k == CC_UNIT_KIND_SHCC;
 }
 
+/* The directory that holds this run's script `out/`, or empty when the
+ * unit is not a script. macOS `TMPDIR` already ends in `/`; joining
+ * another slash makes `T//cc-script-…`, and the parent of that `out/`
+ * is not a project. */
+static char g_script_cache_root[PATH_MAX];
+
 static int cc__use_script_cache_dirs(void) {
-    const char* tmp = getenv("TMPDIR");
+    const char* env = getenv("TMPDIR");
+    char tmp[PATH_MAX];
     char root[PATH_MAX];
-    if (!tmp || !tmp[0]) tmp = "/tmp";
+    size_t n;
+    if (!env || !env[0]) env = "/tmp";
+    n = strlen(env);
+    if (n + 1 > sizeof(tmp)) return -1;
+    memcpy(tmp, env, n + 1);
+    while (n > 1 && tmp[n - 1] == '/') tmp[--n] = '\0';
     if (snprintf(root, sizeof(root), "%s/cc-script-%ld", tmp,
                  (long)getuid()) >= (int)sizeof(root))
         return -1;
+    if (strlen(root) + 1 > sizeof(g_script_cache_root)) return -1;
+    memcpy(g_script_cache_root, root, strlen(root) + 1);
     snprintf(g_out_root, sizeof(g_out_root), "%s/out", root);
     snprintf(g_bin_root, sizeof(g_bin_root), "%s/bin", root);
     snprintf(g_cache_root, sizeof(g_cache_root), "%s/.cc-build", g_out_root);
@@ -4082,6 +4096,8 @@ static uint64_t g_clean_src_key = 0;
  * against is that one and not the unit's own. Kept as content, not as a
  * pointer -- the buffer it is copied from is a block local. */
 static char g_clean_quote_dir[PATH_MAX];
+/* The file the user named, when the lowerer is reading a cache copy of it. */
+static char g_clean_origin[PATH_MAX];
 
 static int cc__set_lowerer_name(const char* v) {
     /* The environment carries the choice to the child runs that lower a
@@ -4390,11 +4406,15 @@ static int cc__exec_comptime_blocks_for_clean(const char* raw, size_t raw_len,
     buf[raw_len] = '\0';
     if (c_path) {
         /* the region TU is the unit's: its lowered local headers first on
-         * the include path, and the runtime linked */
+         * the include path, and the runtime linked. The TU is a memory
+         * buffer, so a quoted include still needs the directory the user
+         * wrote the unit in. */
         char hroot[PATH_MAX];
         char rtdir[PATH_MAX];
         snprintf(hroot, sizeof(hroot), "%s/.cc-build/clean", g_out_root);
         setenv("CC_CT_INCLUDE_FIRST", hroot, 1);
+        if (g_clean_quote_dir[0])
+            setenv("SHADOW_QUOTE_DIR", g_clean_quote_dir, 1);
         rtdir[0] = '\0';
         if (g_repo_root[0]) snprintf(rtdir, sizeof(rtdir), "%s/out/cc/lib", g_repo_root);
         if (!rtdir[0] || access(rtdir, R_OK) != 0) {
@@ -4641,6 +4661,11 @@ static int cc__materialize_comptime_for_clean(const char* in_path, char* out_ccs
             }
             if (lf) fclose(lf);
         }
+        /* `--no-line` leaves a unit_native wrap unstamped, so the walk
+         * above stays on the wrap. The file the user named is the origin. */
+        if (stamp == in_path && g_clean_origin[0] &&
+            strcmp(g_clean_origin, in_path) != 0)
+            stamp = g_clean_origin;
         size_t hn = strlen(stamp) + 32;
         char* with = (char*)malloc(hn + len + 1);
         int k;
@@ -5076,6 +5101,26 @@ static int cc__collect_link_markers_file(const char* file_abs, CCPathList* visit
     return rc;
 }
 
+/* A stage copy lives under the build cache. That directory is not where
+ * the user wrote the unit. */
+static int cc__cache_stage_dir(const char* dir) {
+    char abs[PATH_MAX];
+    char root[PATH_MAX];
+    const char* d;
+    const char* r;
+    if (!dir || !dir[0]) return 0;
+    d = realpath(dir, abs) ? abs : dir;
+    if (g_cache_root[0]) {
+        r = realpath(g_cache_root, root) ? root : g_cache_root;
+        if (strcmp(d, r) == 0 || cc__path_under_root(d, r)) return 1;
+    }
+    if (g_script_cache_root[0]) {
+        r = realpath(g_script_cache_root, root) ? root : g_script_cache_root;
+        if (strcmp(d, r) == 0 || cc__path_under_root(d, r)) return 1;
+    }
+    return 0;
+}
+
 /* The directory a unit was written in: named by a `#line` on its first
  * line when the unit is a stage copy, else its own. */
 static void cc__unit_origin_dir(const char* path, char* out, size_t cap) {
@@ -5429,25 +5474,7 @@ static int cc__write_module_stages_for_clean(const char* unit_path, const char* 
     return 0;
 }
 
-/* Directory the clean lowerer should treat as the root of quoted local
- * headers, when the unit is not in the toolchain tree. An install's
- * `g_repo_root` is the prefix; a dev `ccc`'s is this checkout. Neither
- * contains another project's `core/foo.cch`, and `--quote-dir` is only the
- * directory the unit was written in, so `tests/x.ccs` cannot name
- * `../core/foo.cch`. The stage lives under the project's `out/`, inside
- * that project's checkout when it has one. */
-static int cc__project_root_for_unit(const char* in_path, char* out, size_t cap) {
-    char abs[PATH_MAX];
-    char dir[PATH_MAX];
-    const char* tool = g_repo_root[0] ? g_repo_root : g_cc_include;
-    char tool_abs[PATH_MAX];
-    if (!in_path || !out || cap < 2) return -1;
-    if (!realpath(in_path, abs)) return -1;
-    if (tool && tool[0]) {
-        if (realpath(tool, tool_abs)) tool = tool_abs;
-        if (cc__path_under_root(abs, tool)) return -1;
-    }
-    snprintf(dir, sizeof(dir), "%s", abs);
+static int cc__git_root_walk(char* dir, char* out, size_t cap) {
     for (;;) {
         char marker[PATH_MAX];
         char* slash;
@@ -5461,7 +5488,39 @@ static int cc__project_root_for_unit(const char* in_path, char* out, size_t cap)
         if (!slash || slash == dir) break;
         *slash = '\0';
     }
-    {
+    return -1;
+}
+
+/* Directory the clean lowerer should treat as the root of quoted local
+ * headers, when the unit is not in the toolchain tree. An install's
+ * `g_repo_root` is the prefix; a dev `ccc`'s is this checkout. Neither
+ * contains another project's `core/foo.cch`, and `--quote-dir` is only the
+ * directory the unit was written in, so `tests/x.ccs` cannot name
+ * `../core/foo.cch`. The stage lives under the project's `out/`, inside
+ * that project's checkout when it has one. A script's stage lives under
+ * `$TMPDIR/cc-script-<uid>/out` instead, which also ends in `/out` and is
+ * not that project. */
+static int cc__project_root_for_unit(const char* in_path, char* out, size_t cap) {
+    char abs[PATH_MAX];
+    char dir[PATH_MAX];
+    const char* tool = g_repo_root[0] ? g_repo_root : g_cc_include;
+    char tool_abs[PATH_MAX];
+    if (!in_path || !out || cap < 2) return -1;
+    if (!realpath(in_path, abs)) return -1;
+    if (tool && tool[0]) {
+        if (realpath(tool, tool_abs)) tool = tool_abs;
+        if (cc__path_under_root(abs, tool)) return -1;
+    }
+    snprintf(dir, sizeof(dir), "%s", abs);
+    if (cc__git_root_walk(dir, out, cap) == 0) return 0;
+    if (g_script_cache_root[0] && cc__path_under_root(abs, g_script_cache_root) &&
+        g_clean_quote_dir[0]) {
+        char qabs[PATH_MAX];
+        if (realpath(g_clean_quote_dir, qabs)) {
+            if (cc__git_root_walk(qabs, out, cap) == 0) return 0;
+        }
+    }
+    if (!g_script_cache_root[0]) {
         size_t n = strlen(g_out_root);
         char proj[PATH_MAX];
         if (n > 4 && strcmp(g_out_root + n - 4, "/out") == 0 && n - 4 < sizeof(proj)) {
@@ -5554,7 +5613,9 @@ static int cc__run_clean_lowerer(const char* in_path, const char* c_out,
     rc = cc__run_argv(argv);
     cc__prof_span_arg("clean_lower_child", in_path, t0);
     if (rc != 0) {
-        fprintf(stderr, "cc: clean lowerer failed (rc=%d) on %s\n", rc, in_path);
+        const char* shown = (g_clean_origin[0] && strcmp(g_clean_origin, in_path) != 0)
+                                ? g_clean_origin : in_path;
+        fprintf(stderr, "cc: clean lowerer failed (rc=%d) on %s\n", rc, shown);
         return -1;
     }
     return 0;
@@ -6264,6 +6325,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             CCBuildOptions o2;
             CCBuildOptions o_shcc;
             CCBuildOptions o_unit;
+            snprintf(g_clean_origin, sizeof(g_clean_origin), "%s", clean_orig);
             if (uk == CC_UNIT_KIND_CCH) {
                 fprintf(stderr, "cc: the clean lowerer does not lower header units yet (%s)\n", opt->in_path);
                 return -1;
@@ -6321,6 +6383,13 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             int clean_no_line = 0;
             char clean_modules[PATH_MAX];
             cc__unit_origin_dir(opt->in_path, clean_qdir, sizeof(clean_qdir));
+            /* A stage under the cache has no directory of its own. `#line`
+             * names the file the user wrote; without it (`--no-line` leaves
+             * the wrap unstamped, a script's first line is the prelude) the
+             * walk stays in `out/.cc-build` or `$TMPDIR/cc-script-…`. Quoted
+             * includes still name files beside the file the user named. */
+            if (cc__cache_stage_dir(clean_qdir))
+                cc__module_dir_of(clean_orig, clean_qdir, sizeof(clean_qdir));
             /* recorded for the host compile: by then `in_path` is the emitted
              * C, and a quoted include still names a file beside the unit */
             snprintf(g_clean_quote_dir, sizeof(g_clean_quote_dir), "%s", clean_qdir);

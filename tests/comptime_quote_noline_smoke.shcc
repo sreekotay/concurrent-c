@@ -1,0 +1,16 @@
+/* `--no-line` plus a unit header: comptime still sees `hdr.h` beside
+ * the unit, and the working directory is not that directory. */
+CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
+
+CCCommand run = cc_command(arena, @slice("./cc/bin/ccc"));
+run.arg("run");
+run.arg("--no-cache");
+run.arg("--no-line");
+run.arg("tests/comptime_quote_noline/unit.ccs");
+run.inherit_stdio();
+int rc = run.status() !>;
+if (rc != 0) {
+    "comptime missed the header beside the unit under --no-line".println();
+    return 1;
+}
+return 0;

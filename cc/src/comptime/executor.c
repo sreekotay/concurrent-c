@@ -231,9 +231,22 @@ char* cc_comptime_resolve_quoted_includes(const char* text, size_t len, const ch
         while (p < le && (text[p] == ' ' || text[p] == '\t')) p++;
         if (p < le && text[p] == '#' && cur[0]) {
             const char* slash = strrchr(cur, '/');
+            const char* dir = NULL;
+            size_t dir_len = 0;
+            const char* qd;
             q = p + 1;
             while (q < le && (text[q] == ' ' || text[q] == '\t')) q++;
-            if (slash && q + 7 <= le && memcmp(text + q, "include", 7) == 0) {
+            /* A `#line` with no directory (`cc_slice.cch` after the
+             * prelude, or none at all under `--no-line`) still names a
+             * file beside the unit. SHADOW_QUOTE_DIR is that directory. */
+            if (slash) {
+                dir = cur;
+                dir_len = (size_t)(slash - cur);
+            } else if ((qd = getenv("SHADOW_QUOTE_DIR")) && qd[0]) {
+                dir = qd;
+                dir_len = strlen(qd);
+            }
+            if (dir && dir_len && q + 7 <= le && memcmp(text + q, "include", 7) == 0) {
                 q += 7;
                 while (q < le && (text[q] == ' ' || text[q] == '\t')) q++;
                 if (q < le && text[q] == '"' && q + 1 < le && text[q + 1] != '/') {
@@ -241,7 +254,7 @@ char* cc_comptime_resolve_quoted_includes(const char* text, size_t len, const ch
                     while (qe < le && text[qe] != '"') qe++;
                     if (qe < le) {
                         char abs[2048];
-                        int k = snprintf(abs, sizeof(abs), "%.*s/%.*s", (int)(slash - cur), cur,
+                        int k = snprintf(abs, sizeof(abs), "%.*s/%.*s", (int)dir_len, dir,
                                          (int)(qe - q - 1), text + q + 1);
                         if (k > 0 && (size_t)k < sizeof(abs) && access(abs, R_OK) == 0) {
                             char line[2200];
@@ -1268,6 +1281,42 @@ static int cc__exec_run_tu(const char* tu, char* err_buf, size_t err_sz) {
  * is linked (CC_CT_INCLUDE_FIRST and CC_RUNTIME_LIB_DIR, from the driver). */
 static int cc__exec_link_runtime = 0;
 
+/* The file the block was written in. A memory TU has no including file,
+ * so `#include "rel"` does not search beside it unless this directory
+ * (or SHADOW_QUOTE_DIR, the same directory when the driver set it) is
+ * on the include path. */
+static const char* cc__exec_unit_path = NULL;
+
+static void cc__exec_bind_unit(const CCComptimeExecOpts* opts) {
+    const char* p = opts ? opts->input_path : NULL;
+    cc__exec_unit_path = (p && p[0] && p[0] != '<') ? p : NULL;
+}
+
+static void cc__exec_add_quote_dirs(TCCState* s) {
+    const char* qd = getenv("SHADOW_QUOTE_DIR");
+    const char* path = cc__exec_unit_path;
+    char udir[4096];
+    const char* slash;
+    size_t n;
+    if (!s) return;
+    if (qd && qd[0]) tcc_add_include_path(s, qd);
+    if (!path || !path[0] || path[0] == '<') return;
+    slash = strrchr(path, '/');
+    if (!slash) {
+        if (!qd || strcmp(qd, ".") != 0) tcc_add_include_path(s, ".");
+        return;
+    }
+    n = (size_t)(slash - path);
+    if (n == 0) {
+        if (!qd || strcmp(qd, "/") != 0) tcc_add_include_path(s, "/");
+        return;
+    }
+    if (n >= sizeof(udir)) return;
+    memcpy(udir, path, n);
+    udir[n] = '\0';
+    if (!qd || strcmp(qd, udir) != 0) tcc_add_include_path(s, udir);
+}
+
 static TCCState* cc__exec_new_state(CCExecErrSink* sink, char* err_buf, size_t err_sz) {
     TCCState* s = tcc_new();
     if (!s) {
@@ -1277,6 +1326,8 @@ static TCCState* cc__exec_new_state(CCExecErrSink* sink, char* err_buf, size_t e
     tcc_set_error_func(s, sink, cc__exec_err_capture);
     /* Parse at the version the real compile will use; see the constant. */
     tcc_set_options(s, CC_TCC_HOST_OPTIONS);
+    /* Quoted includes name files beside the unit, not beside the cwd. */
+    cc__exec_add_quote_dirs(s);
     if (cc__exec_link_runtime) {
         const char* first = getenv("CC_CT_INCLUDE_FIRST");
         if (first && first[0]) tcc_add_include_path(s, first);
@@ -1632,6 +1683,7 @@ int cc_comptime_exec_block_body(const char* body, size_t body_len,
                 fclose(df);
             }
         }
+        cc__exec_bind_unit(opts);
         if (setjmp(cc__exec_jb) != 0) {
             cc__exec_in_block = 0;
             if (err_buf && err_sz)
@@ -1644,9 +1696,9 @@ int cc_comptime_exec_block_body(const char* body, size_t body_len,
             rc = cc__exec_run_tu(tu, err_buf, err_sz);
             cc__exec_in_block = 0;
         }
+        cc__exec_unit_path = NULL;
         free(tu);
         cc_emit_plan_host_ctx_end();
-        (void)opts;
         return rc;
     }
 #endif
@@ -1688,6 +1740,7 @@ int cc_comptime_exec_block_region(const char* region, size_t region_len,
                 fclose(df);
             }
         }
+        cc__exec_bind_unit(opts);
         if (setjmp(cc__exec_jb) != 0) {
             cc__exec_in_block = 0;
             if (err_buf && err_sz)
@@ -1702,6 +1755,7 @@ int cc_comptime_exec_block_region(const char* region, size_t region_len,
             cc__exec_link_runtime = 0;
             cc__exec_in_block = 0;
         }
+        cc__exec_unit_path = NULL;
         free(tu);
         cc_emit_plan_host_ctx_end();
         return rc;

@@ -1,0 +1,18 @@
+#!ccc ccs
+/* A unit header forces a cache wrap. `--no-line` leaves that wrap
+ * without `#line`, so the quoted-include root must still be this
+ * directory, not `out/.cc-build`. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include "hdr.h"
+
+@comptime {
+    char b[64];
+    snprintf(b, sizeof(b), "enum { CT_QUOTE_NOLINE = %d };\n", ct_quote_noline_val());
+    cc_emit_cstr(CC_EMIT_AT_COMPTIME_SITE, b);
+}
+
+int main(void) {
+    printf("%d\n", CT_QUOTE_NOLINE);
+    return CT_QUOTE_NOLINE == 41 ? 0 : 1;
+}

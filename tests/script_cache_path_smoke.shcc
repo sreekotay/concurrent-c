@@ -1,0 +1,7 @@
+/* A script's stage lives under `$TMPDIR/cc-script-<uid>`, not the
+ * project. `TMPDIR` on macOS already ends in `/`; that must not become
+ * `//cc-script`, and `--root` must stay the checkout that holds the
+ * script, not the cache. */
+int rc = cc_script_sh(@string(`./tests/script_cache_path_check.sh`, @scratch));
+if (rc != 0) return 1;
+return 0;
