@@ -24,7 +24,7 @@ static int cc_command_push_raw(CCCommand *cmd, CCSlice arg) {
     if (CCVec_size_t_push(&cmd->offsets, offset) != 0) return -1;
     if (!cc_string_push_slice(&cmd->storage, arg, cmd->arena)) {
         cmd->offsets.len--;
-        cc_vec_sync_len((CCVec *)&cmd->offsets);
+        cc_vec_sync_len(&cmd->offsets.base);
         return -1;
     }
     if (!cc_string_push_char(&cmd->storage, '\0', cmd->arena)) {
@@ -32,7 +32,7 @@ static int cc_command_push_raw(CCCommand *cmd, CCSlice arg) {
         storage = cc_string_data(&cmd->storage);
         if (storage) storage[old_len] = '\0';
         cmd->offsets.len--;
-        cc_vec_sync_len((CCVec *)&cmd->offsets);
+        cc_vec_sync_len(&cmd->offsets.base);
         return -1;
     }
     return 0;

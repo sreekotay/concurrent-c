@@ -359,28 +359,40 @@ static bool vt_is_c_keyword(CCSlice s) {
 
 /* The spelling of an arm type in the lowered union: as written, with its
  * qualifiers; a generic or slice type by its instance name. */
+/* True when the canon name is the whole of the type: a generic, slice,
+ * result, chan, or already-instanced name. For those the span may live on
+ * a face tape, and the canon is a host-C name the index still resolves.
+ * A pointer or array arm is not one: its canon drops the pointer, and a
+ * name synthesized from it would leave the binder untypeable. */
+static bool vt_type_by_canon(CcType* t) {
+    if (!t) return false;
+    @switch (t->k) {
+        case .generic: return true;
+        case .slice: return true;
+        case .result: return true;
+        case .chan: return true;
+        case .named: return true;
+        default: break;
+    }
+    return false;
+}
+
 static CCSlice vt_type_text(VStep* st, VInfo* vi, VArm* arm) {
     CcIndex* ix = st->w->ix;
     CcUnit* u = vi->unit;
+    CcType* t = arm->type;
     CCSlice text;
     CCSlice cn;
     size_t i;
     bool plain;
     bool by_canon = false;
-    if (!arm->type) return cstr_slice("void");
-    cn = ix->canon(arm->type);
+    if (!t) return cstr_slice("void");
+    cn = ix->canon(t);
     /* A generic, slice, or already-instanced name may carry a face-tape
      * span. Reading that span from this unit dumps foreign bytes
      * (`struct { Del del;` for `Vec::[char]`), and a case bind that prints
      * that spelling splits the function. Prefer the canon name. */
-    @switch (arm->type->k) {
-        case .generic: by_canon = true; break;
-        case .slice: by_canon = true; break;
-        case .result: by_canon = true; break;
-        case .chan: by_canon = true; break;
-        case .named: by_canon = true; break;
-        default: break;
-    }
+    by_canon = vt_type_by_canon(t);
     if (by_canon && cn.len) return cn;
     text = arm->type_span.last >= arm->type_span.first ? u->text(arm->type_span) : cc_slice_empty();
     plain = text.len > 0;
@@ -2282,15 +2294,20 @@ static void vt_switch_cases_rewrite(VStep* st, VInfo* vi, CcStmt* body, CcExpr* 
                 mb.name = c.arm;
                 mb.arrow = subj_ptr;
                 {
-                    /* Spell the payload the way the union field does: the
-                     * arm's type node may still be a CC generic whose span
-                     * lives on a face tape. Printing that span against this
-                     * unit's tape dumps foreign bytes and splits the
-                     * function (`e; }; } buf = ...`). A named type from
-                     * the canon (or the plain arm text) is host C. */
-                    CcType* bt = NULL;
-                    CCSlice ty = vt_arm_type_text(st, vi, arm);
-                    if (ty.len) bt = lw_named_type(L, ty, t->span);
+                    /* A generic or slice arm may carry a face-tape span.
+                     * Printing that span against this unit's tape dumps
+                     * foreign bytes and splits the function
+                     * (`e; }; } buf = ...`), so spell those from the canon,
+                     * which is host C the index still resolves. Every other
+                     * arm keeps its own type node: the canon of a pointer
+                     * arm drops the pointer, and a name synthesized from it
+                     * leaves the binder untypeable ('cannot type the
+                     * receiver of .len'). */
+                    CcType* bt = arm ? arm->type : NULL;
+                    if (vt_type_by_canon(bt)) {
+                        CCSlice ty = vt_arm_type_text(st, vi, arm);
+                        if (ty.len) bt = lw_named_type(L, ty, t->span);
+                    }
                     if (!bt) bt = lw_named_type(L, cstr_slice("int"), dot);
                     lw_push(blk, vt_synth(st, lw_decl_stmt(L, bt, c.bind, vt_recv_arm(st, vi, mb, t->span), t->span)));
                 }

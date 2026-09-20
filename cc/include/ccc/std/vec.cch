@@ -169,39 +169,42 @@ static inline CCSlice __cc_vec_generic_as_slice(__CCVecGeneric *v) {
  * compiler when the element has a declared slice spec; usable directly
  * when instantiating by hand next to a `CC_DECL_SLICE_SPEC`). */
 #define CC_VEC_DECL_ARENA_CORE(T, Name)                                           \
-    typedef struct {                                                              \
-        T *data;                                                                  \
-        size_t len;                                                               \
-        size_t cap;                                                               \
-        CCArenaOwner *own;                                                        \
-        uint32_t token;                                                           \
-        uint32_t _pad;                                                            \
+    typedef union {                                                               \
+        struct {                                                                  \
+            T *data;                                                              \
+            size_t len;                                                           \
+            size_t cap;                                                           \
+            CCArenaOwner *own;                                                    \
+            uint32_t token;                                                       \
+            uint32_t _pad;                                                        \
+        };                                                                        \
+        CCVec base;                                                               \
     } Name;                                                                       \
                                                                                   \
-    static inline Name Name##_init(CCArena arena, size_t initial_cap) {          \
-        Name v = {NULL, 0, 0, NULL, 0, 0};                                        \
-        if (cc_vec_init((CCVec *)&v, arena, sizeof(T), _Alignof(T),                \
-                        initial_cap > 0 ? initial_cap : CC_VEC_INITIAL_CAP)        \
+    static inline Name Name##_init(CCArena arena, size_t initial_cap) {           \
+        Name v = {{NULL, 0, 0, NULL, 0, 0}};                                      \
+        if (cc_vec_init(&v.base, arena, sizeof(T), _Alignof(T),                   \
+                        initial_cap > 0 ? initial_cap : CC_VEC_INITIAL_CAP)       \
             != 0) {                                                               \
-            cc__vec_unbind((CCVec *)&v);                                          \
+            cc__vec_unbind(&v.base);                                              \
         }                                                                         \
         return v;                                                                 \
     }                                                                             \
                                                                                   \
     static inline Name Name##_from(T *p, size_t len, size_t cap) {                \
-        Name v = {NULL, 0, 0, NULL, 0, 0};                                        \
-        if (cc_vec_from((CCVec *)&v, (void *)p, len, cap) != 0) {                  \
-            cc__vec_unbind((CCVec *)&v);                                          \
+        Name v = {{NULL, 0, 0, NULL, 0, 0}};                                      \
+        if (cc_vec_from(&v.base, (void *)p, len, cap) != 0) {                     \
+            cc__vec_unbind(&v.base);                                              \
         }                                                                         \
         return v;                                                                 \
     }                                                                             \
                                                                                   \
     static inline int Name##_reserve(Name *v, size_t need) {                      \
-        return cc_vec_reserve((CCVec *)v, sizeof(T), _Alignof(T), need);          \
+        return cc_vec_reserve(&v->base, sizeof(T), _Alignof(T), need);            \
     }                                                                             \
                                                                                   \
     static inline int Name##_push(Name *v, T value) {                             \
-        T *slot = (T *)cc_vec_push_slot((CCVec *)v, sizeof(T), _Alignof(T));      \
+        T *slot = (T *)cc_vec_push_slot(&v->base, sizeof(T), _Alignof(T));        \
         if (!slot) return -1;                                                     \
         *slot = value;                                                            \
         return 0;                                                                 \
@@ -209,14 +212,14 @@ static inline CCSlice __cc_vec_generic_as_slice(__CCVecGeneric *v) {
                                                                                   \
     /* Push and return pointer to new slot (kvec's kv_pushp equivalent) */        \
     static inline T* Name##_push_ptr(Name *v) {                                   \
-        return (T *)cc_vec_push_slot((CCVec *)v, sizeof(T), _Alignof(T));         \
+        return (T *)cc_vec_push_slot(&v->base, sizeof(T), _Alignof(T));           \
     }                                                                             \
                                                                                   \
     /* Pop: writes last element to *out and returns true; false if empty. */      \
     static inline bool Name##_pop(Name *v, T *out) {                              \
         if (!v || v->len == 0) return false;                                      \
         v->len--;                                                                 \
-        cc_vec_sync_len((CCVec *)v);                                              \
+        cc_vec_sync_len(&v->base);                                                \
         if (out) *out = v->data[v->len];                                          \
         return true;                                                              \
     }                                                                             \
@@ -239,28 +242,28 @@ static inline CCSlice __cc_vec_generic_as_slice(__CCVecGeneric *v) {
                                                                                   \
     /* Auto-extending indexing (kvec's kv_a equivalent) */                        \
     static inline T* Name##_at_grow(Name *v, size_t i) {                          \
-        return (T *)cc_vec_at_grow((CCVec *)v, sizeof(T), _Alignof(T), i);        \
+        return (T *)cc_vec_at_grow(&v->base, sizeof(T), _Alignof(T), i);          \
     }                                                                             \
                                                                                   \
     static inline void Name##_clear(Name *v) {                                    \
-        cc_vec_clear((CCVec *)v);                                                 \
+        cc_vec_clear(&v->base);                                                   \
     }                                                                             \
                                                                                   \
     static inline void Name##_truncate(Name *v, size_t n) {                       \
-        cc_vec_truncate((CCVec *)v, n);                                           \
+        cc_vec_truncate(&v->base, n);                                             \
     }                                                                             \
                                                                                   \
     static inline void Name##_destroy(Name *v) {                                  \
-        cc_vec_destroy((CCVec *)v);                                               \
+        cc_vec_destroy(&v->base);                                                 \
     }                                                                             \
                                                                                   \
     static inline uint64_t Name##_provenance(const Name *v) {                     \
-        return cc_vec_provenance((const CCVec *)v);                               \
+        return cc_vec_provenance(&v->base);                                       \
     }                                                                             \
                                                                                   \
     static inline size_t Name##_len(const Name *v) { return v ? v->len : 0; }     \
     static inline size_t Name##_cap(const Name *v) {                              \
-        return cc_vec_cap((const CCVec *)v);                                       \
+        return cc_vec_cap(&v->base);                                              \
     }                                                                             \
     static inline T *Name##_begin(Name *v) { return v ? v->data : NULL; }         \
     static inline T *Name##_end(Name *v) { return v ? v->data + v->len : NULL; }  \
@@ -270,7 +273,7 @@ static inline CCSlice __cc_vec_generic_as_slice(__CCVecGeneric *v) {
 #define CC_VEC_DECL_ARENA(T, Name)                                                \
     CC_VEC_DECL_ARENA_CORE(T, Name)                                               \
     static inline CCSlice Name##_as_slice(const Name *v) {                        \
-        return cc_vec_as_slice((const CCVec *)v);                                 \
+        return cc_vec_as_slice(&v->base);                                         \
     }
 
 /* Typed slice view: `as_slice` returns the element's slice instance
@@ -280,7 +283,7 @@ static inline CCSlice __cc_vec_generic_as_slice(__CCVecGeneric *v) {
     CC_VEC_DECL_ARENA_CORE(T, Name)                                               \
     static inline SliceName Name##_as_slice(const Name *v) {                      \
         SliceName s;                                                              \
-        s.base = cc_vec_as_slice((const CCVec *)v);                               \
+        s.base = cc_vec_as_slice(&v->base);                                       \
         return s;                                                                 \
     }
 
