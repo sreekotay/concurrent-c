@@ -1,0 +1,32 @@
+/* `case .arm(bind):` with a Vec payload whose @variant is on an included
+ * face: the arm type's span must not be printed against this unit's tape
+ * (that dumps foreign bytes and splits the function). */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include "variant_switch_vec_face.cch"
+
+typedef struct {
+    Del del;
+} Rec;
+
+static size_t del_n(const Rec* r) {
+    if (!r) return 0;
+    @switch (r->del) {
+        case .text(buf):
+            return buf.len();
+        case .pieces(n):
+            return (size_t)n;
+    }
+    return 0;
+}
+
+int main(void) {
+    CCArena a = cc_arena_heap(4096) @destroy;
+    Vec::[char] v = vec_new::[char](a);
+    Rec r;
+    v.push('x');
+    r.del = (Del){ .text = v };
+    if (del_n(&r) != 1) return 1;
+    printf("ok\n");
+    return 0;
+}

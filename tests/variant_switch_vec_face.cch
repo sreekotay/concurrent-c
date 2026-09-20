@@ -1,0 +1,6 @@
+/* Face for variant_switch_vec_bind_face_smoke: Vec payload lives here so its
+ * type span is on this tape, not the owner TU's. */
+@variant Del {
+    text: Vec::[char];
+    pieces: int;
+};
