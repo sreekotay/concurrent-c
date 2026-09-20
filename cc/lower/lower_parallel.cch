@@ -3423,6 +3423,32 @@ static CcStmt* pl_unwrap_stmt(CcLowerer* L, CcExpr* call, CcSpan sp) {
     return s;
 }
 
+/* The stage `wait`, with the pool's own cancel taken out of it.
+ *
+ * `break` cancels the nursery while later tickets are still parked. The
+ * gate then returns `CC_ERR_CANCELLED` from `cc_turnstile_stage_wait`, and
+ * the function handler would record that as the ticket's error and the
+ * site would re-raise it. It is not an error: the body below already skips
+ * a cancelled pool, and the `pass` after it is what wakes the successor.
+ * Any other failure still takes the slot, the cancel, and the one exit. */
+static CcStmt* pl_pw_stage_wait_stmt(CcLowerer* L, uint32_t id, CcExpr* call, CcSpan sp) {
+    CcExpr* uw = cc__expr_blank(sp, L->arena);
+    CcStmt* s = cc__stmt_blank(sp, L->arena);
+    CcStmt* hb = lw_block(L, sp);
+    CcUnwrapBody ub;
+    CcUnwrapStmt us;
+    CCSlice done = pl_pw_name(L, id, "_done");
+    CCString t = @string(`if (!(__cc_pw_e.kind == CC_ERR_CANCELLED && cc_nursery_is_cancelled_host(__cc_pw_sh->nur))) { __cc_pw_sl->err = __cc_pw_e; __cc_pw_sl->failed = 1; __cc_pw_sl->i = __cc_pw_i; cc_nursery_cancel_host(__cc_pw_sh->nur); goto ${done}; }`, L->arena);
+    pl_pw_text(L, hb, t, sp);
+    ub.a = call;
+    ub.binder = cstr_slice("__cc_pw_e");
+    ub.body = hb;
+    { CcExprK ek = { .unwrap_body = ub }; uw->k = ek; }
+    us.e = uw;
+    { CcStmtK sk = { .unwrap = us }; s->k = sk; }
+    return s;
+}
+
 /* `@stage (gate, phase, ticket) { body }` in the body of a walk, as the
  * ordered section it is: evaluate the arguments into this ticket's cells,
  * wait for this ticket's turn, run the block unless the pool has been
@@ -3481,7 +3507,7 @@ static void pl_pw_stage_lower(PStep* st, uint32_t id, uint32_t k, CcStmt* s,
     {
         CcExpr* ga = pl_stage_addr(L, gform, gate, sp);
         CcExpr* c = pl_stage_call(L, face ? "cc_turnstile_stage_wait" : "cc_turnstile_wait", ga, &cells, sp);
-        lw_push(blk, pl_unwrap_stmt(L, c, sp));
+        lw_push(blk, pl_pw_stage_wait_stmt(L, id, c, sp));
     }
     {
         CCString t = @string(`cc_parallel_honor(__cc_pw_sh->dest)`, L->arena);
