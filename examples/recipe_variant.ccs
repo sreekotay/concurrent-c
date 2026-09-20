@@ -16,6 +16,10 @@
  *       the check. Bare `{0}` on a variant is a compile error.
  *    4. ?> / !> on a projection — inactive arm is fallback or leave
  *    5. Same-arm assign still runs the old destroy chain
+ *    5a. Owned `Vec::[T]` arm: grow in place under `@switch`
+ *        (`reserve` / `push`). `vec_from` is the same type but will not
+ *        grow or release. Same-arm assign of a copied handle destroys
+ *        the live owner — mutate the arm, do not reinstall a copy.
  *    6. Put together — INCR: switch, parse txt, checked add, stay a num
  *
  * Packed two-arm niche layout is `@variant(packed)` — same surface,
@@ -53,6 +57,12 @@ static void held_destroy(Held* h) {
 @variant Slot {
     held: Held;
     num: int64_t;
+};
+
+/* Undo-style payload: owned bag, or empty. */
+@variant Bag {
+    buf: Vec::[char];
+    empty: void;
 };
 
 static int64_t require_num(Cell* c) {
@@ -166,6 +176,46 @@ int main(void) {
     println("rearm drops=1");
     s = { .num = 0 };
     if (g_held_drops != 2) return 5;
+
+    /* 5a. Owned Vec arm: grow in place; wrap will not grow; copy+assign
+     * drops the live owner. */
+    {
+        Bag g = { .buf = vec_new::[char](a) };
+        @switch (g) {
+            case .buf: {
+                Vec::[char] *b = &g.buf;
+                if (b->push('a') != 0 || b->push('b') != 0) return 7;
+                if (b->reserve(8) != 0) return 8;
+                if (b->push('c') != 0) return 9;
+                if (b->len() != 3) return 10;
+                break;
+            }
+            case .empty:
+                return 11;
+        }
+        {
+            char pad[4] = {0};
+            Bag w = { .buf = vec_from::[char](pad, 0, 4) };
+            @switch (w) {
+                case .buf:
+                    if (w.buf.reserve(8) == 0) return 12; /* wrap: no grow */
+                    break;
+                case .empty:
+                    return 13;
+            }
+        }
+        @switch (g) {
+            case .buf: {
+                Vec::[char] copy = g.buf;
+                g = { .buf = copy }; /* destroys the live owner */
+                if (g.buf.push('z') == 0) return 14;
+                break;
+            }
+            case .empty:
+                return 15;
+        }
+        println("vec arm ok");
+    }
 
     /* 6. Fresh num, hot num, then txt that parses. */
     Cell c = { .num = 0 };

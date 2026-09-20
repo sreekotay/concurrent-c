@@ -349,6 +349,7 @@ v.push(10);                              // dot: Vec is the struct
 v.truncate(n);                           // shrink len; n >= len is a no-op
 vec_new::[int](arena);                   // same instance
 Vec::[char] w = vec_from::[char](p, n, c); // wrap; no grow / no release
+                                           // owned Vec in @variant: recipe_variant.ccs
 static Vec::[int] g;                     // file-scope; same CCVec_int
 typedef Vec::[int] Ints;                 // header alias keeps push / reserve
 d->runs.truncate(n);                     // Vec field (also @typehooks owners)
