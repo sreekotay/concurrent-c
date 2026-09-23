@@ -658,7 +658,8 @@ static int cc__excl_deadline_ms(const CCDeadline* d) {
 }
 
 /* Leave the cond queue on cancel/timeout. If a signaler already popped
- * us, wait for ready and treat it as a wake. */
+ * us, wait for its post and treat it as a wake. Either way no signaler
+ * can reach the node once this returns. */
 static int cc__exclusive_cond_leave(CCExclusiveEntry* e, CCExclusiveWaiter* node,
                                    int timedout) {
     int found = cc__exclusive_cond_dequeue(e, node);
@@ -669,21 +670,27 @@ static int cc__exclusive_cond_leave(CCExclusiveEntry* e, CCExclusiveWaiter* node
             else
                 wake_primitive_wait(&node->wake, 0);
         }
-        if (!node->fiber) wake_primitive_retire(&node->wake);
         return CC_EXCL_WAIT_OK;
     }
-    if (!node->fiber) wake_primitive_retire(&node->wake);
     return timedout ? CC_EXCL_WAIT_TIMEOUT : CC_EXCL_WAIT_CANCELLED;
 }
 
 /* Caller holds `g`. Enqueue on the cond list, then release, then park.
  * Fiber: CC_FIBER_PARK. OS thread: wake_primitive on the node. Deadline
- * from cc_current_deadline(). Never returns holding. */
+ * from cc_current_deadline(). Never returns holding.
+ *
+ * An OS-thread node's `wake` is initialized after the early returns and
+ * retired at `out`, the one exit after that point; every path reaches
+ * `out` only once no signaler can touch the node (it saw the post, or it
+ * dequeued the node itself). A fiber node never initializes `wake`: the
+ * condvar fallback's mutex and cond would otherwise be created and never
+ * destroyed. */
 int cc_exclusive_guard_wait_release(CCExclusiveGuard* g) {
     CCExclusiveEntry* e;
     CCExclusiveWaiter node;
     const CCDeadline* dl;
     int in_fiber;
+    int rc;
 
     if (!g || !g->_entry) return CC_EXCL_WAIT_INVALID;
     e = (CCExclusiveEntry*)g->_entry;
@@ -702,7 +709,7 @@ int cc_exclusive_guard_wait_release(CCExclusiveGuard* g) {
     node.fiber = in_fiber ? cc__fiber_current() : NULL;
     node.next = NULL;
     atomic_store_explicit(&node.ready, 0, memory_order_relaxed);
-    wake_primitive_init(&node.wake);
+    if (!in_fiber) wake_primitive_init(&node.wake);
 
     /* Enqueue before release so a signal under a later hold cannot miss us. */
     cc__spin_lock(&e->wait_spin);
@@ -715,18 +722,22 @@ int cc_exclusive_guard_wait_release(CCExclusiveGuard* g) {
 
     for (;;) {
         if (cc__excl_node_woken(&node)) {
-            if (!in_fiber) wake_primitive_retire(&node.wake);
-            return CC_EXCL_WAIT_OK;
+            rc = CC_EXCL_WAIT_OK;
+            goto out;
         }
         /* No nursery is not cancelled. A bare OS thread is not cancelled. */
         {
             CCNurseryHost* nur = cc__runtime_current_nursery();
             if ((nur && cc_nursery_is_cancelled_host(nur)) ||
-                (dl && dl->cancelled) || cc_parallel_current_cancelled())
-                return cc__exclusive_cond_leave(e, &node, 0);
+                (dl && dl->cancelled) || cc_parallel_current_cancelled()) {
+                rc = cc__exclusive_cond_leave(e, &node, 0);
+                goto out;
+            }
         }
-        if (dl && dl->deadline.tv_sec != 0 && cc_deadline_expired(dl))
-            return cc__exclusive_cond_leave(e, &node, 1);
+        if (dl && dl->deadline.tv_sec != 0 && cc_deadline_expired(dl)) {
+            rc = cc__exclusive_cond_leave(e, &node, 1);
+            goto out;
+        }
 
         if (in_fiber) {
             if (dl && dl->deadline.tv_sec != 0)
@@ -747,6 +758,9 @@ int cc_exclusive_guard_wait_release(CCExclusiveGuard* g) {
             }
         }
     }
+out:
+    if (!in_fiber) wake_primitive_retire(&node.wake);
+    return rc;
 }
 
 void cc_exclusive_guard_signal(CCExclusiveGuard* g) {
