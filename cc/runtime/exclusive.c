@@ -46,12 +46,26 @@
 #include <time.h>
 #include <unistd.h>
 
+/* A wait node lives in the waiter's frame. Once the waker publishes the
+ * wake, the waiter may return and the frame be reused, so the publishing
+ * store is the waker's last touch of the node:
+ *   - fiber waiter: `ready`, then cc__fiber_unpark on the fiber pointer the
+ *     waker read under the queue lock (the fiber outlives the node);
+ *   - OS-thread waiter (cond wait only): wake_primitive_post_once on `wake`,
+ *     which is the publication itself; `ready` stays 0.
+ * cc__excl_node_woken reads whichever one the node's kind uses. */
 typedef struct CCExclusiveWaiter {
     void* fiber;           /* tagged fiber, or NULL for an OS thread */
-    _Atomic int ready;
-    wake_primitive wake;   /* off-fiber park; stack-scoped, not destroyed */
+    _Atomic int ready;     /* fiber waiters */
+    wake_primitive wake;   /* OS-thread cond waiters: one-shot post */
     struct CCExclusiveWaiter* next;
 } CCExclusiveWaiter;
+
+static inline int cc__excl_node_woken(CCExclusiveWaiter* node) {
+    if (node->fiber)
+        return atomic_load_explicit(&node->ready, memory_order_acquire) != 0;
+    return wake_primitive_posted(&node->wake);
+}
 
 /*
  * One cache line per mutex entry: adjacent named locks must not false-share
@@ -595,9 +609,14 @@ static void cc__exclusive_cond_wake_n(CCExclusiveEntry* e, int all) {
         }
         cc__spin_unlock(&e->wait_spin);
         if (!w) return;
-        atomic_store_explicit(&w->ready, 1, memory_order_release);
-        if (fiber) cc__fiber_unpark(fiber);
-        wake_primitive_wake_one(&w->wake);
+        /* The publishing store is the last touch of `w` (see
+         * CCExclusiveWaiter): the waiter may return as soon as it sees it. */
+        if (fiber) {
+            atomic_store_explicit(&w->ready, 1, memory_order_release);
+            cc__fiber_unpark(fiber);
+        } else {
+            wake_primitive_post_once(&w->wake);
+        }
         if (!all) return;
     }
 }
@@ -629,19 +648,16 @@ static int cc__exclusive_cond_leave(CCExclusiveEntry* e, CCExclusiveWaiter* node
                                    int timedout) {
     int found = cc__exclusive_cond_dequeue(e, node);
     if (!found) {
-        while (atomic_load_explicit(&node->ready, memory_order_acquire) == 0) {
+        while (!cc__excl_node_woken(node)) {
             if (node->fiber)
                 cc__cpu_pause();
-            else {
-                uint32_t gen = atomic_load_explicit(&node->wake.value,
-                                                    memory_order_acquire);
-                if (atomic_load_explicit(&node->ready, memory_order_acquire) != 0)
-                    break;
-                wake_primitive_wait(&node->wake, gen);
-            }
+            else
+                wake_primitive_wait(&node->wake, 0);
         }
+        if (!node->fiber) wake_primitive_retire(&node->wake);
         return CC_EXCL_WAIT_OK;
     }
+    if (!node->fiber) wake_primitive_retire(&node->wake);
     return timedout ? CC_EXCL_WAIT_TIMEOUT : CC_EXCL_WAIT_CANCELLED;
 }
 
@@ -683,8 +699,10 @@ int cc_exclusive_guard_wait_release(CCExclusiveGuard* g) {
     cc_exclusive_guard_release(g);
 
     for (;;) {
-        if (atomic_load_explicit(&node.ready, memory_order_acquire) != 0)
+        if (cc__excl_node_woken(&node)) {
+            if (!in_fiber) wake_primitive_retire(&node.wake);
             return CC_EXCL_WAIT_OK;
+        }
         /* No nursery is not cancelled. A bare OS thread is not cancelled. */
         {
             CCNurseryHost* nur = cc__runtime_current_nursery();
@@ -702,17 +720,15 @@ int cc_exclusive_guard_wait_release(CCExclusiveGuard* g) {
             else
                 CC_FIBER_PARK("exclusive_when");
         } else {
-            uint32_t gen = atomic_load_explicit(&node.wake.value,
-                                                memory_order_acquire);
-            if (atomic_load_explicit(&node.ready, memory_order_acquire) != 0)
-                return CC_EXCL_WAIT_OK;
+            /* `value` is the post itself (0 -> 1 once): waiting on 0
+             * cannot miss it. */
             if (dl && dl->deadline.tv_sec != 0) {
                 int ms = cc__excl_deadline_ms(dl);
                 if (ms == 0)
                     continue;
-                wake_primitive_wait_timeout(&node.wake, gen, (uint32_t)ms);
+                wake_primitive_wait_timeout(&node.wake, 0, (uint32_t)ms);
             } else {
-                wake_primitive_wait(&node.wake, gen);
+                wake_primitive_wait(&node.wake, 0);
             }
         }
     }

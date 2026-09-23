@@ -1,0 +1,156 @@
+#!ccc ccs
+/*
+ * A condition waiter's node lives in its frame, and the frame is reused as
+ * soon as the waiter returns. The waker must not touch the node after the
+ * store that lets the waiter go.
+ *
+ * Every round, WAITERS waiters block in acquire_when on one name; a driver
+ * thread advances the round and broadcasts. Each waiter, on return, lays a
+ * canary over the stack its wait used and checks it after a short pause. A
+ * waker that stores `ready` and then bumps the node's wake counter (the
+ * old cc__exclusive_cond_wake_n) writes into whatever frame took the
+ * node's place: a flipped canary word here, and under TSan (which widens
+ * the window) a bumped saved return address and a SEGV every run. Both
+ * OS-thread waiters (futex / ulock / condvar park) and fiber waiters are
+ * covered.
+ */
+#include <ccc/std/prelude.cch>
+#include <pthread.h>
+#include <sched.h>
+#include <stdatomic.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#define WAITERS 6
+#define ROUNDS 1000
+#define CANARY_WORDS 2048
+#define CANARY 0x5a5a5a5au
+
+static CCExclusive g_excl;
+static _Atomic int g_round;
+static _Atomic int g_arrived;
+static _Atomic int g_corrupt;
+static _Atomic int g_failed;
+
+static int pred_round(void* env) {
+    int want = *(int*)env;
+    return atomic_load_explicit(&g_round, memory_order_relaxed) >= want;
+}
+
+/* Same depth as the acquire_when call: covers the frames it used. */
+static __attribute__((noinline)) void canary_frame(void) {
+    volatile uint32_t buf[CANARY_WORDS];
+    for (int i = 0; i < CANARY_WORDS; i++) buf[i] = CANARY;
+    for (int i = 0; i < 64; i++) sched_yield();
+    for (int i = 0; i < CANARY_WORDS; i++) {
+        if (buf[i] != CANARY) {
+            atomic_fetch_add(&g_corrupt, 1);
+            return;
+        }
+    }
+}
+
+static __attribute__((noinline)) int wait_round(int want) {
+    CCExclusiveGuard !>(CCError) r =
+        cc_exclusive_acquire_when(g_excl, 7u, pred_round, &want);
+    if (!cc_is_ok(r)) return -1;
+    cc_exclusive_guard_release(&r.u.value);
+    return 0;
+}
+
+static void waiter_loop(void) {
+    for (int round = 1; round <= ROUNDS; round++) {
+        if (wait_round(round) != 0) {
+            atomic_store(&g_failed, 1);
+            return;
+        }
+        canary_frame();
+        atomic_fetch_add(&g_arrived, 1);
+    }
+}
+
+static void* thread_waiter(void* arg) {
+    (void)arg;
+    waiter_loop();
+    return NULL;
+}
+
+/* Advance one round at a time; wait until every waiter is through it. */
+static void* thread_driver(void* arg) {
+    (void)arg;
+    for (int round = 1; round <= ROUNDS; round++) {
+        CCExclusiveGuard g = cc_exclusive_acquire(g_excl, 7u);
+        atomic_store_explicit(&g_round, round, memory_order_relaxed);
+        cc_exclusive_guard_broadcast(&g);
+        cc_exclusive_guard_release(&g);
+        while (atomic_load(&g_arrived) < round * WAITERS) {
+            if (atomic_load(&g_failed)) return NULL;
+            sched_yield();
+        }
+    }
+    return NULL;
+}
+
+static int run_threads(void) {
+    pthread_t w[WAITERS];
+    pthread_t d;
+    atomic_store(&g_round, 0);
+    atomic_store(&g_arrived, 0);
+    for (int i = 0; i < WAITERS; i++)
+        if (pthread_create(&w[i], NULL, thread_waiter, NULL) != 0) return -1;
+    if (pthread_create(&d, NULL, thread_driver, NULL) != 0) return -1;
+    for (int i = 0; i < WAITERS; i++) pthread_join(w[i], NULL);
+    pthread_join(d, NULL);
+    return 0;
+}
+
+static int run_fibers(void) {
+    @errhandler(CCError e) {
+        cc_error_log(e);
+        return -1;
+    }
+    pthread_t d;
+    atomic_store(&g_round, 0);
+    atomic_store(&g_arrived, 0);
+    if (pthread_create(&d, NULL, thread_driver, NULL) != 0) return -1;
+    {
+        CCNursery n = cc_nursery_create() !> @destroy;
+        for (int i = 0; i < WAITERS; i++)
+            n.spawn(() => [] { waiter_loop(); }) !>;
+    }
+    pthread_join(d, NULL);
+    return 0;
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "%s\n", e.message ? e.message : "error");
+        return 1;
+    }
+    setenv("CC_WORKERS", "4", 1);
+    CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+    CCExclusive excl = cc_exclusive_create(arena, 0) !> @destroy;
+    g_excl = excl;
+
+    if (run_threads() != 0 || atomic_load(&g_failed)) {
+        fprintf(stderr, "FAIL thread waiters did not finish\n");
+        return 1;
+    }
+    if (atomic_load(&g_corrupt)) {
+        fprintf(stderr, "FAIL thread waiters: %d frames written after wake\n",
+                atomic_load(&g_corrupt));
+        return 1;
+    }
+    if (run_fibers() != 0 || atomic_load(&g_failed)) {
+        fprintf(stderr, "FAIL fiber waiters did not finish\n");
+        return 1;
+    }
+    if (atomic_load(&g_corrupt)) {
+        fprintf(stderr, "FAIL fiber waiters: %d frames written after wake\n",
+                atomic_load(&g_corrupt));
+        return 1;
+    }
+    printf("exclusive_cond_wake_frame_smoke: OK\n");
+    return 0;
+}

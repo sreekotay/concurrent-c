@@ -158,6 +158,7 @@ TSAN_TESTS=(
     stress/join_handoff_storm.ccs
     stress/park_unpark_storm.ccs
     stress/inbox_cross_worker_storm.ccs
+    tests/exclusive_cond_wake_frame_smoke.ccs
 )
 
 failed=0
