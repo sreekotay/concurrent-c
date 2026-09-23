@@ -1,0 +1,215 @@
+#!ccc ccs
+/*
+ * Every way out of a condition wait: woken, timed out, cancelled, the
+ * early returns before the wait node exists, and a timeout that races a
+ * broadcast (the node is either still queued and the waiter takes it off,
+ * or a broadcaster already popped it and the waiter waits for its post).
+ *
+ * An OS-thread wait node carries a one-shot wake primitive whose retire
+ * must run on every exit after its init; on the condvar fallback the
+ * retire is what destroys the node's mutex and cond. scripts/
+ * test_wake_condvar.sh builds this with -DCC_WAKE_FORCE_CONDVAR, where
+ * every init holds a heap token until its destroy: a missed retire is a
+ * LeakSanitizer leak, and a retire while a poster still holds the mutex is
+ * a TSan report.
+ */
+#include <ccc/std/prelude.cch>
+#include <pthread.h>
+#include <sched.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#define RACERS 4
+#define RACE_ROUNDS 300
+
+static CCExclusive g_excl;
+static _Atomic int g_ready;
+static _Atomic int g_stop;
+static _Atomic int g_bad;
+static _Atomic int g_timeouts;
+static _Atomic int g_oks;
+
+static int pred_never(void* env) {
+    (void)env;
+    return 0;
+}
+
+static int pred_ready(void* env) {
+    (void)env;
+    return atomic_load_explicit(&g_ready, memory_order_relaxed);
+}
+
+/* Returns the error kind, or 0 when it came back holding. */
+static int wait_kind(unsigned name, int (*pred)(void*)) {
+    CCExclusiveGuard !>(CCError) r = cc_exclusive_acquire_when(g_excl, name, pred, NULL);
+    if (cc_is_ok(r)) {
+        cc_exclusive_guard_release(&r.u.value);
+        return 0;
+    }
+    return (int)r.u.error.kind;
+}
+
+/* Deadline already past or already cancelled: out before the node. */
+static void* thread_early(void* arg) {
+    (void)arg;
+    for (int i = 0; i < 50; i++) {
+        CCDeadline d = cc_deadline_after_ms(0);
+        d.deadline.tv_sec -= 1;
+        CCDeadline* prev = cc_deadline_push(&d);
+        if (wait_kind(1u, pred_never) != CC_ERR_TIMEOUT) atomic_store(&g_bad, 1);
+        cc_deadline_pop(prev);
+
+        CCDeadline c = cc_deadline_after_ms(1000);
+        c.cancelled = 1;
+        prev = cc_deadline_push(&c);
+        if (wait_kind(1u, pred_never) != CC_ERR_CANCELLED) atomic_store(&g_bad, 2);
+        cc_deadline_pop(prev);
+    }
+    return NULL;
+}
+
+/* Parks, then times out with nobody signalling: the waiter dequeues. */
+static void* thread_timeout(void* arg) {
+    (void)arg;
+    for (int i = 0; i < 20; i++) {
+        CCDeadline d = cc_deadline_after_ms(3);
+        CCDeadline* prev = cc_deadline_push(&d);
+        if (wait_kind(2u, pred_never) != CC_ERR_TIMEOUT) atomic_store(&g_bad, 3);
+        cc_deadline_pop(prev);
+    }
+    return NULL;
+}
+
+/* Short deadlines against a broadcast storm: timeouts land both before
+ * and after a broadcaster pops the node. */
+static void* thread_racer(void* arg) {
+    (void)arg;
+    for (int i = 0; i < RACE_ROUNDS; i++) {
+        CCDeadline d = cc_deadline_after_ms(1);
+        CCDeadline* prev = cc_deadline_push(&d);
+        int k = wait_kind(3u, pred_never);
+        cc_deadline_pop(prev);
+        if (k == CC_ERR_TIMEOUT) atomic_fetch_add(&g_timeouts, 1);
+        else atomic_store(&g_bad, 4);
+    }
+    return NULL;
+}
+
+static void* thread_storm(void* arg) {
+    (void)arg;
+    while (!atomic_load(&g_stop)) {
+        CCExclusiveGuard g = cc_exclusive_acquire(g_excl, 3u);
+        cc_exclusive_guard_broadcast(&g);
+        cc_exclusive_guard_release(&g);
+        sched_yield();
+    }
+    return NULL;
+}
+
+/* Woken: parks with no deadline until the flag is set and signalled. */
+static void* thread_woken(void* arg) {
+    (void)arg;
+    if (wait_kind(4u, pred_ready) == 0) atomic_fetch_add(&g_oks, 1);
+    else atomic_store(&g_bad, 5);
+    return NULL;
+}
+
+static int run_threads(void) {
+    pthread_t early, tmo, storm, racers[RACERS], woken[RACERS];
+    if (pthread_create(&early, NULL, thread_early, NULL) != 0) return -1;
+    if (pthread_create(&tmo, NULL, thread_timeout, NULL) != 0) return -1;
+    if (pthread_create(&storm, NULL, thread_storm, NULL) != 0) return -1;
+    for (int i = 0; i < RACERS; i++)
+        if (pthread_create(&racers[i], NULL, thread_racer, NULL) != 0) return -1;
+    for (int i = 0; i < RACERS; i++)
+        if (pthread_create(&woken[i], NULL, thread_woken, NULL) != 0) return -1;
+
+    pthread_join(early, NULL);
+    pthread_join(tmo, NULL);
+    for (int i = 0; i < RACERS; i++) pthread_join(racers[i], NULL);
+    atomic_store(&g_stop, 1);
+    pthread_join(storm, NULL);
+
+    cc_sleep_ms(5);
+    {
+        CCExclusiveGuard g = cc_exclusive_acquire(g_excl, 4u);
+        atomic_store(&g_ready, 1);
+        cc_exclusive_guard_broadcast(&g);
+        cc_exclusive_guard_release(&g);
+    }
+    for (int i = 0; i < RACERS; i++) pthread_join(woken[i], NULL);
+    return 0;
+}
+
+/* Fibers take the same exits and never create the primitive. */
+static int run_fibers(void) {
+    @errhandler(CCError e) {
+        cc_error_log(e);
+        return -1;
+    }
+    pthread_t storm;
+    atomic_store(&g_stop, 0);
+    if (pthread_create(&storm, NULL, thread_storm, NULL) != 0) return -1;
+    {
+        CCNursery n = cc_nursery_create() !> @destroy;
+        for (int f = 0; f < RACERS; f++) {
+            n.spawn(() => [] {
+                for (int i = 0; i < 100; i++) {
+                    int k = 0;
+                    @with_deadline(millis(1)) {
+                        k = wait_kind(3u, pred_never);
+                    }
+                    if (k != CC_ERR_TIMEOUT) atomic_store(&g_bad, 6);
+                }
+            }) !>;
+        }
+    }
+    atomic_store(&g_stop, 1);
+    pthread_join(storm, NULL);
+
+    /* Cancelled while parked. */
+    {
+        CCNursery n = cc_nursery_create() !> @destroy;
+        for (int f = 0; f < RACERS; f++) {
+            n.spawn(() => [] {
+                int k = wait_kind(5u, pred_never);
+                if (k != CC_ERR_CANCELLED) atomic_store(&g_bad, 7);
+            }) !>;
+        }
+        cc_sleep_ms(10);
+        n.cancel();
+    }
+    return 0;
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "%s\n", e.message ? e.message : "error");
+        return 1;
+    }
+    setenv("CC_WORKERS", "4", 1);
+    CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+    CCExclusive excl = cc_exclusive_create(arena, 0) !> @destroy;
+    g_excl = excl;
+
+    if (run_threads() != 0) {
+        fprintf(stderr, "FAIL thread setup\n");
+        return 1;
+    }
+    if (atomic_load(&g_bad)) {
+        fprintf(stderr, "FAIL thread exit path %d\n", atomic_load(&g_bad));
+        return 1;
+    }
+    if (atomic_load(&g_oks) != RACERS || atomic_load(&g_timeouts) != RACERS * RACE_ROUNDS) {
+        fprintf(stderr, "FAIL thread counts oks=%d timeouts=%d\n",
+                atomic_load(&g_oks), atomic_load(&g_timeouts));
+        return 1;
+    }
+    if (run_fibers() != 0 || atomic_load(&g_bad)) {
+        fprintf(stderr, "FAIL fiber exit path %d\n", atomic_load(&g_bad));
+        return 1;
+    }
+    printf("exclusive_cond_exit_paths_smoke: OK\n");
+    return 0;
+}

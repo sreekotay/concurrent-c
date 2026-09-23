@@ -224,6 +224,16 @@ elif [ -x "./cc/bin/ccc" ]; then
     echo "[test] long link line selftest FAILED"
     exit 1
   fi
+  # A build file has no fixed cap on targets, sources, deps or line length.
+  if ! sh scripts/test_build_many_targets.sh; then
+    echo "[test] build many-targets selftest FAILED"
+    exit 1
+  fi
+  # Cond waits on the wake primitive's condvar fallback (not Linux/macOS's).
+  if ! bash scripts/test_wake_condvar.sh; then
+    echo "[test] wake condvar fallback selftest FAILED"
+    exit 1
+  fi
   # #!ccc units: quoted #include of project .cch resolves from the source dir.
   if ! sh scripts/test_unit_header_quote_include.sh; then
     echo "[test] unit-header quote-include selftest FAILED"

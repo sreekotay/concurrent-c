@@ -160,6 +160,7 @@ TSAN_TESTS=(
     stress/inbox_cross_worker_storm.ccs
     tests/exclusive_cond_wake_frame_smoke.ccs
     tests/turnstile_concurrent_churn_smoke.ccs
+    tests/exclusive_cond_exit_paths_smoke.ccs
 )
 
 failed=0
@@ -201,6 +202,17 @@ for test in "${TSAN_TESTS[@]}"; do
         fi
     fi
 done
+
+# The same cond waits on the wake primitive's condvar fallback.
+printf "  %-40s " "wake condvar fallback"
+if wc_out=$(bash "$ROOT_DIR/scripts/test_wake_condvar.sh" tsan 2>&1); then
+    echo -e "${GREEN}OK${NC}"
+    passed=$((passed + 1))
+else
+    echo -e "${RED}FAIL${NC}"
+    echo "$wc_out" | tail -20
+    failed=$((failed + 1))
+fi
 
 if [ "$mode" = "--all" ]; then
     echo ""

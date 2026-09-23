@@ -22,7 +22,11 @@
  * Platform Detection
  * ============================================================================ */
 
-#if defined(__linux__)
+/* CC_WAKE_FORCE_CONDVAR selects the portable fallback on any platform, so
+ * its paths can be tested (and run under the sanitizers) on Linux/macOS. */
+#if defined(CC_WAKE_FORCE_CONDVAR)
+    #define WAKE_USE_CONDVAR 1
+#elif defined(__linux__)
     #define WAKE_USE_FUTEX 1
 #elif defined(__APPLE__)
     #include <AvailabilityMacros.h>
@@ -30,6 +34,14 @@
     #define WAKE_USE_ULOCK 1
 #else
     #define WAKE_USE_CONDVAR 1
+#endif
+
+#ifdef WAKE_USE_CONDVAR
+#include <pthread.h>
+#include <time.h>
+#endif
+#ifdef CC_WAKE_FORCE_CONDVAR
+#include <stdlib.h>
 #endif
 
 /* ============================================================================
@@ -42,6 +54,12 @@ typedef struct {
     pthread_mutex_t mutex;
     pthread_cond_t cond;
     int initialized;
+#endif
+#ifdef CC_WAKE_FORCE_CONDVAR
+    /* A heap token from init to destroy, so a primitive that is never
+     * destroyed is a LeakSanitizer leak here as it is a pthread leak on a
+     * libc whose mutex_init allocates (glibc's does not). */
+    void* ledger;
 #endif
 } wake_primitive;
 
@@ -162,6 +180,9 @@ static inline void wake_primitive_init(wake_primitive* wp) {
     pthread_mutex_init(&wp->mutex, NULL);
     pthread_cond_init(&wp->cond, NULL);
     wp->initialized = 1;
+#ifdef CC_WAKE_FORCE_CONDVAR
+    wp->ledger = malloc(1);
+#endif
 }
 
 static inline void wake_primitive_destroy(wake_primitive* wp) {
@@ -169,6 +190,10 @@ static inline void wake_primitive_destroy(wake_primitive* wp) {
         pthread_mutex_destroy(&wp->mutex);
         pthread_cond_destroy(&wp->cond);
         wp->initialized = 0;
+#ifdef CC_WAKE_FORCE_CONDVAR
+        free(wp->ledger);
+        wp->ledger = NULL;
+#endif
     }
 }
 
@@ -237,6 +262,15 @@ static inline void wake_primitive_wake_all(wake_primitive* wp) {
  *            wake_primitive_retire(wp);          (before the frame dies)
  *   waker:   wake_primitive_post_once(wp);       (last touch of *wp)
  *
+ * Every init is paired with exactly one retire, on every exit of the
+ * waiter after the init (woken, timed out, cancelled), and the retire runs
+ * only once no waker can reach `wp`: the waiter saw the post, or it took
+ * the node off the queue itself under the queue lock. Put the retire at
+ * the waiter's single exit rather than on each return. On the condvar
+ * fallback the retire is also the destroy of the mutex and cond, and a
+ * second retire is a no-op. A waiter that never waits on `wp` (a fiber
+ * parks instead) does not init it at all.
+ *
  * `value` goes 0 -> 1 exactly once, so a wait with expected 0 cannot miss
  * the post: the kernel compares before it sleeps.  futex and ulock key the
  * wake by address and never read it, so the wake that follows the store
@@ -285,6 +319,7 @@ static inline void wake_primitive_post_once(wake_primitive* wp) {
 }
 
 static inline void wake_primitive_retire(wake_primitive* wp) {
+    if (!wp->initialized) return;
     /* A waker that posted is inside the mutex until its unlock; wait it
      * out before the frame (and the mutex in it) goes away. */
     pthread_mutex_lock(&wp->mutex);

@@ -66,10 +66,11 @@ static int eval_expr(const char* token, const CCBuildInputs* inputs, long long* 
 static int parse_build_file(const char* path, const CCBuildInputs* inputs, CCConstBinding* out_bindings, size_t* out_count, size_t max) {
     FILE* f = fopen(path, "r");
     if (!f) return errno ? errno : -1;
-    char line[512];
+    char* line = NULL;
+    size_t line_cap = 0;
     int err = 0;
     size_t lineno = 0;
-    while (fgets(line, sizeof(line), f)) {
+    while (getline(&line, &line_cap, f) >= 0) {
         lineno++;
         // Trim leading spaces
         char* p = line;
@@ -96,6 +97,7 @@ static int parse_build_file(const char* path, const CCBuildInputs* inputs, CCCon
             break;
         }
     }
+    free(line);
     fclose(f);
     return err;
 }
@@ -104,10 +106,11 @@ static int parse_build_options(const char* path, CCBuildOptionDecl* out_opts, si
     if (!out_opts || !out_count) return EINVAL;
     FILE* f = fopen(path, "r");
     if (!f) return errno ? errno : -1;
-    char line[1024];
+    char* line = NULL;
+    size_t line_cap = 0;
     int err = 0;
     size_t lineno = 0;
-    while (fgets(line, sizeof(line), f)) {
+    while (getline(&line, &line_cap, f) >= 0) {
         lineno++;
         char* p = line;
         while (*p == ' ' || *p == '\t') p++;
@@ -144,9 +147,10 @@ static int parse_build_options(const char* path, CCBuildOptionDecl* out_opts, si
         out_opts[*out_count].help = stored_help;
         (*out_count)++;
     }
+    free(line);
     fclose(f);
     if (err == ENOSPC) {
-        fprintf(stderr, "cc: too many CC_OPTION lines in build.cc (max %zu)\n", max);
+        fprintf(stderr, "%s: too many CC_OPTION lines (the limit is %zu)\n", path, max);
     }
     return err;
 }
@@ -171,7 +175,7 @@ int cc_build_load_consts(const char* build_path, const CCBuildInputs* inputs, CC
 
     err = parse_build_file(build_path, inputs, out_bindings, out_count, max);
     if (err == ENOSPC) {
-        fprintf(stderr, "cc: too many consts in build.cc (max %zu)\n", max);
+        fprintf(stderr, "%s: too many CC_CONST lines (the limit is %zu, target consts included)\n", build_path, max);
         return err;
     } else if (err != 0) {
         return err;
@@ -225,12 +229,18 @@ static char* dup_trim_eol(const char* s) {
     return out;
 }
 
+/* Append to a heap string list, doubling its capacity. The capacity is not
+ * stored: it is the next power of two at or above the count. */
 static int append_str_list(const char*** io_list, size_t* io_count, const char* s) {
     if (!io_list || !io_count || !s) return EINVAL;
-    const char** new_list = (const char**)realloc((void*)(*io_list), (*io_count + 1) * sizeof(char*));
-    if (!new_list) return ENOMEM;
-    new_list[*io_count] = s;
-    *io_list = new_list;
+    size_t n = *io_count;
+    if (n == 0 || (n & (n - 1)) == 0) {
+        size_t cap = n ? n * 2 : 4;
+        const char** new_list = (const char**)realloc((void*)(*io_list), cap * sizeof(char*));
+        if (!new_list) return ENOMEM;
+        *io_list = new_list;
+    }
+    (*io_list)[n] = s;
     (*io_count)++;
     return 0;
 }
@@ -271,326 +281,266 @@ static int append_flags_str(const char** io_dst, const char* more) {
     return 0;
 }
 
+/* The next whitespace-separated token at *io_p, heap-copied whole, or NULL
+ * in *out at the end of the line. Returns ENOMEM only. */
+static int next_token(char** io_p, char** out) {
+    char* p = *io_p;
+    *out = NULL;
+    while (*p == ' ' || *p == '\t') p++;
+    if (!*p || *p == '\n' || *p == '\r') { *io_p = p; return 0; }
+    char* start = p;
+    while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') p++;
+    size_t len = (size_t)(p - start);
+    char* tok = (char*)malloc(len + 1);
+    if (!tok) return ENOMEM;
+    memcpy(tok, start, len);
+    tok[len] = '\0';
+    *io_p = p;
+    *out = tok;
+    return 0;
+}
+
+/* Append every remaining token on the line to a string list. */
+static int append_tokens(char** io_p, const char*** io_list, size_t* io_count) {
+    for (;;) {
+        char* tok = NULL;
+        int err = next_token(io_p, &tok);
+        if (err) return err;
+        if (!tok) return 0;
+        err = append_str_list(io_list, io_count, tok);
+        if (err) { free(tok); return err; }
+    }
+}
+
+static void free_str_list(const char** list, size_t count) {
+    for (size_t j = 0; j < count; ++j) free((void*)list[j]);
+    free((void*)list);
+}
+
+static void free_target_fields(CCBuildTargetDecl* t) {
+    free((void*)t->name);
+    free_str_list(t->srcs, t->src_count);
+    free_str_list(t->deps, t->dep_count);
+    free((void*)t->out_name);
+    free((void*)t->target_triple);
+    free((void*)t->sysroot);
+    free((void*)t->install_dest);
+    free_str_list(t->include_dirs, t->include_dir_count);
+    free_str_list(t->defines, t->define_count);
+    free_str_list(t->libs, t->lib_count);
+    free((void*)t->cflags);
+    free((void*)t->ldflags);
+    memset(t, 0, sizeof(*t));
+}
+
+/* A directive keyword at p followed by a blank. */
+static int is_directive(const char* p, const char* kw) {
+    size_t n = strlen(kw);
+    return strncmp(p, kw, n) == 0 && (p[n] == ' ' || p[n] == '\t');
+}
+
+/* Every table here grows: a build file may declare any number of targets,
+ * each with any number of sources, deps, include dirs, defines and libs, on
+ * lines of any length. Nothing is truncated or dropped; a malformed line is
+ * an error naming the file and the line. */
 static int parse_build_targets(const char* path,
-                              CCBuildTargetDecl* out_targets,
+                              CCBuildTargetDecl** out_targets,
                               size_t* out_count,
-                              size_t max,
                               char** out_default_name) {
     if (!out_targets || !out_count) return EINVAL;
+    *out_targets = NULL;
+    *out_count = 0;
     if (out_default_name) *out_default_name = NULL;
     FILE* f = fopen(path, "r");
     if (!f) return errno ? errno : -1;
-    char line[2048];
+    char* line = NULL;
+    size_t line_cap = 0;
+    CCBuildTargetDecl* targets = NULL;
+    size_t count = 0;
+    size_t cap = 0;
     int err = 0;
     size_t lineno = 0;
     // Pass 1: parse CC_DEFAULT + CC_TARGET entries.
-    while (fgets(line, sizeof(line), f)) {
+    while (getline(&line, &line_cap, f) >= 0) {
         lineno++;
         char* p = line;
         while (*p == ' ' || *p == '\t') p++;
-        if (strncmp(p, "CC_DEFAULT", 10) == 0) {
+        if (is_directive(p, "CC_DEFAULT")) {
             p += 10;
-            while (*p == ' ' || *p == '\t') p++;
-            char name_buf[128];
-            if (sscanf(p, "%127s", name_buf) != 1) {
+            char* name = NULL;
+            err = next_token(&p, &name);
+            if (err) break;
+            if (!name) {
                 fprintf(stderr, "%s:%zu: malformed CC_DEFAULT line\n", path, lineno);
                 err = EINVAL;
                 break;
             }
             if (out_default_name) {
                 free(*out_default_name);
-                *out_default_name = strdup(name_buf);
-                if (!*out_default_name) { err = ENOMEM; break; }
+                *out_default_name = name;
+            } else {
+                free(name);
             }
             continue;
         }
-        if (strncmp(p, "CC_TARGET", 9) != 0 || !(p[9] == ' ' || p[9] == '\t')) continue;
+        if (!is_directive(p, "CC_TARGET")) continue;
         p += 9;
-        while (*p == ' ' || *p == '\t') p++;
 
-        char name_buf[128];
-        char kind_buf[32];
-        int nread = 0;
-        if (sscanf(p, "%127s %31s%n", name_buf, kind_buf, &nread) < 2) {
+        CCBuildTargetDecl t;
+        memset(&t, 0, sizeof(t));
+        char* kind_tok = NULL;
+        err = next_token(&p, (char**)&t.name);
+        if (!err && t.name) err = next_token(&p, &kind_tok);
+        if (err) { free_target_fields(&t); break; }
+        if (!t.name || !kind_tok) {
             fprintf(stderr, "%s:%zu: malformed CC_TARGET line\n", path, lineno);
+            free_target_fields(&t);
+            free(kind_tok);
             err = EINVAL;
             break;
         }
-        CCBuildTargetKind kind = parse_target_kind(kind_buf);
-        if (!kind) {
-            fprintf(stderr, "%s:%zu: unknown target kind: %s\n", path, lineno, kind_buf);
+        t.kind = parse_target_kind(kind_tok);
+        if (!t.kind) {
+            fprintf(stderr, "%s:%zu: unknown target kind: %s\n", path, lineno, kind_tok);
+            free_target_fields(&t);
+            free(kind_tok);
             err = EINVAL;
             break;
         }
-        p += nread;
-
-        // Count remaining src tokens.
-        enum { max_src = 64 };
-        const char* srcs[max_src];
-        size_t src_count = 0;
-        while (*p) {
-            while (*p == ' ' || *p == '\t') p++;
-            if (!*p || *p == '\n' || *p == '\r') break;
-            char* start = p;
-            while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') p++;
-            if (src_count >= max_src) { err = ENOSPC; break; }
-            size_t len = (size_t)(p - start);
-            char* tok = (char*)malloc(len + 1);
-            if (!tok) { err = ENOMEM; break; }
-            memcpy(tok, start, len);
-            tok[len] = '\0';
-            srcs[src_count++] = tok;
+        free(kind_tok);
+        if (find_target_index(targets, count, t.name) >= 0) {
+            fprintf(stderr, "%s:%zu: duplicate CC_TARGET %s\n", path, lineno, t.name);
+            free_target_fields(&t);
+            err = EINVAL;
+            break;
         }
-        if (err) break;
-        if (src_count == 0) {
+        err = append_tokens(&p, &t.srcs, &t.src_count);
+        if (err) { free_target_fields(&t); break; }
+        if (t.src_count == 0) {
             fprintf(stderr, "%s:%zu: CC_TARGET must list at least 1 source\n", path, lineno);
+            free_target_fields(&t);
             err = EINVAL;
             break;
         }
-        if (*out_count >= max) { err = ENOSPC; break; }
-
-        char* stored_name = strdup(name_buf);
-        if (!stored_name) { err = ENOMEM; break; }
-        const char** stored_srcs = (const char**)calloc(src_count, sizeof(char*));
-        if (!stored_srcs) { free(stored_name); err = ENOMEM; break; }
-        for (size_t i = 0; i < src_count; ++i) stored_srcs[i] = srcs[i];
-
-        out_targets[*out_count].name = stored_name;
-        out_targets[*out_count].kind = kind;
-        out_targets[*out_count].srcs = stored_srcs;
-        out_targets[*out_count].src_count = src_count;
-        out_targets[*out_count].deps = NULL;
-        out_targets[*out_count].dep_count = 0;
-        out_targets[*out_count].out_name = NULL;
-        out_targets[*out_count].target_triple = NULL;
-        out_targets[*out_count].sysroot = NULL;
-        out_targets[*out_count].install_dest = NULL;
-        out_targets[*out_count].include_dirs = NULL;
-        out_targets[*out_count].include_dir_count = 0;
-        out_targets[*out_count].defines = NULL;
-        out_targets[*out_count].define_count = 0;
-        out_targets[*out_count].libs = NULL;
-        out_targets[*out_count].lib_count = 0;
-        out_targets[*out_count].cflags = NULL;
-        out_targets[*out_count].ldflags = NULL;
-        (*out_count)++;
+        if (count == cap) {
+            size_t ncap = cap ? cap * 2 : 16;
+            CCBuildTargetDecl* grown = (CCBuildTargetDecl*)realloc(targets, ncap * sizeof(*grown));
+            if (!grown) { free_target_fields(&t); err = ENOMEM; break; }
+            targets = grown;
+            cap = ncap;
+        }
+        targets[count++] = t;
     }
     // Pass 2: attach per-target properties.
     if (err == 0) {
         rewind(f);
         lineno = 0;
-        while (fgets(line, sizeof(line), f)) {
+        while (getline(&line, &line_cap, f) >= 0) {
             lineno++;
             char* p = line;
             while (*p == ' ' || *p == '\t') p++;
 
-            const int is_deps = (strncmp(p, "CC_TARGET_DEPS", 14) == 0 && (p[14] == ' ' || p[14] == '\t'));
-            const int is_out = (strncmp(p, "CC_TARGET_OUT", 13) == 0 && (p[13] == ' ' || p[13] == '\t'));
-            const int is_tgt = (strncmp(p, "CC_TARGET_TARGET", 16) == 0 && (p[16] == ' ' || p[16] == '\t'));
-            const int is_sys = (strncmp(p, "CC_TARGET_SYSROOT", 17) == 0 && (p[17] == ' ' || p[17] == '\t'));
-            const int is_install = (strncmp(p, "CC_INSTALL", 10) == 0 && (p[10] == ' ' || p[10] == '\t'));
-            const int is_inc = (strncmp(p, "CC_TARGET_INCLUDE", 17) == 0 && (p[17] == ' ' || p[17] == '\t'));
-            const int is_cflags = (strncmp(p, "CC_TARGET_CFLAGS", 16) == 0 && (p[16] == ' ' || p[16] == '\t'));
-            const int is_ldflags = (strncmp(p, "CC_TARGET_LDFLAGS", 17) == 0 && (p[17] == ' ' || p[17] == '\t'));
-            const int is_def = (strncmp(p, "CC_TARGET_DEFINE", 16) == 0 && (p[16] == ' ' || p[16] == '\t'));
-            const int is_libs = (strncmp(p, "CC_TARGET_LIBS", 14) == 0 && (p[14] == ' ' || p[14] == '\t'));
+            const int is_deps = is_directive(p, "CC_TARGET_DEPS");
+            const int is_out = is_directive(p, "CC_TARGET_OUT");
+            const int is_tgt = is_directive(p, "CC_TARGET_TARGET");
+            const int is_sys = is_directive(p, "CC_TARGET_SYSROOT");
+            const int is_install = is_directive(p, "CC_INSTALL");
+            const int is_inc = is_directive(p, "CC_TARGET_INCLUDE");
+            const int is_cflags = is_directive(p, "CC_TARGET_CFLAGS");
+            const int is_ldflags = is_directive(p, "CC_TARGET_LDFLAGS");
+            const int is_def = is_directive(p, "CC_TARGET_DEFINE");
+            const int is_libs = is_directive(p, "CC_TARGET_LIBS");
 
             if (!is_deps && !is_out && !is_tgt && !is_sys && !is_install && !is_inc && !is_cflags && !is_ldflags && !is_def && !is_libs) continue;
 
-            if (is_deps) p += 14;
-            else if (is_out) p += 13;
-            else if (is_tgt) p += 16;
-            else if (is_sys) p += 17;
-            else if (is_install) p += 10;
-            else if (is_inc) p += 17;
-            else if (is_cflags) p += 16;
-            else if (is_ldflags) p += 17;
-            else if (is_def) p += 16;
-            else p += 14; // libs
+            const char* directive = p;
+            while (*p && *p != ' ' && *p != '\t') p++;
+            int dlen = (int)(p - directive);
 
-            while (*p == ' ' || *p == '\t') p++;
-
-            char name_buf[128];
-            int nread = 0;
-            if (sscanf(p, "%127s%n", name_buf, &nread) != 1) {
-                fprintf(stderr, "%s:%zu: malformed target property line\n", path, lineno);
+            char* name = NULL;
+            err = next_token(&p, &name);
+            if (err) break;
+            if (!name) {
+                fprintf(stderr, "%s:%zu: malformed %.*s line\n", path, lineno, dlen, directive);
                 err = EINVAL;
                 break;
             }
-            p += nread;
-            while (*p == ' ' || *p == '\t') p++;
-
-            int idx = find_target_index(out_targets, *out_count, name_buf);
+            int idx = find_target_index(targets, count, name);
             if (idx < 0) {
-                fprintf(stderr, "%s:%zu: unknown target for property: %s\n", path, lineno, name_buf);
+                fprintf(stderr, "%s:%zu: unknown target for property: %s\n", path, lineno, name);
+                free(name);
                 err = EINVAL;
                 break;
             }
-            CCBuildTargetDecl* t = &out_targets[(size_t)idx];
+            free(name);
+            CCBuildTargetDecl* t = &targets[(size_t)idx];
 
             if (is_deps) {
-                // Tokenize remaining dep target names.
-                while (*p) {
-                    while (*p == ' ' || *p == '\t') p++;
-                    if (!*p || *p == '\n' || *p == '\r') break;
-                    char* start = p;
-                    while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') p++;
-                    size_t len = (size_t)(p - start);
-                    char* tok = (char*)malloc(len + 1);
-                    if (!tok) { err = ENOMEM; break; }
-                    memcpy(tok, start, len);
-                    tok[len] = '\0';
-                    err = append_str_list(&t->deps, &t->dep_count, tok);
-                    if (err) { free(tok); break; }
-                }
-                if (err) break;
+                err = append_tokens(&p, &t->deps, &t->dep_count);
             } else if (is_out || is_tgt || is_sys || is_install) {
                 // Single string value after target name.
-                while (*p == ' ' || *p == '\t') p++;
-                if (!*p || *p == '\n' || *p == '\r') { err = EINVAL; break; }
-                char* start = p;
-                while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') p++;
-                size_t len = (size_t)(p - start);
-                char* tok = (char*)malloc(len + 1);
-                if (!tok) { err = ENOMEM; break; }
-                memcpy(tok, start, len);
-                tok[len] = '\0';
-
-                if (is_out) {
-                    free((void*)t->out_name);
-                    t->out_name = tok;
-                } else if (is_tgt) {
-                    free((void*)t->target_triple);
-                    t->target_triple = tok;
-                } else if (is_sys) {
-                    free((void*)t->sysroot);
-                    t->sysroot = tok;
-                } else {
-                    free((void*)t->install_dest);
-                    t->install_dest = tok;
-                }
-            } else if (is_inc) {
-                // Tokenize remaining include dirs.
-                while (*p) {
-                    while (*p == ' ' || *p == '\t') p++;
-                    if (!*p || *p == '\n' || *p == '\r') break;
-                    char* start = p;
-                    while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') p++;
-                    size_t len = (size_t)(p - start);
-                    char* tok = (char*)malloc(len + 1);
-                    if (!tok) { err = ENOMEM; break; }
-                    memcpy(tok, start, len);
-                    tok[len] = '\0';
-                    err = append_str_list(&t->include_dirs, &t->include_dir_count, tok);
-                    if (err) { free(tok); break; }
-                }
+                char* tok = NULL;
+                err = next_token(&p, &tok);
                 if (err) break;
+                if (!tok) {
+                    fprintf(stderr, "%s:%zu: %.*s %s needs a value\n", path, lineno, dlen, directive, t->name);
+                    err = EINVAL;
+                    break;
+                }
+                const char** slot = is_out ? &t->out_name
+                                  : is_tgt ? &t->target_triple
+                                  : is_sys ? &t->sysroot
+                                           : &t->install_dest;
+                free((void*)*slot);
+                *slot = tok;
+            } else if (is_inc) {
+                err = append_tokens(&p, &t->include_dirs, &t->include_dir_count);
             } else if (is_cflags) {
                 err = append_flags_str(&t->cflags, p);
-                if (err) break;
             } else if (is_ldflags) {
                 err = append_flags_str(&t->ldflags, p);
-                if (err) break;
             } else if (is_def) {
-                // Tokenize remaining define tokens (NAME or NAME=VALUE).
-                while (*p) {
-                    while (*p == ' ' || *p == '\t') p++;
-                    if (!*p || *p == '\n' || *p == '\r') break;
-                    char* start = p;
-                    while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') p++;
-                    size_t len = (size_t)(p - start);
-                    char* tok = (char*)malloc(len + 1);
-                    if (!tok) { err = ENOMEM; break; }
-                    memcpy(tok, start, len);
-                    tok[len] = '\0';
-                    err = append_str_list(&t->defines, &t->define_count, tok);
-                    if (err) { free(tok); break; }
-                }
-                if (err) break;
-            } else if (is_libs) {
-                // Tokenize remaining libs tokens (either "m" or "-lm" etc).
-                while (*p) {
-                    while (*p == ' ' || *p == '\t') p++;
-                    if (!*p || *p == '\n' || *p == '\r') break;
-                    char* start = p;
-                    while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') p++;
-                    size_t len = (size_t)(p - start);
-                    char* tok = (char*)malloc(len + 1);
-                    if (!tok) { err = ENOMEM; break; }
-                    memcpy(tok, start, len);
-                    tok[len] = '\0';
-                    err = append_str_list(&t->libs, &t->lib_count, tok);
-                    if (err) { free(tok); break; }
-                }
-                if (err) break;
+                err = append_tokens(&p, &t->defines, &t->define_count);
+            } else {
+                err = append_tokens(&p, &t->libs, &t->lib_count);
             }
+            if (err) break;
         }
     }
 
+    if (!err && ferror(f)) {
+        fprintf(stderr, "%s: read error\n", path);
+        err = EIO;
+    }
+    free(line);
     fclose(f);
-    if (err == ENOSPC) {
-        fprintf(stderr, "cc: too many CC_TARGET entries or sources in build.cc\n");
+    if (err == ENOMEM) {
+        fprintf(stderr, "%s: out of memory reading build targets\n", path);
     }
     if (err != 0) {
-        // Free partial allocations on error.
         if (out_default_name && *out_default_name) { free(*out_default_name); *out_default_name = NULL; }
-        for (size_t i = 0; i < *out_count; ++i) {
-            free((void*)out_targets[i].name);
-            for (size_t j = 0; j < out_targets[i].src_count; ++j) free((void*)out_targets[i].srcs[j]);
-            free((void*)out_targets[i].srcs);
-            for (size_t j = 0; j < out_targets[i].dep_count; ++j) free((void*)out_targets[i].deps[j]);
-            free((void*)out_targets[i].deps);
-            free((void*)out_targets[i].out_name);
-            free((void*)out_targets[i].target_triple);
-            free((void*)out_targets[i].sysroot);
-            free((void*)out_targets[i].install_dest);
-            for (size_t j = 0; j < out_targets[i].include_dir_count; ++j) free((void*)out_targets[i].include_dirs[j]);
-            free((void*)out_targets[i].include_dirs);
-            for (size_t j = 0; j < out_targets[i].define_count; ++j) free((void*)out_targets[i].defines[j]);
-            free((void*)out_targets[i].defines);
-            for (size_t j = 0; j < out_targets[i].lib_count; ++j) free((void*)out_targets[i].libs[j]);
-            free((void*)out_targets[i].libs);
-            free((void*)out_targets[i].cflags);
-            free((void*)out_targets[i].ldflags);
-            memset(&out_targets[i], 0, sizeof(out_targets[i]));
-        }
-        *out_count = 0;
+        for (size_t i = 0; i < count; ++i) free_target_fields(&targets[i]);
+        free(targets);
+        return err;
     }
-    return err;
+    *out_targets = targets;
+    *out_count = count;
+    return 0;
 }
 
-int cc_build_list_targets(const char* build_path, CCBuildTargetDecl* out_targets, size_t* out_count, size_t max, char** out_default_name) {
+int cc_build_list_targets(const char* build_path, CCBuildTargetDecl** out_targets, size_t* out_count, char** out_default_name) {
     if (!out_targets || !out_count) return EINVAL;
+    *out_targets = NULL;
     *out_count = 0;
     if (out_default_name) *out_default_name = NULL;
     if (!build_path) return 0;
     if (!file_exists(build_path)) return 0;
-    return parse_build_targets(build_path, out_targets, out_count, max, out_default_name);
+    return parse_build_targets(build_path, out_targets, out_count, out_default_name);
 }
 
 void cc_build_free_targets(CCBuildTargetDecl* targets, size_t count, char* default_name) {
-    if (default_name) free(default_name);
+    free(default_name);
     if (!targets) return;
-    for (size_t i = 0; i < count; ++i) {
-        free((void*)targets[i].name);
-        for (size_t j = 0; j < targets[i].src_count; ++j) free((void*)targets[i].srcs[j]);
-        free((void*)targets[i].srcs);
-        for (size_t j = 0; j < targets[i].dep_count; ++j) free((void*)targets[i].deps[j]);
-        free((void*)targets[i].deps);
-        free((void*)targets[i].out_name);
-        free((void*)targets[i].target_triple);
-        free((void*)targets[i].sysroot);
-        free((void*)targets[i].install_dest);
-        for (size_t j = 0; j < targets[i].include_dir_count; ++j) free((void*)targets[i].include_dirs[j]);
-        free((void*)targets[i].include_dirs);
-        for (size_t j = 0; j < targets[i].define_count; ++j) free((void*)targets[i].defines[j]);
-        free((void*)targets[i].defines);
-        for (size_t j = 0; j < targets[i].lib_count; ++j) free((void*)targets[i].libs[j]);
-        free((void*)targets[i].libs);
-        free((void*)targets[i].cflags);
-        free((void*)targets[i].ldflags);
-        memset(&targets[i], 0, sizeof(targets[i]));
-    }
+    for (size_t i = 0; i < count; ++i) free_target_fields(&targets[i]);
+    free(targets);
 }
-
-

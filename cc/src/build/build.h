@@ -71,8 +71,15 @@ void cc_build_free_options(CCBuildOptionDecl* opts, size_t count);
 //   CC_TARGET_TARGET <NAME> <triple>
 //   CC_TARGET_SYSROOT <NAME> <path>
 //   CC_INSTALL <NAME> <dest>
-// Returns 0 on success. The returned strings/arrays are heap-allocated; caller must free via cc_build_free_targets().
-int cc_build_list_targets(const char* build_path, CCBuildTargetDecl* out_targets, size_t* out_count, size_t max, char** out_default_name);
+//   CC_TARGET_INCLUDE / CC_TARGET_DEFINE / CC_TARGET_LIBS <NAME> <tok>...
+//   CC_TARGET_CFLAGS / CC_TARGET_LDFLAGS <NAME> <raw flags...>
+// There is no limit on the number of targets, the tokens on a line, or the
+// length of a line. Returns 0 on success with *out_targets a heap array of
+// *out_count entries (NULL when there are none); the caller frees the array,
+// its strings and *out_default_name with cc_build_free_targets(). On error
+// the parser has printed a diagnostic naming the file and line, and nothing
+// is returned to free.
+int cc_build_list_targets(const char* build_path, CCBuildTargetDecl** out_targets, size_t* out_count, char** out_default_name);
 void cc_build_free_targets(CCBuildTargetDecl* targets, size_t count, char* default_name);
 
 #endif // CC_BUILD_BUILD_H

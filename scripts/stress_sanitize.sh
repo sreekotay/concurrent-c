@@ -176,6 +176,8 @@ case "$mode" in
         ;;
     asan|address)
         run_with_sanitizer "AddressSanitizer" "-fsanitize=address -fno-omit-frame-pointer" || ((total_failed++))
+        # Cond-wait exits on the condvar fallback, leak-checked.
+        bash scripts/test_wake_condvar.sh asan || ((total_failed++))
         ;;
     sanitizers)
         # TSan and ASan are mutually exclusive, run separately
