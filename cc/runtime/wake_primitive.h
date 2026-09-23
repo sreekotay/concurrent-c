@@ -221,4 +221,77 @@ static inline void wake_primitive_wake_all(wake_primitive* wp) {
 
 #endif /* platform selection */
 
+/* ============================================================================
+ * One-shot handoff on a waiter-owned primitive
+ * ============================================================================
+ *
+ * For a primitive that lives in the waiter's frame (a stack wait node): the
+ * waiter may return -- and its frame be reused -- the moment it sees the
+ * post, so the post IS the publication and the waker touches nothing of
+ * `*wp` after it.  Publishing a separate `ready` flag first and then calling
+ * wake_primitive_wake_one(wp) writes `wp->value` into a frame that may
+ * already belong to someone else.
+ *
+ *   waiter:  wake_primitive_init(wp);  ...make wp reachable...
+ *            while (!wake_primitive_posted(wp)) wake_primitive_wait(wp, 0);
+ *            wake_primitive_retire(wp);          (before the frame dies)
+ *   waker:   wake_primitive_post_once(wp);       (last touch of *wp)
+ *
+ * `value` goes 0 -> 1 exactly once, so a wait with expected 0 cannot miss
+ * the post: the kernel compares before it sleeps.  futex and ulock key the
+ * wake by address and never read it, so the wake that follows the store
+ * is safe on a dead frame (at worst a spurious wake for whoever waits
+ * there next, which every waiter tolerates).  The condvar fallback has to
+ * touch the mutex and cond after the store, so it posts under the mutex
+ * and the waiter takes the mutex once in wake_primitive_retire: it cannot
+ * return while the waker is still inside the critical section.
+ */
+
+static inline int wake_primitive_posted(wake_primitive* wp) {
+    return atomic_load_explicit(&wp->value, memory_order_acquire) != 0;
+}
+
+#if defined(WAKE_USE_FUTEX)
+
+static inline void wake_primitive_post_once(wake_primitive* wp) {
+    _Atomic uint32_t* addr = &wp->value;
+    atomic_store_explicit(addr, 1, memory_order_release);
+    syscall(SYS_futex, addr, FUTEX_WAKE | FUTEX_PRIVATE_FLAG, 1, NULL, NULL, 0);
+}
+
+static inline void wake_primitive_retire(wake_primitive* wp) {
+    (void)wp;
+}
+
+#elif defined(WAKE_USE_ULOCK)
+
+static inline void wake_primitive_post_once(wake_primitive* wp) {
+    _Atomic uint32_t* addr = &wp->value;
+    atomic_store_explicit(addr, 1, memory_order_release);
+    __ulock_wake(UL_COMPARE_AND_WAIT | ULF_NO_ERRNO, (void*)addr, 0);
+}
+
+static inline void wake_primitive_retire(wake_primitive* wp) {
+    (void)wp;
+}
+
+#else /* WAKE_USE_CONDVAR */
+
+static inline void wake_primitive_post_once(wake_primitive* wp) {
+    pthread_mutex_lock(&wp->mutex);
+    atomic_store_explicit(&wp->value, 1, memory_order_release);
+    pthread_cond_signal(&wp->cond);
+    pthread_mutex_unlock(&wp->mutex);
+}
+
+static inline void wake_primitive_retire(wake_primitive* wp) {
+    /* A waker that posted is inside the mutex until its unlock; wait it
+     * out before the frame (and the mutex in it) goes away. */
+    pthread_mutex_lock(&wp->mutex);
+    pthread_mutex_unlock(&wp->mutex);
+    wake_primitive_destroy(wp);
+}
+
+#endif
+
 #endif /* WAKE_PRIMITIVE_H */

@@ -290,11 +290,6 @@ static void cc__append_host_cc_flags(char* cmd, size_t cmd_cap, const char* cc_b
     cc_host_cc_profile_append_flags(&prof, cmd, cmd_cap);
 }
 
-/* Back-compat name used at call sites before the profile existed. */
-static void cc__append_tcc_host_flags(char* cmd, size_t cmd_cap, const char* cc_bin) {
-    cc__append_host_cc_flags(cmd, cmd_cap, cc_bin);
-}
-
 static void cc__append_flag(char* buf, size_t cap, const char* prefix, const char* val) {
     if (!buf || cap == 0 || !val || !val[0]) return;
     if (prefix && prefix[0]) {
@@ -1634,6 +1629,112 @@ static int run_cmd(const char* cmd, int verbose) {
         fprintf(stderr, "cc: command failed (rc=%d): %s\n", rc, cmd);
     }
     return rc;
+}
+
+/* A command line that grows with what it names. The link line lists every
+ * object and library of a target, and the compile line every include root,
+ * so neither has a size the driver can pick ahead of time: a fixed buffer
+ * cut `-o <bin>` off the tail and the host cc wrote a binary under whatever
+ * name the cut left. `failed` is sticky -- a command that could not be
+ * built whole is refused by cc__cmd_run, never run as a prefix. */
+typedef struct {
+    char* p;
+    size_t len;
+    size_t cap;
+    int failed;
+} CCCmd;
+
+static void cc__cmd_free(CCCmd* c) {
+    free(c->p);
+    memset(c, 0, sizeof(*c));
+}
+
+static void cc__cmd_cat_n(CCCmd* c, const char* s, size_t n) {
+    if (c->failed || !s) return;
+    if (c->len + n + 1 > c->cap) {
+        size_t cap = c->cap ? c->cap : 1024;
+        char* np;
+        while (cap < c->len + n + 1) {
+            if (cap > ((size_t)-1) / 2) { c->failed = 1; return; }
+            cap *= 2;
+        }
+        np = (char*)realloc(c->p, cap);
+        if (!np) { c->failed = 1; return; }
+        c->p = np;
+        c->cap = cap;
+    }
+    memcpy(c->p + c->len, s, n);
+    c->len += n;
+    c->p[c->len] = '\0';
+}
+
+static void cc__cmd_cat(CCCmd* c, const char* s) {
+    if (s) cc__cmd_cat_n(c, s, strlen(s));
+}
+
+/* ` s` -- nothing for NULL or "". */
+static void cc__cmd_arg(CCCmd* c, const char* s) {
+    if (!s || !s[0]) return;
+    cc__cmd_cat_n(c, " ", 1);
+    cc__cmd_cat(c, s);
+}
+
+static void cc__cmd_catf(CCCmd* c, const char* fmt, ...) {
+    va_list ap;
+    int n;
+    char small[512];
+    char* big;
+    if (c->failed) return;
+    va_start(ap, fmt);
+    n = vsnprintf(small, sizeof(small), fmt, ap);
+    va_end(ap);
+    if (n < 0) { c->failed = 1; return; }
+    if ((size_t)n < sizeof(small)) { cc__cmd_cat_n(c, small, (size_t)n); return; }
+    big = (char*)malloc((size_t)n + 1);
+    if (!big) { c->failed = 1; return; }
+    va_start(ap, fmt);
+    vsnprintf(big, (size_t)n + 1, fmt, ap);
+    va_end(ap);
+    cc__cmd_cat_n(c, big, (size_t)n);
+    free(big);
+}
+
+/* The command text, or NULL with a diagnostic when it could not be built
+ * whole. */
+static const char* cc__cmd_str(const CCCmd* c, const char* what) {
+    if (c->failed || !c->p) {
+        fprintf(stderr, "cc: cannot build the %s command whole; "
+                        "not running a truncated one\n", what);
+        return NULL;
+    }
+    return c->p;
+}
+
+static int cc__cmd_run(const CCCmd* c, const char* what, int verbose) {
+    const char* s = cc__cmd_str(c, what);
+    if (!s) return -1;
+    return run_cmd(s, verbose);
+}
+
+/* A fixed flag buffer that strncat filled to the brim may have lost its
+ * tail: refuse it rather than hand a prefix to the host cc. */
+static int cc__flags_truncated(const char* buf, size_t cap, const char* what) {
+    if (!buf || strlen(buf) + 1 < cap) return 0;
+    fprintf(stderr, "cc: %s exceed %zu bytes; not running a truncated command\n",
+            what, cap - 1);
+    return 1;
+}
+
+/* The host cc profile's flags (TCC's -B and friends) on a growable line. */
+static void cc__cmd_host_cc_flags(CCCmd* c, const char* cc_bin) {
+    char flags[4096];
+    flags[0] = '\0';
+    cc__append_host_cc_flags(flags, sizeof(flags), cc_bin);
+    if (cc__flags_truncated(flags, sizeof(flags), "host cc flags")) {
+        c->failed = 1;
+        return;
+    }
+    cc__cmd_cat(c, flags);
 }
 
 static int run_exec(const char* bin_path, char* const* argv, int verbose) {
@@ -3067,6 +3168,22 @@ static int cc__is_lib_path(const char* lib) {
     return 0;
 }
 
+/* Link flags collected from @link, build.cc targets, and --ld-flags. The
+ * buffers are fixed, so every one is checked with cc__flags_truncated
+ * before it reaches a command line. */
+#define CC_LD_FLAGS_CAP 16384
+
+/* `-I` roots for the `cc -E` that finds @link markers: four toolchain
+ * roots and the unit's directory, each at most PATH_MAX. */
+#define CC_LINK_INC_FLAGS_CAP (5 * (PATH_MAX + 4))
+
+static void cc__link_inc_flags(const char* src_dir, char* out, size_t cap) {
+    int n = snprintf(out, cap, "-I%s -I%s -I%s -I%s",
+                     g_cc_lowered_include, g_cc_include, g_cc_dir, g_repo_root);
+    if (n >= 0 && (size_t)n < cap && src_dir && src_dir[0])
+        snprintf(out + n, cap - (size_t)n, " -I%s", src_dir);
+}
+
 static void cc__merge_target_link_flags(const CCBuildTargetDecl* t, char* ld_flags, size_t ld_cap) {
     if (!t) return;
     if (t->ldflags && t->ldflags[0]) cc__append_spaced(ld_flags, ld_cap, t->ldflags);
@@ -3244,12 +3361,15 @@ static void cc__extract_link_directives(const char* c_file_path, const char* inc
     }
     
     // Run preprocessor to expand includes and scan that too
-    char cmd[2048];
+    CCCmd cmd;
     const char* inc = include_flags ? include_flags : "";
+    const char* cmd_s;
+    memset(&cmd, 0, sizeof(cmd));
     /* -C keeps the marker comments a lowered header carries */
-    snprintf(cmd, sizeof(cmd), "cc -E -C %s \"%s\" 2>/dev/null", inc, c_file_path);
-    
-    FILE* pp = popen(cmd, "r");
+    cc__cmd_catf(&cmd, "cc -E -C %s \"%s\" 2>/dev/null", inc, c_file_path);
+    cmd_s = cc__cmd_str(&cmd, "@link scan");
+    FILE* pp = cmd_s ? popen(cmd_s, "r") : NULL;
+    cc__cmd_free(&cmd);
     if (!pp) return;
     
     // Read preprocessed output
@@ -3304,15 +3424,9 @@ static void cc__collect_multi_link_flags(const char* extra_ld,
         out[cap - 1] = '\0';
     }
     for (i = 0; i < n; i++) {
-        char link_inc_flags[512];
-        snprintf(link_inc_flags, sizeof(link_inc_flags), "-I%s -I%s -I%s -I%s",
-                 g_cc_lowered_include, g_cc_include, g_cc_dir, g_repo_root);
-        if (src_dir_bufs && src_dir_bufs[i][0]) {
-            strncat(link_inc_flags, " -I",
-                    sizeof(link_inc_flags) - strlen(link_inc_flags) - 1);
-            strncat(link_inc_flags, src_dir_bufs[i],
-                    sizeof(link_inc_flags) - strlen(link_inc_flags) - 1);
-        }
+        char link_inc_flags[CC_LINK_INC_FLAGS_CAP];
+        cc__link_inc_flags(src_dir_bufs ? src_dir_bufs[i] : NULL,
+                           link_inc_flags, sizeof(link_inc_flags));
         if (c_bufs && c_bufs[i][0])
             cc__extract_link_directives(c_bufs[i], link_inc_flags, out, cap);
         if (inputs && inputs[i])
@@ -6301,6 +6415,35 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
 }
 
 // Core compile helper shared by default and build modes.
+/* The single-unit link line. Put -l libs after objects so GNU ld resolves
+ * them (macOS ld is laxer). */
+static int cc__link_one(const CCBuildOptions* opt, const char* cc_bin, int is_tcc,
+                        const char* ccflags_env, const char* target_part,
+                        const char* sysroot_part, const char* link_extra,
+                        const char* module_objs, const char* runtime_obj,
+                        const char* ldflags_env, const char* final_ld_flags) {
+    CCCmd cmd;
+    int rc;
+    memset(&cmd, 0, sizeof(cmd));
+    cc__cmd_cat(&cmd, cc_bin);
+    cc__cmd_arg(&cmd, ccflags_env);
+    cc__cmd_arg(&cmd, opt->cc_flags);
+    cc__cmd_arg(&cmd, target_part);
+    cc__cmd_arg(&cmd, sysroot_part);
+    cc__cmd_arg(&cmd, link_extra);
+    cc__cmd_arg(&cmd, opt->obj_out_path);
+    cc__cmd_arg(&cmd, module_objs);
+    cc__cmd_arg(&cmd, runtime_obj);
+    cc__cmd_arg(&cmd, ldflags_env);
+    cc__cmd_arg(&cmd, final_ld_flags);
+    cc__cmd_cat(&cmd, " -o ");
+    cc__cmd_cat(&cmd, opt->bin_out_path);
+    if (is_tcc) cc__cmd_host_cc_flags(&cmd, cc_bin);
+    rc = cc__cmd_run(&cmd, "link", opt->verbose);
+    cc__cmd_free(&cmd);
+    return rc != 0 ? -1 : 0;
+}
+
 static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary_out) {
     if (!opt || !opt->in_path || !opt->c_out_path) {
         fprintf(stderr, "cc: missing input or c_out_path\n");
@@ -6806,19 +6949,14 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         return -1;
     }
     // Extract @link directives from generated C file (runs preprocessor to expand includes)
-    static char extracted_ld[1024];
+    static char extracted_ld[CC_LD_FLAGS_CAP];
     extracted_ld[0] = '\0';
     if (opt->ld_flags && opt->ld_flags[0]) {
         strncpy(extracted_ld, opt->ld_flags, sizeof(extracted_ld) - 1);
         extracted_ld[sizeof(extracted_ld) - 1] = '\0';
     }
-    char link_inc_flags[512];
-    snprintf(link_inc_flags, sizeof(link_inc_flags), "-I%s -I%s -I%s -I%s",
-             g_cc_lowered_include, g_cc_include, g_cc_dir, g_repo_root);
-    if (src_dir[0]) {
-        strncat(link_inc_flags, " -I", sizeof(link_inc_flags) - strlen(link_inc_flags) - 1);
-        strncat(link_inc_flags, src_dir, sizeof(link_inc_flags) - strlen(link_inc_flags) - 1);
-    }
+    char link_inc_flags[CC_LINK_INC_FLAGS_CAP];
+    cc__link_inc_flags(src_dir, link_inc_flags, sizeof(link_inc_flags));
     cc__extract_link_directives(opt->c_out_path, link_inc_flags, extracted_ld, sizeof(extracted_ld));
 #ifndef _WIN32
     /* libm is ISO C's own standard surface — the libc/libm split is a
@@ -6829,11 +6967,11 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
     cc__add_lib_to_flags("m", extracted_ld, sizeof(extracted_ld));
 #endif
     cc__add_runtime_tls_lib(extracted_ld, sizeof(extracted_ld));
+    if (cc__flags_truncated(extracted_ld, sizeof(extracted_ld), "link flags")) return -1;
     const char* final_ld_flags = extracted_ld[0] ? extracted_ld : opt->ld_flags;
 
     // Link to binary (with incremental cache)
     const char* ldflags_env = getenv("LDFLAGS");
-    char link_cmd[2048];
     // Optional runtime object (release builds may need a freshly-built runtime with section flags for dead-strip).
     char runtime_obj[PATH_MAX];
     runtime_obj[0] = '\0';
@@ -6863,7 +7001,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
 #endif
 
     /* The module objects this unit reaches through its lowered headers. */
-    static char module_objs[4096];
+    static char module_objs[CC_LD_FLAGS_CAP];
     module_objs[0] = '\0';
     {
         CCPathList mods;
@@ -6915,22 +7053,10 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         if (file_exists(opt->bin_out_path) && cc__read_u64_file(link_meta_path, &prev) == 0 && prev == link_key) {
             if (summary_out) { summary_out->reuse_link = 1; summary_out->did_link = 0; }
         } else {
-            /* Put -l libs after objects so GNU ld resolves them (macOS ld is laxer). */
-            snprintf(link_cmd, sizeof(link_cmd), "%s %s %s %s %s %s %s %s %s %s %s -o %s",
-                     cc_bin,
-                     ccflags_env ? ccflags_env : "",
-                     opt->cc_flags ? opt->cc_flags : "",
-                     target_part,
-                     sysroot_part,
-                     link_extra,
-                     opt->obj_out_path,
-                     module_objs,
-                     have_runtime ? runtime_obj : "",
-                     ldflags_env ? ldflags_env : "",
-                     final_ld_flags ? final_ld_flags : "",
-                     opt->bin_out_path);
-            if (link_is_tcc) cc__append_tcc_host_flags(link_cmd, sizeof(link_cmd), cc_bin);
-            if (run_cmd(link_cmd, opt->verbose) != 0) return -1;
+            if (cc__link_one(opt, cc_bin, link_is_tcc, ccflags_env, target_part, sysroot_part,
+                             link_extra, module_objs, have_runtime ? runtime_obj : "",
+                             ldflags_env, final_ld_flags) != 0)
+                return -1;
 
 #if defined(__APPLE__)
             // On macOS, DWARF debug info typically lives in a separate dSYM bundle.
@@ -6950,21 +7076,10 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             if (summary_out) { summary_out->reuse_link = 0; summary_out->did_link = 1; }
         }
     } else {
-        snprintf(link_cmd, sizeof(link_cmd), "%s %s %s %s %s %s %s %s %s %s %s -o %s",
-                 cc_bin,
-                 ccflags_env ? ccflags_env : "",
-                 opt->cc_flags ? opt->cc_flags : "",
-                 target_part,
-                 sysroot_part,
-                 link_extra,
-                 opt->obj_out_path,
-                 module_objs,
-                 have_runtime ? runtime_obj : "",
-                 ldflags_env ? ldflags_env : "",
-                 final_ld_flags ? final_ld_flags : "",
-                 opt->bin_out_path);
-        if (link_is_tcc) cc__append_tcc_host_flags(link_cmd, sizeof(link_cmd), cc_bin);
-        if (run_cmd(link_cmd, opt->verbose) != 0) return -1;
+        if (cc__link_one(opt, cc_bin, link_is_tcc, ccflags_env, target_part, sysroot_part,
+                         link_extra, module_objs, have_runtime ? runtime_obj : "",
+                         ldflags_env, final_ld_flags) != 0)
+            return -1;
 
 #if defined(__APPLE__)
         {
@@ -7090,7 +7205,8 @@ static int cc__compile_c_to_obj(const CCBuildOptions* opt,
     const char* ccflags_env = getenv("CFLAGS");
     const char* cppflags_env = getenv("CPPFLAGS");
     int is_tcc = cc__is_tcc(cc_bin);
-    char cmd[2048];
+    CCCmd cmd;
+    int rc;
     char lead_inc[2 * PATH_MAX + 16];
 
     /* Two lowered forms of the same local `.cch` exist side by side: the one
@@ -7101,6 +7217,7 @@ static int cc__compile_c_to_obj(const CCBuildOptions* opt,
      * searched ahead of out/include, whichever route (a unit, a build file
      * target, a module face) asked for the object. The caller's extra
      * directory follows it. */
+    memset(&cmd, 0, sizeof(cmd));
     lead_inc[0] = '\0';
     if (g_lowerer_clean) {
         char clean_dir[PATH_MAX];
@@ -7115,7 +7232,7 @@ static int cc__compile_c_to_obj(const CCBuildOptions* opt,
     // TCC doesn't support -MMD/-MF/-MT dependency tracking flags
     // Add lowered include path first so .h versions of .cch are found before originals
     if (is_tcc) {
-        snprintf(cmd, sizeof(cmd), "%s %s %s %s %s %s-I%s -I%s -I%s -I%s",
+        cc__cmd_catf(&cmd, "%s %s %s %s %s %s-I%s -I%s -I%s -I%s",
                  cc_bin,
                  ccflags_env ? ccflags_env : "",
                  cppflags_env ? cppflags_env : "",
@@ -7126,9 +7243,9 @@ static int cc__compile_c_to_obj(const CCBuildOptions* opt,
                  g_cc_include,
                  g_cc_dir,
                  g_repo_root);
-        cc__append_tcc_host_flags(cmd, sizeof(cmd), cc_bin);
+        cc__cmd_host_cc_flags(&cmd, cc_bin);
     } else {
-        snprintf(cmd, sizeof(cmd), "%s %s %s %s %s -MMD -MF %s -MT %s %s-I%s -I%s -I%s -I%s",
+        cc__cmd_catf(&cmd, "%s %s %s %s %s -MMD -MF %s -MT %s %s-I%s -I%s -I%s -I%s",
                  cc_bin,
                  ccflags_env ? ccflags_env : "",
                  cppflags_env ? cppflags_env : "",
@@ -7146,7 +7263,7 @@ static int cc__compile_c_to_obj(const CCBuildOptions* opt,
         // Add -I<dir> so generated C can include headers relative to the original source directory.
         char inc[PATH_MAX + 8];
         snprintf(inc, sizeof(inc), " -I%s", extra_include_dir);
-        strncat(cmd, inc, sizeof(cmd) - strlen(cmd) - 1);
+        cc__cmd_cat(&cmd, inc);
     }
     {
         /* A module unit is compiled from out/.cc-build/clean, and the
@@ -7157,7 +7274,7 @@ static int cc__compile_c_to_obj(const CCBuildOptions* opt,
         char inc[PATH_MAX + 8];
         if (c_path && cc__project_root_for_unit(c_path, proj, sizeof(proj)) == 0) {
             snprintf(inc, sizeof(inc), " -I%s", proj);
-            strncat(cmd, inc, sizeof(cmd) - strlen(cmd) - 1);
+            cc__cmd_cat(&cmd, inc);
         }
     }
     /* On the clean path `extra_include_dir` is the emit directory, not the
@@ -7169,7 +7286,7 @@ static int cc__compile_c_to_obj(const CCBuildOptions* opt,
         (!extra_include_dir || strcmp(extra_include_dir, g_clean_quote_dir) != 0)) {
         char inc[PATH_MAX + 8];
         snprintf(inc, sizeof(inc), " -I%s", g_clean_quote_dir);
-        strncat(cmd, inc, sizeof(cmd) - strlen(cmd) - 1);
+        cc__cmd_cat(&cmd, inc);
     }
     {
         /* Extra system includes from --sysroot / -isysroot / CC_SYSROOT.
@@ -7185,37 +7302,38 @@ static int cc__compile_c_to_obj(const CCBuildOptions* opt,
                     sizeof(probe) &&
                 access(probe, R_OK) == 0 &&
                 (size_t)snprintf(inc, sizeof(inc), " -I%s", probe) < sizeof(inc))
-                strncat(cmd, inc, sizeof(cmd) - strlen(cmd) - 1);
+                cc__cmd_cat(&cmd, inc);
         }
     }
     if (opt->cc_flags && *opt->cc_flags) {
-        strncat(cmd, " ", sizeof(cmd) - strlen(cmd) - 1);
-        strncat(cmd, opt->cc_flags, sizeof(cmd) - strlen(cmd) - 1);
+        cc__cmd_arg(&cmd, opt->cc_flags);
     }
     // For smaller release binaries, ensure the compiler emits per-function/data sections.
     // This enables the linker to dead-strip unused runtime code.
     // TCC doesn't support these flags.
     if (!is_tcc) {
-        strncat(cmd, " -ffunction-sections -fdata-sections", sizeof(cmd) - strlen(cmd) - 1);
+        cc__cmd_cat(&cmd, " -ffunction-sections -fdata-sections");
         /* C23 semantics: an undeclared function is a compile error AT THE
          * USER'S LINE (via #line sourcemaps), not an implicit int that
          * survives to an opaque linker error naming the lowered .c file.
          * gcc>=14 / clang>=16 already default to this; pinning the flag
          * makes the diagnostic identical on older hosts. */
-        strncat(cmd, " -Werror=implicit-function-declaration", sizeof(cmd) - strlen(cmd) - 1);
+        cc__cmd_cat(&cmd, " -Werror=implicit-function-declaration");
     }
     // Finally append the compilation inputs/outputs.
     if (c_path && *c_path) {
-        strncat(cmd, " -c ", sizeof(cmd) - strlen(cmd) - 1);
-        strncat(cmd, c_path, sizeof(cmd) - strlen(cmd) - 1);
+        cc__cmd_cat(&cmd, " -c ");
+        cc__cmd_cat(&cmd, c_path);
     }
     if (obj_path && *obj_path) {
-        strncat(cmd, " -o ", sizeof(cmd) - strlen(cmd) - 1);
-        strncat(cmd, obj_path, sizeof(cmd) - strlen(cmd) - 1);
+        cc__cmd_cat(&cmd, " -o ");
+        cc__cmd_cat(&cmd, obj_path);
     }
     {
         long long t_cc = cc__now_ms();
-        if (run_cmd(cmd, opt->verbose) != 0) return -1;
+        rc = cc__cmd_run(&cmd, "compile", opt->verbose);
+        cc__cmd_free(&cmd);
+        if (rc != 0) return -1;
         cc__prof_span_arg("host_cc", c_path ? c_path : obj_path, t_cc);
     }
     return 0;
@@ -7223,7 +7341,7 @@ static int cc__compile_c_to_obj(const CCBuildOptions* opt,
 
 /* The command that produces a runtime object (single unity TU). */
 typedef struct {
-    char compile[4096];
+    char compile[8192];
 } CCRuntimeCmds;
 
 static uint64_t cc__fnv1a64(const void* data, size_t n, uint64_t h) {
@@ -7383,7 +7501,7 @@ static int cc__runtime_obj_is_stale(const char* runtime_obj_path) {
  * of truth: cc__ensure_runtime_obj calls this twice — once against placeholder
  * paths to derive the variant hash, once against the real paths to run and to
  * record — so the hash cannot miss a dimension the commands encode. */
-static void cc__runtime_build_cmds(const CCBuildOptions* opt, const char* cc_bin, int is_tcc,
+static int cc__runtime_build_cmds(const CCBuildOptions* opt, const char* cc_bin, int is_tcc,
                                    const CCHostCcProfile* host_prof,
                                    const char* target_part, const char* sysroot_part,
                                    const char* obj, CCRuntimeCmds* out) {
@@ -7422,6 +7540,8 @@ static void cc__runtime_build_cmds(const CCBuildOptions* opt, const char* cc_bin
     if (!is_tcc)
         strncat(out->compile, " -ffunction-sections -fdata-sections",
                 sizeof(out->compile) - strlen(out->compile) - 1);
+    return cc__flags_truncated(out->compile, sizeof(out->compile), "the runtime compile command")
+               ? -1 : 0;
 }
 
 static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
@@ -7485,8 +7605,9 @@ static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
     CCRuntimeCmds probe;
     char ph_obj[PATH_MAX];
     snprintf(ph_obj, sizeof(ph_obj), "%s/runtime.o", rt_root);
-    cc__runtime_build_cmds(opt, cc_bin, is_tcc, &host_prof, target_part, sysroot_part,
-                           ph_obj, &probe);
+    if (cc__runtime_build_cmds(opt, cc_bin, is_tcc, &host_prof, target_part, sysroot_part,
+                               ph_obj, &probe) != 0)
+        return -1;
     uint64_t vh = cc__fnv1a64(probe.compile, strlen(probe.compile), 0);
     char variant[17];
     snprintf(variant, sizeof(variant), "%016llx", (unsigned long long)vh);
@@ -7494,8 +7615,9 @@ static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
     snprintf(runtime_obj, sizeof(runtime_obj), "%s/runtime-%s.o", rt_root, variant);
 
     CCRuntimeCmds cmds;
-    cc__runtime_build_cmds(opt, cc_bin, is_tcc, &host_prof, target_part, sysroot_part,
-                           runtime_obj, &cmds);
+    if (cc__runtime_build_cmds(opt, cc_bin, is_tcc, &host_prof, target_part, sysroot_part,
+                               runtime_obj, &cmds) != 0)
+        return -1;
 
     char recipe_path[PATH_MAX];
     char recipe[sizeof(cmds.compile) + 2];
@@ -7558,8 +7680,10 @@ static int cc__link_many(const CCBuildOptions* opt,
     const char* cc_bin = pick_cc_bin(opt->cc_bin_override);
     const char* ldflags_env = getenv("LDFLAGS");
     int is_tcc = cc__is_tcc(cc_bin);
-    char cmd[4096];
+    CCCmd cmd;
     CCPathList mod_objs;
+    int rc;
+    memset(&cmd, 0, sizeof(cmd));
     memset(&mod_objs, 0, sizeof(mod_objs));
     if (c_paths &&
         cc__module_objects(opt, c_paths, obj_count, NULL, NULL, NULL, 0,
@@ -7567,47 +7691,32 @@ static int cc__link_many(const CCBuildOptions* opt,
         cc__pathlist_free(&mod_objs);
         return -1;
     }
-    snprintf(cmd, sizeof(cmd), "%s %s %s",
-             cc_bin,
-             target_part ? target_part : "",
-             sysroot_part ? sysroot_part : "");
-    if (is_tcc) cc__append_tcc_host_flags(cmd, sizeof(cmd), cc_bin);
+    cc__cmd_cat(&cmd, cc_bin);
+    cc__cmd_arg(&cmd, target_part);
+    cc__cmd_arg(&cmd, sysroot_part);
+    if (is_tcc) cc__cmd_host_cc_flags(&cmd, cc_bin);
     // TCC doesn't support -Wl,-dead_strip or -Wl,--gc-sections
     if (!is_tcc) {
 #if defined(__APPLE__)
-        strncat(cmd, " -Wl,-dead_strip", sizeof(cmd) - strlen(cmd) - 1);
+        cc__cmd_arg(&cmd, "-Wl,-dead_strip");
 #elif defined(__linux__)
-        strncat(cmd, " -Wl,--gc-sections", sizeof(cmd) - strlen(cmd) - 1);
+        cc__cmd_arg(&cmd, "-Wl,--gc-sections");
 #endif
     }
-    for (size_t i = 0; i < obj_count; ++i) {
-        strncat(cmd, " ", sizeof(cmd) - strlen(cmd) - 1);
-        strncat(cmd, obj_paths[i], sizeof(cmd) - strlen(cmd) - 1);
-    }
-    for (size_t i = 0; i < mod_objs.n; ++i) {
-        strncat(cmd, " ", sizeof(cmd) - strlen(cmd) - 1);
-        strncat(cmd, mod_objs.v[i], sizeof(cmd) - strlen(cmd) - 1);
-    }
+    for (size_t i = 0; i < obj_count; ++i) cc__cmd_arg(&cmd, obj_paths[i]);
+    for (size_t i = 0; i < mod_objs.n; ++i) cc__cmd_arg(&cmd, mod_objs.v[i]);
     cc__pathlist_free(&mod_objs);
-    if (runtime_obj && runtime_obj[0]) {
-        strncat(cmd, " ", sizeof(cmd) - strlen(cmd) - 1);
-        strncat(cmd, runtime_obj, sizeof(cmd) - strlen(cmd) - 1);
-    }
+    cc__cmd_arg(&cmd, runtime_obj);
     /* Libraries after every object: an archive named by @link or LDFLAGS
      * is scanned once, where it stands, and must stand after the objects
      * that need it. */
-    if (ldflags_env && ldflags_env[0]) {
-        strncat(cmd, " ", sizeof(cmd) - strlen(cmd) - 1);
-        strncat(cmd, ldflags_env, sizeof(cmd) - strlen(cmd) - 1);
-    }
-    if (opt->ld_flags && opt->ld_flags[0]) {
-        strncat(cmd, " ", sizeof(cmd) - strlen(cmd) - 1);
-        strncat(cmd, opt->ld_flags, sizeof(cmd) - strlen(cmd) - 1);
-    }
-    strncat(cmd, " -o ", sizeof(cmd) - strlen(cmd) - 1);
-    strncat(cmd, bin_out_path, sizeof(cmd) - strlen(cmd) - 1);
-    if (run_cmd(cmd, opt->verbose) != 0) return -1;
-    return 0;
+    cc__cmd_arg(&cmd, ldflags_env);
+    cc__cmd_arg(&cmd, opt->ld_flags);
+    cc__cmd_cat(&cmd, " -o ");
+    cc__cmd_cat(&cmd, bin_out_path);
+    rc = cc__cmd_run(&cmd, "link", opt->verbose);
+    cc__cmd_free(&cmd);
+    return rc != 0 ? -1 : 0;
 }
 
 static void print_build_summary(const CCBuildOptions* opt, const CCBuildSummary* s, const char* step_name) {
@@ -7640,19 +7749,19 @@ static int ensure_cc_test_tool(const char* cc_bin, const char* target_part, cons
     snprintf(mk_cmd, sizeof(mk_cmd), "mkdir -p %s/tools", g_repo_root);
     if (run_cmd(mk_cmd, verbose) != 0) return -1;
 
-    char cmd[2048];
-    snprintf(cmd, sizeof(cmd), "%s %s %s -O2 -Wall -Wextra %s -o %s",
-             cc_bin,
-             target_part ? target_part : "",
-             sysroot_part ? sysroot_part : "",
-             tool_src,
-             tool_path);
-    if (cc_flags && *cc_flags) {
-        strncat(cmd, " ", sizeof(cmd) - strlen(cmd) - 1);
-        strncat(cmd, cc_flags, sizeof(cmd) - strlen(cmd) - 1);
-    }
-    if (run_cmd(cmd, verbose) != 0) return -1;
-    return 0;
+    CCCmd cmd;
+    int rc;
+    memset(&cmd, 0, sizeof(cmd));
+    cc__cmd_catf(&cmd, "%s %s %s -O2 -Wall -Wextra %s -o %s",
+                 cc_bin,
+                 target_part ? target_part : "",
+                 sysroot_part ? sysroot_part : "",
+                 tool_src,
+                 tool_path);
+    cc__cmd_arg(&cmd, cc_flags);
+    rc = cc__cmd_run(&cmd, "test tool", verbose);
+    cc__cmd_free(&cmd);
+    return rc != 0 ? -1 : 0;
 }
 
 static int run_build_mode(int argc, char** argv) {
@@ -7932,14 +8041,14 @@ static int run_build_mode(int argc, char** argv) {
 
     // Build combined cc_flags that includes both --cc-flags and -D defines
     // This ensures defines like -DCC_ENABLE_HTTP=1 are passed to the C compiler
-    static char combined_cc_flags[2048];
+    static char combined_cc_flags[8192];
     combined_cc_flags[0] = '\0';
     if (flavor_cc && flavor_cc[0]) {
         strncat(combined_cc_flags, flavor_cc, sizeof(combined_cc_flags) - 1);
     }
     if (cc_flags && cc_flags[0]) {
         if (combined_cc_flags[0]) strncat(combined_cc_flags, " ", sizeof(combined_cc_flags) - strlen(combined_cc_flags) - 1);
-        strncat(combined_cc_flags, cc_flags, sizeof(combined_cc_flags) - 1);
+        strncat(combined_cc_flags, cc_flags, sizeof(combined_cc_flags) - strlen(combined_cc_flags) - 1);
     }
     for (size_t i = 0; i < cli_count; ++i) {
         char def[256];
@@ -7949,6 +8058,10 @@ static int run_build_mode(int argc, char** argv) {
             snprintf(def, sizeof(def), " -D%s=%lld", cli_names[i], cli_values[i]);
         }
         strncat(combined_cc_flags, def, sizeof(combined_cc_flags) - strlen(combined_cc_flags) - 1);
+    }
+    if (cc__flags_truncated(combined_cc_flags, sizeof(combined_cc_flags), "--cc-flags and -D defines")) {
+        for (size_t i = 0; i < cli_count; ++i) free(cli_names[i]);
+        return 2;
     }
     cc_flags = combined_cc_flags[0] ? combined_cc_flags : cc_flags;
     cc__apply_user_include_env(cc_flags);
@@ -8675,12 +8788,17 @@ static int run_build_mode(int argc, char** argv) {
             }
 
             // Merge link flags from closure + CLI.
-            static char merged_ld[4096];
+            static char merged_ld[CC_LD_FLAGS_CAP];
             merged_ld[0] = '\0';
             for (size_t i = 0; i < target_count; ++i) {
                 if (vis[i]) cc__merge_target_link_flags(&targets[i], merged_ld, sizeof(merged_ld));
             }
             if (ld_flags && ld_flags[0]) cc__append_spaced(merged_ld, sizeof(merged_ld), ld_flags);
+            if (cc__flags_truncated(merged_ld, sizeof(merged_ld), "link flags")) {
+                cc_build_free_targets(targets, target_count, def_name);
+                free(targets);
+                goto parse_fail;
+            }
             base_opt.ld_flags = merged_ld[0] ? merged_ld : ld_flags;
 
             // Link.
@@ -9030,11 +9148,12 @@ static int run_build_mode(int argc, char** argv) {
         }
 
         // Link all objects
-        char collected_ld[2048];
+        static char collected_ld[CC_LD_FLAGS_CAP];
         const char* link_c_paths[64];
         for (int i = 0; i < input_count; ++i) link_c_paths[i] = c_bufs[i];
         cc__collect_multi_link_flags(ld_flags, inputs, c_bufs, src_dir_bufs,
                                     input_count, collected_ld, sizeof(collected_ld));
+        if (cc__flags_truncated(collected_ld, sizeof(collected_ld), "link flags")) goto parse_fail;
         base_opt.ld_flags = collected_ld[0] ? collected_ld : ld_flags;
         char runtime_path[PATH_MAX];
         int runtime_reused = 0;
@@ -9130,8 +9249,8 @@ static int run_build_mode(int argc, char** argv) {
      * the object is identical under every entry, so secondaries become
      * hardlinked names after the primary links (below). */
     static CCExtModTarget extmod_tg[4];
-    static char extmod_ccflags[1024];
-    static char extmod_ldflags[1024];
+    static char extmod_ccflags[8192 + 64];
+    static char extmod_ldflags[CC_LD_FLAGS_CAP];
     int extmod_nt = cc__detect_ext_module(
         in_path_abs, extmod_tg, (int)(sizeof(extmod_tg) / sizeof(extmod_tg[0])));
     if (module_narrow && module_narrow[0]) {
@@ -9307,6 +9426,9 @@ static int run_build_mode(int argc, char** argv) {
             }
         }
 #endif
+        if (cc__flags_truncated(extmod_ccflags, sizeof(extmod_ccflags), "module cc flags") ||
+            cc__flags_truncated(extmod_ldflags, sizeof(extmod_ldflags), "module link flags"))
+            goto parse_fail;
         ld_flags = extmod_ldflags;
     }
 
@@ -10459,7 +10581,7 @@ int main(int argc, char **argv) {
     const char* flavor_cc = CC_DEFAULT_FLAVOR_CC;
     if (opt_debug) flavor_cc = "-O0 -g";
     else if (opt_release) flavor_cc = "-O2 -DNDEBUG";
-    static char combined_cc_flags_main[2048];
+    static char combined_cc_flags_main[8192];
     combined_cc_flags_main[0] = '\0';
     if (flavor_cc && flavor_cc[0]) strncat(combined_cc_flags_main, flavor_cc, sizeof(combined_cc_flags_main) - 1);
     if (cc_flags && cc_flags[0]) {
@@ -10476,6 +10598,11 @@ int main(int argc, char **argv) {
         }
         strncat(combined_cc_flags_main, def,
                 sizeof(combined_cc_flags_main) - strlen(combined_cc_flags_main) - 1);
+    }
+    if (cc__flags_truncated(combined_cc_flags_main, sizeof(combined_cc_flags_main),
+                            "--cc-flags and -D defines")) {
+        for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
+        return 2;
     }
     cc_flags = combined_cc_flags_main[0] ? combined_cc_flags_main : cc_flags;
 
@@ -10619,9 +10746,13 @@ int main(int argc, char **argv) {
             for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
             return 0;
         }
-        char collected_ld[2048];
+        static char collected_ld[CC_LD_FLAGS_CAP];
         cc__collect_multi_link_flags(ld_flags, inputs, c_bufs, src_dir_bufs,
                                     input_count, collected_ld, sizeof(collected_ld));
+        if (cc__flags_truncated(collected_ld, sizeof(collected_ld), "link flags")) {
+            for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
+            return 1;
+        }
         base_opt.ld_flags = collected_ld[0] ? collected_ld : ld_flags;
         char runtime_path[PATH_MAX]; int runtime_reused = 0;
         if (cc__ensure_runtime_obj(&base_opt, target_part, sysroot_part, runtime_path, sizeof(runtime_path), &runtime_reused) != 0) {

@@ -36,6 +36,7 @@
 #include "wake_primitive.h"
 
 #include <pthread.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stddef.h>
@@ -46,12 +47,26 @@
 #include <time.h>
 #include <unistd.h>
 
+/* A wait node lives in the waiter's frame. Once the waker publishes the
+ * wake, the waiter may return and the frame be reused, so the publishing
+ * store is the waker's last touch of the node:
+ *   - fiber waiter: `ready`, then cc__fiber_unpark on the fiber pointer the
+ *     waker read under the queue lock (the fiber outlives the node);
+ *   - OS-thread waiter (cond wait only): wake_primitive_post_once on `wake`,
+ *     which is the publication itself; `ready` stays 0.
+ * cc__excl_node_woken reads whichever one the node's kind uses. */
 typedef struct CCExclusiveWaiter {
     void* fiber;           /* tagged fiber, or NULL for an OS thread */
-    _Atomic int ready;
-    wake_primitive wake;   /* off-fiber park; stack-scoped, not destroyed */
+    _Atomic int ready;     /* fiber waiters */
+    wake_primitive wake;   /* OS-thread cond waiters: one-shot post */
     struct CCExclusiveWaiter* next;
 } CCExclusiveWaiter;
+
+static inline int cc__excl_node_woken(CCExclusiveWaiter* node) {
+    if (node->fiber)
+        return atomic_load_explicit(&node->ready, memory_order_acquire) != 0;
+    return wake_primitive_posted(&node->wake);
+}
 
 /*
  * One cache line per mutex entry: adjacent named locks must not false-share
@@ -81,13 +96,14 @@ enum {
 typedef struct CCExclusiveEntry {
     _Atomic int locked;
     _Atomic int wait_spin;
-    uint64_t name;
+    _Atomic uint64_t name; /* read by lock-free lookup while retire clears it */
     CCExclusiveWaiter* wait_head;
     CCExclusiveWaiter* wait_tail;
     CCExclusiveWaiter* cond_head;
     CCExclusiveWaiter* cond_tail;
     _Atomic uint32_t gate_state;
-    uint32_t gate_touched;
+    uint16_t gate_touched;
+    _Atomic uint16_t gate_departed;
     /* Freelist link. Never overlay `locked`: a stale acquire CAS would smash
      * Treiber next and later alloc would SEGV on a wild head (Linux ASan). */
     struct CCExclusiveEntry* pool_next;
@@ -99,13 +115,14 @@ typedef struct CCExclusiveEntry {
 typedef struct CCExclusiveEntry {
     _Atomic int locked;
     _Atomic int wait_spin;
-    uint64_t name;
+    _Atomic uint64_t name; /* read by lock-free lookup while retire clears it */
     CCExclusiveWaiter* wait_head;
     CCExclusiveWaiter* wait_tail;
     CCExclusiveWaiter* cond_head;
     CCExclusiveWaiter* cond_tail;
     _Atomic uint32_t gate_state;
-    uint32_t gate_touched;
+    uint16_t gate_touched;          /* under the entry lock */
+    _Atomic uint16_t gate_departed; /* first toucher is out of its release */
     struct CCExclusiveEntry* pool_next;
 } __attribute__((aligned(64))) CCExclusiveEntry;
 #endif
@@ -355,9 +372,33 @@ static CCExclusiveEntry* cc__exclusive_lookup(CCExclusiveHost* excl, uint64_t na
             &m->buckets[idx].entry, memory_order_acquire);
         if (!e) return NULL;
         if (cc__excl_is_tomb(e)) continue;
-        if (e->name == name) return e;
+        if (atomic_load_explicit(&e->name, memory_order_relaxed) == name) return e;
     }
     return NULL;
+}
+
+/* Bring a recycled entry up as `name`.
+ *
+ * Not a memset: `name` is the one field a lock-free reader touches, and a
+ * reader that loaded this bucket before the entry was retired can still be
+ * inside cc__exclusive_lookup reading it while we re-arm the entry here. A
+ * bulk write covers `name` non-atomically, which races that load (TSan:
+ * atomic read vs write in cc__exclusive_install). Store it atomically and
+ * write the rest field-wise; every other member is reached only under
+ * `create_mu`, the entry lock, or `wait_spin`, and the gate_departed
+ * handshake is what keeps a queue walker off those. */
+static void cc__excl_entry_init(CCExclusiveEntry* e, uint64_t name) {
+    atomic_store_explicit(&e->name, name, memory_order_relaxed);
+    atomic_store_explicit(&e->locked, CC_EXCL_FREE, memory_order_relaxed);
+    atomic_store_explicit(&e->wait_spin, 0, memory_order_relaxed);
+    atomic_store_explicit(&e->gate_state, CC_GATE_EMPTY, memory_order_relaxed);
+    atomic_store_explicit(&e->gate_departed, 0, memory_order_relaxed);
+    e->gate_touched = 0;
+    e->wait_head = NULL;
+    e->wait_tail = NULL;
+    e->cond_head = NULL;
+    e->cond_tail = NULL;
+    e->pool_next = NULL; /* off the freelist; only cc__excl_entry_free sets it */
 }
 
 static CCExclusiveEntry* cc__exclusive_install(
@@ -375,13 +416,7 @@ static CCExclusiveEntry* cc__exclusive_install(
             }
             CCExclusiveEntry* e = cc__excl_entry_alloc(excl);
             if (!e) return NULL;
-            memset(e, 0, sizeof(*e));
-            e->name = name;
-            atomic_store_explicit(&e->locked, CC_EXCL_FREE, memory_order_relaxed);
-            atomic_store_explicit(&e->wait_spin, 0, memory_order_relaxed);
-            atomic_store_explicit(&e->gate_state, CC_GATE_EMPTY,
-                                  memory_order_relaxed);
-            e->gate_touched = 0;
+            cc__excl_entry_init(e, name);
             atomic_store_explicit(&m->buckets[idx].entry, e, memory_order_release);
             excl->count++;
             return e;
@@ -393,13 +428,7 @@ static CCExclusiveEntry* cc__exclusive_install(
     if (tomb_idx != (size_t)-1) {
         CCExclusiveEntry* e = cc__excl_entry_alloc(excl);
         if (!e) return NULL;
-        memset(e, 0, sizeof(*e));
-        e->name = name;
-        atomic_store_explicit(&e->locked, CC_EXCL_FREE, memory_order_relaxed);
-        atomic_store_explicit(&e->wait_spin, 0, memory_order_relaxed);
-        atomic_store_explicit(&e->gate_state, CC_GATE_EMPTY,
-                              memory_order_relaxed);
-        e->gate_touched = 0;
+        cc__excl_entry_init(e, name);
         atomic_store_explicit(&m->buckets[tomb_idx].entry, e, memory_order_release);
         if (excl->tombs > 0) excl->tombs--;
         excl->count++;
@@ -595,9 +624,14 @@ static void cc__exclusive_cond_wake_n(CCExclusiveEntry* e, int all) {
         }
         cc__spin_unlock(&e->wait_spin);
         if (!w) return;
-        atomic_store_explicit(&w->ready, 1, memory_order_release);
-        if (fiber) cc__fiber_unpark(fiber);
-        wake_primitive_wake_one(&w->wake);
+        /* The publishing store is the last touch of `w` (see
+         * CCExclusiveWaiter): the waiter may return as soon as it sees it. */
+        if (fiber) {
+            atomic_store_explicit(&w->ready, 1, memory_order_release);
+            cc__fiber_unpark(fiber);
+        } else {
+            wake_primitive_post_once(&w->wake);
+        }
         if (!all) return;
     }
 }
@@ -629,19 +663,16 @@ static int cc__exclusive_cond_leave(CCExclusiveEntry* e, CCExclusiveWaiter* node
                                    int timedout) {
     int found = cc__exclusive_cond_dequeue(e, node);
     if (!found) {
-        while (atomic_load_explicit(&node->ready, memory_order_acquire) == 0) {
+        while (!cc__excl_node_woken(node)) {
             if (node->fiber)
                 cc__cpu_pause();
-            else {
-                uint32_t gen = atomic_load_explicit(&node->wake.value,
-                                                    memory_order_acquire);
-                if (atomic_load_explicit(&node->ready, memory_order_acquire) != 0)
-                    break;
-                wake_primitive_wait(&node->wake, gen);
-            }
+            else
+                wake_primitive_wait(&node->wake, 0);
         }
+        if (!node->fiber) wake_primitive_retire(&node->wake);
         return CC_EXCL_WAIT_OK;
     }
+    if (!node->fiber) wake_primitive_retire(&node->wake);
     return timedout ? CC_EXCL_WAIT_TIMEOUT : CC_EXCL_WAIT_CANCELLED;
 }
 
@@ -683,8 +714,10 @@ int cc_exclusive_guard_wait_release(CCExclusiveGuard* g) {
     cc_exclusive_guard_release(g);
 
     for (;;) {
-        if (atomic_load_explicit(&node.ready, memory_order_acquire) != 0)
+        if (cc__excl_node_woken(&node)) {
+            if (!in_fiber) wake_primitive_retire(&node.wake);
             return CC_EXCL_WAIT_OK;
+        }
         /* No nursery is not cancelled. A bare OS thread is not cancelled. */
         {
             CCNurseryHost* nur = cc__runtime_current_nursery();
@@ -702,17 +735,15 @@ int cc_exclusive_guard_wait_release(CCExclusiveGuard* g) {
             else
                 CC_FIBER_PARK("exclusive_when");
         } else {
-            uint32_t gen = atomic_load_explicit(&node.wake.value,
-                                                memory_order_acquire);
-            if (atomic_load_explicit(&node.ready, memory_order_acquire) != 0)
-                return CC_EXCL_WAIT_OK;
+            /* `value` is the post itself (0 -> 1 once): waiting on 0
+             * cannot miss it. */
             if (dl && dl->deadline.tv_sec != 0) {
                 int ms = cc__excl_deadline_ms(dl);
                 if (ms == 0)
                     continue;
-                wake_primitive_wait_timeout(&node.wake, gen, (uint32_t)ms);
+                wake_primitive_wait_timeout(&node.wake, 0, (uint32_t)ms);
             } else {
-                wake_primitive_wait(&node.wake, gen);
+                wake_primitive_wait(&node.wake, 0);
             }
         }
     }
@@ -995,7 +1026,17 @@ CCExclusiveMutex cc_exclusive_mutex_host(CCExclusiveHost* excl, uint64_t name) {
 
 /* Second toucher retires the gate cell. Clear `name` under the excl lock
  * before release so lock-free lookup cannot return this entry into a stale
- * acquire that would race freelist reuse. */
+ * acquire that would race freelist reuse.
+ *
+ * The first toucher's release is not over when the second toucher gets the
+ * lock: a release that swapped FREE over CONTENDED goes on into
+ * cc_exclusive_unlock_contended, which takes `wait_spin` and walks the wait
+ * queue of this entry. Retiring the entry then would let the next install
+ * memset it under that spin lock. So the first toucher marks
+ * `gate_departed` once its release has returned -- its last touch of the
+ * entry -- and the second toucher recycles the entry only after seeing it.
+ * The wait is bounded by one unlock slow path on another thread; a fiber
+ * does not yield inside a release, so the two cannot share a worker. */
 static void cc__exclusive_gate_touch_done(CCExclusiveMutex* m,
                                           CCExclusiveEntry* e,
                                           CCExclusiveGuard* g) {
@@ -1008,8 +1049,17 @@ static void cc__exclusive_gate_touch_done(CCExclusiveMutex* m,
         e->name = 0;
     }
     cc_exclusive_guard_release(g);
-    if (do_free)
-        cc_exclusive_mutex_free(m);
+    if (!do_free) {
+        atomic_store_explicit(&e->gate_departed, 1, memory_order_release);
+        return;
+    }
+    for (int spins = 0;
+         atomic_load_explicit(&e->gate_departed, memory_order_acquire) == 0;
+         spins++) {
+        if (spins < CC_EXCL_SPIN_TRIES) cc__cpu_pause();
+        else sched_yield();
+    }
+    cc_exclusive_mutex_free(m);
 }
 
 int cc_exclusive_gate_wait_host(CCExclusiveHost* excl, uint64_t name) {
@@ -1174,6 +1224,7 @@ void cc_exclusive_mutex_free(CCExclusiveMutex* m) {
     atomic_store_explicit(&e->wait_spin, 0, memory_order_relaxed);
     atomic_store_explicit(&e->gate_state, CC_GATE_EMPTY, memory_order_relaxed);
     e->gate_touched = 0;
+    atomic_store_explicit(&e->gate_departed, 0, memory_order_relaxed);
     cc__excl_entry_free(excl, e);
 
     pthread_mutex_unlock(&excl->create_mu);

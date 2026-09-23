@@ -219,6 +219,11 @@ elif [ -x "./cc/bin/ccc" ]; then
     echo "[test] out-dir cwd selftest FAILED"
     exit 1
   fi
+  # Host-cc command lines past any fixed buffer still name the right output.
+  if ! sh scripts/test_long_link_line.sh; then
+    echo "[test] long link line selftest FAILED"
+    exit 1
+  fi
   # #!ccc units: quoted #include of project .cch resolves from the source dir.
   if ! sh scripts/test_unit_header_quote_include.sh; then
     echo "[test] unit-header quote-include selftest FAILED"
