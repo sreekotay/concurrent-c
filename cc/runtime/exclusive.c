@@ -377,6 +377,30 @@ static CCExclusiveEntry* cc__exclusive_lookup(CCExclusiveHost* excl, uint64_t na
     return NULL;
 }
 
+/* Bring a recycled entry up as `name`.
+ *
+ * Not a memset: `name` is the one field a lock-free reader touches, and a
+ * reader that loaded this bucket before the entry was retired can still be
+ * inside cc__exclusive_lookup reading it while we re-arm the entry here. A
+ * bulk write covers `name` non-atomically, which races that load (TSan:
+ * atomic read vs write in cc__exclusive_install). Store it atomically and
+ * write the rest field-wise; every other member is reached only under
+ * `create_mu`, the entry lock, or `wait_spin`, and the gate_departed
+ * handshake is what keeps a queue walker off those. */
+static void cc__excl_entry_init(CCExclusiveEntry* e, uint64_t name) {
+    atomic_store_explicit(&e->name, name, memory_order_relaxed);
+    atomic_store_explicit(&e->locked, CC_EXCL_FREE, memory_order_relaxed);
+    atomic_store_explicit(&e->wait_spin, 0, memory_order_relaxed);
+    atomic_store_explicit(&e->gate_state, CC_GATE_EMPTY, memory_order_relaxed);
+    atomic_store_explicit(&e->gate_departed, 0, memory_order_relaxed);
+    e->gate_touched = 0;
+    e->wait_head = NULL;
+    e->wait_tail = NULL;
+    e->cond_head = NULL;
+    e->cond_tail = NULL;
+    e->pool_next = NULL; /* off the freelist; only cc__excl_entry_free sets it */
+}
+
 static CCExclusiveEntry* cc__exclusive_install(
         CCExclusiveHost* excl, CCExclusiveMap* m, uint64_t name) {
     size_t start = cc__exclusive_slot_cap(m->cap, name);
@@ -392,14 +416,7 @@ static CCExclusiveEntry* cc__exclusive_install(
             }
             CCExclusiveEntry* e = cc__excl_entry_alloc(excl);
             if (!e) return NULL;
-            memset(e, 0, sizeof(*e));
-            e->name = name;
-            atomic_store_explicit(&e->locked, CC_EXCL_FREE, memory_order_relaxed);
-            atomic_store_explicit(&e->wait_spin, 0, memory_order_relaxed);
-            atomic_store_explicit(&e->gate_state, CC_GATE_EMPTY,
-                                  memory_order_relaxed);
-            e->gate_touched = 0;
-            atomic_store_explicit(&e->gate_departed, 0, memory_order_relaxed);
+            cc__excl_entry_init(e, name);
             atomic_store_explicit(&m->buckets[idx].entry, e, memory_order_release);
             excl->count++;
             return e;
@@ -411,14 +428,7 @@ static CCExclusiveEntry* cc__exclusive_install(
     if (tomb_idx != (size_t)-1) {
         CCExclusiveEntry* e = cc__excl_entry_alloc(excl);
         if (!e) return NULL;
-        memset(e, 0, sizeof(*e));
-        e->name = name;
-        atomic_store_explicit(&e->locked, CC_EXCL_FREE, memory_order_relaxed);
-        atomic_store_explicit(&e->wait_spin, 0, memory_order_relaxed);
-        atomic_store_explicit(&e->gate_state, CC_GATE_EMPTY,
-                              memory_order_relaxed);
-        e->gate_touched = 0;
-        atomic_store_explicit(&e->gate_departed, 0, memory_order_relaxed);
+        cc__excl_entry_init(e, name);
         atomic_store_explicit(&m->buckets[tomb_idx].entry, e, memory_order_release);
         if (excl->tombs > 0) excl->tombs--;
         excl->count++;
