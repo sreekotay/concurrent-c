@@ -3497,7 +3497,66 @@ typedef struct {
     char** obj_paths;  // heap-allocated array of heap-allocated strings
     char** c_paths;    // the emitted C behind each object, same shape
     uint64_t* obj_keys; // heap-allocated
+    size_t obj_cap;     // entries allocated in each of the three
 } CCTargetObjCache;
+
+/* Room for n more objects in a target's cache. */
+static int cc__obj_cache_reserve(CCTargetObjCache* c, size_t n) {
+    size_t want = c->obj_count + n;
+    size_t cap = c->obj_cap ? c->obj_cap : 8;
+    char** op;
+    char** cp;
+    uint64_t* kp;
+    if (want <= c->obj_cap) return 0;
+    while (cap < want) cap *= 2;
+    op = (char**)realloc(c->obj_paths, cap * sizeof(char*));
+    if (!op) return -1;
+    c->obj_paths = op;
+    cp = (char**)realloc(c->c_paths, cap * sizeof(char*));
+    if (!cp) return -1;
+    c->c_paths = cp;
+    kp = (uint64_t*)realloc(c->obj_keys, cap * sizeof(uint64_t));
+    if (!kp) return -1;
+    c->obj_keys = kp;
+    c->obj_cap = cap;
+    return 0;
+}
+
+/* One `ccc build <target>`: the parsed targets and every table sized by
+ * their count. cc__target_build_release frees all of it, so each exit of
+ * the target build is one call. */
+typedef struct {
+    CCBuildTargetDecl* targets;
+    size_t count;
+    char* def_name;
+    CCTargetObjCache* caches;   /* count entries */
+    unsigned char* marks;       /* 3 * count: needed, walk, link closure */
+    const char** obj_paths;     /* borrowed from caches */
+    const char** obj_c_paths;
+    uint64_t* obj_keys;
+} CCTargetBuild;
+
+static void cc__target_build_release(CCTargetBuild* b) {
+    if (b->caches) {
+        for (size_t i = 0; i < b->count; ++i) {
+            CCTargetObjCache* c = &b->caches[i];
+            for (size_t j = 0; j < c->obj_count; ++j) {
+                if (c->obj_paths) free(c->obj_paths[j]);
+                if (c->c_paths) free(c->c_paths[j]);
+            }
+            free(c->obj_paths);
+            free(c->c_paths);
+            free(c->obj_keys);
+        }
+    }
+    free(b->caches);
+    free(b->marks);
+    free(b->obj_paths);
+    free(b->obj_c_paths);
+    free(b->obj_keys);
+    cc_build_free_targets(b->targets, b->count, b->def_name);
+    memset(b, 0, sizeof(*b));
+}
 
 static int cc__find_target_idx(const CCBuildTargetDecl* targets, size_t target_count, const char* name) {
     if (!targets || !name) return -1;
@@ -3558,10 +3617,14 @@ static int cc__build_one_target_objs(int idx,
     char t_sysroot_part[256];
     cc__make_cross_parts(t, cli_target, cli_sysroot, t_target_part, sizeof(t_target_part), t_sysroot_part, sizeof(t_sysroot_part));
 
-    char t_cc_flags[2048];
+    char t_cc_flags[CC_LD_FLAGS_CAP];
     t_cc_flags[0] = '\0';
     cc__merge_target_compile_flags(t, build_dir, t_cc_flags, sizeof(t_cc_flags));
     if (base_cli_opt && base_cli_opt->cc_flags && base_cli_opt->cc_flags[0]) cc__append_spaced(t_cc_flags, sizeof(t_cc_flags), base_cli_opt->cc_flags);
+    if (cc__flags_truncated(t_cc_flags, sizeof(t_cc_flags), "the compile flags of a target")) {
+        fprintf(stderr, "cc: target '%s': too many include dirs, defines or cflags\n", t->name);
+        return -1;
+    }
 
     char c_dir[PATH_MAX];
     char o_dir[PATH_MAX];
@@ -3574,15 +3637,9 @@ static int cc__build_one_target_objs(int idx,
     if (cc__mkdir_p(c_dir) != 0 || cc__mkdir_p(o_dir) != 0) return -1;
 
     caches[idx].obj_count = 0;
-    if (!caches[idx].obj_paths) {
-        caches[idx].obj_paths = (char**)calloc(128, sizeof(char*));
-        caches[idx].c_paths = (char**)calloc(128, sizeof(char*));
-        caches[idx].obj_keys = (uint64_t*)calloc(128, sizeof(uint64_t));
-        if (!caches[idx].obj_paths || !caches[idx].c_paths || !caches[idx].obj_keys) return -1;
-    }
+    if (cc__obj_cache_reserve(&caches[idx], t->src_count) != 0) return -1;
 
     for (size_t si = 0; si < t->src_count; ++si) {
-        if (caches[idx].obj_count >= 128) return -1;
         char src_abs[PATH_MAX];
         cc__join_path(build_dir, t->srcs[si], src_abs, sizeof(src_abs));
 
@@ -3749,8 +3806,11 @@ static int cc__write_target_job_manifest(const char* o_dir, const CCTargetObjCac
 
 static int cc__read_target_job_manifest(const char* o_dir, CCTargetObjCache* cache) {
     char path[PATH_MAX];
-    char line[PATH_MAX + 64];
+    char* line = NULL;
+    size_t line_cap = 0;
+    ssize_t len;
     FILE* f;
+    int rc = 0;
     if (!o_dir || !cache) return -1;
     snprintf(path, sizeof(path), "%s/.cc_job_objs", o_dir);
     f = fopen(path, "r");
@@ -3759,34 +3819,37 @@ static int cc__read_target_job_manifest(const char* o_dir, CCTargetObjCache* cac
         cache->obj_count = 0;
         return 0;
     }
-    if (!cache->obj_paths) {
-        cache->obj_paths = (char**)calloc(128, sizeof(char*));
-        cache->c_paths = (char**)calloc(128, sizeof(char*));
-        cache->obj_keys = (uint64_t*)calloc(128, sizeof(uint64_t));
-        if (!cache->obj_paths || !cache->c_paths || !cache->obj_keys) {
-            fclose(f);
-            return -1;
-        }
-    }
     cache->obj_count = 0;
-    while (fgets(line, sizeof(line), f) && cache->obj_count < 128) {
-        unsigned long long key = 0;
-        char obj[PATH_MAX];
-        char cpath[PATH_MAX];
+    /* `<key>\t<obj>\t<c or ->` per object; paths are taken whole. */
+    while ((len = getline(&line, &line_cap, f)) >= 0) {
+        char* key_end = NULL;
+        char* obj;
+        char* cpath;
+        char* tab;
+        unsigned long long key;
+        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) line[--len] = '\0';
+        if (len == 0) continue;
+        key = strtoull(line, &key_end, 10);
+        obj = (key_end && *key_end == '\t') ? key_end + 1 : NULL;
+        tab = obj ? strchr(obj, '\t') : NULL;
         /* A manifest without the C column predates module objects; the
          * link would not know which modules that object needs. Rebuilt. */
-        if (sscanf(line, "%llu\t%1023s\t%1023s", &key, obj, cpath) != 3) {
-            fclose(f);
+        if (!tab || tab == obj || !tab[1]) {
             fprintf(stderr, "cc: stale object manifest %s (no C column); rerun without the cache\n", path);
-            return -1;
+            rc = -1;
+            break;
         }
+        *tab = '\0';
+        cpath = tab + 1;
+        if (cc__obj_cache_reserve(cache, 1) != 0) { rc = -1; break; }
         cache->obj_paths[cache->obj_count] = strdup(obj);
         cache->c_paths[cache->obj_count] = strcmp(cpath, "-") == 0 ? NULL : strdup(cpath);
         cache->obj_keys[cache->obj_count] = (uint64_t)key;
         cache->obj_count++;
     }
+    free(line);
     fclose(f);
-    return 0;
+    return rc;
 }
 
 static void cc__target_obj_dir(const CCBuildTargetDecl* t, const char* build_dir,
@@ -3853,7 +3916,8 @@ static off_t cc__target_src_bytes(const CCBuildTargetDecl* t,
     return sum;
 }
 
-static int cc__build_target_objs_parallel(int chosen_idx,
+/* needed/walk: target_count zeroed bytes each, owned by the caller. */
+static int cc__build_target_objs_schedule(int chosen_idx,
                                           const CCBuildTargetDecl* targets,
                                           size_t target_count,
                                           const char* build_dir,
@@ -3866,23 +3930,22 @@ static int cc__build_target_objs_parallel(int chosen_idx,
                                           int cache_ok,
                                           CCTargetObjCache* caches,
                                           int jobs,
-                                          CCKeepKids* keep) {
-    unsigned char needed[64];
-    unsigned char walk[64];
+                                          CCKeepKids* keep,
+                                          unsigned char* needed,
+                                          unsigned char* walk) {
     typedef struct {
         pid_t pid;
         int idx;
     } CCBuildJob;
-    CCBuildJob running[64];
+    CCBuildJob running[64]; /* jobs <= 64: cc__resolve_build_jobs */
     int nrun = 0;
     int remaining = 0;
     int fail_rc = 0;
     size_t i;
 
     if (jobs < 1) jobs = 1;
+    if (jobs > 64) jobs = 64;
     if (chosen_idx < 0 || (size_t)chosen_idx >= target_count) return -1;
-    memset(needed, 0, sizeof(needed));
-    memset(walk, 0, sizeof(walk));
     {
         int mr = cc__mark_needed_targets(chosen_idx, targets, target_count, needed, walk);
         if (mr != 0) return mr;
@@ -4001,6 +4064,33 @@ static int cc__build_target_objs_parallel(int chosen_idx,
     return fail_rc;
 }
 
+static int cc__build_target_objs_parallel(int chosen_idx,
+                                          const CCBuildTargetDecl* targets,
+                                          size_t target_count,
+                                          const char* build_dir,
+                                          const CCCompileConfig* cfg,
+                                          const CCBuildOptions* base_cli_opt,
+                                          const char* cli_target,
+                                          const char* cli_sysroot,
+                                          const CCFileSig* build_sig_for_key,
+                                          const CCFileSig* cc_sig_for_key,
+                                          int cache_ok,
+                                          CCTargetObjCache* caches,
+                                          int jobs,
+                                          CCKeepKids* keep) {
+    unsigned char* needed;
+    int rc;
+    if (chosen_idx < 0 || (size_t)chosen_idx >= target_count) return -1;
+    needed = (unsigned char*)calloc(target_count, 2);
+    if (!needed) return -1;
+    rc = cc__build_target_objs_schedule(chosen_idx, targets, target_count, build_dir, cfg,
+                                        base_cli_opt, cli_target, cli_sysroot,
+                                        build_sig_for_key, cc_sig_for_key, cache_ok,
+                                        caches, jobs, keep, needed, needed + target_count);
+    free(needed);
+    return rc;
+}
+
 static int cc__build_target_objs_rec(int idx,
                                      const CCBuildTargetDecl* targets,
                                      size_t target_count,
@@ -4012,9 +4102,7 @@ static int cc__build_target_objs_rec(int idx,
                                      const CCFileSig* build_sig_for_key,
                                      const CCFileSig* cc_sig_for_key,
                                      int cache_ok,
-                                     CCTargetObjCache* caches,
-                                     char chain[][128],
-                                     size_t chain_len) {
+                                     CCTargetObjCache* caches) {
     if (idx < 0 || (size_t)idx >= target_count) return -1;
     if (caches[idx].state == 1) return -2; // cycle
     if (caches[idx].state == 2) return 0;
@@ -4026,9 +4114,8 @@ static int cc__build_target_objs_rec(int idx,
     for (size_t di = 0; di < t->dep_count; ++di) {
         int d = cc__find_target_idx(targets, target_count, t->deps[di]);
         if (d < 0) return -3;
-        if (chain_len < 64) strncpy(chain[chain_len], t->deps[di], sizeof(chain[chain_len]) - 1);
         int r = cc__build_target_objs_rec(d, targets, target_count, build_dir, cfg, base_cli_opt, cli_target, cli_sysroot,
-                                          build_sig_for_key, cc_sig_for_key, cache_ok, caches, chain, chain_len + 1);
+                                          build_sig_for_key, cc_sig_for_key, cache_ok, caches);
         if (r != 0) return r;
     }
 
@@ -4040,7 +4127,6 @@ static int cc__build_target_objs_rec(int idx,
     }
 
     caches[idx].state = 2;
-    (void)chain;
     return 0;
 }
 
@@ -7150,10 +7236,10 @@ static int cc__load_const_bindings(const CCBuildOptions* opt, CCConstBinding* bi
 
 static void cc__print_comptime_targets(const char* build_path) {
     if (!build_path) return;
-    CCBuildTargetDecl targets[64];
+    CCBuildTargetDecl* targets = NULL;
     size_t target_count = 0;
     char* def_name = NULL;
-    if (cc_build_list_targets(build_path, targets, &target_count, 64, &def_name) != 0) {
+    if (cc_build_list_targets(build_path, &targets, &target_count, &def_name) != 0) {
         return;
     }
     printf("COMPTIME targets (%zu):\n", target_count);
@@ -8093,10 +8179,10 @@ static int run_build_mode(int argc, char** argv) {
             }
             cc_build_free_options(opts, opt_count);
 
-            CCBuildTargetDecl targets[64];
+            CCBuildTargetDecl* targets = NULL;
             size_t target_count = 0;
             char* def_name = NULL;
-            if (cc_build_list_targets(build_path_for_help, targets, &target_count, 64, &def_name) == 0 && (target_count || def_name)) {
+            if (cc_build_list_targets(build_path_for_help, &targets, &target_count, &def_name) == 0 && (target_count || def_name)) {
                 fprintf(stderr, "\nDeclared CC_TARGETs in %s:\n", build_path_for_help);
                 if (def_name) fprintf(stderr, "  default: %s\n", def_name);
                 for (size_t i = 0; i < target_count; ++i) {
@@ -8133,12 +8219,10 @@ static int run_build_mode(int argc, char** argv) {
             fprintf(stderr, "cc: no build.cc in scope (use --build-file)\n");
             goto parse_fail;
         }
-        CCBuildTargetDecl targets[64];
+        CCBuildTargetDecl* targets = NULL;
         size_t target_count = 0;
         char* def_name = NULL;
-        int terr = cc_build_list_targets(build_path_for_help, targets, &target_count, 64, &def_name);
-        if (terr != 0) {
-            cc_build_free_targets(targets, target_count, def_name);
+        if (cc_build_list_targets(build_path_for_help, &targets, &target_count, &def_name) != 0) {
             goto parse_fail;
         }
         printf("build_file=%s\n", build_path_for_help);
@@ -8195,12 +8279,10 @@ static int run_build_mode(int argc, char** argv) {
             }
         }
 
-        CCBuildTargetDecl targets[64];
+        CCBuildTargetDecl* targets = NULL;
         size_t target_count = 0;
         char* def_name = NULL;
-        int terr = cc_build_list_targets(build_path_for_help, targets, &target_count, 64, &def_name);
-        if (terr != 0) {
-            cc_build_free_targets(targets, target_count, def_name);
+        if (cc_build_list_targets(build_path_for_help, &targets, &target_count, &def_name) != 0) {
             goto parse_fail;
         }
 
@@ -8263,12 +8345,10 @@ static int run_build_mode(int argc, char** argv) {
             goto parse_fail;
         }
 
-        CCBuildTargetDecl targets[64];
+        CCBuildTargetDecl* targets = NULL;
         size_t target_count = 0;
         char* def_name = NULL;
-        int terr = cc_build_list_targets(build_path_for_help, targets, &target_count, 64, &def_name);
-        if (terr != 0) {
-            cc_build_free_targets(targets, target_count, def_name);
+        if (cc_build_list_targets(build_path_for_help, &targets, &target_count, &def_name) != 0) {
             goto parse_fail;
         }
 
@@ -8493,23 +8573,29 @@ static int run_build_mode(int argc, char** argv) {
             target_name = inputs[0];
         }
         if (want_target) {
-            // Heap-allocate to avoid stack overflow with many targets.
-            CCBuildTargetDecl* targets = (CCBuildTargetDecl*)calloc(64, sizeof(CCBuildTargetDecl));
-            if (!targets) { fprintf(stderr, "cc: out of memory\n"); goto parse_fail; }
-            size_t target_count = 0;
-            char* def_name = NULL;
-            int terr = cc_build_list_targets(build_path_for_help, targets, &target_count, 64, &def_name);
-            if (terr != 0) {
-                cc_build_free_targets(targets, target_count, def_name);
-                free(targets);
+            /* Everything below is sized by the build file's target count and
+             * released together by cc__target_build_release on every exit. */
+            CCTargetBuild tb;
+            memset(&tb, 0, sizeof(tb));
+            if (cc_build_list_targets(build_path_for_help, &tb.targets, &tb.count, &tb.def_name) != 0) {
                 goto parse_fail;
             }
+            CCBuildTargetDecl* const targets = tb.targets;
+            const size_t target_count = tb.count;
+            char* const def_name = tb.def_name;
             if (target_count == 0) {
-                fprintf(stderr, "cc: build.cc has no CC_TARGET entries\n");
-                cc_build_free_targets(targets, target_count, def_name);
-                free(targets);
+                fprintf(stderr, "cc: %s has no CC_TARGET entries\n", build_path_for_help);
+                cc__target_build_release(&tb);
                 goto parse_fail;
             }
+            tb.caches = (CCTargetObjCache*)calloc(target_count, sizeof(CCTargetObjCache));
+            tb.marks = (unsigned char*)calloc(target_count, 3);
+            if (!tb.caches || !tb.marks) {
+                fprintf(stderr, "cc: out of memory\n");
+                cc__target_build_release(&tb);
+                goto parse_fail;
+            }
+            CCTargetObjCache* const caches = tb.caches;
 
             const CCBuildTargetDecl* chosen = NULL;
             if (target_name) {
@@ -8518,8 +8604,7 @@ static int run_build_mode(int argc, char** argv) {
                 }
                 if (!chosen) {
                     fprintf(stderr, "cc: unknown target '%s' (see `cc build --help`)\n", target_name);
-                    cc_build_free_targets(targets, target_count, def_name);
-                    free(targets);
+                    cc__target_build_release(&tb);
                     goto parse_fail;
                 }
             } else {
@@ -8536,8 +8621,7 @@ static int run_build_mode(int argc, char** argv) {
                 if (!chosen && target_count == 1) chosen = &targets[0];
                 if (!chosen) {
                     fprintf(stderr, "cc: no default target; specify one with CC_DEFAULT or pass a target name\n");
-                    cc_build_free_targets(targets, target_count, def_name);
-                    free(targets);
+                    cc__target_build_release(&tb);
                     goto parse_fail;
                 }
             }
@@ -8591,40 +8675,32 @@ static int run_build_mode(int argc, char** argv) {
             };
             int berr = cc__load_const_bindings(&base_opt, bindings, &binding_count);
             if (berr != 0) {
-                cc_build_free_targets(targets, target_count, def_name);
-                free(targets);
+                cc__target_build_release(&tb);
                 goto parse_fail;
             }
             CCCompileConfig cfg = {.consts = bindings, .const_count = binding_count};
             if (dry_run) {
-                cc_build_free_targets(targets, target_count, def_name);
-                free(targets);
+                cc__target_build_release(&tb);
                 for (size_t i = 0; i < cli_count; ++i) free(cli_names[i]);
                 return 0;
             }
 
             if ((step == CC_BUILD_STEP_RUN || step == CC_BUILD_STEP_INSTALL) && chosen->kind != CC_BUILD_TARGET_EXE) {
                 fprintf(stderr, "cc: step requires an exe target, but '%s' is obj\n", chosen->name);
-                cc_build_free_targets(targets, target_count, def_name);
-                free(targets);
+                cc__target_build_release(&tb);
                 goto parse_fail;
             }
 
             // Compile deps + chosen (once).
-            CCTargetObjCache caches[64];
-            memset(caches, 0, sizeof(caches));
-            char chain[64][128];
-            memset(chain, 0, sizeof(chain));
             char prefetch_ccs[128][PATH_MAX];
             int nprefetch = 0;
             {
                 char abs_ccs[128][PATH_MAX];
                 int nc = 0;
-                unsigned char needed[64];
-                unsigned char walk[64];
+                /* The marks are scratch here; the scheduler clears its own. */
+                unsigned char* needed = tb.marks;
+                unsigned char* walk = tb.marks + target_count;
                 size_t ti, sj;
-                memset(needed, 0, sizeof(needed));
-                memset(walk, 0, sizeof(walk));
                 if (cc__mark_needed_targets(chosen_idx, targets, target_count,
                                             needed, walk) == 0) {
                     for (ti = 0; ti < target_count && nc < 128; ti++) {
@@ -8684,8 +8760,7 @@ static int run_build_mode(int argc, char** argv) {
                                                warm_sysroot, warm_rt,
                                                sizeof(warm_rt),
                                                &warm_reused) != 0) {
-                        cc_build_free_targets(targets, target_count, def_name);
-                        free(targets);
+                        cc__target_build_release(&tb);
                         goto parse_fail;
                     }
                     cc__prof_span("ensure_runtime_once", t_fork);
@@ -8710,7 +8785,7 @@ static int run_build_mode(int argc, char** argv) {
             if (jobs <= 1) {
                 r = cc__build_target_objs_rec(chosen_idx, targets, target_count, build_dir, &cfg, &base_opt,
                                               target_flag ? target_flag : "", sysroot_flag ? sysroot_flag : "",
-                                              &build_sig, &cc_sig, cache_ok, caches, chain, 0);
+                                              &build_sig, &cc_sig, cache_ok, caches);
             } else {
                 r = cc__build_target_objs_parallel(chosen_idx, targets, target_count, build_dir, &cfg, &base_opt,
                                                    target_flag ? target_flag : "", sysroot_flag ? sysroot_flag : "",
@@ -8733,32 +8808,27 @@ static int run_build_mode(int argc, char** argv) {
                     }
                     if (rt_bad) {
                         fprintf(stderr, "cc: runtime.o compile failed\n");
-                        cc_build_free_targets(targets, target_count, def_name);
-                        free(targets);
+                        cc__target_build_release(&tb);
                         goto parse_fail;
                     }
                 }
             }
             if (r == -2) {
                 fprintf(stderr, "cc: cycle in CC_TARGET_DEPS\n");
-                cc_build_free_targets(targets, target_count, def_name);
-                free(targets);
+                cc__target_build_release(&tb);
                 goto parse_fail;
             } else if (r == -3) {
                 fprintf(stderr, "cc: unknown dep target in CC_TARGET_DEPS\n");
-                cc_build_free_targets(targets, target_count, def_name);
-                free(targets);
+                cc__target_build_release(&tb);
                 goto parse_fail;
             } else if (r != 0) {
                 fprintf(stderr, "cc: target build failed for '%s' (err=%d)\n", chosen->name, r);
-                cc_build_free_targets(targets, target_count, def_name);
-                free(targets);
+                cc__target_build_release(&tb);
                 goto parse_fail;
             }
 
             if (mode == CC_MODE_EMIT_C || mode == CC_MODE_COMPILE || chosen->kind == CC_BUILD_TARGET_OBJ) {
-                cc_build_free_targets(targets, target_count, def_name);
-                free(targets);
+                cc__target_build_release(&tb);
                 for (size_t i = 0; i < cli_count; ++i) free(cli_names[i]);
                 return 0;
             }
@@ -8773,17 +8843,25 @@ static int run_build_mode(int argc, char** argv) {
             if (out_dirname[0]) (void)cc__mkdir_p(out_dirname);
 
             // Gather objects for link (dep closure + chosen).
-            const char* obj_paths[256];
-            const char* obj_c_paths[256];
-            uint64_t obj_keys[256];
+            size_t obj_cap = 0;
+            for (size_t i = 0; i < target_count; ++i) obj_cap += caches[i].obj_count;
+            tb.obj_paths = (const char**)calloc(obj_cap ? obj_cap : 1, sizeof(char*));
+            tb.obj_c_paths = (const char**)calloc(obj_cap ? obj_cap : 1, sizeof(char*));
+            tb.obj_keys = (uint64_t*)calloc(obj_cap ? obj_cap : 1, sizeof(uint64_t));
+            if (!tb.obj_paths || !tb.obj_c_paths || !tb.obj_keys) {
+                fprintf(stderr, "cc: out of memory\n");
+                cc__target_build_release(&tb);
+                goto parse_fail;
+            }
+            const char** const obj_paths = tb.obj_paths;
+            const char** const obj_c_paths = tb.obj_c_paths;
+            uint64_t* const obj_keys = tb.obj_keys;
             size_t obj_count = 0;
-            unsigned char vis[64];
-            memset(vis, 0, sizeof(vis));
-            int gr = cc__gather_obj_closure(chosen_idx, targets, target_count, caches, vis, obj_paths, obj_c_paths, obj_keys, &obj_count, 256);
+            unsigned char* vis = tb.marks + 2 * target_count;
+            int gr = cc__gather_obj_closure(chosen_idx, targets, target_count, caches, vis, obj_paths, obj_c_paths, obj_keys, &obj_count, obj_cap);
             if (gr != 0) {
                 fprintf(stderr, "cc: failed to gather dep objects (err=%d)\n", gr);
-                cc_build_free_targets(targets, target_count, def_name);
-                free(targets);
+                cc__target_build_release(&tb);
                 goto parse_fail;
             }
 
@@ -8795,8 +8873,7 @@ static int run_build_mode(int argc, char** argv) {
             }
             if (ld_flags && ld_flags[0]) cc__append_spaced(merged_ld, sizeof(merged_ld), ld_flags);
             if (cc__flags_truncated(merged_ld, sizeof(merged_ld), "link flags")) {
-                cc_build_free_targets(targets, target_count, def_name);
-                free(targets);
+                cc__target_build_release(&tb);
                 goto parse_fail;
             }
             base_opt.ld_flags = merged_ld[0] ? merged_ld : ld_flags;
@@ -8813,8 +8890,7 @@ static int run_build_mode(int argc, char** argv) {
             {
                 long long t_rt = cc__now_ms();
                 if (cc__ensure_runtime_obj(&base_opt, chosen_target_part, chosen_sysroot_part, runtime_path, sizeof(runtime_path), &runtime_reused) != 0) {
-                    cc_build_free_targets(targets, target_count, def_name);
-                    free(targets);
+                    cc__target_build_release(&tb);
                     goto parse_fail;
                 }
                 cc__prof_span("ensure_runtime_link", t_rt);
@@ -8855,16 +8931,14 @@ static int run_build_mode(int argc, char** argv) {
                     link_reused = 1;
                 } else {
                     if (cc__link_many(&base_opt, obj_paths, obj_c_paths, obj_count, runtime_path, chosen_target_part, chosen_sysroot_part, user_out) != 0) {
-                        cc_build_free_targets(targets, target_count, def_name);
-                free(targets);
+                        cc__target_build_release(&tb);
                         goto parse_fail;
                     }
                     (void)cc__write_u64_file(link_meta_path, h);
                 }
             } else {
                 if (cc__link_many(&base_opt, obj_paths, obj_c_paths, obj_count, runtime_path, chosen_target_part, chosen_sysroot_part, user_out) != 0) {
-                    cc_build_free_targets(targets, target_count, def_name);
-                free(targets);
+                    cc__target_build_release(&tb);
                     goto parse_fail;
                 }
             }
@@ -8883,8 +8957,7 @@ static int run_build_mode(int argc, char** argv) {
             if (step == CC_BUILD_STEP_INSTALL) {
                 if (!chosen->install_dest || !chosen->install_dest[0]) {
                     fprintf(stderr, "cc: CC_INSTALL missing for target '%s'\n", chosen->name);
-                    cc_build_free_targets(targets, target_count, def_name);
-                free(targets);
+                    cc__target_build_release(&tb);
                     goto parse_fail;
                 }
                 char dst_abs[PATH_MAX];
@@ -8896,25 +8969,24 @@ static int run_build_mode(int argc, char** argv) {
                 }
                 if (cc__copy_file(user_out, dst_abs) != 0) {
                     fprintf(stderr, "cc: install failed: %s -> %s\n", user_out, dst_abs);
-                    cc_build_free_targets(targets, target_count, def_name);
-                free(targets);
+                    cc__target_build_release(&tb);
                     goto parse_fail;
                 }
                 if (summary) fprintf(stderr, "  install: %s\n", dst_abs);
             }
 
-            cc_build_free_targets(targets, target_count, def_name);
-                free(targets);
+            cc__target_build_release(&tb);
             for (size_t i = 0; i < cli_count; ++i) free(cli_names[i]);
             if (step == CC_BUILD_STEP_RUN) {
-                char* exec_argv[64];
+                char** exec_argv = (char**)calloc((size_t)(run_argc > 0 ? run_argc : 0) + 2, sizeof(char*));
                 int idx2 = 0;
+                if (!exec_argv) { fprintf(stderr, "cc: out of memory\n"); return 1; }
                 exec_argv[idx2++] = (char*)user_out;
-                for (int j = 0; j < run_argc && idx2 < (int)(sizeof(exec_argv) / sizeof(exec_argv[0]) - 1); ++j) {
-                    exec_argv[idx2++] = run_argv[j];
-                }
+                for (int j = 0; j < run_argc; ++j) exec_argv[idx2++] = run_argv[j];
                 exec_argv[idx2] = NULL;
-                return run_exec(user_out, exec_argv, verbose);
+                int rr = run_exec(user_out, exec_argv, verbose);
+                free(exec_argv);
+                return rr;
             }
             return 0;
         }
