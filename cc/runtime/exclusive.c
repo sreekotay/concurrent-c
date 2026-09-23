@@ -36,6 +36,7 @@
 #include "wake_primitive.h"
 
 #include <pthread.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stddef.h>
@@ -95,13 +96,14 @@ enum {
 typedef struct CCExclusiveEntry {
     _Atomic int locked;
     _Atomic int wait_spin;
-    uint64_t name;
+    _Atomic uint64_t name; /* read by lock-free lookup while retire clears it */
     CCExclusiveWaiter* wait_head;
     CCExclusiveWaiter* wait_tail;
     CCExclusiveWaiter* cond_head;
     CCExclusiveWaiter* cond_tail;
     _Atomic uint32_t gate_state;
-    uint32_t gate_touched;
+    uint16_t gate_touched;
+    _Atomic uint16_t gate_departed;
     /* Freelist link. Never overlay `locked`: a stale acquire CAS would smash
      * Treiber next and later alloc would SEGV on a wild head (Linux ASan). */
     struct CCExclusiveEntry* pool_next;
@@ -113,13 +115,14 @@ typedef struct CCExclusiveEntry {
 typedef struct CCExclusiveEntry {
     _Atomic int locked;
     _Atomic int wait_spin;
-    uint64_t name;
+    _Atomic uint64_t name; /* read by lock-free lookup while retire clears it */
     CCExclusiveWaiter* wait_head;
     CCExclusiveWaiter* wait_tail;
     CCExclusiveWaiter* cond_head;
     CCExclusiveWaiter* cond_tail;
     _Atomic uint32_t gate_state;
-    uint32_t gate_touched;
+    uint16_t gate_touched;          /* under the entry lock */
+    _Atomic uint16_t gate_departed; /* first toucher is out of its release */
     struct CCExclusiveEntry* pool_next;
 } __attribute__((aligned(64))) CCExclusiveEntry;
 #endif
@@ -369,7 +372,7 @@ static CCExclusiveEntry* cc__exclusive_lookup(CCExclusiveHost* excl, uint64_t na
             &m->buckets[idx].entry, memory_order_acquire);
         if (!e) return NULL;
         if (cc__excl_is_tomb(e)) continue;
-        if (e->name == name) return e;
+        if (atomic_load_explicit(&e->name, memory_order_relaxed) == name) return e;
     }
     return NULL;
 }
@@ -396,6 +399,7 @@ static CCExclusiveEntry* cc__exclusive_install(
             atomic_store_explicit(&e->gate_state, CC_GATE_EMPTY,
                                   memory_order_relaxed);
             e->gate_touched = 0;
+            atomic_store_explicit(&e->gate_departed, 0, memory_order_relaxed);
             atomic_store_explicit(&m->buckets[idx].entry, e, memory_order_release);
             excl->count++;
             return e;
@@ -414,6 +418,7 @@ static CCExclusiveEntry* cc__exclusive_install(
         atomic_store_explicit(&e->gate_state, CC_GATE_EMPTY,
                               memory_order_relaxed);
         e->gate_touched = 0;
+        atomic_store_explicit(&e->gate_departed, 0, memory_order_relaxed);
         atomic_store_explicit(&m->buckets[tomb_idx].entry, e, memory_order_release);
         if (excl->tombs > 0) excl->tombs--;
         excl->count++;
@@ -1011,7 +1016,17 @@ CCExclusiveMutex cc_exclusive_mutex_host(CCExclusiveHost* excl, uint64_t name) {
 
 /* Second toucher retires the gate cell. Clear `name` under the excl lock
  * before release so lock-free lookup cannot return this entry into a stale
- * acquire that would race freelist reuse. */
+ * acquire that would race freelist reuse.
+ *
+ * The first toucher's release is not over when the second toucher gets the
+ * lock: a release that swapped FREE over CONTENDED goes on into
+ * cc_exclusive_unlock_contended, which takes `wait_spin` and walks the wait
+ * queue of this entry. Retiring the entry then would let the next install
+ * memset it under that spin lock. So the first toucher marks
+ * `gate_departed` once its release has returned -- its last touch of the
+ * entry -- and the second toucher recycles the entry only after seeing it.
+ * The wait is bounded by one unlock slow path on another thread; a fiber
+ * does not yield inside a release, so the two cannot share a worker. */
 static void cc__exclusive_gate_touch_done(CCExclusiveMutex* m,
                                           CCExclusiveEntry* e,
                                           CCExclusiveGuard* g) {
@@ -1024,8 +1039,17 @@ static void cc__exclusive_gate_touch_done(CCExclusiveMutex* m,
         e->name = 0;
     }
     cc_exclusive_guard_release(g);
-    if (do_free)
-        cc_exclusive_mutex_free(m);
+    if (!do_free) {
+        atomic_store_explicit(&e->gate_departed, 1, memory_order_release);
+        return;
+    }
+    for (int spins = 0;
+         atomic_load_explicit(&e->gate_departed, memory_order_acquire) == 0;
+         spins++) {
+        if (spins < CC_EXCL_SPIN_TRIES) cc__cpu_pause();
+        else sched_yield();
+    }
+    cc_exclusive_mutex_free(m);
 }
 
 int cc_exclusive_gate_wait_host(CCExclusiveHost* excl, uint64_t name) {
@@ -1190,6 +1214,7 @@ void cc_exclusive_mutex_free(CCExclusiveMutex* m) {
     atomic_store_explicit(&e->wait_spin, 0, memory_order_relaxed);
     atomic_store_explicit(&e->gate_state, CC_GATE_EMPTY, memory_order_relaxed);
     e->gate_touched = 0;
+    atomic_store_explicit(&e->gate_departed, 0, memory_order_relaxed);
     cc__excl_entry_free(excl, e);
 
     pthread_mutex_unlock(&excl->create_mu);
