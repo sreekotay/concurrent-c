@@ -242,6 +242,7 @@ runtime rows; the table above for the program rows.
 | Push invalidation of the highlight and analysis caches at four edit sites (`hl_full = 0`, `hl_win_stamp = 0`, `analysis_reset()`) | cctext `core/document.ccs:300,660,1153,1171,1188,4390` | design (writer knows readers) |
 | Push-marking restyle: `dirty` set at eight sites, propagated to parent and children by hand, cleared in one loop | stylo `engine/stylebench_cc.ccs:2084-3656` | design (deep sparse change; a graph is right here) |
 | The language already states one relation checked by execution: `seq (cond)` flips the schedule, "differential testing and adaptive dispatch flip a flag, not the code" | spec §8.11.5 | design |
+| Closures capture by free name with no list required (`n.spawn(() => { use(s); })`); a suffix block already names its own declaration (`@destroy { t.close(); }`) | spec §2.2; `docs/typehooks-typeviews.md` §3 | design (precedent for `@derive`) |
 
 | Observation | Where | Tag |
 |-------------|-------|-----|

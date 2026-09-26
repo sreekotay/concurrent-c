@@ -991,34 +991,49 @@ construction; the push rows need a flush at the end of the write to
 avoid running an effect on a half-updated diamond, and both libraries
 have one.
 
-**Derivations with stated edges.** A closure in CC has an explicit
-capture list. A signals library in a language with implicit captures
-must discover a derivation's sources by watching it run; here the
-capture list states them. So the dependency graph lives in the
-compiler, and bringing derived state up to date lowers to straight-line
-stamp compares with no graph at run time.
+**Derivations with stated edges.** A derivation is a declaration
+suffix, the way `@destroy` is: it says how the binding behaves. The
+initializer or the block is a closure, and like every CC closure it
+captures by free name. So its free names are its edges, stated once,
+inline, where the logic is.
 
 ```c
-LineIndex idx @derive [&doc->tree, width] {
-    rtx_line_index_build(&idx, &doc->tree, width);   /* imperative; writes only idx */
-};
-Markup hl @derive [&idx, d->hl_window] { ... };
+/* expression: the initializer is the derivation */
+size_t nlines = rtx_count_lines(&doc->tree) @derive;
 
-@settle (idx, hl);   /* here; stale ones rebuild in capture order */
+/* block: the body updates the declared name in place, as @destroy { } names it */
+LineIndex idx @derive {
+    idx.clear();
+    @for (p in doc->tree.pieces) idx.add(p, width);
+};
+
+/* optional list: narrow the edges, or compare a value instead of a version */
+Markup hl @derive [&idx, window] { ... };
 ```
 
 ```c
 if (idx.tree_v != doc->tree.v || idx.width != width) { rebuild_idx(); idx.v = ++cc_gen; }
-if (hl.idx_v != idx.v || hl.win != d->hl_window)      { rebuild_hl();  hl.v  = ++cc_gen; }
+if (hl.idx_v != idx.v || hl.win != window)            { rebuild_hl();  hl.v  = ++cc_gen; }
 ```
 
-What depends on what is stated by the capture. When it is brought up to
-date is stated by a statement, `@settle`, the way `@defer` places
-cleanup; a read of a stale derivation outside a settle rebuilds it
-there. A captured scalar is its own version: the stamp stores the
-value. A rebuild that produces the same value does not bump, so early
-cut-off is free. The body is imperative and may allocate; it writes
-only its own cache, which the capture modes enforce.
+JS also knows a closure's free names; what it cannot know is which
+reactive cells the body reaches, because cells are runtime values. Here
+the edges are names of versioned storage, so the lexical free-name set
+is the edge set, and the finest edge is the field path the body reads:
+reading `doc->tree` makes the tree's version the edge, not `doc`'s. A
+free name that is a function, a constant, or a comptime value is not an
+edge; only mutable storage is. The dependency graph therefore lives in
+the compiler, and bringing derived state up to date lowers to the
+straight-line compares above with no graph at run time.
+
+A read brings a derivation up to date, and a read of `hl` checks `idx`
+first, so the order comes from the edges. Reading the value is where the
+rebuild cost lands. A captured scalar is its own version: the stamp
+stores the value. A rebuild that produces the same value does not bump,
+so early cut-off is free. The block form runs against the existing
+value, so the body can reuse its storage or patch it. A named function
+is not required and not excluded: `LineIndex idx =
+rtx_line_index(&doc->tree, width) @derive;` is the expression form.
 
 What it removes, in the specimens:
 
@@ -1028,9 +1043,11 @@ What it removes, in the specimens:
 | push invalidation: every edit path must clear `hl_full`, zero `hl_win_stamp`, or call `analysis_reset` | cctext `document.ccs`, four sites | the edit bumps the tree's version; the writer no longer needs to know its readers |
 | `edit_gen` beside `safe_gen`, dirty as their inequality | cctext | the pattern named once |
 
-Three boundaries. A capture list must be complete, and a call inside the
-body can hide an edge; where the reads are field paths off a capture the
-check is lexical, and through a call it is not. This is make's missing
+Four boundaries. A call inside the body can hide an edge: the free names
+are lexical, and a callee that reads state it was not handed is not. An
+attribute stating that a function reads only its parameters closes that
+at compile time where it is written; it is an option, not the price of
+the construct. This is make's missing
 header, and `gcc -MD`, which records what the compiler opened, is the
 legitimate reconstruction for it. Over-capture is safe and costs only a
 recompute. A facts-you-do-not-own source, such as a file checked by
@@ -1039,6 +1056,9 @@ takes a probe in place of a counter. And a deep tree with sparse change
 favors marking: stylo sets `dirty` at eight sites and propagates it by
 hand, and per-node stamps checked from the root would compare every node
 on every restyle. That case stays a library with an explicit graph.
+And data-dependent reach is coarse: a body that walks a collection has
+one edge, the collection's version, which any element store bumps when
+element stores go through the collection's verbs.
 
 The relation `cache == body(captures)` is stated by the declaration and
 checked by execution. A harness rebuilds each derivation from scratch
@@ -1085,10 +1105,14 @@ counter and a width question, or per-primary counters and rare reuse.
 - Whether trust through embedding should stop at the field.
 - Sealed construction's spelling, and whether serdes-filled types are
   sealed by default.
-- Whether a derivation body may call functions at all, or only functions
-  the compiler can see are reads of their arguments, and what refusal
-  that costs on the cctext chain of line index, highlight, find, and
-  layout, which is the specimen to write this against first.
+- A version says whether a source changed, not what changed. Patching a
+  cache in place after an edit needs the edit, a delta. cctext keeps an
+  edit journal, so the shape is a source that carries a version and a
+  log since a given version; its spelling is open.
+- The cctext chain of line index, highlight, find, and layout is the
+  specimen to write this against first, to measure how many hand-kept
+  `valid`, `gen`, and invalidation sites disappear and how often a body
+  calls into a function that reads state it was not handed.
 - Which other stated relations get a generated execution check: `cache
   (name)` states that deleting the clause leaves the serial program, and
   a grammar schema that reads and writes states a round trip.
