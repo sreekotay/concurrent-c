@@ -24,6 +24,17 @@ truth and data model. A stated fact is checked strictly and refused
 loudly. An unstated fact is never inferred. The failure mode is the
 unstated fact, so safety widens by widening what can be stated.
 
+A stated fact has up to three consumers. The compiler refuses the
+shapes that contradict it. The runtime checks it where the check rides
+on work already paid. And a relation the compiler cannot prove is
+checked by execution: the statement generates the test that exercises
+it. The language already does the third once: `seq (cond)` states that
+the parallel schedule and the sequential one produce the same result,
+and flipping the flag is the differential test. Bend proves its laws;
+CC runs them. Either way the law is written once, and here it is the
+declaration itself, so it costs nothing to author. A fact with no
+consumer is surface that does no work.
+
 The anti-pattern is reconstruction: a language gives a fact no place to
 be stated, then adds machinery to recover an approximation of it.
 
@@ -980,6 +991,73 @@ construction; the push rows need a flush at the end of the write to
 avoid running an effect on a half-updated diamond, and both libraries
 have one.
 
+**Derivations with stated edges.** A closure in CC has an explicit
+capture list. A signals library in a language with implicit captures
+must discover a derivation's sources by watching it run; here the
+capture list states them. So the dependency graph lives in the
+compiler, and bringing derived state up to date lowers to straight-line
+stamp compares with no graph at run time.
+
+```c
+LineIndex idx @derive [&doc->tree, width] {
+    rtx_line_index_build(&idx, &doc->tree, width);   /* imperative; writes only idx */
+};
+Markup hl @derive [&idx, d->hl_window] { ... };
+
+@settle (idx, hl);   /* here; stale ones rebuild in capture order */
+```
+
+```c
+if (idx.tree_v != doc->tree.v || idx.width != width) { rebuild_idx(); idx.v = ++cc_gen; }
+if (hl.idx_v != idx.v || hl.win != d->hl_window)      { rebuild_hl();  hl.v  = ++cc_gen; }
+```
+
+What depends on what is stated by the capture. When it is brought up to
+date is stated by a statement, `@settle`, the way `@defer` places
+cleanup; a read of a stale derivation outside a settle rebuilds it
+there. A captured scalar is its own version: the stamp stores the
+value. A rebuild that produces the same value does not bump, so early
+cut-off is free. The body is imperative and may allocate; it writes
+only its own cache, which the capture modes enforce.
+
+What it removes, in the specimens:
+
+| Hand-kept today | Where | With a stated edge |
+|-----------------|-------|--------------------|
+| one snapshot of 20 fields written three times: copied in `rtx_ws_safe_note`, compared in `rtx_ws_safe_stale`, hashed in `rtx_ws_safe_sig` | cctext `workspace.ccs` | one capture list; the copy and the compare are generated; a body reading an uncaptured field is refused |
+| push invalidation: every edit path must clear `hl_full`, zero `hl_win_stamp`, or call `analysis_reset` | cctext `document.ccs`, four sites | the edit bumps the tree's version; the writer no longer needs to know its readers |
+| `edit_gen` beside `safe_gen`, dirty as their inequality | cctext | the pattern named once |
+
+Three boundaries. A capture list must be complete, and a call inside the
+body can hide an edge; where the reads are field paths off a capture the
+check is lexical, and through a call it is not. This is make's missing
+header, and `gcc -MD`, which records what the compiler opened, is the
+legitimate reconstruction for it. Over-capture is safe and costs only a
+recompute. A facts-you-do-not-own source, such as a file checked by
+`stat`, has an observed version rather than a bumped one, so its capture
+takes a probe in place of a counter. And a deep tree with sparse change
+favors marking: stylo sets `dirty` at eight sites and propagates it by
+hand, and per-node stamps checked from the root would compare every node
+on every restyle. That case stays a library with an explicit graph.
+
+The relation `cache == body(captures)` is stated by the declaration and
+checked by execution. A harness rebuilds each derivation from scratch
+after each settle and compares it with the cached value. A mismatch at
+equal stamps means an edge is missing from the capture list, which is
+exactly the failure the compiler cannot see through a call. The check is
+the net under the one hole in the idea, it is a test and not a build
+mode, and the law costs the author nothing to write. Comparing needs an
+equality on the derived type: structural where comptime can generate it,
+a declared hook where the value holds views.
+
+Pure languages remove co-facts by not mutating and then rebuild
+incrementality by hand: the cache comes back as a field of the state,
+with its stamps, and Lean's language server and rust-analyzer's Salsa
+are the machinery that results. Salsa is the nearest precedent here,
+with versioned inputs, memoized queries, and early cut-off, but it
+records dependencies at run time. Stated edges, imperative bodies, and
+no run-time tracking together are, as far as this review found, new.
+
 ### 4.3 Cost
 
 | Item | Run-time cost | Memory |
@@ -990,6 +1068,8 @@ have one.
 | 5 variant | none | often less: one tag replaces several ints |
 | 6 seam validation | one call per annotated store at a seam; nothing elsewhere | none |
 | 8 address refusal | none | none |
+| derivations | one compare per captured source at each settle or read; nothing per store beyond the version increment | one stamp per captured source per derivation |
+| the execution check | a from-scratch rebuild and compare per settle, in the test harness only | none in the program |
 
 A versioned primary read across fibers is a seqlock, version then value
 then version, or a hold, unless value and version pack into one word as
@@ -1005,6 +1085,13 @@ counter and a width question, or per-primary counters and rare reuse.
 - Whether trust through embedding should stop at the field.
 - Sealed construction's spelling, and whether serdes-filled types are
   sealed by default.
+- Whether a derivation body may call functions at all, or only functions
+  the compiler can see are reads of their arguments, and what refusal
+  that costs on the cctext chain of line index, highlight, find, and
+  layout, which is the specimen to write this against first.
+- Which other stated relations get a generated execution check: `cache
+  (name)` states that deleting the clause leaves the serial program, and
+  a grammar schema that reads and writes states a round trip.
 
 ### 4.5 Surface that does no work
 

@@ -238,6 +238,10 @@ runtime rows; the table above for the program rows.
 | Count beside set: `nworkers` CAS in two helpers, decremented on two exit paths (`CCServer.ccs:269-287,875,946`); curl `live` CAS with two rollbacks (`thrdqueue.ccs:450-465`) and conditional idle exit (`:423`) | staticd, curl | design |
 | Record moved by interleaved stores: find `scan_off/scan_bytes/done/truncated` in the stage block (`find.ccs:359-378`); the UI reads them on another fiber | cctext | design (tearing) |
 | No comment in the corpus says "keep in sync", "must match", or "mirror" | grep | observation |
+| Session-save snapshot: 20 fields copied in `rtx_ws_safe_note`, compared in `rtx_ws_safe_stale`, and hashed in `rtx_ws_safe_sig`; three lists that must agree | cctext `core/workspace.ccs:130-210` | design (co-fact, three copies) |
+| Push invalidation of the highlight and analysis caches at four edit sites (`hl_full = 0`, `hl_win_stamp = 0`, `analysis_reset()`) | cctext `core/document.ccs:300,660,1153,1171,1188,4390` | design (writer knows readers) |
+| Push-marking restyle: `dirty` set at eight sites, propagated to parent and children by hand, cleared in one loop | stylo `engine/stylebench_cc.ccs:2084-3656` | design (deep sparse change; a graph is right here) |
+| The language already states one relation checked by execution: `seq (cond)` flips the schedule, "differential testing and adaptive dispatch flip a flag, not the code" | spec §8.11.5 | design |
 
 | Observation | Where | Tag |
 |-------------|-------|-----|
