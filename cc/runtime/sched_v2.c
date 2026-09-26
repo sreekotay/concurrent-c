@@ -992,6 +992,10 @@ static _Atomic uint64_t g_v2_grow_held = 0;       /* recheck decided hold */
 static _Atomic uint64_t g_v2_grow_parked = 0;     /* hold: run-to-park     */
 static _Atomic uint64_t g_v2_grow_busy = 0;       /* recheck: long runs   */
 static _Atomic uint64_t g_v2_grow_shrink = 0;     /* idle workers released  */
+static _Atomic uint64_t g_v2_grow_stale = 0;      /* episodes ended unused  */
+/* Slow ticks during which no episode may be armed, set by sysmon when an
+ * episode goes a tick without growing. Written by sysmon only. */
+static _Atomic int g_v2_grow_quiet_ticks = 0;
 
 /* Coro-pool high-water cap (tunable via CC_V2_CORO_POOL_MAX).
  *
@@ -1699,6 +1703,8 @@ void cc_parallel_noblock_prepare(void) {
 /* Ask sysmon to consider growing the pool. First requester per episode
  * pays one wake syscall; everyone else sees the flag already set. */
 static void sched_v2_request_grow(void) {
+    if (atomic_load_explicit(&g_v2_grow_quiet_ticks, memory_order_relaxed) > 0)
+        return;
     int expected = 0;
     if (atomic_compare_exchange_strong_explicit(&g_v2_grow_pending, &expected, 1,
             memory_order_acq_rel, memory_order_relaxed)) {
@@ -3097,6 +3103,8 @@ static void* sched_v2_sysmon_main(void* arg) {
     uint64_t settle_last_ns = 0;
     uint64_t settle_last_idle = 0;
     uint64_t settle_last_spare = 0;
+    uint64_t grow_act_ns = 0;      /* episode start or last growth */
+    int grow_backoff = 0;          /* quiet ticks after the next stale episode */
     int slow_prev_backlog = 0;
     uint64_t last_slow_ns = 0;
     v2_mach_tb_init_once();
@@ -3161,17 +3169,38 @@ static void* sched_v2_sysmon_main(void* arg) {
             } else {
                 grow_slack_since_ns = 0;
             }
-            if (n >= g_v2.max_threads || !admit_ok || slack_done) {
+            /* An episode that went a whole tick without growing is a
+             * saturated pool the rechecks keep holding on (multiplexing
+             * that never slacks and never reaches cap). End it so sysmon
+             * returns to the tick cadence, and keep new episodes off for
+             * 1, 2, 4 ... 16 ticks; a growth resets the count. */
+            int stale = 0;
+            if (grow_act_ns != 0) {
+                uint64_t t = slack_now_ns ? slack_now_ns : v2_now_ns();
+                stale = t - grow_act_ns >=
+                        (uint64_t)V2_SYSMON_INTERVAL_MS * 1000000ull;
+            }
+            if (n >= g_v2.max_threads || !admit_ok || slack_done || stale) {
+                if (stale) {
+                    V2_STAT_INC(g_v2_grow_stale);
+                    grow_backoff = grow_backoff == 0 ? 1
+                        : (grow_backoff >= 16 ? 16 : grow_backoff * 2);
+                    atomic_store_explicit(&g_v2_grow_quiet_ticks, grow_backoff,
+                                          memory_order_relaxed);
+                }
                 atomic_store_explicit(&g_v2_grow_pending, 0, memory_order_release);
                 grow_have_baseline = 0;
                 grow_depth_streak = 0;
                 grow_slack_since_ns = 0;
                 busy_since_ns = 0;
+                grow_act_ns = 0;
             } else {
                 uint64_t pops = atomic_load_explicit(&g_v2.ready_queue.pops,
                                                      memory_order_relaxed);
                 uint64_t parks = sched_v2_park_sum();
                 uint64_t now = v2_now_ns();
+                if (grow_act_ns == 0)
+                    grow_act_ns = now;
                 /* Long-run sample: a worker on the same dispatch as at the
                  * previous recheck has run that fiber for at least one
                  * recheck interval without parking. The first recheck of
@@ -3250,25 +3279,30 @@ static void* sched_v2_sysmon_main(void* arg) {
                             busy_samples > 0 &&
                             busy_long * 2ull >= busy_samples &&
                             busy_waiting * 2ull >= busy_rechecks;
+                        int grew = 0;
                         if (rate_slow && !run_to_park && depth > 0) {
                             V2_STAT_INC(g_v2_grow_stall);
                             grow_depth_streak = 0;
                             busy_since_ns = 0;
-                            (void)sched_v2_try_expand_pool();
+                            grew = sched_v2_try_expand_pool();
                         } else if (depth_grow) {
                             V2_STAT_INC(g_v2_grow_backlog);
                             grow_depth_streak = 0;
                             busy_since_ns = 0;
-                            (void)sched_v2_try_expand_pool();
+                            grew = sched_v2_try_expand_pool();
                         } else if (busy_grow) {
                             V2_STAT_INC(g_v2_grow_busy);
                             grow_depth_streak = 0;
                             busy_since_ns = 0;
-                            (void)sched_v2_try_expand_pool();
+                            grew = sched_v2_try_expand_pool();
                         } else if (run_to_park && (rate_slow || depth_hit)) {
                             V2_STAT_INC(g_v2_grow_parked);
                         } else {
                             V2_STAT_INC(g_v2_grow_held);
+                        }
+                        if (grew) {
+                            grow_act_ns = now;
+                            grow_backoff = 0;
                         }
                     }
                 }
@@ -3278,6 +3312,7 @@ static void* sched_v2_sysmon_main(void* arg) {
             grow_depth_streak = 0;
             grow_slack_since_ns = 0;
             busy_since_ns = 0;
+            grow_act_ns = 0;
         }
 
         /* Everything below assumes ~one V2_SYSMON_INTERVAL_MS between
@@ -3289,6 +3324,11 @@ static void* sched_v2_sysmon_main(void* arg) {
             continue;
         }
         last_slow_ns = now_ns;
+        {
+            int q = atomic_load_explicit(&g_v2_grow_quiet_ticks, memory_order_relaxed);
+            if (q > 0)
+                atomic_store_explicit(&g_v2_grow_quiet_ticks, q - 1, memory_order_relaxed);
+        }
 
         /* Syscall-age eviction runs every tick: cheap scan, high payoff. */
         sched_v2_sysmon_evict_aged_workers();
@@ -3569,7 +3609,7 @@ static void sched_v2_atexit_dump_stats(void) {
             (unsigned long long)atomic_load_explicit(&g_v2_worker_busy_from_recheck, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_worker_busy_from_wake, memory_order_relaxed));
     fprintf(stderr, "[sched_v2 stats] grow (eager<=%d recheck=%dus rate=%dus/pop/worker depth_x=%d dwell=%d esc=%d): requests=%llu "
-                    "stall=%llu backlog=%llu busy=%llu escalate=%llu held=%llu parked=%llu shrink=%llu final_threads=%d/%d\n",
+                    "stall=%llu backlog=%llu busy=%llu escalate=%llu held=%llu parked=%llu stale=%llu shrink=%llu final_threads=%d/%d\n",
             g_v2_eager_threads, g_v2_grow_recheck_us, g_v2_grow_rate_us,
             g_v2_grow_depth_mult, g_v2_grow_depth_dwell, g_v2_grow_escalate_ticks,
             (unsigned long long)atomic_load_explicit(&g_v2_grow_requests, memory_order_relaxed),
@@ -3579,6 +3619,7 @@ static void sched_v2_atexit_dump_stats(void) {
             (unsigned long long)atomic_load_explicit(&g_v2_grow_escalate, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_grow_held, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_grow_parked, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_grow_stale, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_grow_shrink, memory_order_relaxed),
             atomic_load_explicit(&g_v2.num_threads, memory_order_relaxed),
             g_v2.max_threads);

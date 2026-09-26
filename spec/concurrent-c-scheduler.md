@@ -380,7 +380,6 @@ grow-pending flag and sysmon decides. Sysmon also arms the flag on a tick
 (~20 ms) in which no worker slept, work is queued and no worker is idle:
 a push arms it only when the ready queue is deeper than the live pool, and
 a turnstile's ordered stage keeps the queue shallower than that.
-
 While grow-pending is set, sysmon rechecks on a short cadence (default
 25 µs). It grows one worker when both:
 
@@ -416,14 +415,22 @@ and do not show one dispatch on two rechecks.
 
 Otherwise it holds. A high pop rate on a shallow queue is park/wake churn.
 
-An episode ends when the pool is at cap, admission is gated, or there is
-true slack: every worker idle and the ready queue empty, or a spare
-worker plus an empty queue that persists (~200 µs). An empty queue with
-every worker busy is saturation, not slack — the live fibers are the
-whole remaining set. Extra workers cannot run work that is not waiting,
-so the rate trigger does not grow on an empty queue. The episode stays
-armed through saturation so a later queued fiber can still recruit.
+An episode ends when the pool is at cap, admission is gated, there is
+true slack, or it goes one tick (~20 ms) without growing. True slack is
+every worker idle and the ready queue empty, or a spare worker plus an
+empty queue that persists (~200 µs). An empty queue with every worker
+busy is saturation, not slack — the live fibers are the whole remaining
+set. Extra workers cannot run work that is not waiting, so the rate
+trigger does not grow on an empty queue. The episode stays armed through
+saturation within its tick so a later queued fiber can still recruit.
 A single park between CPU-bound arms is not slack.
+
+An episode that ends a tick without growing is a pool the rechecks keep
+holding on (multiplexing that never slacks and never reaches cap). No
+episode is armed, by a push or by sysmon, for the next 1, 2, 4 … 16 ticks
+after consecutive such endings; a growth resets the count. Sysmon stays
+on the tick cadence instead of the recheck cadence for a saturated
+multiplexing load.
 
 Settle runs on the sysmon tick. Each worker accumulates the time it sleeps
 with nothing to run; a sleep ends when a waker claims the worker, so time a

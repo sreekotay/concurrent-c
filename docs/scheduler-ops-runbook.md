@@ -103,6 +103,11 @@ does. Growth happens on two paths:
   the pool; sysmon also arms it on a slow tick in which no worker slept,
   work is queued and nobody is idle (a turnstile keeps the queue shallow).
 
+Any episode ends after a tick (~20 ms) without growth. Consecutive stale
+episodes keep both arming paths off for 1, 2, 4 … up to 16 ticks, reset
+by a growth, so a saturated multiplexing pool does not keep sysmon on the
+recheck cadence.
+
 While a request is pending, sysmon rechecks every `CC_V2_GROW_RECHECK_US`
 (default 25us; unreliable below ~10us due to kernel timeout resolution)
 instead of sleeping its normal 20ms tick. Its slow-tick jobs (worker
@@ -165,7 +170,7 @@ worker per slow tick regardless of the rate test.
 With `CC_V2_STATS=1` the dump includes a growth line:
 
 ```
-[sched_v2 stats] grow (eager<=2 recheck=25us rate=100us/pop/worker depth_x=2 dwell=3 esc=0): requests=... stall=... backlog=... busy=... escalate=... held=... parked=... shrink=... final_threads=4/8
+[sched_v2 stats] grow (eager<=2 recheck=25us rate=100us/pop/worker depth_x=2 dwell=3 esc=0): requests=... stall=... backlog=... busy=... escalate=... held=... parked=... stale=... shrink=... final_threads=4/8
 ```
 
 - `requests` — pushes (or busy sysmon ticks) that armed the grow-pending flag (one per episode)
@@ -173,6 +178,7 @@ With `CC_V2_STATS=1` the dump includes a growth line:
 - `escalate` — workers added by slow-tick escalation
 - `held` — rechecks that decided not to grow
 - `parked` — rechecks that would have grown but the episode was run-to-park
+- `stale` — episodes ended after a tick without growth
 - `shrink` — idle workers released back toward the eager cap
 - `final_threads` — pool size at exit / cap
 
