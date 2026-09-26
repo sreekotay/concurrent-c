@@ -28,8 +28,8 @@ fiber handoff goes through the ready queue.
 Worker count defaults to `sysconf(_SC_NPROCESSORS_ONLN)`, capped at
 `V2_MAX_THREADS` (256), overridable via `CC_V2_THREADS` (or `CC_WORKERS`).
 The live pool starts at one worker and grows on demand up to that cap.
-Idle workers above the eager cap are released when the ready queue is
-empty and slack holds. See Worker pool growth.
+Idle workers above the eager cap are released when the queues are empty
+and the pool had that many workers to spare. See Worker pool growth.
 
 ### Correctness goals
 
@@ -371,12 +371,15 @@ bounds the latency of a skipped wake to one sysmon interval.
 ## Worker pool growth
 
 The pool starts at one worker and grows on demand up to the worker cap.
-Idle workers above the eager cap (default 2) are released when the ready
-queue is empty and slack holds.
+Idle workers above the eager cap (default 2) are released when the queues
+are empty and the pool had that many workers to spare (see Settle below).
 
 A push that finds no idle worker creates a thread inline while the pool is
 below the eager cap (default 2). Beyond that the push arms a one-shot
-grow-pending flag and sysmon decides.
+grow-pending flag and sysmon decides. Sysmon also arms the flag on a tick
+(~20 ms) in which no worker slept, work is queued and no worker is idle:
+a push arms it only when the ready queue is deeper than the live pool, and
+a turnstile's ordered stage keeps the queue shallower than that.
 
 While grow-pending is set, sysmon rechecks on a short cadence (default
 25 µs). It grows one worker when both:
@@ -399,6 +402,18 @@ exclusive wait). Extra workers add traffic, not progress. A low park
 fraction with a slow drain and a non-empty ready queue is CPU-bound work
 still occupying workers while more fibers sit ready.
 
+Pops and parks do not say how long a fiber ran before it parked. A
+`@parallel wait` turnstile parks every ticket (depth enter, `@stage`
+handshake), so tickets whose run is CPU or a blocking syscall (open, read,
+getdents) pop and park as often as recv churn. On every recheck sysmon
+therefore also samples each worker's dispatch epoch: a worker on the same
+dispatch as at the previous recheck is in a long run. Independent of the
+park fraction and the drain rate, sysmon grows one worker when, over at
+least the rate period since its last growth, at least half the worker
+samples were long runs and at least half the rechecks saw work queued, and
+work is queued now. Multiplexed fibers run for microseconds between parks
+and do not show one dispatch on two rechecks.
+
 Otherwise it holds. A high pop rate on a shallow queue is park/wake churn.
 
 An episode ends when the pool is at cap, admission is gated, or there is
@@ -409,6 +424,15 @@ whole remaining set. Extra workers cannot run work that is not waiting,
 so the rate trigger does not grow on an empty queue. The episode stays
 armed through saturation so a later queued fiber can still recruit.
 A single park between CPU-bound arms is not slack.
+
+Settle runs on the sysmon tick. Each worker accumulates the time it sleeps
+with nothing to run; a sleep ends when a waker claims the worker, so time a
+woken worker waits for a core is not counted. Sysmon releases at most as
+many idle workers above the eager cap as the pool slept whole workers on
+each of the last two ticks, and only while the ready and worklet queues are
+empty. An ordered pipeline shows an idle worker and an empty queue at many
+instants while it uses every worker on average; it keeps its workers. A
+pool that `cc_parallel_noblock_prepare` filled is never released.
 
 `CC_V2_EAGER_THREADS`, `CC_V2_GROW_RECHECK_US`, `CC_V2_GROW_RATE_US`,
 `CC_V2_GROW_DEPTH_X`, `CC_V2_GROW_DEPTH_DWELL`, and

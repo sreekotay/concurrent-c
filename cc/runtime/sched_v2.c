@@ -461,6 +461,14 @@ typedef struct {
      * the park path is an uncontended relaxed increment; sysmon sums
      * the live prefix when a grow episode is armed. */
     _Atomic uint64_t parks;
+    /* Time this worker spent asleep on `wake` with nothing to run:
+     * idle_ns is the total of finished sleeps, idle_since the start of
+     * the current one (0 while awake). Touched only around the idle
+     * sleep and by the waker that claims it, both already a futex
+     * round trip (sched_v2_idle_close). Sysmon reads them to size the
+     * pool to the capacity that was actually used. */
+    _Atomic uint64_t idle_ns;
+    _Atomic uint64_t idle_since;
     wake_primitive wake;
     /* Sysmon sets this to retire an idle worker above the eager cap.
      * The worker exits the loop cleanly and clears alive. */
@@ -884,14 +892,42 @@ static _Atomic int g_v2_running_workers = 0;
  * by measured elapsed time, so the decision is stable against kernel
  * timeout jitter in the recheck sleep itself.
  *
+ * Neither pops nor parks say how long a fiber ran before it parked.
+ * A `@parallel wait` turnstile parks every ticket (depth enter, @stage
+ * handshake), so tickets that spend their run in CPU or in blocking
+ * syscalls (open / read / getdents) count as many pops and as many
+ * parks as recv churn: the rate looks healthy and the episode reads as
+ * run-to-park. Sysmon therefore also samples each worker's dispatch
+ * epoch on every recheck. A worker still on the dispatch it was on at
+ * the previous recheck is in a long run (at least one recheck
+ * interval without parking). Grow one worker when, over at least one
+ * rate window since the last decision, half the worker samples were
+ * long runs and half the rechecks saw work waiting, and work is
+ * waiting now: the workers are occupied, not multiplexing. Multiplexed
+ * fibers run for microseconds between parks and never show the same
+ * epoch on two rechecks, so they do not trip this.
+ *
  * An episode ends on a full pool, an admission gate, or true slack:
  * every worker idle and the ready queue empty, or one spare worker
  * plus an empty queue persisting for SCHED_V2_GROW_SLACK_NS (a single
  * park between CPU-bound arms is not slack). depth==0 with nobody idle
  * is saturation, not slack: keep the episode armed so a later queued
  * fiber can still hit the rate trigger. Do not grow on that empty
- * queue. Idle workers above the eager cap are released once slack
- * holds — the pool settles to the work that is actually there.
+ * queue.
+ *
+ * Settle (release idle workers above the eager cap) is one decision on
+ * the slow tick, measured rather than sampled: each worker accumulates
+ * the time it slept with nothing to run, and sysmon releases at most as
+ * many idle workers as the pool had spare (whole worker-ticks of sleep)
+ * on each of the last two ticks. An ordered pipeline (a turnstile whose
+ * stage waits on its slowest ticket) shows an idle worker and an empty
+ * queue at many instants while it still uses every worker on average;
+ * releasing on an instant's slack cost the next episode a regrow. A
+ * pool cc_parallel_noblock_prepare filled is never settled. A tick
+ * with no sleep at all, work queued and nobody idle arms an episode:
+ * the push path arms one only when the queue is deeper than the pool,
+ * and a turnstile's ordered stage keeps it shallower.
+ *
  * The env knobs below are test overrides; defaults settle from
  * the workload.
  *
@@ -954,6 +990,7 @@ static _Atomic uint64_t g_v2_grow_backlog = 0;    /* recheck: deep queue  */
 static _Atomic uint64_t g_v2_grow_escalate = 0;   /* slow-tick escalation */
 static _Atomic uint64_t g_v2_grow_held = 0;       /* recheck decided hold */
 static _Atomic uint64_t g_v2_grow_parked = 0;     /* hold: run-to-park     */
+static _Atomic uint64_t g_v2_grow_busy = 0;       /* recheck: long runs   */
 static _Atomic uint64_t g_v2_grow_shrink = 0;     /* idle workers released  */
 
 /* Coro-pool high-water cap (tunable via CC_V2_CORO_POOL_MAX).
@@ -1496,6 +1533,7 @@ static void sched_v2_init_worker_slot(int id) {
     atomic_store_explicit(&g_v2.threads[id].generation, 0,
                           memory_order_release);
     atomic_store_explicit(&g_v2.threads[id].parks, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_v2.threads[id].idle_since, 0, memory_order_relaxed);
     atomic_store_explicit(&g_v2.threads[id].retiring, 0, memory_order_relaxed);
     wake_primitive_init(&g_v2.threads[id].wake);
 }
@@ -1532,22 +1570,61 @@ static int sched_v2_try_retire_last_idle(void) {
     return 1;
 }
 
-static void sched_v2_settle_pool(void) {
-    for (;;) {
+/* Release up to `budget` idle workers above the eager cap while both
+ * queues are empty. A pool cc_parallel_noblock_prepare filled stays
+ * filled: worklets leave the queue while they run, so an empty queue is
+ * not slack there. */
+static void sched_v2_settle_pool(int budget) {
+    if (atomic_load_explicit(&g_v2_noblock_pool_pinned, memory_order_relaxed))
+        return;
+    while (budget-- > 0) {
         size_t depth = atomic_load_explicit(&g_v2.ready_queue.count,
                                            memory_order_relaxed);
         int n = atomic_load_explicit(&g_v2.num_threads, memory_order_acquire);
         int idle = atomic_load_explicit(&g_v2.idle_workers, memory_order_acquire);
-        if (depth != 0 || n <= g_v2_eager_threads || idle <= 0)
+        size_t wdepth = atomic_load_explicit(&g_v2.worklets.count,
+                                             memory_order_relaxed);
+        if (depth != 0 || wdepth != 0 || n <= g_v2_eager_threads || idle <= 0)
             return;
         if (!sched_v2_try_retire_last_idle())
             return;
     }
 }
 
+/* Total worker sleep so far: finished sleeps plus the ones in progress,
+ * over the whole slot table. A retired slot keeps its total and a
+ * reused slot adds to it, so the sum only grows. */
+static uint64_t sched_v2_idle_ns_sum(uint64_t now) {
+    uint64_t s = 0;
+    for (int i = 0; i < V2_MAX_THREADS; i++) {
+        uint64_t since = atomic_load_explicit(&g_v2.threads[i].idle_since,
+                                              memory_order_relaxed);
+        s += atomic_load_explicit(&g_v2.threads[i].idle_ns, memory_order_relaxed);
+        if (since != 0 && now > since)
+            s += now - since;
+    }
+    return s;
+}
+
 static inline int sched_v2_finish_join(fiber_v2* f, void** out_result) {
     if (out_result) *out_result = f->result;
     return 0;
+}
+
+/* End slot i's idle sleep in its accounting. The waker calls this when
+ * it claims the worker, so the time the woken thread then waits for a
+ * core (a busy host) is not counted as spare capacity; the worker calls
+ * it after its wait returns for a wake nobody claimed. The exchange
+ * makes one of them count the interval. */
+static void sched_v2_idle_close(int i) {
+    uint64_t since = atomic_exchange_explicit(&g_v2.threads[i].idle_since, 0,
+                                              memory_order_relaxed);
+    if (since != 0) {
+        uint64_t now = v2_now_ns();
+        if (now > since)
+            atomic_fetch_add_explicit(&g_v2.threads[i].idle_ns, now - since,
+                                      memory_order_relaxed);
+    }
 }
 
 /* Claim one idle worker thread and wake it. Returns 1 on success. */
@@ -1562,6 +1639,7 @@ static int sched_v2_try_wake_one(void) {
                 memory_order_acq_rel, memory_order_relaxed)) {
             atomic_fetch_sub_explicit(&g_v2.idle_workers, 1, memory_order_acq_rel);
             V2_STAT_INC(g_v2_wake_issued);
+            sched_v2_idle_close(i);
             wake_primitive_wake_one(&g_v2.threads[i].wake);
             return 1;
         }
@@ -2771,7 +2849,10 @@ static void* thread_v2_main(void* arg) {
             continue;
         }
 
+        atomic_store_explicit(&g_v2.threads[tid].idle_since, v2_now_ns(),
+                              memory_order_relaxed);
         wake_primitive_wait(&g_v2.threads[tid].wake, val);
+        sched_v2_idle_close(tid);
         if (atomic_exchange_explicit(&g_v2.threads[tid].is_idle, 0, memory_order_acq_rel)) {
             atomic_fetch_sub_explicit(&g_v2.idle_workers, 1, memory_order_acq_rel);
         }
@@ -3006,9 +3087,20 @@ static void* sched_v2_sysmon_main(void* arg) {
     int grow_have_baseline = 0;
     int grow_depth_streak = 0;
     uint64_t grow_slack_since_ns = 0;
+    /* Long-run sampling (see the g_v2_grow_pending block comment). */
+    uint64_t grow_last_epoch[V2_MAX_THREADS];
+    uint64_t busy_since_ns = 0;
+    uint64_t busy_samples = 0;     /* worker samples */
+    uint64_t busy_long = 0;        /* ... on the same dispatch as last recheck */
+    uint64_t busy_rechecks = 0;
+    uint64_t busy_waiting = 0;     /* rechecks with work queued */
+    uint64_t settle_last_ns = 0;
+    uint64_t settle_last_idle = 0;
+    uint64_t settle_last_spare = 0;
     int slow_prev_backlog = 0;
     uint64_t last_slow_ns = 0;
     v2_mach_tb_init_once();
+    memset(grow_last_epoch, 0, sizeof grow_last_epoch);
     while (atomic_load_explicit(&g_v2.running, memory_order_acquire)) {
         uint32_t val = atomic_load_explicit(&g_v2.sysmon_wake.value, memory_order_acquire);
         if (atomic_load_explicit(&g_v2_grow_pending, memory_order_acquire)) {
@@ -3074,13 +3166,37 @@ static void* sched_v2_sysmon_main(void* arg) {
                 grow_have_baseline = 0;
                 grow_depth_streak = 0;
                 grow_slack_since_ns = 0;
-                if (slack_done)
-                    sched_v2_settle_pool();
+                busy_since_ns = 0;
             } else {
                 uint64_t pops = atomic_load_explicit(&g_v2.ready_queue.pops,
                                                      memory_order_relaxed);
                 uint64_t parks = sched_v2_park_sum();
                 uint64_t now = v2_now_ns();
+                /* Long-run sample: a worker on the same dispatch as at the
+                 * previous recheck has run that fiber for at least one
+                 * recheck interval without parking. The first recheck of
+                 * a window only primes the epochs. */
+                {
+                    uint64_t nl = 0;
+                    for (int i = 0; i < n; i++) {
+                        uint64_t cur = atomic_load_explicit(
+                            &g_v2.threads[i].dispatch_epoch, memory_order_relaxed);
+                        if (busy_since_ns != 0 && cur != 0 && cur == grow_last_epoch[i])
+                            nl++;
+                        grow_last_epoch[i] = cur;
+                    }
+                    if (busy_since_ns == 0) {
+                        busy_since_ns = now;
+                        busy_samples = busy_long = 0;
+                        busy_rechecks = busy_waiting = 0;
+                    } else {
+                        busy_samples += (uint64_t)n;
+                        busy_long += nl;
+                        busy_rechecks++;
+                        if (depth > 0)
+                            busy_waiting++;
+                    }
+                }
                 if (!grow_have_baseline) {
                     /* One baseline per demand episode, captured on the
                      * first recheck (single writer; a producer-side write
@@ -3125,13 +3241,29 @@ static void* sched_v2_sysmon_main(void* arg) {
                          * CHURN-inlined tree (or any single CPU fiber)
                          * occupies a worker with depth==0; more threads
                          * cannot run work that is not queued. */
+                        /* Occupied, not multiplexing: most worker samples
+                         * were long runs and work kept waiting, over at
+                         * least one rate window since the last decision.
+                         * Park count and pop rate do not enter it. */
+                        int busy_grow = depth > 0 &&
+                            now - busy_since_ns >= (uint64_t)g_v2_grow_rate_us * 1000ull &&
+                            busy_samples > 0 &&
+                            busy_long * 2ull >= busy_samples &&
+                            busy_waiting * 2ull >= busy_rechecks;
                         if (rate_slow && !run_to_park && depth > 0) {
                             V2_STAT_INC(g_v2_grow_stall);
                             grow_depth_streak = 0;
+                            busy_since_ns = 0;
                             (void)sched_v2_try_expand_pool();
                         } else if (depth_grow) {
                             V2_STAT_INC(g_v2_grow_backlog);
                             grow_depth_streak = 0;
+                            busy_since_ns = 0;
+                            (void)sched_v2_try_expand_pool();
+                        } else if (busy_grow) {
+                            V2_STAT_INC(g_v2_grow_busy);
+                            grow_depth_streak = 0;
+                            busy_since_ns = 0;
                             (void)sched_v2_try_expand_pool();
                         } else if (run_to_park && (rate_slow || depth_hit)) {
                             V2_STAT_INC(g_v2_grow_parked);
@@ -3145,6 +3277,7 @@ static void* sched_v2_sysmon_main(void* arg) {
             grow_have_baseline = 0;
             grow_depth_streak = 0;
             grow_slack_since_ns = 0;
+            busy_since_ns = 0;
         }
 
         /* Everything below assumes ~one V2_SYSMON_INTERVAL_MS between
@@ -3160,19 +3293,34 @@ static void* sched_v2_sysmon_main(void* arg) {
         /* Syscall-age eviction runs every tick: cheap scan, high payoff. */
         sched_v2_sysmon_evict_aged_workers();
 
-        /* Empty queues + spare workers: release extras down to the eager cap.
-         * Noblock pins the pool (worklets leave the queue while running, so
-         * settle would otherwise see false slack and shrink mid-frame). */
+        /* Pool size against the capacity the last ticks used. spare is
+         * whole worker-ticks of sleep over this tick. Spare on this tick
+         * and the one before: release that many idle workers above the
+         * eager cap (settle checks the queues and the noblock pin). No
+         * sleep at all while work waits and nobody is idle: the pool is
+         * occupied, so arm a growth episode even though no push found the
+         * queue deeper than the pool (a turnstile's ordered stage keeps
+         * it shallow); the episode's rechecks decide whether to grow. */
         {
-            size_t depth = atomic_load_explicit(&g_v2.ready_queue.count,
-                                                 memory_order_relaxed);
-            size_t wdepth = atomic_load_explicit(&g_v2.worklets.count,
-                                                 memory_order_relaxed);
-            int n = atomic_load_explicit(&g_v2.num_threads, memory_order_acquire);
-            int idle = atomic_load_explicit(&g_v2.idle_workers, memory_order_acquire);
-            if (depth == 0 && wdepth == 0 && idle > 0 && n > g_v2_eager_threads &&
-                !atomic_load_explicit(&g_v2_noblock_pool_pinned, memory_order_relaxed))
-                sched_v2_settle_pool();
+            uint64_t idle_sum = sched_v2_idle_ns_sum(now_ns);
+            if (settle_last_ns != 0 && now_ns > settle_last_ns) {
+                uint64_t spare = (idle_sum - settle_last_idle) /
+                                 (now_ns - settle_last_ns);
+                uint64_t keep = spare < settle_last_spare ? spare : settle_last_spare;
+                if (keep > 0)
+                    sched_v2_settle_pool(keep > (uint64_t)V2_MAX_THREADS
+                                             ? V2_MAX_THREADS : (int)keep);
+                settle_last_spare = spare;
+                if (spare == 0 &&
+                    (atomic_load_explicit(&g_v2.ready_queue.count, memory_order_relaxed) > 0 ||
+                     atomic_load_explicit(&g_v2.worklets.count, memory_order_relaxed) > 0) &&
+                    atomic_load_explicit(&g_v2.idle_workers, memory_order_relaxed) == 0 &&
+                    atomic_load_explicit(&g_v2.num_threads, memory_order_acquire) < g_v2.max_threads &&
+                    !atomic_load_explicit(&g_v2_grow_pending, memory_order_relaxed))
+                    sched_v2_request_grow();
+            }
+            settle_last_ns = now_ns;
+            settle_last_idle = idle_sum;
         }
 
         /* Park-deadline wakeup: signal any fiber whose @with_deadline
@@ -3421,12 +3569,13 @@ static void sched_v2_atexit_dump_stats(void) {
             (unsigned long long)atomic_load_explicit(&g_v2_worker_busy_from_recheck, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_worker_busy_from_wake, memory_order_relaxed));
     fprintf(stderr, "[sched_v2 stats] grow (eager<=%d recheck=%dus rate=%dus/pop/worker depth_x=%d dwell=%d esc=%d): requests=%llu "
-                    "stall=%llu backlog=%llu escalate=%llu held=%llu parked=%llu shrink=%llu final_threads=%d/%d\n",
+                    "stall=%llu backlog=%llu busy=%llu escalate=%llu held=%llu parked=%llu shrink=%llu final_threads=%d/%d\n",
             g_v2_eager_threads, g_v2_grow_recheck_us, g_v2_grow_rate_us,
             g_v2_grow_depth_mult, g_v2_grow_depth_dwell, g_v2_grow_escalate_ticks,
             (unsigned long long)atomic_load_explicit(&g_v2_grow_requests, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_grow_stall, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_grow_backlog, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_grow_busy, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_grow_escalate, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_grow_held, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_grow_parked, memory_order_relaxed),

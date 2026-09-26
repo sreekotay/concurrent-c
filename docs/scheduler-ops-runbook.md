@@ -88,17 +88,20 @@ timing.
 
 ## Worker pool growth
 
-The pool is a ratchet on the grow path and settles on slack: workers
-are created on demand and released when the ready queue is empty and a
-spare worker persists (~200 µs, or one sysmon tick). Extras above the
-eager cap (default 2) do not stay for the life of the process.
-Growth happens on two paths:
+The pool is a ratchet on the grow path and settles on measured slack:
+workers are created on demand and released when the queues are empty and
+the pool slept at least that many whole workers over each of the last two
+sysmon ticks (~40 ms). Extras above the eager cap (default 2) do not stay
+for the life of the process; a pool `cc_parallel_noblock_prepare` filled
+does. Growth happens on two paths:
 
 - **Inline** — a push that finds work queued and no idle worker creates a
   pthread directly, but only up to `CC_V2_EAGER_THREADS` workers (default 2).
 - **Deferred** — beyond that, the push CASes a one-shot grow-pending flag
   (the first requester per episode pays one sysmon wake syscall) and sysmon
-  deliberates.
+  deliberates. The push arms it only when the ready queue is deeper than
+  the pool; sysmon also arms it on a slow tick in which no worker slept,
+  work is queued and nobody is idle (a turnstile keeps the queue shallow).
 
 While a request is pending, sysmon rechecks every `CC_V2_GROW_RECHECK_US`
 (default 25us; unreliable below ~10us due to kernel timeout resolution)
@@ -122,6 +125,18 @@ run-to-park:
   accept, and lock-wait multiplexing look like stall or backlog; extra
   workers add traffic. A low park fraction with a slow drain and a
   non-empty queue is CPU-bound work still occupying workers.
+
+A third trigger ignores pops and parks:
+
+- **busy** — each recheck samples every worker's dispatch epoch; a worker
+  on the same dispatch as at the previous recheck is in a long run (CPU or
+  a blocking syscall, no park for a recheck interval). Grow when, over at
+  least `CC_V2_GROW_RATE_US` since the last growth, half the worker samples
+  were long runs and half the rechecks saw work queued, and work is queued
+  now. A `@parallel wait` turnstile parks every ticket, so syscall-bound
+  tickets (a directory walk, a file search) read as run-to-park with a
+  healthy pop rate; this is the trigger that grows them. Multiplexed
+  fibers run microseconds between parks and never trip it.
 
 The rate and depth knobs are independent: the rate is normalized by elapsed
 time since the episode baseline, so a faster recheck cadence changes only
@@ -150,11 +165,11 @@ worker per slow tick regardless of the rate test.
 With `CC_V2_STATS=1` the dump includes a growth line:
 
 ```
-[sched_v2 stats] grow (eager<=2 recheck=25us rate=100us/pop/worker depth_x=2 esc=0): requests=... stall=... backlog=... escalate=... held=... parked=... final_threads=4/8
+[sched_v2 stats] grow (eager<=2 recheck=25us rate=100us/pop/worker depth_x=2 dwell=3 esc=0): requests=... stall=... backlog=... busy=... escalate=... held=... parked=... shrink=... final_threads=4/8
 ```
 
-- `requests` — pushes that armed the grow-pending flag (one per episode)
-- `stall` / `backlog` — rechecks that grew via the rate / depth trigger
+- `requests` — pushes (or busy sysmon ticks) that armed the grow-pending flag (one per episode)
+- `stall` / `backlog` / `busy` — rechecks that grew via the rate / depth / long-run trigger
 - `escalate` — workers added by slow-tick escalation
 - `held` — rechecks that decided not to grow
 - `parked` — rechecks that would have grown but the episode was run-to-park
