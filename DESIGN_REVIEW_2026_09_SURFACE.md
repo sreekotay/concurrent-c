@@ -11,7 +11,7 @@ gives one rule for which place a fact belongs in.
 
 | Place | Holds | Why there |
 |-------|-------|-----------|
-| **the struct declaration** | fields, and any fact that adds bytes: a version on a primary, a cached derivation and its stamps, an edit ring | layout is one fact per type, the same in every translation unit |
+| **the struct declaration** | fields, and any fact that adds bytes: a primary's generation, a cached derivation and its stamps, an edit ring | layout is one fact per type, the same in every translation unit |
 | **the view** (`@typeview`) | admission (`r:`, `w:`, `rw:`), faces (`as:`), field-shaped reads that store nothing (`d:`) | erased; adds no bytes; everyday syntax |
 | **hooks** (`@typehooks`) | lifecycle: create, destroy, validate, extent | advanced; how a value comes to be and ends |
 | **declaration suffixes** | how this binding behaves: `@destroy`, `@detach`, `@derive` | local, where the logic is |
@@ -37,16 +37,16 @@ erased and keeps nothing new in hooks.
 | `@parallel (h) below (n) {…}` as a `bool` | 4.2 item 1 | proposed |
 | `@variant` for a tag beside a payload | 4.2 item 5 | shipped construct, new use |
 | `d: name` in a view: a field-shaped read that stores nothing | 4.2 item 3 | proposed |
-| `T f @version;` member suffix: stores bump the field's stamp | 4.2 item 4 | proposed; replaces `v:` |
+| `T f @primary;` member suffix: stores bump the field's generation | 4.2 item 4 | proposed; replaces `v:` and `@version` |
 | `T x = expr @derive;` and `T x @derive {…};` | 4.2 derivations | proposed; replaces `c:` and `from` |
 | `[name = expr]` init-captures on `@derive` for probes and clocks | 4.2 derivations | proposed; syntax already exists for closures |
-| `x.fresh()`: bring a derivation up to date here | 4.2 derivations | proposed; replaces `@settle` |
-| `T f @version log(N);` and `@patch (T.edit e) {…}` | 4.2 deltas | proposed, deferred: one specimen |
+| `@derive_gen(x)`: the generation of a primary or a derivation, `uint64_t`; settles a derivation first | 4.2 derivations | proposed; replaces `@settle` and `fresh()` |
+| `T f @primary log(N);` and `@patch (T.edit e) {…}` | 4.2 deltas | proposed, deferred: one specimen |
 | `.validate` hook; sealed construction | 4.2 item 6 | proposed |
 | `&` of a non-writable field refused | 4.2 item 8 | proposed, no syntax |
 | `const` on a member read by the lowering as frozen | census | proposed, no new syntax |
 
-Withdrawn along the way: `@since`, `@settle`, `@log(x, e)`, `v:` and `c:`
+Withdrawn along the way: `@since`, `@settle`, `fresh()`, `@version`, `@log(x, e)`, `v:` and `c:`
 view groups, `c: idx from …` edge lists, validation on every assignment,
 a transaction scope, per-instance validators, a subscriber graph.
 
@@ -60,8 +60,8 @@ as a one-entry edit log with no lag check.
 
 ```c
 typedef struct {
-    RtxPieceTree tree  @version;          /* a store bumps tree's stamp */
-    size_t       width @version;
+    RtxPieceTree tree  @primary;          /* a store bumps tree's generation */
+    size_t       width @primary;
     size_t       hl_from, hl_to;          /* the visible window */
 
     LineIndex idx @derive {               /* edges: tree, width */
@@ -86,16 +86,21 @@ Rules this example fixes:
 - A member derivation's body names its siblings directly, and its edges
   are the sibling fields it reads. An edge outside the object means the
   derivation belongs on the object that holds both, or in a local.
-- An edge must be a field declared `@version`, a `const` field, or a
-  value compared by value. Reading an unversioned mutable field is
-  refused: "edge `hl_from` has no version; add `@version` or make it a
-  value capture". Here `hl_from` and `hl_to` are compared by value, since
+- An edge must be a field declared `@primary`, a `const` field, or a
+  value compared by value. Reading any other mutable field is refused:
+  "edge `hl_from` is not a primary; add `@primary` or make it a value
+  capture". Here `hl_from` and `hl_to` are compared by value, since
   their stamp would be the value itself.
+- `typeof(d->idx)` is `const LineIndex`. A read settles, then loads; a
+  store is refused by C's own `const` rule; the body alone may write it.
+  A copy is an ordinary value, which is a pinned snapshot. `&d->idx`
+  settles and yields a `const LineIndex *`, a borrow that ends at the
+  next store to an edge, which section 2's borrow rule already checks.
 
 With deltas, later and only if the one-specimen case holds up:
 
 ```c
-    RtxPieceTree tree @version log(8);
+    RtxPieceTree tree @primary log(8);
     LineIndex idx @derive { idx.build(&tree, width); }
                   @patch (RtxPieceTree.edit e) {
                       @switch (e) {
@@ -113,22 +118,34 @@ and `rtx_ws_safe_sig` hashes them.
 
 ```c
 typedef struct {
-    RtxDoc doc;
-    size_t top, left_col, seek_off;
-    RtxLayout layout;
+    RtxDoc     doc;
+    size_t     top @primary, left_col @primary, seek_off @primary;
+    RtxLayout  layout @primary;
     ...
-    RtxSafeCam saved @derive {            /* edges: every field the body reads */
-        rtx_ws_flush(&saved, &doc, top, left_col, seek_off, &layout) !>;
+    RtxSafeCam cam @derive {              /* pure: builds the snapshot, writes nothing else */
+        cam = rtx_safe_cam(&doc, top, left_col, seek_off, &layout);
     };
+    uint64_t   cam_written;               /* the generation last flushed */
 } RtxBuf;
 
-/* the frame loop */
-b->saved.fresh() !>;                      /* flushes only when something it read changed */
+/* the frame loop: the effect is written where it runs */
+uint64_t g = @derive_gen(b->cam);         /* settles cam, returns its generation */
+if (g != b->cam_written) {
+    rtx_ws_flush(&b->cam) !>;
+    b->cam_written = g;                   /* recorded only after the flush succeeds */
+}
 ```
 
-`.fresh()` is the statement form of a read, for a derivation whose
-rebuild is an effect. Its builder is fallible, so the call is a Result
-site. The three hand-kept lists become the body's reads.
+A derivation writes only its own cache, so the execution check can
+rebuild it from scratch without repeating an effect. An effect on change
+is an ordinary `if` on a remembered generation. Early cut-off carries
+through: `cam` gets a new generation only when its value changes. The
+three hand-kept lists become the body's reads, and `cam_written` is one
+word recording a different fact, what was last written.
+
+A generation answers "has this changed since", and may over-report.
+It is not a state identity: dirty tracking needs ids that undo
+restores, and stays the program's own fact.
 
 ### 3. staticd: a file cache with a probe and a clock
 
@@ -228,9 +245,9 @@ operation under the set's own lock.
 | Overlap | Spellings that competed | Resolution |
 |---------|------------------------|------------|
 | where a dependency edge is stated | `c: idx from pos, len`; a capture list; the body's free names | free names; a list only for init-captures and value compares |
-| where a version lives | `v:` in the view; hand-declared `pos_v` fields | `@version` on the member; the stamp is part of the member's lowering |
+| where a generation lives | `v:` in the view; hand-declared `pos_v` fields; `@version`, `@tracked` | `@primary` on the member; the counter is part of the member's lowering, `uint64_t` so it never wraps on a 32-bit target |
 | where a cache lives | `c:` in the view; `@derive` suffix | `@derive` on the member or the local |
-| bringing state up to date | `@settle`; a read | a read, plus `x.fresh()` when the read is for effect |
+| bringing state up to date | `@settle`; `fresh()`; a read | a read; `@derive_gen(x)` where an effect needs to know whether anything changed |
 | deltas | `@since` switch; `@log` in verbs | `@version log(N)` and `@patch`; deferred |
 | a derived field vs a method | `d:`; a method | both: `d:` where call sites read a field today |
 | a named owner | section 2's annotation; section 3's `h@(a)`; `create_*` | `@detach(owner)` |
@@ -241,10 +258,9 @@ operation under the set's own lock.
 ## Open choices
 
 - Bare sibling names inside a member derivation, or `self->`.
-- The word `@version`.
 - Whether `@parallel (h) below (n) {…}` returns `bool`, which makes the
   dest-attach an expression; today it is a statement.
 - `@detach(owner)` widens `@detach`'s meaning from "the caller" to "this
   owner".
-- The name `fresh`.
+- Whether `@derive_gen` stays a compound or a shorter spelling is found.
 - Whether `d:` earns its place, or methods suffice.
