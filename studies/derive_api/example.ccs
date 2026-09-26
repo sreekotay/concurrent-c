@@ -1,0 +1,132 @@
+/*
+ * The lowered form, written by hand: a text buffer as a source with an
+ * edit log, a line index derived from it (patched from edits when it can,
+ * rebuilt when it must), a second derivation on the first, an effect on
+ * change, dirty tracking by state identity, and the execution check.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+#include "cc_gen.h"
+
+typedef struct { size_t off, ins, del; } Edit;       /* coordinates, not content */
+CC_GENLOG_DECL(TextLog, Edit, 8)
+
+typedef struct {
+    char    buf[4096];
+    size_t  len;
+    TextLog log;                                      /* the source's generation and edits */
+} Text;
+
+static void text_insert(Text* t, size_t off, const char* s) {
+    size_t n = strlen(s);
+    memmove(t->buf + off + n, t->buf + off, t->len - off);
+    memcpy(t->buf + off, s, n);
+    t->len += n;
+    TextLog_push(&t->log, (Edit){ off, n, 0 });
+}
+static void text_erase(Text* t, size_t off, size_t n) {
+    memmove(t->buf + off, t->buf + off + n, t->len - off - n);
+    t->len -= n;
+    TextLog_push(&t->log, (Edit){ off, 0, n });
+}
+
+typedef struct { size_t nl; size_t width_cols; } LineIndex;   /* newline count, wrapped rows */
+
+typedef struct {
+    Text      text;
+    size_t    width;                                  /* a scalar: compared by value */
+    LineIndex idx;   CCStamp idx_at;   CCGen idx_gen;  /* derived: value, inputs, own generation */
+    char      title[64]; CCStamp title_at;            /* derived from idx */
+    CCStamp   flushed;                                /* effect: inputs last written */
+    int       rebuilds, patches, flushes;
+} Doc;
+
+static size_t count_nl(const char* s, size_t n) { size_t k = 0; for (size_t i = 0; i < n; i++) k += s[i] == '\n'; return k; }
+
+static void idx_build(Doc* d) {
+    d->idx.nl = count_nl(d->text.buf, d->text.len);
+    d->idx.width_cols = d->width ? (d->text.len + d->width - 1) / d->width : 0;
+    d->rebuilds++;
+}
+
+/* the lowered form of: LineIndex idx @derive { ... } @patch (Edit e) { ... } */
+static const LineIndex* doc_idx(Doc* d) {
+    CCStampCheck c = cc_stamp_check(&d->idx_at, CC_IN(cc_gen_get(&d->text.log.gen), d->width));
+    if (c.stale) {
+        CCSince s = TextLog_since(&d->text.log, c.prev[0]);    /* edits since the last build */
+        if (c.built && !(c.changed & CC_INPUT(1)) && s.kind == CC_SINCE_EDITS) {
+            for (uint32_t i = 0; i < s.n; i++) {       /* patch: an erase cannot be undone */
+                const Edit* e = TextLog_at(&d->text.log, s, i);   /* from coordinates alone, */
+                if (e->del) { idx_build(d); goto built; }         /* so erase falls back    */
+                d->idx.nl += count_nl(d->text.buf + e->off, e->ins);
+            }
+            d->idx.width_cols = d->width ? (d->text.len + d->width - 1) / d->width : 0;
+            d->patches++;
+        } else {
+            idx_build(d);
+        }
+    built:
+        cc_stamp_commit(&c);
+        cc_gen_bump(&d->idx_gen);
+    }
+    return &d->idx;
+}
+
+/* the lowered form of a derivation on a derivation */
+static const char* doc_title(Doc* d) {
+    const LineIndex* ix = doc_idx(d);
+    CCStampCheck c = cc_stamp_check(&d->title_at, CC_IN(cc_gen_get(&d->idx_gen)));
+    if (c.stale) {
+        snprintf(d->title, sizeof d->title, "%zu lines, %zu rows", ix->nl, ix->width_cols);
+        cc_stamp_commit(&c);
+    }
+    return d->title;
+}
+
+/* the lowered form of an effect on change: same primitives, placed by the program */
+static void doc_frame(Doc* d) {
+    const char* t = doc_title(d);
+    CCStampCheck c = cc_stamp_check(&d->flushed, CC_IN(cc_gen_get(&d->idx_gen)));
+    if (c.stale) { d->flushes++; (void)t; cc_stamp_commit(&c); }
+}
+
+/* the execution check: rebuild from scratch, compare with the cached value */
+static int idx_law_holds(Doc* d) {
+    LineIndex cached = *doc_idx(d);
+    Doc scratch = *d;
+    cc_stamp_clear(&scratch.idx_at);
+    const LineIndex* fresh = doc_idx(&scratch);
+    return cached.nl == fresh->nl && cached.width_cols == fresh->width_cols;
+}
+
+int main(void) {
+    static Doc d;
+    d.width = 10;
+
+    text_insert(&d.text, 0, "a\nb\n");   doc_frame(&d);
+    text_insert(&d.text, 4, "c\n");      doc_frame(&d);
+    doc_frame(&d);                                            /* nothing changed: no work */
+    text_insert(&d.text, 0, "x\n"); text_insert(&d.text, 0, "y\n");  doc_frame(&d);
+    text_erase(&d.text, 0, 2);           doc_frame(&d);      /* erase: rebuild */
+    d.width = 3;                         doc_frame(&d);      /* scalar edge moved: rebuild */
+    for (int i = 0; i < 10; i++) text_insert(&d.text, 0, "z\n");   /* 10 edits > ring of 8 */
+    doc_frame(&d);
+    cc_gen_bump(&d.text.log.gen);        doc_frame(&d);      /* a bump with no logged edit: gap */
+
+    printf("idx: nl=%zu rows=%zu  title=\"%s\"\n", d.idx.nl, d.idx.width_cols, d.title);
+    printf("rebuilds=%d patches=%d flushes=%d\n", d.rebuilds, d.patches, d.flushes);
+    printf("law (cache == rebuild): %s\n", idx_law_holds(&d) ? "holds" : "BROKEN");
+
+    /* identity, not freshness: save, undo, divergent edit */
+    CCStateId s0 = cc_state_id_new();            /* "abc" */
+    CCStateId s1 = cc_state_id_new();            /* insert X: "aXbc" */
+    CCStateId saved = s1;                        /* save */
+    CCStateId cur = s0;                          /* undo restores s0's id */
+    printf("after undo: dirty=%d\n", !cc_state_id_eq(cur, saved));
+    cur = cc_state_id_new();                     /* insert Y on the new branch: a new state */
+    printf("after divergent edit: dirty=%d\n", !cc_state_id_eq(cur, saved));
+    cur = s1;                                    /* had we redone X instead */
+    printf("after redo to saved: dirty=%d\n", !cc_state_id_eq(cur, saved));
+    return 0;
+}
