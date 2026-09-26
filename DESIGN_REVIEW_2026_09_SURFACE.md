@@ -248,7 +248,7 @@ operation under the set's own lock.
 | where a generation lives | `v:` in the view; hand-declared `pos_v` fields; `@version`, `@tracked` | `@primary` on the member; the counter is part of the member's lowering, `uint64_t` so it never wraps on a 32-bit target |
 | where a cache lives | `c:` in the view; `@derive` suffix | `@derive` on the member or the local |
 | bringing state up to date | `@settle`; `fresh()`; a read | a read; `@derive_gen(x)` where an effect needs to know whether anything changed |
-| deltas | `@since` switch; `@log` in verbs | `@version log(N)` and `@patch`; deferred |
+| deltas | `@since` switch; `@log` in verbs | `@primary log(N)` and `@patch`; deferred |
 | a derived field vs a method | `d:`; a method | both: `d:` where call sites read a field today |
 | a named owner | section 2's annotation; section 3's `h@(a)`; `create_*` | `@detach(owner)` |
 | a cap on a set | `@parallel(h, below: n)`; library verbs | `below (n)`, a contextual word like `seq` and `cache` |
