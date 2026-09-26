@@ -242,6 +242,12 @@ runtime rows; the table above for the program rows.
 | Push invalidation of the highlight and analysis caches at four edit sites (`hl_full = 0`, `hl_win_stamp = 0`, `analysis_reset()`) | cctext `core/document.ccs:300,660,1153,1171,1188,4390` | design (writer knows readers) |
 | Push-marking restyle: `dirty` set at eight sites, propagated to parent and children by hand, cleared in one loop | stylo `engine/stylebench_cc.ccs:2084-3656` | design (deep sparse change; a graph is right here) |
 | The language already states one relation checked by execution: `seq (cond)` flips the schedule, "differential testing and adaptive dispatch flip a flag, not the code" | spec §8.11.5 | design |
+| Co-fact census of `real_projects/` and the std server: ~170 sites; tag beside payload ~26, derivation ~24, count beside set ~20, seam validation ~20, published scalar ~18, fields together ~15; deltas ~2 weak | `studies/cofact_census/README.md` | observation |
+| pigz `--rsyncable` drops input with exit 0: segment array `block/5` full leaves no tail slot, `total_in == data.len` never checked | `pigz/pigz_cc/pigz_cc.ccs:174,231-245,440-465`; `studies/cofact_census/pigz_rsync_repro.sh` | defect (reproduced) |
+| `seq (cond)` present in pigz and never compared; storm keeps four hand copies of one recursion; only the raytracer's smoke compares schedules | `pigz_cc.ccs:625,640`; `parallel_storm/storm_tile.ccs:47-138`; `raytracer/smoke.sh` | design |
+| Std server folds the engine's pending bit into the page's `want_out`, against its own header | `std/server_serve.ccs:689,822`; `server.cch:42-46` | defect (read) |
+| redis reply arena reset by the client while the owner may still build into it after an early drain exit | `redis/redis_owner.ccs:922-937` | defect (read; section 2: `send_into` pins no epoch) |
+| curl worker exits on a non-timeout error without decrementing `live` | `curl_dns_port/thrdqueue.ccs:426-427` | defect (read) |
 | Closures capture by free name with no list required (`n.spawn(() => { use(s); })`); a suffix block already names its own declaration (`@destroy { t.close(); }`) | spec §2.2; `docs/typehooks-typeviews.md` §3 | design (precedent for `@derive`) |
 
 | Observation | Where | Tag |

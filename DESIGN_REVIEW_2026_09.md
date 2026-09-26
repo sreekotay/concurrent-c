@@ -831,6 +831,17 @@ The specimens keep co-facts by hand in four shapes.
 | a derivation with a source | cctext `edit_gen` bumped on every content change, `safe_gen` "last flushed edit_gen", dirty is their inequality; stylo `inv_stamp` and `bloom_stamp` against per-node `inv_gen` and `bloom_gen`; staticd's poll `gen`, `hit_epoch`, `wake_epoch` | a hand-rolled version on the source and a stamp on the derived value, compared on read |
 | a tag beside a payload | `disk_valid` beside `disk_mtime`, `disk_sz`, `disk_ino`; `mark_valid` beside `mark_line`, `mark_off`; `seek_valid` beside `seek_rel` | a validity int the reader must test first |
 
+A census of every project in `real_projects/` and the std server
+library (`studies/cofact_census/`) finds about 170 such sites. The four
+largest groups are a tag beside a payload, a stored derivation, a count
+beside a set, and a check that belongs at a seam; together they are
+about 90 sites, and each has a zero-cost statement below. Deltas are
+rare: outside cctext's history no project keeps an edit journal. The
+census also found a data-loss bug of exactly this shape: pigz's
+`--rsyncable` path fills a segment array sized for the densest possible
+hits, drops the tail segment, never checks that the segments sum to the
+block, and exits 0 with a corrupt archive.
+
 Twenty-two fields across the corpus are named `valid`, `dirty`,
 `stale`, `gen`, `epoch`, or `version`. Three specimens invented the
 version-and-stamp pattern independently. No comment anywhere says
@@ -1105,6 +1116,17 @@ counter and a width question, or per-primary counters and rare reuse.
 - Whether trust through embedding should stop at the field.
 - Sealed construction's spelling, and whether serdes-filled types are
   sealed by default.
+- Five places where one storage costs more, from the census: scalars
+  published to other threads that are meant to be stale; external
+  sources with no version to bump, the kernel's interest set, the
+  filesystem, and the clock; hot loops where any added store shows;
+  pinned snapshots that must not resync; and a deliberate sparse second
+  storage. The model needs a spelling for two of them: frozen after
+  construction, which also lets a compiler hoist through aliasing, and a
+  pinned version.
+- `seq (cond)` is never compared in pigz, and parallel_storm keeps four
+  hand copies of one recursion. Making the comparison automatic is the
+  first place to apply a stated relation checked by execution.
 - A version says whether a source changed, not what changed. Patching a
   cache in place after an edit needs the edit, a delta. cctext keeps an
   edit journal, so the shape is a source that carries a version and a
