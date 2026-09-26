@@ -1,0 +1,138 @@
+/*
+ * @parallel wait (ts) for — tickets that block in syscalls grow the pool.
+ *
+ * Every ticket parks (depth enter, @stage handshake), so the episode's
+ * parks track its pops and it reads as run-to-park; the short tickets
+ * keep the pop rate healthy and the ordered stage keeps the ready queue
+ * shallower than the pool. Every other ticket blocks in the kernel for
+ * BLOCK_US (a read that misses the page cache: the worker thread
+ * sleeps, the fiber does not park). A walk / search lane is this shape.
+ *
+ * The pool starts at the eager cap (2 workers). Without
+ * cc_parallel_noblock_prepare it must grow past that while tickets
+ * wait, and grow back after the slack between waves (a walk's wave
+ * barrier, an editor frame). The long tickets are at most cap/2 apart
+ * in the order, so up to ncpu of them can be blocked at once.
+ *
+ * avg_conc is ticket time over wall time; a pool held at 2 workers
+ * cannot pass 2. The same waves then run on a pool that
+ * cc_parallel_noblock_prepare filled, as the reference. Pass: at least
+ * WANT_X10/10 wide, or within REF_PCT of the reference (a host whose
+ * cores are busy with other work slows both runs alike).
+ *
+ * Hosts with fewer than 4 cores print the same OK line: max_threads is
+ * ncpu, so there is no third worker to grow onto.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <time.h>
+
+#define ROUNDS   2
+#define N        2000
+#define BLOCK_US 200
+#define GAP_MS   50
+#define WANT_X10 25 /* avg_conc >= 2.5 */
+#define REF_PCT  80
+
+static cc_atomic_int g_done;
+static cc_atomic_int g_ticket_us;
+static cc_atomic_int g_bad;
+static int g_fd = -1;
+static int g_next;
+
+static uint64_t now_us(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+}
+
+/* One small read; every other ticket then blocks in the kernel. Never
+ * parks the fiber. */
+static void ticket(int i) {
+    char buf[512];
+    uint64_t t0 = now_us();
+    if (pread(g_fd, buf, sizeof buf, (off_t)(i % 8) * 512) < 0)
+        cc_atomic_store(&g_bad, 1);
+    if ((i & 1) == 0)
+        usleep(BLOCK_US);
+    cc_atomic_fetch_add(&g_ticket_us, (int)(now_us() - t0));
+}
+
+/* ROUNDS waves of N tickets; returns avg_conc * 10, or -1. */
+static int waves(CCTurnstile* ts) {
+    @errhandler(CCError e) { cc_error_log(e); return -1; }
+    uint64_t wall = 0;
+    int i;
+    cc_atomic_store(&g_done, 0);
+    cc_atomic_store(&g_ticket_us, 0);
+    for (int r = 0; r < ROUNDS; r++) {
+        /* The gap is the pool's slack between waves: it may settle. */
+        if (r > 0)
+            usleep(GAP_MS * 1000);
+        g_next = 0;
+        uint64_t t0 = now_us();
+        @parallel wait (ts) for (i in 0..N) {
+            ticket(i);
+            @stage (ts, 0, i) {
+                if (g_next != i)
+                    cc_atomic_store(&g_bad, 1);
+                g_next = i + 1;
+            }
+            cc_atomic_fetch_add(&g_done, 1);
+        } !>.wait()!>;
+        wall += now_us() - t0;
+    }
+    if (cc_atomic_load(&g_done) != ROUNDS * N || cc_atomic_load(&g_bad)) {
+        fprintf(stderr, "FAIL done=%d want=%d bad=%d\n", cc_atomic_load(&g_done),
+                ROUNDS * N, cc_atomic_load(&g_bad));
+        return -1;
+    }
+    return wall ? (int)((uint64_t)cc_atomic_load(&g_ticket_us) * 10u / wall) : 0;
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    char path[] = "/tmp/cc_par_grow_XXXXXX";
+    char blk[4096];
+    long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+    g_fd = mkstemp(path);
+    if (g_fd < 0) {
+        fprintf(stderr, "FAIL mkstemp\n");
+        return 1;
+    }
+    unlink(path);
+    memset(blk, 'x', sizeof blk);
+    if (write(g_fd, blk, sizeof blk) != (ssize_t)sizeof blk) {
+        fprintf(stderr, "FAIL write\n");
+        return 1;
+    }
+    CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+    int cap = ncpu > 1 ? (int)ncpu * 2 : 2;
+    CCTurnstile ts@(cap, 1, arena) !> @destroy;
+    int conc = waves(&ts);
+    if (conc < 0)
+        return 1;
+    /* Reference: the filled pool. Runs last; the fill pins the pool. */
+    cc_parallel_noblock_prepare();
+    int ref = waves(&ts);
+    close(g_fd);
+    if (ref < 0)
+        return 1;
+    if (getenv("CC_PAR_GROW_VERBOSE"))
+        fprintf(stderr, "ncpu=%ld avg_conc=%d.%d filled=%d.%d\n", ncpu,
+                conc / 10, conc % 10, ref / 10, ref % 10);
+    if (ncpu >= 4 && conc < WANT_X10 && conc * 100 < ref * REF_PCT) {
+        fprintf(stderr, "FAIL syscall-blocked tickets ran %d.%d wide on %ld cores "
+                        "(filled pool %d.%d; want >= %d.%d or %d%% of it)\n",
+                conc / 10, conc % 10, ncpu, ref / 10, ref % 10,
+                WANT_X10 / 10, WANT_X10 % 10, REF_PCT);
+        return 1;
+    }
+    printf("parallel_wait_syscall_grow_smoke: OK\n");
+    return 0;
+}
