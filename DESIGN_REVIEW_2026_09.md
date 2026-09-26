@@ -1071,6 +1071,22 @@ And data-dependent reach is coarse: a body that walks a collection has
 one edge, the collection's version, which any element store bumps when
 element stores go through the collection's verbs.
 
+Freshness is not identity. A stamp answers "has this source changed
+since I read it", and it may over-report: a rebuild with nothing new
+costs time and nothing else. A version drawn from one monotonic counter
+answers that correctly. A second question looks the same and is not:
+"is this the same state as that one", which decides whether a document
+is dirty and whether a save may be skipped. It must never under-report,
+because a false "same" loses data, and a monotonic counter over-reports
+it, because undoing back to the saved state should read as clean. So an
+identity is a different fact from a version: each state gets an id when
+it is created, and a move back to an earlier state restores that
+state's id. cctext compares history positions, `hist.head !=
+saved_head`, and a position is reused after the redo branch is dropped;
+a divergent edit then reads as clean and the save is skipped. Positions
+are neither versions nor identities, and a language that names both
+facts removes the third, wrong one.
+
 The relation `cache == body(captures)` is stated by the declaration and
 checked by execution. A harness rebuilds each derivation from scratch
 after each settle and compares it with the cached value. A mismatch at
