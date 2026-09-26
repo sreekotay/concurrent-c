@@ -163,7 +163,7 @@ lint-soft-return-emit:
 # Offsets golden smoke (PASS_CLEANUP_PLAN phase 1): the full suite with the
 # UFCS byte-offset self-check FATAL.  Any drift between recorded offsets and
 # the parse buffer fails the run instead of warning.
-test-strict:
+test-strict: tools
 	CC_STRICT_OFFSETS=1 ./tools/cc_test
 
 check-submodules:
@@ -177,9 +177,10 @@ smoke: cc
 	@$(CC_DIR)/bin/ccc build test --out-dir out
 
 # Build tools (host C).
-tools:
-	@mkdir -p tools
-	@cc -O2 -Wall -Wextra tools/cc_test.c -o tools/cc_test
+tools: tools/cc_test
+
+tools/cc_test: tools/cc_test.c
+	@cc -O2 -Wall -Wextra -D_FILE_OFFSET_BITS=64 tools/cc_test.c -o tools/cc_test
 
 # The clean lowerer (out/cc/bin/*_cc), built by the current compiler.
 lower-cc: cc

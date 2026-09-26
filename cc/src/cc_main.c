@@ -7820,12 +7820,18 @@ static void print_build_summary(const CCBuildOptions* opt, const CCBuildSummary*
 }
 
 static int ensure_cc_test_tool(const char* cc_bin, const char* target_part, const char* sysroot_part, const char* cc_flags, int verbose) {
-    // We build tools/cc_test from source if missing (no make required).
+    // We build tools/cc_test from source if missing or older than its source
+    // (no make required); a stale harness misreads newer test conventions.
     char tool_path[PATH_MAX];
     char tool_src[PATH_MAX];
     snprintf(tool_path, sizeof(tool_path), "%s/tools/cc_test", g_repo_root);
     snprintf(tool_src, sizeof(tool_src), "%s/tools/cc_test.c", g_repo_root);
-    if (file_exists(tool_path)) return 0;
+    {
+        struct stat st_bin, st_src;
+        if (stat(tool_path, &st_bin) == 0 &&
+            (stat(tool_src, &st_src) != 0 || !cc__stat_mtime_before(&st_bin, &st_src)))
+            return 0;
+    }
     if (!file_exists(tool_src)) {
         fprintf(stderr, "cc: missing test tool source: %s\n", tool_src);
         return -1;

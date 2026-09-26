@@ -20052,6 +20052,20 @@ int cc_module_faces_of_unit(const char* unit_path, cc_module_face_fn fn, void* e
     return rc;
 }
 
+/* This unit's quoted `.cch` faces, as written: a face included by this unit
+ * (the per-unit include tree) that was also lowered as a local header. The
+ * lowered-header table spans every unit the driver has seen, and the
+ * include tree also holds stdlib faces, whose life macros stay the host
+ * preprocessor's (see below). */
+static int cc__unit_quoted_face(const char* src_path) {
+    char real[PATH_MAX];
+    size_t i;
+    if (!src_path || !realpath(src_path, real)) return 0;
+    for (i = 0; i < g_included_cch_source_count; i++)
+        if (strcmp(g_included_cch_sources[i], real) == 0) return 1;
+    return 0;
+}
+
 /* Function-like `#define`s whose body carries `@destroy` / `@detach`,
  * expanded at the use site. See `cc_expand_cc_attr_defines` in the header
  * for why the clean path needs this and the built-in life macros are
@@ -20063,11 +20077,23 @@ char* cc_expand_cc_attr_defines(const char* src, size_t n) {
     int nm = 0, harvested, changed = 0, round, i;
     char* cur;
     size_t cur_n;
+    size_t h;
     if (!src || n == 0) return NULL;
     memset(ms, 0, sizeof(ms));
     do {
         harvested = nm;
         (void)cc__life_harvest(ms, &nm, src, n);
+        /* A quoted face's lowered `.h` has the attribute stripped from the
+         * body; the host would expand the define without it and the destroy
+         * would silently not happen. Harvest the face as written. */
+        for (h = 0; h < g_lowered_local_header_count; h++) {
+            const char* path = g_lowered_local_headers[h].source_path;
+            const char* fsrc;
+            size_t fn = 0;
+            if (!path || !path[0] || !cc__unit_quoted_face(path)) continue;
+            fsrc = cc__path_text_cached(path, &fn);
+            if (fsrc && fn) (void)cc__life_harvest(ms, &nm, fsrc, fn);
+        }
     } while (nm > harvested);
     if (nm == 0) return NULL;
     /* A body is written across lines with `\` splices and the use site is
