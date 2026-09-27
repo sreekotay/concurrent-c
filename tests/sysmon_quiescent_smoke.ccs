@@ -8,9 +8,10 @@
  * detector has no parked fiber to judge; whatever makes work wakes it.
  *
  * Each case runs in a forked child (the parent never starts the
- * runtime), counting context switches of every thread but the measuring
- * one from /proc/self/task/<tid>/status (Linux; elsewhere the smoke
- * prints its OK lines and skips).
+ * runtime), counting context switches of the runtime's threads (not the
+ * measuring one, nor a sanitizer thread that predates the runtime) from
+ * /proc/self/task/<tid>/status (Linux; elsewhere the smoke prints its OK
+ * lines and skips).
  *
  *   idle      after a burst and a settle, 1 s idle: ~0 wakeups in total;
  *             then, with sysmon asleep: a @parallel after the idle runs
@@ -20,7 +21,7 @@
  *   deadlock  a deadlock made after sysmon went to sleep is still
  *             detected (exit 124 after CC_DEADLOCK_PERSIST_MS).
  *
- * CC_SYSMON_QUIET_VERBOSE=1 prints the numbers.
+ * CC_SYSMON_QUIET_VERBOSE=1 prints the numbers; =2 also each thread.
  */
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_atomic.cch>
@@ -37,7 +38,22 @@
 #define BURST        256
 #define SETTLE_MS    300
 #define IDLE_MS      1000
-#define IDLE_MAX     2    /* wakeups tolerated in the quiet second */
+/* Wakeups tolerated in the quiet second. TSan's own background thread
+ * starts with the first pthread_create (so it looks like a runtime
+ * thread) and wakes ~10 times a second; still far from the 50 a second
+ * of the tick. */
+#if defined(__SANITIZE_THREAD__)
+#define CC_SMOKE_TSAN 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define CC_SMOKE_TSAN 1
+#endif
+#endif
+#if defined(CC_SMOKE_TSAN)
+#define IDLE_MAX     15
+#else
+#define IDLE_MAX     2
+#endif
 #define TICK_MIN     10   /* 50 expected at the 20 ms tick */
 #define SLEEP_MS     50
 #define LATE_MS      150  /* slack for a loaded host */
@@ -55,8 +71,31 @@ static uint64_t now_us(void) {
 }
 
 #if defined(__linux__)
-/* Context switches (voluntary + involuntary) of every thread but this
- * one: each wakeup of a blocked thread is at least one switch. */
+/* Threads alive before the runtime starts (a sanitizer's background
+ * thread): not the runtime's, not counted. */
+static long g_pre[16];
+static int g_npre;
+
+static int preexisting(long tid) {
+    for (int i = 0; i < g_npre; i++)
+        if (g_pre[i] == tid) return 1;
+    return 0;
+}
+
+static void note_preexisting(void) {
+    DIR* d = opendir("/proc/self/task");
+    struct dirent* e;
+    g_npre = 0;
+    if (!d) return;
+    while ((e = readdir(d)) != NULL && g_npre < 16) {
+        if (e->d_name[0] == '.') continue;
+        g_pre[g_npre++] = strtol(e->d_name, NULL, 10);
+    }
+    closedir(d);
+}
+
+/* Context switches (voluntary + involuntary) of every runtime thread:
+ * each wakeup of a blocked thread is at least one switch. */
 static long other_threads_switches(int* nthreads) {
     long total = 0;
     int n = 0;
@@ -67,18 +106,27 @@ static long other_threads_switches(int* nthreads) {
     while ((e = readdir(d)) != NULL) {
         if (e->d_name[0] == '.') continue;
         long tid = strtol(e->d_name, NULL, 10);
-        if (tid == self) continue;
+        if (tid == self || preexisting(tid)) continue;
         char path[64];
         snprintf(path, sizeof path, "/proc/self/task/%ld/status", tid);
         FILE* f = fopen(path, "r");
         if (!f) continue;
         char line[256];
+        long mine = 0;
         while (fgets(line, sizeof line, f)) {
             long v;
-            if (sscanf(line, "voluntary_ctxt_switches: %ld", &v) == 1) total += v;
-            else if (sscanf(line, "nonvoluntary_ctxt_switches: %ld", &v) == 1) total += v;
+            if (sscanf(line, "voluntary_ctxt_switches: %ld", &v) == 1) mine += v;
+            else if (sscanf(line, "nonvoluntary_ctxt_switches: %ld", &v) == 1) mine += v;
         }
+        total += mine;
         fclose(f);
+        if (g_verbose > 1) {
+            snprintf(path, sizeof path, "/proc/self/task/%ld/comm", tid);
+            FILE* c = fopen(path, "r");
+            char name[32] = "?";
+            if (c) { if (fgets(name, sizeof name, c)) name[strcspn(name, "\n")] = 0; fclose(c); }
+            fprintf(stderr, "  tid %ld %s switches=%ld\n", tid, name, mine);
+        }
         n++;
     }
     closedir(d);
@@ -100,6 +148,9 @@ static int burst(void) {
 
 /* Wakeups of the other threads over IDLE_MS, after a burst + settle. */
 static long idle_wakeups(void) {
+#if defined(__linux__)
+    note_preexisting();
+#endif
     if (burst() != 0) return -1;
     usleep(SETTLE_MS * 1000);
 #if defined(__linux__)
@@ -236,7 +287,7 @@ static int run_child(child_fn fn, int timeout_ms) {
 }
 
 int main(void) {
-    g_verbose = getenv("CC_SYSMON_QUIET_VERBOSE") != NULL;
+    g_verbose = getenv("CC_SYSMON_QUIET_VERBOSE") ? atoi(getenv("CC_SYSMON_QUIET_VERBOSE")) : 0;
 #if !defined(__linux__)
     printf("sysmon_quiescent idle: OK (skipped: not Linux)\n");
     printf("sysmon_quiescent tick: OK (skipped: not Linux)\n");

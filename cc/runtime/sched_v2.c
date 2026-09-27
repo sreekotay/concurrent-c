@@ -4275,7 +4275,6 @@ static int sched_v2_deadlock_verdict_idle(void) {
     int n = atomic_load_explicit(&g_v2.num_threads, memory_order_acquire);
     if (sched_v2_count_idle_workers() < n) return 0;
     size_t internal_parked = 0, external_parked = 0;
-    int only_open_recv = 1;
     int busy = 0;
     pthread_mutex_lock(&g_v2.all_fibers_mu);
     for (fiber_v2* f = g_v2.all_fibers; f; f = f->all_next) {
@@ -4287,16 +4286,25 @@ static int sched_v2_deadlock_verdict_idle(void) {
         if (atomic_load_explicit(&f->deadlock_suppress_depth, memory_order_acquire) > 0) continue;
         if (atomic_load_explicit(&f->has_park_deadline, memory_order_acquire)) continue;
         internal_parked++;
-        if (!sched_v2_fiber_is_open_chan_recv_wait(f)) only_open_recv = 0;
     }
     pthread_mutex_unlock(&g_v2.all_fibers_mu);
     if (busy) return 0;
     if (internal_parked > 0 &&
-        !atomic_load_explicit(&g_v2_deadlock_reported, memory_order_acquire) &&
-        !((external_parked +
-           atomic_load_explicit(&g_external_wait_threads, memory_order_acquire)) > 0 &&
-          only_open_recv))
-        return 0;
+        !atomic_load_explicit(&g_v2_deadlock_reported, memory_order_acquire)) {
+        /* Only the external-progress exemption can clear internal parks.
+         * Its open-channel test reads park_reason / park_obj, which the
+         * owner rewrites once it runs again; walk it only when an
+         * external waiter makes the answer matter (as the verdict does). */
+        size_t internal2 = 0, suppressed2 = 0, external2 = 0;
+        int only_open_recv = 1;
+        if (external_parked +
+                atomic_load_explicit(&g_external_wait_threads, memory_order_acquire) == 0)
+            return 0;
+        sched_v2_classify_parked_fibers(&internal2, &suppressed2, &external2,
+                                        &only_open_recv);
+        if (internal2 > 0 && !only_open_recv)
+            return 0;
+    }
     atomic_store_explicit(&g_v2_deadlock_first_seen, 0, memory_order_relaxed);
     return 1;
 }
