@@ -1933,7 +1933,12 @@ static inline size_t next_power_of_2(size_t n) {
 
 static CCChan* cc_chan_create_internal(size_t capacity, CCChanMode mode, bool allow_take, bool is_sync, CCChanTopology topology) {
     size_t cap = capacity; /* capacity==0 => unbuffered rendezvous */
-    CCChan* ch = (CCChan*)malloc(sizeof(CCChan));
+    /* The ring indices sit on their own 128-byte blocks (aligned(128):
+     * a producer and a consumer do not share a cache line or its
+     * adjacent-line prefetch pair), which makes CCChan 128-aligned.
+     * malloc guarantees 16. sizeof is a multiple of the alignment, as
+     * aligned_alloc wants; free() releases it (cc_chan_free). */
+    CCChan* ch = (CCChan*)aligned_alloc(_Alignof(CCChan), sizeof(CCChan));
     if (!ch) return NULL;
     memset(ch, 0, sizeof(*ch));
     ch->cap = cap;
