@@ -375,7 +375,8 @@ static void worklet_queue_push(worklet_queue* q, cc_worklet* w) {
     else
         q->head = w;
     q->tail = w;
-    atomic_fetch_add_explicit(&q->count, 1, memory_order_relaxed);
+    /* seq_cst: pairs with sysmon's sleep flag (sched_v2_sysmon_poke). */
+    atomic_fetch_add_explicit(&q->count, 1, memory_order_seq_cst);
     v2_slock_unlock(&q->mu);
 }
 
@@ -405,7 +406,8 @@ static int v2_queue_push(v2_queue* q, fiber_v2* f) {
         q->head = f;
     }
     q->tail = f;
-    int prev = atomic_fetch_add_explicit(&q->count, 1, memory_order_relaxed);
+    /* seq_cst: pairs with sysmon's sleep flag (sched_v2_sysmon_poke). */
+    int prev = atomic_fetch_add_explicit(&q->count, 1, memory_order_seq_cst);
     v2_slock_unlock(&q->mu);
     return prev;
 }
@@ -993,21 +995,28 @@ static _Atomic int g_v2_grow_pending = 0;
  * Whoever makes work pokes it awake: a ready push that finds the queue
  * empty, a worklet, the first park deadline, and the last thread leaving
  * an external-wait scope (that can turn parked fibers into a deadlock).
- * A quiet process then wakes 0 times a second instead of 50. Store /
- * fence / load on both sides (Dekker): either the producer sees the flag
- * or sysmon's recheck sees the producer's work. Pokes on the 0 -> 1 edge
- * of a counter suffice: sysmon sleeps only after reading 0 there, so the
- * next write to it is an increment from 0. */
+ * A quiet process then wakes 0 times a second instead of 50.
+ *
+ * Dekker: sysmon stores the flag, issues a seq_cst fence and rechecks;
+ * the producer's triggering write is a seq_cst RMW (the queue counts, the
+ * deadline count) followed by a seq_cst load of the flag. Either the
+ * producer sees the flag or sysmon's recheck sees the producer's work. On
+ * x86 the RMW is the lock-prefixed op it already was and the load is a
+ * plain load, so the push path pays no fence. Pokes on the 0 -> 1 edge of
+ * a count suffice: sysmon sleeps only after reading 0 there, so the next
+ * write to it is an increment from 0. */
 static _Atomic int g_v2_sysmon_asleep = 0;
 
+/* Call after a seq_cst RMW that made work for sysmon. */
 static inline void sched_v2_sysmon_poke(void) {
-    atomic_thread_fence(memory_order_seq_cst);
-    if (atomic_load_explicit(&g_v2_sysmon_asleep, memory_order_relaxed) &&
+    if (atomic_load_explicit(&g_v2_sysmon_asleep, memory_order_seq_cst) &&
         atomic_exchange_explicit(&g_v2_sysmon_asleep, 0, memory_order_acq_rel))
         wake_primitive_wake_one(&g_v2.sysmon_wake);
 }
 
+/* For a triggering write that was not a seq_cst RMW (outside sched_v2.c). */
 void sched_v2_sysmon_notify(void) {
+    atomic_thread_fence(memory_order_seq_cst);
     sched_v2_sysmon_poke();
 }
 static _Atomic uint64_t g_v2_grow_requests = 0;   /* producer defers      */
@@ -2580,7 +2589,7 @@ void sched_v2_fiber_set_park_deadline(fiber_v2* f, const struct timespec* d) {
     atomic_store_explicit(&f->park_deadline_nsec, (int64_t)d->tv_nsec, memory_order_relaxed);
     int was = atomic_exchange_explicit(&f->has_park_deadline, 1, memory_order_release);
     if (!was &&
-        atomic_fetch_add_explicit(&g_v2_park_deadlines, 1, memory_order_relaxed) == 0)
+        atomic_fetch_add_explicit(&g_v2_park_deadlines, 1, memory_order_seq_cst) == 0)
         sched_v2_sysmon_poke();
 }
 
