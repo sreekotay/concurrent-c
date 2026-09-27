@@ -1,0 +1,266 @@
+/*
+ * Quiescent sysmon: an idle process does not wake.
+ *
+ * After a @parallel burst the scheduler monitor (sysmon) used to wait on
+ * a 20 ms timeout for the rest of the process: 50 wakeups a second with
+ * nothing to do. It now waits with no timeout while nothing is queued,
+ * running, growing or due, the pool has settled and the deadlock
+ * detector has no parked fiber to judge; whatever makes work wakes it.
+ *
+ * Each case runs in a forked child (the parent never starts the
+ * runtime), counting context switches of every thread but the measuring
+ * one from /proc/self/task/<tid>/status (Linux; elsewhere the smoke
+ * prints its OK lines and skips).
+ *
+ *   idle      after a burst and a settle, 1 s idle: ~0 wakeups in total;
+ *             then, with sysmon asleep: a @parallel after the idle runs
+ *             promptly, a fiber's cc_sleep_ms and a @with_deadline recv
+ *             (both park deadlines) end on time.
+ *   tick      CC_V2_SYSMON_SLEEP=0: the same idle second ticks.
+ *   deadlock  a deadlock made after sysmon went to sleep is still
+ *             detected (exit 124 after CC_DEADLOCK_PERSIST_MS).
+ *
+ * CC_SYSMON_QUIET_VERBOSE=1 prints the numbers.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <signal.h>
+#include <dirent.h>
+#include <sys/wait.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#include <time.h>
+
+#define BURST        256
+#define SETTLE_MS    300
+#define IDLE_MS      1000
+#define IDLE_MAX     2    /* wakeups tolerated in the quiet second */
+#define TICK_MIN     10   /* 50 expected at the 20 ms tick */
+#define SLEEP_MS     50
+#define LATE_MS      150  /* slack for a loaded host */
+
+static cc_atomic_int g_sum;
+static int g_verbose;
+static cc_atomic_int g_sleep_us;
+static cc_atomic_int g_dl_us;
+static cc_atomic_int g_got;
+
+static uint64_t now_us(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+}
+
+#if defined(__linux__)
+/* Context switches (voluntary + involuntary) of every thread but this
+ * one: each wakeup of a blocked thread is at least one switch. */
+static long other_threads_switches(int* nthreads) {
+    long total = 0;
+    int n = 0;
+    long self = (long)syscall(SYS_gettid);
+    DIR* d = opendir("/proc/self/task");
+    if (!d) return -1;
+    struct dirent* e;
+    while ((e = readdir(d)) != NULL) {
+        if (e->d_name[0] == '.') continue;
+        long tid = strtol(e->d_name, NULL, 10);
+        if (tid == self) continue;
+        char path[64];
+        snprintf(path, sizeof path, "/proc/self/task/%ld/status", tid);
+        FILE* f = fopen(path, "r");
+        if (!f) continue;
+        char line[256];
+        while (fgets(line, sizeof line, f)) {
+            long v;
+            if (sscanf(line, "voluntary_ctxt_switches: %ld", &v) == 1) total += v;
+            else if (sscanf(line, "nonvoluntary_ctxt_switches: %ld", &v) == 1) total += v;
+        }
+        fclose(f);
+        n++;
+    }
+    closedir(d);
+    if (nthreads) *nthreads = n;
+    return total;
+}
+#endif
+
+static int burst(void) {
+    int i;
+    cc_atomic_store(&g_sum, 0);
+    @parallel for (i in 0..BURST) {
+        volatile int x = 0;
+        for (int k = 0; k < 2000; k++) x += k;
+        cc_atomic_fetch_add(&g_sum, 1);
+    } !>.wait()!>;
+    return cc_atomic_load(&g_sum) == BURST ? 0 : -1;
+}
+
+/* Wakeups of the other threads over IDLE_MS, after a burst + settle. */
+static long idle_wakeups(void) {
+    if (burst() != 0) return -1;
+    usleep(SETTLE_MS * 1000);
+#if defined(__linux__)
+    int n0 = 0, n1 = 0;
+    long a = other_threads_switches(&n0);
+    usleep(IDLE_MS * 1000);
+    long b = other_threads_switches(&n1);
+    if (a < 0 || b < 0) return -1;
+    if (g_verbose)
+        fprintf(stderr, "threads=%d->%d wakeups=%ld over %d ms\n", n0, n1, b - a, IDLE_MS);
+    return b - a;
+#else
+    return 0;
+#endif
+}
+
+static int child_idle(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 40; }
+    long w = idle_wakeups();
+    if (w < 0) return 41;
+    if (w > IDLE_MAX) {
+        fprintf(stderr, "FAIL idle: %ld wakeups in %d ms (want <= %d)\n", w, IDLE_MS, IDLE_MAX);
+        return 42;
+    }
+
+    /* Work after a long idle runs promptly (workers wake on the push;
+     * sysmon is poked and resumes its tick). */
+    uint64_t t0 = now_us();
+    if (burst() != 0) return 43;
+    uint64_t burst_us = now_us() - t0;
+    if (burst_us > LATE_MS * 1000u) {
+        fprintf(stderr, "FAIL burst after idle took %llu us\n", (unsigned long long)burst_us);
+        return 44;
+    }
+
+    /* Timers and park deadlines fire on time while sysmon sleeps: let it
+     * go quiet again, then park a fiber on each. */
+    usleep(SETTLE_MS * 1000);
+    int[~ >] tx;
+    int[~ <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    if (!ch) return 45;
+    {
+        CCNursery n = @create() !> @destroy;
+        n.spawn(() => {
+            uint64_t s = now_us();
+            cc_sleep_ms(SLEEP_MS);
+            cc_atomic_store(&g_sleep_us, (int)(now_us() - s));
+        }) !>;
+        n.spawn(() => {
+            int v = 0;
+            uint64_t s = now_us();
+            @with_deadline(millis(SLEEP_MS)) {
+                cc_atomic_store(&g_got, cc_io_avail(chan_recv(rx, &v)) ? 1 : 0);
+            }
+            cc_atomic_store(&g_dl_us, (int)(now_us() - s));
+        }) !>;
+    }
+    chan_free(ch);
+    int sleep_us = cc_atomic_load(&g_sleep_us);
+    int dl_us = cc_atomic_load(&g_dl_us);
+    int got = cc_atomic_load(&g_got);
+    if (g_verbose)
+        fprintf(stderr, "burst_after_idle=%llu us sleep=%d us deadline_recv=%d us\n",
+                (unsigned long long)burst_us, sleep_us, dl_us);
+    if (sleep_us < SLEEP_MS * 1000 - 1000 || sleep_us > (SLEEP_MS + LATE_MS) * 1000) {
+        fprintf(stderr, "FAIL cc_sleep_ms(%d) took %d us\n", SLEEP_MS, sleep_us);
+        return 46;
+    }
+    if (got || dl_us < SLEEP_MS * 1000 - 1000 || dl_us > (SLEEP_MS + LATE_MS) * 1000) {
+        fprintf(stderr, "FAIL @with_deadline(%d ms) recv took %d us (got=%d)\n",
+                SLEEP_MS, dl_us, got);
+        return 47;
+    }
+    return 0;
+}
+
+static int child_tick(void) {
+    setenv("CC_V2_SYSMON_SLEEP", "0", 1);
+    long w = idle_wakeups();
+    if (w < 0) return 51;
+#if defined(__linux__)
+    if (w < TICK_MIN) {
+        fprintf(stderr, "FAIL CC_V2_SYSMON_SLEEP=0: %ld wakeups in %d ms (want >= %d)\n",
+                w, IDLE_MS, TICK_MIN);
+        return 52;
+    }
+#endif
+    return 0;
+}
+
+static int child_deadlock(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 60; }
+    setenv("CC_DEADLOCK_ABORT", "1", 1);
+    setenv("CC_DEADLOCK_PERSIST_MS", "200", 1);
+    if (burst() != 0) return 61;
+    usleep(SETTLE_MS * 1000); /* sysmon asleep */
+    int[~ >] tx;
+    int[~ <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    if (!ch) return 62;
+    {
+        CCNursery n = @create() !> @destroy;
+        n.spawn(() => {
+            int v = 0;
+            (void)chan_recv(rx, &v); /* no sender: deadlock */
+        }) !>;
+    }
+    chan_free(ch);
+    return 63; /* not detected */
+}
+
+typedef int (*child_fn)(void);
+
+/* Fork `fn`; wait up to timeout_ms. Returns the exit status, or -1 on a
+ * timeout (child killed). */
+static int run_child(child_fn fn, int timeout_ms) {
+    fflush(stdout);
+    fflush(stderr);
+    pid_t pid = fork();
+    if (pid < 0) return -2;
+    if (pid == 0) _exit(fn());
+    int status = 0;
+    for (int waited = 0; waited < timeout_ms; waited += 20) {
+        pid_t rc = waitpid(pid, &status, WNOHANG);
+        if (rc == pid)
+            return WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+        if (rc < 0) return -3;
+        usleep(20 * 1000);
+    }
+    kill(pid, SIGKILL);
+    (void)waitpid(pid, &status, 0);
+    return -1;
+}
+
+int main(void) {
+    g_verbose = getenv("CC_SYSMON_QUIET_VERBOSE") != NULL;
+#if !defined(__linux__)
+    printf("sysmon_quiescent idle: OK (skipped: not Linux)\n");
+    printf("sysmon_quiescent tick: OK (skipped: not Linux)\n");
+    printf("sysmon_quiescent deadlock: OK (skipped: not Linux)\n");
+    return 0;
+#else
+    int rc = run_child(child_idle, 10000);
+    if (rc != 0) {
+        fprintf(stderr, "FAIL idle child rc=%d\n", rc);
+        return 1;
+    }
+    printf("sysmon_quiescent idle: OK\n");
+    rc = run_child(child_tick, 10000);
+    if (rc != 0) {
+        fprintf(stderr, "FAIL tick child rc=%d\n", rc);
+        return 1;
+    }
+    printf("sysmon_quiescent tick: OK\n");
+    rc = run_child(child_deadlock, 3000);
+    if (rc != 124) {
+        fprintf(stderr, "FAIL deadlock child rc=%d (want 124)\n", rc);
+        return 1;
+    }
+    printf("sysmon_quiescent deadlock: OK\n");
+    return 0;
+#endif
+}
