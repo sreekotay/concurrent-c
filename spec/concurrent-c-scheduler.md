@@ -517,7 +517,9 @@ timeout when all of the following hold:
   or the verdict was already reported.
 
 It publishes a sleep flag, issues a `seq_cst` fence, and then evaluates
-these conditions. Producers change their state, fence, and load the flag.
+these conditions. Producers make their change with a `seq_cst` read-modify-write
+(the queue counts, the park-deadline count) or a write followed by a `seq_cst`
+fence, and then load the flag with `seq_cst`.
 A producer that sees the flag clears it and wakes sysmon. The producers are:
 
 - a ready-queue push onto an empty queue,
