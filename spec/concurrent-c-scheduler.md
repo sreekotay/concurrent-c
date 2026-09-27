@@ -502,8 +502,9 @@ work to watch (see Quiescent sleep). Per tick:
 
 ### Quiescent sleep
 
-Sysmon does not tick while the process is quiescent. It waits with no
-timeout when all of the following hold:
+Sysmon does not tick while the process is quiescent. Once the following
+have held at every tick for `V2_SYSMON_QUIET_MS` (100 ms), with no pop and
+no worklet spawn in that time, it waits with no timeout:
 
 - The ready queue and the worklet queue are empty, no worklet is live, no
   worker is admitted to run, and every worker is idle.
@@ -666,6 +667,7 @@ correctness.
 | `V2_MAX_THREADS`               | 256                             | Cap on active worker slots.                                       |
 | `V2_FIBER_STACK_SIZE`          | 2 MiB (opt) / 8 MiB (debug)     | Per-fiber coroutine stack.                                        |
 | `V2_SYSMON_INTERVAL_MS`        | 20                              | Sysmon tick.                                                      |
+| `V2_SYSMON_QUIET_MS`           | 100                             | Quiescent time before sysmon stops ticking.                       |
 | `V2_ORPHAN_SAFETY_CAP`         | 4096                            | Max concurrent orphans before eviction is skipped for a tick.     |
 | `SCHED_V2_DEADLOCK_PERSIST_MS` | 1000                            | Latch duration before the detector fires.                         |
 

@@ -3145,19 +3145,42 @@ static int sched_v2_quiescent(void) {
     return 1;
 }
 
+/* Quiet time before sysmon sleeps with no timeout: no pop, no worklet
+ * spawn and quiescent at every tick for this long. Work arriving in
+ * bursts closer together than this keeps the tick and never pays the
+ * poke's wake syscall on its first push. */
+#define V2_SYSMON_QUIET_MS 100
+
 /* Wait with no timeout while quiescent and the deadlock detector has no
- * verdict pending (sched_v2_deadlock_verdict_idle). `val` is the wake
- * word sampled before the checks, so a poke, a grow request or shutdown
- * after it returns at once. Returns 0 (without waiting) when there is
- * something to watch; the caller then ticks. CC_V2_SYSMON_SLEEP=0 always
- * ticks. */
+ * verdict pending (sched_v2_deadlock_verdict_idle), after
+ * V2_SYSMON_QUIET_MS of that. `val` is the wake word sampled before the
+ * checks, so a poke, a grow request or shutdown after it returns at once.
+ * Returns 0 (without waiting) when there is something to watch; the caller
+ * then ticks. CC_V2_SYSMON_SLEEP=0 always ticks. Sysmon thread only. */
 static int sched_v2_sysmon_try_sleep(uint32_t val) {
     static int off = -1;
+    static uint64_t quiet_since = 0;
+    static uint64_t last_work = 0;
     if (off < 0) {
         const char* e = getenv("CC_V2_SYSMON_SLEEP");
         off = (e && e[0] == '0') ? 1 : 0;
     }
     if (off) return 0;
+    {
+        uint64_t work =
+            atomic_load_explicit(&g_v2.ready_queue.pops, memory_order_relaxed) +
+            atomic_load_explicit(&g_v2_worklet_spawn, memory_order_relaxed);
+        uint64_t now = v2_now_ns();
+        if (work != last_work || !sched_v2_quiescent()) {
+            last_work = work;
+            quiet_since = 0;
+            return 0;
+        }
+        if (quiet_since == 0)
+            quiet_since = now;
+        if (now - quiet_since < (uint64_t)V2_SYSMON_QUIET_MS * 1000000ull)
+            return 0;
+    }
     atomic_store_explicit(&g_v2_sysmon_asleep, 1, memory_order_relaxed);
     atomic_thread_fence(memory_order_seq_cst);
     if (!atomic_load_explicit(&g_v2.running, memory_order_acquire) ||

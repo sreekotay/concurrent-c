@@ -192,7 +192,9 @@ A contended-lock workload that holds at a small `final_threads` with a large
 
 Sysmon ticks every 20 ms only while it has something to watch. With
 nothing queued, running, growing or due, the pool settled, and no parked
-fiber the deadlock detector would judge, it waits with no timeout. The
+fiber the deadlock detector would judge, for 100 ms (`V2_SYSMON_QUIET_MS`;
+bursts closer together than that keep the tick and never pay a wake), it
+waits with no timeout. The
 next push onto an empty queue, worklet, park deadline, grow request or last
 external-wait exit wakes it. An idle process then has 0 wakeups a second.
 Count them with `voluntary_ctxt_switches` in `/proc/<pid>/task/*/status`.
