@@ -375,7 +375,8 @@ static void worklet_queue_push(worklet_queue* q, cc_worklet* w) {
     else
         q->head = w;
     q->tail = w;
-    atomic_fetch_add_explicit(&q->count, 1, memory_order_relaxed);
+    /* seq_cst: pairs with sysmon's sleep flag (sched_v2_sysmon_poke). */
+    atomic_fetch_add_explicit(&q->count, 1, memory_order_seq_cst);
     v2_slock_unlock(&q->mu);
 }
 
@@ -386,7 +387,7 @@ static cc_worklet* worklet_queue_pop(worklet_queue* q) {
         q->head = w->next;
         if (!q->head)
             q->tail = NULL;
-        atomic_fetch_sub_explicit(&q->count, 1, memory_order_relaxed);
+        atomic_fetch_sub_explicit(&q->count, 1, memory_order_release);
         w->next = NULL;
     }
     v2_slock_unlock(&q->mu);
@@ -405,7 +406,8 @@ static int v2_queue_push(v2_queue* q, fiber_v2* f) {
         q->head = f;
     }
     q->tail = f;
-    int prev = atomic_fetch_add_explicit(&q->count, 1, memory_order_relaxed);
+    /* seq_cst: pairs with sysmon's sleep flag (sched_v2_sysmon_poke). */
+    int prev = atomic_fetch_add_explicit(&q->count, 1, memory_order_seq_cst);
     v2_slock_unlock(&q->mu);
     return prev;
 }
@@ -418,7 +420,9 @@ static fiber_v2* v2_queue_pop(v2_queue* q) {
         q->head = f->next;
         if (!q->head) q->tail = NULL;
         f->next = NULL;
-        atomic_fetch_sub_explicit(&q->count, 1, memory_order_relaxed);
+        /* Release: sysmon's quiescence check reads count, then
+         * g_v2_running_workers (see sched_v2_quiescent). */
+        atomic_fetch_sub_explicit(&q->count, 1, memory_order_release);
         atomic_fetch_add_explicit(&q->pops, 1, memory_order_relaxed);
     }
     v2_slock_unlock(&q->mu);
@@ -984,6 +988,37 @@ static int g_v2_grow_escalate_ticks = 0;
  * recheck of idle is a park between long arms, not spare capacity. */
 #define SCHED_V2_GROW_SLACK_NS 200000ull
 static _Atomic int g_v2_grow_pending = 0;
+
+/* Quiescent sysmon (see sched_v2_sysmon_try_sleep). 1 while sysmon waits
+ * with no timeout: nothing queued, running, pending growth, deadlines or
+ * pool to settle, and no parked fiber the deadlock detector would judge.
+ * Whoever makes work pokes it awake: a ready push that finds the queue
+ * empty, a worklet, the first park deadline, and the last thread leaving
+ * an external-wait scope (that can turn parked fibers into a deadlock).
+ * A quiet process then wakes 0 times a second instead of 50.
+ *
+ * Dekker: sysmon stores the flag, issues a seq_cst fence and rechecks;
+ * the producer's triggering write is a seq_cst RMW (the queue counts, the
+ * deadline count) followed by a seq_cst load of the flag. Either the
+ * producer sees the flag or sysmon's recheck sees the producer's work. On
+ * x86 the RMW is the lock-prefixed op it already was and the load is a
+ * plain load, so the push path pays no fence. Pokes on the 0 -> 1 edge of
+ * a count suffice: sysmon sleeps only after reading 0 there, so the next
+ * write to it is an increment from 0. */
+static _Atomic int g_v2_sysmon_asleep = 0;
+
+/* Call after a seq_cst RMW that made work for sysmon. */
+static inline void sched_v2_sysmon_poke(void) {
+    if (atomic_load_explicit(&g_v2_sysmon_asleep, memory_order_seq_cst) &&
+        atomic_exchange_explicit(&g_v2_sysmon_asleep, 0, memory_order_acq_rel))
+        wake_primitive_wake_one(&g_v2.sysmon_wake);
+}
+
+/* For a triggering write that was not a seq_cst RMW (outside sched_v2.c). */
+void sched_v2_sysmon_notify(void) {
+    atomic_thread_fence(memory_order_seq_cst);
+    sched_v2_sysmon_poke();
+}
 static _Atomic uint64_t g_v2_grow_requests = 0;   /* producer defers      */
 static _Atomic uint64_t g_v2_grow_stall = 0;      /* recheck: pops slow   */
 static _Atomic uint64_t g_v2_grow_backlog = 0;    /* recheck: deep queue  */
@@ -1774,6 +1809,8 @@ static void thread_v2_run_worklet(cc_worklet* w);
 
 static void sched_v2_enqueue_runnable_ex(fiber_v2* f, int prefer_local) {
     int prev = v2_queue_push(&g_v2.ready_queue, f);
+    if (prev == 0)
+        sched_v2_sysmon_poke();
     /* If the queue was already deep, a drainer is on it (or a previous
      * push just woke one) and will self-drain to our item. Skip the
      * seq_cst fence + idle-worker scan on this push. Correctness is
@@ -2066,6 +2103,7 @@ cc_worklet* sched_v2_worklet_spawn(void* (*fn)(void*), void* arg) {
     }
     atomic_fetch_add_explicit(&g_v2_worklets_live, 1, memory_order_relaxed);
     worklet_queue_push(&g_v2.worklets, w);
+    sched_v2_sysmon_poke();
     atomic_fetch_add_explicit(&g_v2_worklet_spawn, 1, memory_order_relaxed);
     sched_v2_wake(-1);
     return w;
@@ -2550,7 +2588,9 @@ void sched_v2_fiber_set_park_deadline(fiber_v2* f, const struct timespec* d) {
     atomic_store_explicit(&f->park_deadline_sec, (int64_t)d->tv_sec, memory_order_relaxed);
     atomic_store_explicit(&f->park_deadline_nsec, (int64_t)d->tv_nsec, memory_order_relaxed);
     int was = atomic_exchange_explicit(&f->has_park_deadline, 1, memory_order_release);
-    if (!was) atomic_fetch_add_explicit(&g_v2_park_deadlines, 1, memory_order_relaxed);
+    if (!was &&
+        atomic_fetch_add_explicit(&g_v2_park_deadlines, 1, memory_order_seq_cst) == 0)
+        sched_v2_sysmon_poke();
 }
 
 void sched_v2_fiber_clear_park_deadline(fiber_v2* f) {
@@ -3079,6 +3119,80 @@ static void sched_v2_sysmon_evict_aged_workers(void) {
     }
 }
 
+static int sched_v2_deadlock_verdict_idle(void);
+
+/* Nothing for a tick to do: no ready or worklet backlog, no worker out
+ * of its park (running / spinning), no growth episode or growth backoff
+ * to count down, no park deadline, and the pool already settled to the
+ * eager cap (or pinned). The queue counts are read with acquire before
+ * g_v2_running_workers: a pop's release decrement carries the popper's
+ * admission, so a fiber popped before this check shows as running (or,
+ * once it has parked, as parked in the verdict's fiber walk). */
+static int sched_v2_quiescent(void) {
+    int n, idle;
+    if (atomic_load_explicit(&g_v2_grow_pending, memory_order_acquire)) return 0;
+    if (atomic_load_explicit(&g_v2_grow_quiet_ticks, memory_order_relaxed) > 0) return 0;
+    if (atomic_load_explicit(&g_v2.ready_queue.count, memory_order_acquire)) return 0;
+    if (atomic_load_explicit(&g_v2.worklets.count, memory_order_acquire)) return 0;
+    if (atomic_load_explicit(&g_v2_worklets_live, memory_order_acquire)) return 0;
+    if (atomic_load_explicit(&g_v2_running_workers, memory_order_acquire)) return 0;
+    if (atomic_load_explicit(&g_v2_park_deadlines, memory_order_acquire)) return 0;
+    n = atomic_load_explicit(&g_v2.num_threads, memory_order_acquire);
+    idle = atomic_load_explicit(&g_v2.idle_workers, memory_order_acquire);
+    if (idle > 0 && n > g_v2_eager_threads &&
+        !atomic_load_explicit(&g_v2_noblock_pool_pinned, memory_order_relaxed))
+        return 0;
+    return 1;
+}
+
+/* Quiet time before sysmon sleeps with no timeout: no pop, no worklet
+ * spawn and quiescent at every tick for this long. Work arriving in
+ * bursts closer together than this keeps the tick and never pays the
+ * poke's wake syscall on its first push. */
+#define V2_SYSMON_QUIET_MS 100
+
+/* Wait with no timeout while quiescent and the deadlock detector has no
+ * verdict pending (sched_v2_deadlock_verdict_idle), after
+ * V2_SYSMON_QUIET_MS of that. `val` is the wake word sampled before the
+ * checks, so a poke, a grow request or shutdown after it returns at once.
+ * Returns 0 (without waiting) when there is something to watch; the caller
+ * then ticks. CC_V2_SYSMON_SLEEP=0 always ticks. Sysmon thread only. */
+static int sched_v2_sysmon_try_sleep(uint32_t val) {
+    static int off = -1;
+    static uint64_t quiet_since = 0;
+    static uint64_t last_work = 0;
+    if (off < 0) {
+        const char* e = getenv("CC_V2_SYSMON_SLEEP");
+        off = (e && e[0] == '0') ? 1 : 0;
+    }
+    if (off) return 0;
+    {
+        uint64_t work =
+            atomic_load_explicit(&g_v2.ready_queue.pops, memory_order_relaxed) +
+            atomic_load_explicit(&g_v2_worklet_spawn, memory_order_relaxed);
+        uint64_t now = v2_now_ns();
+        if (work != last_work || !sched_v2_quiescent()) {
+            last_work = work;
+            quiet_since = 0;
+            return 0;
+        }
+        if (quiet_since == 0)
+            quiet_since = now;
+        if (now - quiet_since < (uint64_t)V2_SYSMON_QUIET_MS * 1000000ull)
+            return 0;
+    }
+    atomic_store_explicit(&g_v2_sysmon_asleep, 1, memory_order_relaxed);
+    atomic_thread_fence(memory_order_seq_cst);
+    if (!atomic_load_explicit(&g_v2.running, memory_order_acquire) ||
+        !sched_v2_quiescent() || !sched_v2_deadlock_verdict_idle()) {
+        atomic_store_explicit(&g_v2_sysmon_asleep, 0, memory_order_relaxed);
+        return 0;
+    }
+    wake_primitive_wait(&g_v2.sysmon_wake, val);
+    atomic_store_explicit(&g_v2_sysmon_asleep, 0, memory_order_relaxed);
+    return 1;
+}
+
 static void* sched_v2_sysmon_main(void* arg) {
     (void)arg;
     uint64_t last_run_count = 0;
@@ -3114,7 +3228,7 @@ static void* sched_v2_sysmon_main(void* arg) {
         if (atomic_load_explicit(&g_v2_grow_pending, memory_order_acquire)) {
             wake_primitive_wait_timeout_us(&g_v2.sysmon_wake, val,
                                            (uint32_t)g_v2_grow_recheck_us);
-        } else {
+        } else if (!sched_v2_sysmon_try_sleep(val)) {
             wake_primitive_wait_timeout(&g_v2.sysmon_wake, val, V2_SYSMON_INTERVAL_MS);
         }
 
@@ -4179,6 +4293,52 @@ static void sched_v2_dump_parked_fibers_for_verdict(void) {
     if (total > shown) {
         fprintf(stderr, "  ... %zu more fibers not shown\n", total - shown);
     }
+}
+
+/* Sysmon may sleep with no timeout (sched_v2_sysmon_try_sleep): every
+ * worker idle, no fiber queued or running, and the deadlock detector has
+ * nothing to judge: no parked fiber, all parks exempt (external wait,
+ * suppress, deadline, or open-channel receives with an external waiter),
+ * or the verdict already reported. A candidate deadlock keeps sysmon
+ * ticking until sched_v2_check_deadlock decides it. Called with the
+ * sleep flag published, so any later work pokes sysmon; clears the
+ * detector's latch, since the time asleep is not evidence of a stall. */
+static int sched_v2_deadlock_verdict_idle(void) {
+    int n = atomic_load_explicit(&g_v2.num_threads, memory_order_acquire);
+    if (sched_v2_count_idle_workers() < n) return 0;
+    size_t internal_parked = 0, external_parked = 0;
+    int busy = 0;
+    pthread_mutex_lock(&g_v2.all_fibers_mu);
+    for (fiber_v2* f = g_v2.all_fibers; f; f = f->all_next) {
+        int base = fiber_v2_state_base(
+            atomic_load_explicit(&f->state, memory_order_acquire));
+        if (base == FIBER_V2_QUEUED || base == FIBER_V2_RUNNING) { busy = 1; break; }
+        if (base != FIBER_V2_PARKED) continue;
+        if (atomic_load_explicit(&f->external_wait_depth, memory_order_acquire) > 0) { external_parked++; continue; }
+        if (atomic_load_explicit(&f->deadlock_suppress_depth, memory_order_acquire) > 0) continue;
+        if (atomic_load_explicit(&f->has_park_deadline, memory_order_acquire)) continue;
+        internal_parked++;
+    }
+    pthread_mutex_unlock(&g_v2.all_fibers_mu);
+    if (busy) return 0;
+    if (internal_parked > 0 &&
+        !atomic_load_explicit(&g_v2_deadlock_reported, memory_order_acquire)) {
+        /* Only the external-progress exemption can clear internal parks.
+         * Its open-channel test reads park_reason / park_obj, which the
+         * owner rewrites once it runs again; walk it only when an
+         * external waiter makes the answer matter (as the verdict does). */
+        size_t internal2 = 0, suppressed2 = 0, external2 = 0;
+        int only_open_recv = 1;
+        if (external_parked +
+                atomic_load_explicit(&g_external_wait_threads, memory_order_acquire) == 0)
+            return 0;
+        sched_v2_classify_parked_fibers(&internal2, &suppressed2, &external2,
+                                        &only_open_recv);
+        if (internal2 > 0 && !only_open_recv)
+            return 0;
+    }
+    atomic_store_explicit(&g_v2_deadlock_first_seen, 0, memory_order_relaxed);
+    return 1;
 }
 
 void sched_v2_check_deadlock(void) {

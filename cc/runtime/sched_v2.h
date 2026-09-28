@@ -119,6 +119,10 @@ int    sched_v2_fiber_par_slot(fiber_v2* f);
  * Idempotent: multiple calls after the first report are no-ops. */
 void   sched_v2_check_deadlock(void);
 
+/* Wake a sysmon that sleeps while the process is quiescent. For state
+ * changes outside sched_v2.c that give sysmon something to judge. */
+void   sched_v2_sysmon_notify(void);
+
 /* Wait-ticket support (for kqueue / multi-wait integration) */
 uint64_t sched_v2_fiber_publish_wait_ticket(fiber_v2* f);
 int sched_v2_fiber_wait_ticket_matches(fiber_v2* f, uint64_t ticket);

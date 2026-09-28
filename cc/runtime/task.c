@@ -17,6 +17,7 @@ void cc__deadlock_thread_block(void);
 void cc__deadlock_thread_unblock(void);
 
 #include <errno.h>
+#include <stddef.h>
 
 #include <pthread.h>
 #include <sched.h>
@@ -77,6 +78,17 @@ typedef struct {
 #define TASK_SPAWN(t) ((CCTaskSpawnInternal*)((t)->_data))
 #define TASK_FIBER_V2(t) ((CCTaskFiberV2Internal*)((t)->_data))
 #endif /* CC_TASK_INTERNAL_TYPES_DEFINED */
+
+/* Every variant fits CCTask._data, and _data is aligned for its members. */
+#define CC_TASK_DATA_FITS(T) \
+    _Static_assert(sizeof(T) <= sizeof(((CCTask*)0)->_data) && \
+                   _Alignof(T) <= 8 && \
+                   offsetof(CCTask, _data) % 8 == 0, #T " fits CCTask._data")
+CC_TASK_DATA_FITS(CCTaskFutureInternal);
+CC_TASK_DATA_FITS(CCTaskPollInternal);
+CC_TASK_DATA_FITS(CCTaskSpawnInternal);
+CC_TASK_DATA_FITS(CCTaskFiberV2Internal);
+_Static_assert(sizeof(CCTask) == 128, "CCTask stays 128 bytes");
 
 fiber_v2* cc_task_fiber_v2(CCTask t) {
     if (t.kind != CC_TASK_KIND_FIBER_V2) return NULL;

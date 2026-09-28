@@ -66,10 +66,12 @@ typedef enum {
 } CCTaskKind;
 
 /* Opaque CCTask struct - the actual layout is implementation detail.
-   This struct is 128 bytes to fit all variants. */
+   This struct is 128 bytes to fit all variants. The variants hold
+   pointers and intptr_t, so _data is 8-aligned (after 4 bytes of
+   padding on LP64); a constant, since TCC has no max_align_t. */
 typedef struct CCTask {
     CCTaskKind kind;
-    char _data[124];  /* Opaque storage for union members */
+    _Alignas(8) char _data[120];  /* Opaque storage for union members */
 } CCTask;
 
 /* Backward compatibility type aliases */

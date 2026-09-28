@@ -476,7 +476,8 @@ on `join_waiter_fiber`; losers use thread-style `done_wake`.
 
 ## Sysmon
 
-Single thread, interval `V2_SYSMON_INTERVAL_MS` (20 ms). Per tick:
+Single thread, interval `V2_SYSMON_INTERVAL_MS` (20 ms) while there is
+work to watch (see Quiescent sleep). Per tick:
 
 1. **Unchanged-dispatch eviction.** A worker whose `dispatch_epoch` is unchanged
    across a tick (and non-zero) has been running the same fiber for at least
@@ -499,6 +500,47 @@ Single thread, interval `V2_SYSMON_INTERVAL_MS` (20 ms). Per tick:
    thread in `cc_external_wait_enter`, are not waiters for this
    diagnostic.
 
+### Quiescent sleep
+
+Sysmon does not tick while the process is quiescent. Once the following
+have held at every tick for `V2_SYSMON_QUIET_MS` (100 ms), with no pop and
+no worklet spawn in that time, it waits with no timeout:
+
+- The ready queue and the worklet queue are empty, no worklet is live, no
+  worker is admitted to run, and every worker is idle.
+- No fiber is `QUEUED` or `RUNNING`.
+- No grow-pending episode, and no growth backoff ticks left.
+- No park deadline is published.
+- The pool is at or below the eager cap, or has no idle worker, or is
+  pinned by `cc_parallel_noblock_prepare`.
+- The deadlock detector has nothing to judge: no parked fiber counts
+  toward deadlock (see Exemptions and the external-progress exemption),
+  or the verdict was already reported.
+
+It publishes a sleep flag, issues a `seq_cst` fence, and then evaluates
+these conditions. Producers make their change with a `seq_cst` read-modify-write
+(the queue counts, the park-deadline count) or a write followed by a `seq_cst`
+fence, and then load the flag with `seq_cst`.
+A producer that sees the flag clears it and wakes sysmon. The producers are:
+
+- a ready-queue push onto an empty queue,
+- a worklet spawn,
+- the first park deadline,
+- the last host thread leaving an external-wait scope,
+- a grow request and shutdown (both wake sysmon unconditionally).
+
+Either the producer sees the flag or sysmon's check sees the producer's
+work. A process with nothing to do wakes 0 times a second.
+
+While sysmon sleeps, the stall diagnostics do not run: parked fibers whose
+waits are all exempt produce no STALL snapshot until the next work wakes
+sysmon. A deadlock candidate never lets sysmon sleep. Sysmon ticks until
+the detector decides, so a deadlock still exits 124 after the latch.
+Before sleeping, sysmon clears the detector's latch, so time spent asleep
+does not count toward a later verdict.
+
+`CC_V2_SYSMON_SLEEP=0` keeps the fixed tick.
+
 ## Deadlock detection
 
 `sched_v2_check_deadlock` (sysmon) fires when all of the following hold for
@@ -509,7 +551,7 @@ at least `SCHED_V2_DEADLOCK_PERSIST_MS` (1000 ms):
 - At least one fiber is `PARKED` with `external_wait_depth == 0` and
   `deadlock_suppress_depth == 0`.
 
-Sysmon samples idle / ready-queue / park-deadline every tick. The parked-fiber
+Sysmon samples idle / ready-queue / park-deadline every tick it runs. The parked-fiber
 walk runs only after that stall has persisted for the latch duration. An
 I/O-wait pool (all idle, empty queue, no internal parks) does not walk every
 tick.
@@ -608,6 +650,7 @@ correctness.
 | `CC_V2_JOIN_SPIN=N`              | Joiner busy-spin iterations on `done` before parking. Default 0.                               |
 | `CC_V2_CORO_POOL_MAX=N`          | High-water cap for pooled coroutine allocations.                                               |
 | `CC_V2_SYSMON_DETACH=0`          | Disable unchanged-dispatch eviction (pool hard-capped at `CC_V2_THREADS`).                    |
+| `CC_V2_SYSMON_SLEEP=0`           | Sysmon ticks every 20 ms even while quiescent (no quiescent sleep).                           |
 | `CC_V2_STATS=1`                  | Enable hot-path stat counters and dump them at exit.                                           |
 | `CC_V2_SYSMON_STATS=1`           | Enable stat counters without atexit dump.                                                      |
 | `CC_DEADLOCK_ABORT=0`            | Print deadlock banner but do not `_exit(124)`.                                                 |
@@ -624,6 +667,7 @@ correctness.
 | `V2_MAX_THREADS`               | 256                             | Cap on active worker slots.                                       |
 | `V2_FIBER_STACK_SIZE`          | 2 MiB (opt) / 8 MiB (debug)     | Per-fiber coroutine stack.                                        |
 | `V2_SYSMON_INTERVAL_MS`        | 20                              | Sysmon tick.                                                      |
+| `V2_SYSMON_QUIET_MS`           | 100                             | Quiescent time before sysmon stops ticking.                       |
 | `V2_ORPHAN_SAFETY_CAP`         | 4096                            | Max concurrent orphans before eviction is skipped for a tick.     |
 | `SCHED_V2_DEADLOCK_PERSIST_MS` | 1000                            | Latch duration before the detector fires.                         |
 

@@ -23,6 +23,7 @@ Representative correctness pins:
 - `tests/deadlock_suppress_scope_smoke.ccs`
 - `tests/external_wait_scope_smoke.ccs`
 - `tests/v2_deadline_cancel_smoke.ccs`
+- `tests/sysmon_quiescent_smoke.ccs` — idle process: no sysmon wakeups
 - Stress under `stress/` (e.g. legacy-named `work_stealing_race.ccs`, which
   exercises the global ready-queue race, plus `join_init_race.ccs`,
   `minimal_spawn_race.ccs`, and `fiber_spawn_join_tight.ccs`)
@@ -55,6 +56,8 @@ Scheduler (see also the config table in the scheduler spec):
   `CC_V2_GROW_ESCALATE_TICKS` — deferred pool-growth controller (see
   "Worker pool growth" below)
 - `CC_V2_SYSMON_DETACH=0` — disable unchanged-dispatch worker eviction
+- `CC_V2_SYSMON_SLEEP=0` — keep sysmon's 20 ms tick while the process is
+  quiescent (see "Quiescent sysmon" below)
 - `CC_V2_STATS=1` / `CC_V2_SYSMON_STATS=1` — counters
 - `CC_DEADLOCK_ABORT=0` — deadlock banner without `_exit(124)`
 - `CC_DEADLOCK_PERSIST_MS=N` — override deadlock latch duration (default 1000)
@@ -184,6 +187,31 @@ With `CC_V2_STATS=1` the dump includes a growth line:
 
 A contended-lock workload that holds at a small `final_threads` with a large
 `held` count is the controller working as designed, not a recruitment bug.
+
+## Quiescent sysmon
+
+Sysmon ticks every 20 ms only while it has something to watch. With
+nothing queued, running, growing or due, the pool settled, and no parked
+fiber the deadlock detector would judge, for 100 ms (`V2_SYSMON_QUIET_MS`;
+bursts closer together than that keep the tick and never pay a wake), it
+waits with no timeout. The
+next push onto an empty queue, worklet, park deadline, grow request or last
+external-wait exit wakes it. An idle process then has 0 wakeups a second.
+Count them with `voluntary_ctxt_switches` in `/proc/<pid>/task/*/status`.
+
+What that means when diagnosing:
+
+- **No STALL snapshots while everything is parked on exempt waits** (for
+  example, fibers in `cc_external_wait_enter`, open-channel receivers with
+  an external waiter, or a server parked on I/O). Those snapshots come from
+  the tick, and the tick resumes at the next work. To see them on an idle
+  process, run with `CC_V2_SYSMON_SLEEP=0`.
+- **Deadlock detection is unchanged.** A parked fiber that counts toward
+  deadlock keeps sysmon ticking until the verdict, so a deadlock still exits
+  124 after `CC_DEADLOCK_PERSIST_MS`.
+- **The first tick after a long sleep** runs the slow jobs at once
+  (settle, eviction and deadline walks see real elapsed time), so work after
+  an idle spell is not delayed by the sleep.
 
 ## Build
 

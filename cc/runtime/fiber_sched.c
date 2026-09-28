@@ -230,6 +230,7 @@ int    sched_v2_current_worker_id(void);
 int    sched_v2_live_workers(void);
 int    sched_v2_max_workers(void);
 fiber_v2* sched_v2_current_fiber(void);
+void   sched_v2_sysmon_notify(void);
 void   sched_v2_park(void);
 void   sched_v2_yield(void);
 void   sched_v2_set_park_reason(const char* reason);
@@ -804,8 +805,11 @@ void cc_external_wait_leave(void) {
     }
     if (tls_external_wait_depth == 0) return;
     tls_external_wait_depth--;
-    if (tls_external_wait_depth == 0) {
-        atomic_fetch_sub_explicit(&g_external_wait_threads, 1, memory_order_relaxed);
+    if (tls_external_wait_depth == 0 &&
+        atomic_fetch_sub_explicit(&g_external_wait_threads, 1, memory_order_relaxed) == 1) {
+        /* Parked open-channel receivers may be a deadlock now: a
+         * quiescent sysmon has to judge them. */
+        sched_v2_sysmon_notify();
     }
 }
 
