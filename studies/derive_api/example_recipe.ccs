@@ -1,0 +1,37 @@
+/* The connection lives in the field's type: Derived::[LineIndex, Doc_idx]. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include "cc_source.cch"
+
+typedef struct { size_t nl; size_t rows; } LineIndex;
+typedef struct Doc Doc;
+static void Doc_idx(void* holder, LineIndex* out, CCDerive* q, CCStamp* at);   /* the recipe */
+
+struct Doc {
+    Source::[size_t]              text_len;
+    Source::[size_t]              width;
+    Derived::[LineIndex, Doc_idx] idx;          /* idx is derived by Doc_idx */
+    int builds;
+};
+
+/* one function: the inputs it states, and the build they guard */
+static void Doc_idx(void* holder, LineIndex* out, CCDerive* q, CCStamp* at) {
+    Doc* d = holder;                     /* the cycle: a typed holder needs a later emission point */
+    if (!cc_derive_inputs(q, at, cc_inputs(d->text_len.gen(), d->width.gen()))) return;
+    size_t n = d->text_len.val(), w = d->width.val();
+    out->nl = n / 2;
+    out->rows = w ? (n + w - 1) / w : 0;
+    d->builds++;
+}
+
+int main(void) {
+    static Doc d;
+    d.text_len.set(40);
+    d.width.set(10);
+    size_t a = d.idx.get(&d)->rows;
+    size_t b = d.idx.get(&d)->rows;                     /* fresh: no build */
+    d.width.set(4);                                     /* ends any pointer get() returned */
+    size_t c = d.idx.get(&d)->rows;                     /* width moved: one build */
+    printf("rows %zu %zu %zu builds=%d\n", a, b, c, d.builds);
+    return 0;
+}

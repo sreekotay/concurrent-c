@@ -117,3 +117,44 @@ What the prototype found:
 - **C-macro families are invisible to the lowerer**: neither UFCS nor a
   fence resolves on a type made by `#define`. The family has to be a
   factory.
+
+## Third pass: the recipe named in the field's type
+
+`Derived::[LineIndex, Doc_idx] idx;` names the function that derives the
+field, so the connection is in the struct declaration. The same factory
+serves both forms by arity: `Derived::[T]` keeps its stamp and the caller
+runs `check` and `commit`; `Derived::[T, Recipe]` has one operation,
+`get(holder)`, which runs the recipe. The recipe is one function that
+states its inputs first and builds only when they moved:
+
+```c
+static void Doc_idx(void* holder, LineIndex* out, CCDerive* q, CCStamp* at) {
+    Doc* d = holder;
+    if (!cc_derive_inputs(q, at, cc_inputs(d->text_len.gen(), d->width.gen()))) return;
+    ...build *out from d->text_len and d->width...
+}
+```
+
+`example_recipe.ccs` prints `rows 4 4 10 builds=2` on 0.4.0-419: a
+build, a fresh read, and one rebuild after `width.set(4)`. There is no
+unchecked read, because `get` is the only operation.
+
+What it found:
+
+- **The spelling makes a cycle.** The field's type names a function that
+  takes the struct containing the field. The factory's code is emitted
+  ahead of the program, before the struct and the recipe's prototype
+  exist, so the generated `get` cannot name the holder's type. The
+  prototype here takes the holder as `void *` by contract, which loses
+  the type check on `get(&d)`: passing another document compiles.
+  The ways out: emit a factory's code at the first use rather than
+  hoisted; name the holder type as a third argument,
+  `Derived::[LineIndex, Doc, Doc_idx]`; or let a family's method receive
+  the object that contains its receiver, which the lowerer already knows
+  from the receiver expression `d.idx`.
+- **Two factories named `Derived` collided**, and the rule that a generic
+  name has one base is right; one factory branches on arity.
+- **A pointer from `get` ends at the next store to an input.** The first
+  printout held two pointers across `width.set(4)` and showed the rebuilt
+  value through both. That is section 2's borrow rule, and a checker
+  applying it to `get`'s result would refuse the held pointer.

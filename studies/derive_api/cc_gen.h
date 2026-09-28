@@ -91,6 +91,19 @@ typedef struct { uint32_t n; uint64_t v[CC_STAMP_MAX]; } CCInputs;
     .n = (uint32_t)(sizeof((uint64_t[]){ __VA_ARGS__ }) / sizeof(uint64_t)), \
     .v = { __VA_ARGS__ } })
 
+/* ---- a recipe's handle: states its inputs, learns whether to build ---- */
+/* A recipe calls cc_derive_inputs() first. It returns false when the value
+ * is fresh, and the recipe returns without building. The caller commits
+ * only after a recipe that built returns successfully. */
+
+typedef struct { CCStampCheck c; bool asked; } CCDerive;
+
+static inline bool cc_derive_inputs(CCDerive* q, CCStamp* s, CCInputs in) {
+    q->c = cc_stamp_check(s, in.v, in.n);
+    q->asked = true;
+    return q->c.stale;
+}
+
 /* ---- state identity ------------------------------------------------- */
 /* A new id when a state is created; a move back to an earlier state
  * restores that state's id. Equal ids mean the same state. A CCGen can
