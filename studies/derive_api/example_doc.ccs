@@ -1,0 +1,44 @@
+/* A document with one derived field: the field is storage, d.lines() is the read. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include "cc_source.cch"
+
+typedef struct { size_t nl; size_t rows; } LineIndex;
+
+typedef struct {
+    Source::[size_t]     text_len;
+    Source::[size_t]     width;
+    Derived::[LineIndex] lines;          /* storage; d.lines() is the read */
+    int builds;
+} Doc;
+
+@typeview on Doc { r: ^lines; }       /* storage: only Doc bodies touch it */
+
+/* the one place lines is derived: inputs first, then the build */
+static const LineIndex* Doc_lines(Doc* d) {
+    LineIndex* out = d->lines.stale(cc_inputs(d->text_len.gen(), d->width.gen()));
+    if (out) {
+        size_t n = d->text_len.val(), w = d->width.val();
+        out->nl   = n / 2;
+        out->rows = w ? (n + w - 1) / w : 0;
+        d->lines.commit();
+        d->builds++;
+    }
+    return d->lines.ref();
+}
+
+int main(void) {
+    Doc d = {0};
+    d.text_len.set(40);
+    d.width.set(10);
+
+    size_t a = d.lines()->rows;          /* builds */
+    size_t b = d.lines()->rows;          /* fresh: no build */
+    d.width.set(4);
+    size_t c = d.lines()->rows;          /* width moved: builds */
+    d.width.set(4);                      /* a store bumps even when equal */
+    size_t e = d.lines()->rows;          /* over-reports: builds */
+
+    printf("rows %zu %zu %zu %zu builds=%d\n", a, b, c, e, d.builds);
+    return 0;
+}

@@ -19,44 +19,25 @@ static inline uint64_t ${mangled}_gen(const ${mangled}* s) { return cc_gen_get(&
 `, arena);
 }
 
-/* Derived::[T] keeps its stamp; the caller runs check and commit.
- * Derived::[T, Holder, Recipe] names its holder and its recipe; get(holder)
- * is the only operation. The holder is named because the factory sees only
- * its arguments: the recipe's first parameter says the same thing, but no
- * reflection verb reads a free function's parameters. */
-CC_GENERIC_FACTORY(Derived) {
-    if (type_args.len < 1 || !mangled.ptr) return cc_slice_empty();
-    if (type_args.len >= 3) return @emit(`
-#ifndef ${mangled}_DEFINED
-#define ${mangled}_DEFINED
-typedef struct ${mangled} { ${arg(0)} value; CCStamp at; CCGen g; } ${mangled};
-static void ${arg(2)}(${arg(1)}* holder, ${arg(0)}* out, CCDerive* q, CCStamp* at);
-static inline const ${arg(0)}* ${mangled}_get(${mangled}* self, ${arg(1)}* holder) {
-    CCDerive q = {0};
-    ${arg(2)}(holder, &self->value, &q, &self->at);
-    if (!q.asked) __builtin_trap();                 /* a recipe must state its inputs */
-    if (q.c.stale) { cc_stamp_commit(&q.c); cc_gen_bump(&self->g); }
-    return &self->value;
-}
-static inline uint64_t ${mangled}_gen(${mangled}* self, ${arg(1)}* holder) {
-    (void)${mangled}_get(self, holder);             /* settles first */
-    return cc_gen_get(&self->g);
-}
-#endif
-`, arena);
+/* Derived::[T]: a cached value and the inputs it was built from.
+ * stale(inputs) returns the slot to rebuild into, or NULL when fresh;
+ * commit() records the inputs once the rebuild has succeeded. */
+CC_GENERIC_FACTORY(Derived, 1) {
     return @emit(`
 #ifndef ${mangled}_DEFINED
 #define ${mangled}_DEFINED
-typedef struct ${mangled} { ${arg(0)} value; CCStamp at; CCGen g; } ${mangled};
-typedef struct ${mangled}_Check { CCStampCheck c; ${arg(0)}* slot; bool stale; } ${mangled}_Check;
-static inline ${mangled}_Check ${mangled}_check(${mangled}* d, CCInputs in) {
-    ${mangled}_Check k;
-    k.c = cc_stamp_check(&d->at, in.v, in.n);
-    k.stale = k.c.stale;
-    k.slot = k.stale ? &d->value : 0;
-    return k;
+typedef struct ${mangled} { ${arg(0)} value; CCStamp at; CCInputs pending; CCGen g; } ${mangled};
+static inline ${arg(0)}* ${mangled}_stale(${mangled}* d, CCInputs in) {
+    CCStampCheck c = cc_stamp_check(&d->at, in.v, in.n);
+    if (!c.stale) return 0;
+    d->pending = in;
+    return &d->value;
 }
-static inline void ${mangled}_commit(${mangled}* d, ${mangled}_Check* k) { cc_stamp_commit(&k->c); cc_gen_bump(&d->g); }
+static inline void ${mangled}_commit(${mangled}* d) {
+    CCStampCheck c = cc_stamp_check(&d->at, d->pending.v, d->pending.n);
+    cc_stamp_commit(&c);
+    cc_gen_bump(&d->g);
+}
 static inline const ${arg(0)}* ${mangled}_ref(const ${mangled}* d) { return &d->value; }
 static inline uint64_t ${mangled}_gen(const ${mangled}* d) { return cc_gen_get(&d->g); }
 static inline void ${mangled}_invalidate(${mangled}* d) { cc_stamp_clear(&d->at); }

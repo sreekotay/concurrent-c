@@ -77,7 +77,7 @@ An effect on change is the same three calls with an effect in the block.
 | Type | Methods |
 |------|---------|
 | `Source::[T]` | `set(v)` stores and bumps; `mut()` returns `T*` and bumps; `val()`, `ref()`, `gen()` |
-| `Derived::[T]` | `check(cc_inputs(...))` returns a check whose `.slot` is the writable value only when stale; `commit(&k)` records inputs and bumps; `ref()`, `gen()`, `invalidate()` |
+| `Derived::[T]` | `stale(cc_inputs(...))` returns `T*` to rebuild into, or `NULL` when fresh; `commit()` records those inputs and bumps; `ref()`, `gen()`, `invalidate()` |
 
 ```c
 typedef struct {
@@ -85,14 +85,14 @@ typedef struct {
     Derived::[LineIndex] idx;
 } Doc;
 
-Derived_LineIndex_Check k = d->idx.check(cc_inputs(d->text.gen(), d->width.gen()));
-if (k.stale) { ...write *k.slot...; d->idx.commit(&k); }
+LineIndex* out = d->idx.stale(cc_inputs(d->text.gen(), d->width.gen()));
+if (out) { ...write *out...; d->idx.commit(); }
 return d->idx.ref();
 
 d->width.set(4);          /* the bump is the call */
 ```
 
-`example_family.ccs` runs on 0.4.0-419 (`rows=10 rebuilds=2`).
+`example_doc.ccs` is the short full example (fourth pass below).
 `example_generic.ccs` is the full document example with the types
 written as C macros and called directly; it also carries erased-newline
 counts in the edit, so erases patch instead of rebuilding
@@ -102,14 +102,16 @@ What the prototype found:
 
 - **Every write is a visible call and every byte is in the type.** There
   is no hidden bump, no hidden field, and no read that silently
-  rebuilds. The only writable access to a derived value is `k.slot`
-  from a stale check, so "a store to a derived value is refused" falls
+  rebuilds. The only writable access to a derived value is the pointer
+  `stale` returns, so "a store to a derived value is refused" falls
   out of the API's shape.
-- **The check's type is a mangled name the user must spell**,
-  `Derived_LineIndex_Check`. At this seed `@auto` exists only as the
+- **The first version returned a check the user had to spell**,
+  `Derived_LineIndex_Check k = …`. At this seed `@auto` exists only as the
   grower shorthand `@auto(src) name(arena) @destroy;`; a bare
   `@auto k = …` is an unknown word and plain `auto` parses as the C
-  storage class. Declaration inference is the general feature this wants.
+  storage class. Keeping the pending inputs in the value (one `CCInputs`,
+  40 bytes) removed the check type: `stale` returns the slot, `commit()`
+  takes nothing.
 - **The fence does not reach factory-generated types.**
   `fence_on_generic_probe.ccs`: `@typeview on Plain { r: ^value; }`
   refuses `p.value = 1`; the same view on `Source_size_t`, by exact name
@@ -118,58 +120,63 @@ What the prototype found:
   fence resolves on a type made by `#define`. The family has to be a
   factory.
 
-## Third pass: the recipe named in the field's type
+## Third pass: the recipe named in the field's type, withdrawn
 
-`Derived::[LineIndex, Doc, Doc_idx] idx;` names the holder and the
-function that derives the field, so the connection is in the struct
-declaration. The same factory serves both forms by arity: `Derived::[T]`
-keeps its stamp and the caller runs `check` and `commit`;
-`Derived::[T, Holder, Recipe]` has one operation, `get(holder)`, which
-runs the recipe. The recipe is one function that states its inputs first
-and builds only when they moved:
+`Derived::[LineIndex, Doc_idx] idx;` named the function that derives the
+field, and `get(holder)` ran it. It worked (`rows 4 4 10 builds=2`) but
+the factory sees only its arguments, so `get` took the holder as
+`void *` and `d.idx.get(&other)` compiled. Naming the holder,
+`Derived::[LineIndex, Doc, Doc_idx]`, typed it, and read oddly: the
+recipe is called for you, yet you spell its holder's type, and you pass
+the holder at every call although `d.idx` already says which one. Both
+redundancies come from putting the connection in the member's type,
+which cannot see the struct around it. It also needed the forward
+`typedef struct Doc Doc;`: without it the instance is placed after the
+struct that needs it, and fails as `unknown type name`.
+
+
+## Fourth pass: the field and its read share a name
 
 ```c
-typedef struct Doc Doc;                       /* needed: see below */
-struct Doc {
-    Source::[size_t]                   text_len, width;
-    Derived::[LineIndex, Doc, Doc_idx] idx;
-};
+typedef struct {
+    Source::[size_t]     text_len, width;
+    Derived::[LineIndex] lines;          /* storage; d.lines() is the read */
+} Doc;
 
-static void Doc_idx(Doc* d, LineIndex* out, CCDerive* q, CCStamp* at) {
-    if (!cc_derive_inputs(q, at, cc_inputs(d->text_len.gen(), d->width.gen()))) return;
-    ...build *out from d->text_len and d->width...
+@typeview on Doc { r: ^lines; }       /* only Doc bodies touch the storage */
+
+static const LineIndex* Doc_lines(Doc* d) {
+    LineIndex* out = d->lines.stale(cc_inputs(d->text_len.gen(), d->width.gen()));
+    if (out) { ...build *out...; d->lines.commit(); }
+    return d->lines.ref();
 }
+
+d.width.set(4);
+size_t rows = d.lines()->rows;          /* rebuilds once, then fresh */
 ```
 
-`example_recipe.ccs` prints `rows 4 4 10 builds=2` on 0.4.0-419: a
-build, a fresh read, and one rebuild after `width.set(4)`. There is no
-unchecked read, because `get` is the only operation. There is no `void *`:
-`get` takes a `Doc *` and passing another type is diagnosed by C.
+`example_doc.ccs` prints `rows 4 4 10 10 builds=3` on 0.4.0-419: a build,
+a fresh read, a rebuild after `width.set(4)`, and a rebuild after a
+second `width.set(4)` of the same value, since a store bumps whether or
+not the value changed (over-reporting, the safe direction).
 
 What it found:
 
-- **The holder is one fact the factory cannot see.** The first version
-  was `Derived::[LineIndex, Doc_idx]` with the holder as `void *`, which
-  let `d.idx.get(&other)` compile. The holder's type is already in the
-  source, as the recipe's first parameter, but a factory sees only its
-  arguments, and no reflection verb reads a free function's parameters
-  (`cc_reflect_method_params` reads by type, and the type is what is
-  missing). Naming the holder as an argument costs one word and types
-  everything. The two-argument spelling needs one host verb, the
-  parameter list of a named function, and an anchor that counts a
-  function's prototype as the declaration of a function argument.
-- **The forward declaration is load-bearing.** An instance lands after
-  the last declaration of each type it names. With
-  `typedef struct Doc Doc;` first, that is between the forward typedef
-  and the struct body, which is exactly where a by-value member needs
-  it. Without it, `Doc` is declared only by the struct itself, the
-  instance lands after the struct, and the field fails with
-  `unknown type name 'Derived_LineIndex_Doc_Doc_idx'`. The lowerer could
-  write the forward typedef itself when an instance names the struct
-  that holds it; at least the error should say so.
-- **Two factories named `Derived` collided**, and the rule that a generic
-  name has one base is right; one factory branches on arity.
-- **A pointer from `get` ends at the next store to an input.** The first
-  printout held two pointers across `width.set(4)` and showed the rebuilt
-  value through both. That is section 2's borrow rule, and a checker
-  applying it to `get`'s result would refuse the held pointer.
+- **Nothing is typed twice.** The member says what is cached; the method
+  of the same name says how, with its inputs on its first line. UFCS
+  already resolves `d.lines()` to `Doc_lines(&d)` beside a field named
+  `lines`; the two do not collide.
+- **The storage is private with no new mechanism.** `r: ^lines` in the
+  view refuses `d.lines.ref()` in `main` ("restricted mode '(default)'
+  on 'Doc' does not allow field 'lines'"), and `Doc_lines` is a trusted
+  body because its first parameter is a `Doc *`. The deny works here
+  because `Doc` is a user struct; on the factory's own type it still
+  does not (the fence finding above).
+- **What the shape does not catch.** A missing `commit()` rebuilds on
+  every read: slow, never wrong. An input left out of `cc_inputs` gives a
+  stale value: wrong. The second is what the execution check exists
+  for: `d.lines.invalidate()`, read again, compare.
+- **A pointer from the read ends at the next store to an input.** The
+  recipe pass held two pointers across `width.set(4)` and saw the
+  rebuilt value through both. That is section 2's borrow rule, and a
+  checker applying it to this read would refuse the held pointer.
