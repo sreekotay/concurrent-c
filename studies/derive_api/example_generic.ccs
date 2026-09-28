@@ -1,0 +1,110 @@
+/*
+ * The same document as example.ccs, with sources and derived values as
+ * generic types. Every write is a call; the raw fields are fenced.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+#include "cc_source.h"
+
+typedef struct { size_t off, ins, del, del_nl; } Edit;   /* values about removed content, computed while it exists */
+CC_GENLOG_DECL(TextLog, Edit, 8)
+
+/* an aggregate source: owns its generation, bumped by its own verbs */
+typedef struct { char buf[4096]; size_t len; TextLog log; } Text;
+static uint64_t Text_gen(const Text* t) { return cc_gen_get(&t->log.gen); }
+static size_t count_nl(const char* s, size_t n) { size_t k = 0; for (size_t i = 0; i < n; i++) k += s[i] == '\n'; return k; }
+static void Text_insert(Text* t, size_t off, const char* s) {
+    size_t n = strlen(s);
+    memmove(t->buf + off + n, t->buf + off, t->len - off); memcpy(t->buf + off, s, n); t->len += n;
+    TextLog_push(&t->log, (Edit){ off, n, 0, 0 });
+}
+static void Text_erase(Text* t, size_t off, size_t n) {
+    size_t gone = count_nl(t->buf + off, n);
+    memmove(t->buf + off, t->buf + off + n, t->len - off - n); t->len -= n;
+    TextLog_push(&t->log, (Edit){ off, 0, n, gone });
+}
+
+typedef struct { size_t nl; size_t rows; } LineIndex;
+
+CC_SOURCE_DECL(SrcSize, size_t)
+CC_DERIVED_DECL(DerIdx, LineIndex)
+typedef struct { char s[64]; } Title;
+CC_DERIVED_DECL(DerTitle, Title)
+
+/* A fence (`@typeview on SrcSize { r: ^value; }`) and UFCS (`d->width.set(3)`)
+ * need the lowerer to see the family; a C macro hides it. As a CC generic
+ * family (Source::[T], like Vec::[T]) both work. Here: direct calls. */
+
+typedef struct {
+    Text     text;
+    SrcSize  width;
+    DerIdx   idx;
+    DerTitle title;
+    CCStamp  flushed;
+    int      rebuilds, patches, flushes;
+} Doc;
+
+static const LineIndex* Doc_idx(Doc* d) {
+    DerIdx_Check k = DerIdx_check(&d->idx, CC_IN(Text_gen(&d->text), SrcSize_gen(&d->width)));
+    if (k.stale) {
+        CCSince s = TextLog_since(&d->text.log, k.c.prev[0]);
+        if (k.c.built && !(k.c.changed & CC_INPUT(1)) && s.kind == CC_SINCE_EDITS) {
+            for (uint32_t i = 0; i < s.n; i++) {
+                const Edit* e = TextLog_at(&d->text.log, s, i);
+                k.slot->nl += count_nl(d->text.buf + e->off, e->ins) - e->del_nl;
+            }
+            d->patches++;
+        } else {
+            k.slot->nl = count_nl(d->text.buf, d->text.len);
+            d->rebuilds++;
+        }
+        size_t w = SrcSize_val(&d->width);
+        k.slot->rows = w ? (d->text.len + w - 1) / w : 0;
+        DerIdx_commit(&d->idx, &k);
+    }
+    return DerIdx_ref(&d->idx);
+}
+
+static const char* Doc_title(Doc* d) {
+    const LineIndex* ix = Doc_idx(d);
+    DerTitle_Check k = DerTitle_check(&d->title, CC_IN(DerIdx_gen(&d->idx)));
+    if (k.stale) {
+        snprintf(k.slot->s, sizeof k.slot->s, "%zu lines, %zu rows", ix->nl, ix->rows);
+        DerTitle_commit(&d->title, &k);
+    }
+    return DerTitle_ref(&d->title)->s;
+}
+
+static void Doc_frame(Doc* d) {
+    (void)Doc_title(d);
+    CCStampCheck c = cc_stamp_check(&d->flushed, CC_IN(DerTitle_gen(&d->title)));
+    if (c.stale) { d->flushes++; cc_stamp_commit(&c); }
+}
+
+static int idx_law_holds(Doc* d) {
+    LineIndex cached = *Doc_idx(d);
+    Doc scratch = *d;
+    DerIdx_invalidate(&scratch.idx);
+    const LineIndex* fresh = Doc_idx(&scratch);
+    return cached.nl == fresh->nl && cached.rows == fresh->rows;
+}
+
+int main(void) {
+    static Doc d;
+    SrcSize_set(&d.width, 10);
+
+    Text_insert(&d.text, 0, "a\nb\n");   Doc_frame(&d);
+    Text_insert(&d.text, 4, "c\n");      Doc_frame(&d);
+    Doc_frame(&d);
+    Text_insert(&d.text, 0, "x\n"); Text_insert(&d.text, 0, "y\n");  Doc_frame(&d);
+    Text_erase(&d.text, 0, 2);           Doc_frame(&d);      /* erase: now patched, del_nl carried */
+    SrcSize_set(&d.width, 3);               Doc_frame(&d);      /* a set is the visible bump */
+    for (int i = 0; i < 10; i++) Text_insert(&d.text, 0, "z\n");
+    Doc_frame(&d);
+
+    printf("idx: nl=%zu rows=%zu  title=\"%s\"\n", Doc_idx(&d)->nl, Doc_idx(&d)->rows, Doc_title(&d));
+    printf("rebuilds=%d patches=%d flushes=%d\n", d.rebuilds, d.patches, d.flushes);
+    printf("law (cache == rebuild): %s\n", idx_law_holds(&d) ? "holds" : "BROKEN");
+    return 0;
+}

@@ -1,0 +1,42 @@
+/* Source::[T] and Derived::[T] as CC generic families. */
+#ifndef CC_SOURCE_CCH
+#define CC_SOURCE_CCH
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include "cc_gen.h"
+
+CC_GENERIC_FACTORY(Source, 1) {
+    return @emit(`
+#ifndef ${mangled}_DEFINED
+#define ${mangled}_DEFINED
+typedef struct ${mangled} { ${arg(0)} value; CCGen g; } ${mangled};
+static inline void ${mangled}_set(${mangled}* s, ${arg(0)} v) { s->value = v; cc_gen_bump(&s->g); }
+static inline ${arg(0)}* ${mangled}_mut(${mangled}* s) { cc_gen_bump(&s->g); return &s->value; }
+static inline ${arg(0)} ${mangled}_val(const ${mangled}* s) { return s->value; }
+static inline const ${arg(0)}* ${mangled}_ref(const ${mangled}* s) { return &s->value; }
+static inline uint64_t ${mangled}_gen(const ${mangled}* s) { return cc_gen_get(&s->g); }
+#endif
+`, arena);
+}
+
+CC_GENERIC_FACTORY(Derived, 1) {
+    return @emit(`
+#ifndef ${mangled}_DEFINED
+#define ${mangled}_DEFINED
+typedef struct ${mangled} { ${arg(0)} value; CCStamp at; CCGen g; } ${mangled};
+typedef struct ${mangled}_Check { CCStampCheck c; ${arg(0)}* slot; bool stale; } ${mangled}_Check;
+static inline ${mangled}_Check ${mangled}_check(${mangled}* d, CCInputs in) {
+    ${mangled}_Check k;
+    k.c = cc_stamp_check(&d->at, in.v, in.n);
+    k.stale = k.c.stale;
+    k.slot = k.stale ? &d->value : 0;
+    return k;
+}
+static inline void ${mangled}_commit(${mangled}* d, ${mangled}_Check* k) { cc_stamp_commit(&k->c); cc_gen_bump(&d->g); }
+static inline const ${arg(0)}* ${mangled}_ref(const ${mangled}* d) { return &d->value; }
+static inline uint64_t ${mangled}_gen(const ${mangled}* d) { return cc_gen_get(&d->g); }
+static inline void ${mangled}_invalidate(${mangled}* d) { cc_stamp_clear(&d->at); }
+#endif
+`, arena);
+}
+#endif

@@ -85,6 +85,12 @@ static inline void cc_stamp_clear(CCStamp* s) { s->n = 0; }
 #define CC_IN(...) (const uint64_t[]){ __VA_ARGS__ }, \
     (uint32_t)(sizeof((uint64_t[]){ __VA_ARGS__ }) / sizeof(uint64_t))
 
+/* The same list as one value, for methods: cc_inputs(a, b). */
+typedef struct { uint32_t n; uint64_t v[CC_STAMP_MAX]; } CCInputs;
+#define cc_inputs(...) ((CCInputs){ \
+    .n = (uint32_t)(sizeof((uint64_t[]){ __VA_ARGS__ }) / sizeof(uint64_t)), \
+    .v = { __VA_ARGS__ } })
+
 /* ---- state identity ------------------------------------------------- */
 /* A new id when a state is created; a move back to an earlier state
  * restores that state's id. Equal ids mean the same state. A CCGen can
