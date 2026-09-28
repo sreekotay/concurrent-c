@@ -1,22 +1,20 @@
-/* The connection lives in the field's type: Derived::[LineIndex, Doc_idx]. */
+/* The connection lives in the field's type: Derived::[LineIndex, Doc, Doc_idx]. */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 #include "cc_source.cch"
 
 typedef struct { size_t nl; size_t rows; } LineIndex;
 typedef struct Doc Doc;
-static void Doc_idx(void* holder, LineIndex* out, CCDerive* q, CCStamp* at);   /* the recipe */
 
 struct Doc {
     Source::[size_t]              text_len;
     Source::[size_t]              width;
-    Derived::[LineIndex, Doc_idx] idx;          /* idx is derived by Doc_idx */
+    Derived::[LineIndex, Doc, Doc_idx] idx;     /* idx is derived by Doc_idx from a Doc */
     int builds;
 };
 
 /* one function: the inputs it states, and the build they guard */
-static void Doc_idx(void* holder, LineIndex* out, CCDerive* q, CCStamp* at) {
-    Doc* d = holder;                     /* the cycle: a typed holder needs a later emission point */
+static void Doc_idx(Doc* d, LineIndex* out, CCDerive* q, CCStamp* at) {
     if (!cc_derive_inputs(q, at, cc_inputs(d->text_len.gen(), d->width.gen()))) return;
     size_t n = d->text_len.val(), w = d->width.val();
     out->nl = n / 2;

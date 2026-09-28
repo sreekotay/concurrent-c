@@ -20,22 +20,25 @@ static inline uint64_t ${mangled}_gen(const ${mangled}* s) { return cc_gen_get(&
 }
 
 /* Derived::[T] keeps its stamp; the caller runs check and commit.
- * Derived::[T, Recipe] names its recipe; get(holder) is the only operation. */
+ * Derived::[T, Holder, Recipe] names its holder and its recipe; get(holder)
+ * is the only operation. The holder is named because the factory sees only
+ * its arguments: the recipe's first parameter says the same thing, but no
+ * reflection verb reads a free function's parameters. */
 CC_GENERIC_FACTORY(Derived) {
     if (type_args.len < 1 || !mangled.ptr) return cc_slice_empty();
-    if (type_args.len >= 2) return @emit(`
+    if (type_args.len >= 3) return @emit(`
 #ifndef ${mangled}_DEFINED
 #define ${mangled}_DEFINED
 typedef struct ${mangled} { ${arg(0)} value; CCStamp at; CCGen g; } ${mangled};
-static void ${arg(1)}(void* holder, ${arg(0)}* out, CCDerive* q, CCStamp* at);
-static inline const ${arg(0)}* ${mangled}_get(${mangled}* self, void* holder) {
+static void ${arg(2)}(${arg(1)}* holder, ${arg(0)}* out, CCDerive* q, CCStamp* at);
+static inline const ${arg(0)}* ${mangled}_get(${mangled}* self, ${arg(1)}* holder) {
     CCDerive q = {0};
-    ${arg(1)}(holder, &self->value, &q, &self->at);
+    ${arg(2)}(holder, &self->value, &q, &self->at);
     if (!q.asked) __builtin_trap();                 /* a recipe must state its inputs */
     if (q.c.stale) { cc_stamp_commit(&q.c); cc_gen_bump(&self->g); }
     return &self->value;
 }
-static inline uint64_t ${mangled}_gen(${mangled}* self, void* holder) {
+static inline uint64_t ${mangled}_gen(${mangled}* self, ${arg(1)}* holder) {
     (void)${mangled}_get(self, holder);             /* settles first */
     return cc_gen_get(&self->g);
 }

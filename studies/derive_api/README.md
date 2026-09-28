@@ -120,16 +120,22 @@ What the prototype found:
 
 ## Third pass: the recipe named in the field's type
 
-`Derived::[LineIndex, Doc_idx] idx;` names the function that derives the
-field, so the connection is in the struct declaration. The same factory
-serves both forms by arity: `Derived::[T]` keeps its stamp and the caller
-runs `check` and `commit`; `Derived::[T, Recipe]` has one operation,
-`get(holder)`, which runs the recipe. The recipe is one function that
-states its inputs first and builds only when they moved:
+`Derived::[LineIndex, Doc, Doc_idx] idx;` names the holder and the
+function that derives the field, so the connection is in the struct
+declaration. The same factory serves both forms by arity: `Derived::[T]`
+keeps its stamp and the caller runs `check` and `commit`;
+`Derived::[T, Holder, Recipe]` has one operation, `get(holder)`, which
+runs the recipe. The recipe is one function that states its inputs first
+and builds only when they moved:
 
 ```c
-static void Doc_idx(void* holder, LineIndex* out, CCDerive* q, CCStamp* at) {
-    Doc* d = holder;
+typedef struct Doc Doc;                       /* needed: see below */
+struct Doc {
+    Source::[size_t]                   text_len, width;
+    Derived::[LineIndex, Doc, Doc_idx] idx;
+};
+
+static void Doc_idx(Doc* d, LineIndex* out, CCDerive* q, CCStamp* at) {
     if (!cc_derive_inputs(q, at, cc_inputs(d->text_len.gen(), d->width.gen()))) return;
     ...build *out from d->text_len and d->width...
 }
@@ -137,21 +143,30 @@ static void Doc_idx(void* holder, LineIndex* out, CCDerive* q, CCStamp* at) {
 
 `example_recipe.ccs` prints `rows 4 4 10 builds=2` on 0.4.0-419: a
 build, a fresh read, and one rebuild after `width.set(4)`. There is no
-unchecked read, because `get` is the only operation.
+unchecked read, because `get` is the only operation. There is no `void *`:
+`get` takes a `Doc *` and passing another type is diagnosed by C.
 
 What it found:
 
-- **The spelling makes a cycle.** The field's type names a function that
-  takes the struct containing the field. The factory's code is emitted
-  ahead of the program, before the struct and the recipe's prototype
-  exist, so the generated `get` cannot name the holder's type. The
-  prototype here takes the holder as `void *` by contract, which loses
-  the type check on `get(&d)`: passing another document compiles.
-  The ways out: emit a factory's code at the first use rather than
-  hoisted; name the holder type as a third argument,
-  `Derived::[LineIndex, Doc, Doc_idx]`; or let a family's method receive
-  the object that contains its receiver, which the lowerer already knows
-  from the receiver expression `d.idx`.
+- **The holder is one fact the factory cannot see.** The first version
+  was `Derived::[LineIndex, Doc_idx]` with the holder as `void *`, which
+  let `d.idx.get(&other)` compile. The holder's type is already in the
+  source, as the recipe's first parameter, but a factory sees only its
+  arguments, and no reflection verb reads a free function's parameters
+  (`cc_reflect_method_params` reads by type, and the type is what is
+  missing). Naming the holder as an argument costs one word and types
+  everything. The two-argument spelling needs one host verb, the
+  parameter list of a named function, and an anchor that counts a
+  function's prototype as the declaration of a function argument.
+- **The forward declaration is load-bearing.** An instance lands after
+  the last declaration of each type it names. With
+  `typedef struct Doc Doc;` first, that is between the forward typedef
+  and the struct body, which is exactly where a by-value member needs
+  it. Without it, `Doc` is declared only by the struct itself, the
+  instance lands after the struct, and the field fails with
+  `unknown type name 'Derived_LineIndex_Doc_Doc_idx'`. The lowerer could
+  write the forward typedef itself when an instance names the struct
+  that holds it; at least the error should say so.
 - **Two factories named `Derived` collided**, and the rule that a generic
   name has one base is right; one factory branches on arity.
 - **A pointer from `get` ends at the next store to an input.** The first
