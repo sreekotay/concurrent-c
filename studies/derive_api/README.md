@@ -180,3 +180,21 @@ What it found:
   recipe pass held two pointers across `width.set(4)` and saw the
   rebuilt value through both. That is section 2's borrow rule, and a
   checker applying it to this read would refuse the held pointer.
+
+## Costs measured
+
+`gen_bench.c`, gcc -O2, 4 cores, 50M stores per thread, time per store:
+
+| Bump | 1 thread | 4 threads |
+|------|----------|-----------|
+| one global atomic (`cc_gen_next` today) | 7.4 ns | 128 ns |
+| per-thread block of 1024 from the global | 0.8 ns | 1.1 ns |
+| plain per-object increment | 0.3 ns | 0.4 ns |
+
+The global counter exists so a restored snapshot can never reuse a
+number. Per-thread blocks keep that, since every number is still unique
+in the process, at about one nanosecond. A plain per-object increment
+does not: restore gen 5, store, and gen 6 names a second value.
+
+`sizeof(Derived::[T])` is `sizeof(T) + 88`: a 4-slot stamp (40), the
+pending inputs (40), and the generation (8).
