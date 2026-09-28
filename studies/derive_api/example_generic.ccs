@@ -5,6 +5,7 @@
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 #include <string.h>
+#define CC_GEN_IMPL                      /* this unit defines the counter */
 #include "cc_source.h"
 
 typedef struct { size_t off, ins, del, del_nl; } Edit;   /* values about removed content, computed while it exists */

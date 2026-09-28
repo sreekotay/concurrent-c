@@ -20,22 +20,23 @@ static inline uint64_t ${mangled}_gen(const ${mangled}* s) { return cc_gen_get(&
 }
 
 /* Derived::[T]: a cached value and the inputs it was built from.
- * stale(inputs) returns the slot to rebuild into, or NULL when fresh;
- * commit() records the inputs once the rebuild has succeeded. */
+ * stale(inputs) returns the slot to rebuild into, or NULL when fresh; it
+ * records the inputs in the stamp, marked as building. commit() clears
+ * the mark once the rebuild has succeeded; without it the next read
+ * rebuilds again. */
 CC_GENERIC_FACTORY(Derived, 1) {
     return @emit(`
 #ifndef ${mangled}_DEFINED
 #define ${mangled}_DEFINED
-typedef struct ${mangled} { ${arg(0)} value; CCStamp at; CCInputs pending; CCGen g; } ${mangled};
+typedef struct ${mangled} { ${arg(0)} value; CCStamp at; CCGen g; } ${mangled};
 static inline ${arg(0)}* ${mangled}_stale(${mangled}* d, CCInputs in) {
     CCStampCheck c = cc_stamp_check(&d->at, in.v, in.n);
     if (!c.stale) return 0;
-    d->pending = in;
+    cc_stamp_begin(&d->at, in.v, in.n);
     return &d->value;
 }
 static inline void ${mangled}_commit(${mangled}* d) {
-    CCStampCheck c = cc_stamp_check(&d->at, d->pending.v, d->pending.n);
-    cc_stamp_commit(&c);
+    cc_stamp_done(&d->at);
     cc_gen_bump(&d->g);
 }
 static inline const ${arg(0)}* ${mangled}_ref(const ${mangled}* d) { return &d->value; }

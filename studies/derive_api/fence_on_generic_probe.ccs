@@ -1,6 +1,7 @@
 /* Control: the fence refuses the store on Plain, and does not reach the
  * factory-generated Source_size_t (seed 0.4.0-419). */
 #include <ccc/std/prelude.cch>
+#define CC_GEN_IMPL                      /* this unit defines the counter */
 #include "cc_source.cch"
 typedef struct { int value; } Plain;
 @typeview on Plain { r: ^value; }

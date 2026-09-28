@@ -187,8 +187,8 @@ What it found:
 
 | Bump | 1 thread | 4 threads |
 |------|----------|-----------|
-| one global atomic (`cc_gen_next` today) | 7.4 ns | 128 ns |
-| per-thread block of 1024 from the global | 0.8 ns | 1.1 ns |
+| one global atomic (the first `cc_gen_next`) | 7.4 ns | 128 ns |
+| per-thread block of 1024 from the global (now) | 0.8 ns | 1.1 ns |
 | plain per-object increment | 0.3 ns | 0.4 ns |
 
 The global counter exists so a restored snapshot can never reuse a
@@ -196,5 +196,25 @@ number. Per-thread blocks keep that, since every number is still unique
 in the process, at about one nanosecond. A plain per-object increment
 does not: restore gen 5, store, and gen 6 names a second value.
 
-`sizeof(Derived::[T])` is `sizeof(T) + 88`: a 4-slot stamp (40), the
-pending inputs (40), and the generation (8).
+`sizeof(Derived::[T])` was `sizeof(T) + 88`: a 4-slot stamp (40), the
+pending inputs (40), and the generation (8). `stale()` now writes the
+inputs straight into the stamp with a building mark (the stamp's count's
+top bit), and `commit()` clears it; a build that fails part way leaves
+the mark, and a marked stamp reads as stale, so the next read builds
+again. That is `sizeof(T) + 48`.
+
+What changing the counter found:
+
+- **The first counter was one per translation unit.** `cc_gen_next` was
+  `static inline` with a `static` counter inside it, which C gives each
+  unit its own copy of. Two units storing to the same source handed it
+  the same number: `gen_units_repro.sh` against the first header prints
+  "unit A gave 1, unit B gave 1", the under-reporting direction. The
+  counter is now one `_Atomic` object defined where `CC_GEN_IMPL` is
+  defined, and the examples define it. A CC runtime home for it would
+  remove the macro.
+- **The mark cannot also detect a cycle.** A read of `d.lines()` from
+  inside `Doc_lines` finds the mark set, but so does the read after a
+  build that failed; both read as stale. Telling them apart needs a
+  second bit set only while the build is on the stack, and clearing it
+  on every exit path, which is `@defer`'s job, not the type's.

@@ -1,6 +1,7 @@
 /* A document with one derived field: the field is storage, d.lines() is the read. */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
+#define CC_GEN_IMPL                      /* this unit defines the counter */
 #include "cc_source.cch"
 
 typedef struct { size_t nl; size_t rows; } LineIndex;

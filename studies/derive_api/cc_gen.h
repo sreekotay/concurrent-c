@@ -18,10 +18,31 @@
 #include <stdatomic.h>
 
 /* ---- unique numbers ------------------------------------------------- */
+/* One counter per process, defined by exactly one translation unit:
+ * #define CC_GEN_IMPL before including this header there. (A static
+ * counter inside the inline function below would be one per translation
+ * unit, and two units storing to the same source could give it the same
+ * number twice: a stamp would then call a changed input unchanged.)
+ * Each thread takes numbers in blocks, so a bump is a thread-local
+ * increment and one shared atomic add per CC_GEN_BLOCK bumps. Numbers are
+ * unique in the process, not ordered in time across threads; stamps only
+ * compare them for equality. */
+
+#define CC_GEN_BLOCK 1024
+
+#ifdef CC_GEN_IMPL
+_Atomic uint64_t cc_gen_counter = 0;
+#else
+extern _Atomic uint64_t cc_gen_counter;
+#endif
 
 static inline uint64_t cc_gen_next(void) {
-    static _Atomic uint64_t next = 0;
-    return atomic_fetch_add_explicit(&next, 1, memory_order_relaxed) + 1;
+    static _Thread_local uint64_t next, end;
+    if (next == end) {
+        next = atomic_fetch_add_explicit(&cc_gen_counter, CC_GEN_BLOCK, memory_order_relaxed) + 1;
+        end = next + CC_GEN_BLOCK;
+    }
+    return next++;
 }
 
 /* ---- a source's generation ------------------------------------------ */
@@ -76,6 +97,20 @@ static inline void cc_stamp_commit(const CCStampCheck* c) {
     for (i = 0; i < c->n; i++) c->s->at[i] = c->in[i];
     c->s->n = c->n;
 }
+
+/* A build is about to run from these inputs: record them in the stamp,
+ * marked as building. Until cc_stamp_done a check finds the stamp stale,
+ * so a build that fails part way (no done) runs again at the next read. */
+#define CC_STAMP_BUILDING 0x80000000u
+
+static inline void cc_stamp_begin(CCStamp* s, const uint64_t* in, uint32_t n) {
+    uint32_t i;
+    if (n > CC_STAMP_MAX) __builtin_trap();
+    for (i = 0; i < n; i++) s->at[i] = in[i];
+    s->n = n | CC_STAMP_BUILDING;
+}
+
+static inline void cc_stamp_done(CCStamp* s) { s->n &= ~CC_STAMP_BUILDING; }
 
 /* Force the next check stale: explicit invalidation, and the test hook
  * for the execution check (clear, rebuild, compare). */
