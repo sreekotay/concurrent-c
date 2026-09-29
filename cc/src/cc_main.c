@@ -519,17 +519,27 @@ static int cc__input_is_shcc(CCUnitKind unit_kind, const char* path) {
     return k == CC_UNIT_KIND_SHCC;
 }
 
-/* The directory that holds this run's script `out/`, or empty when the
+/* The per-user directory that holds script stages, or empty when the
  * unit is not a script. macOS `TMPDIR` already ends in `/`; joining
  * another slash makes `T//cc-script-…`, and the parent of that `out/`
- * is not a project. */
+ * is not a project.
+ *
+ * Each script stages under its own `<root>/<hash of its absolute path>/`.
+ * Intermediates are named by the unit's stem (`out/make.c`, `make.o`), so
+ * one shared stage let two trees' `make.shcc` building at once overwrite
+ * each other's C and objects between compile and link, and each ran the
+ * other's program. */
 static char g_script_cache_root[PATH_MAX];
 
-static int cc__use_script_cache_dirs(void) {
+static int cc__use_script_cache_dirs(const char* in_path) {
     const char* env = getenv("TMPDIR");
     char tmp[PATH_MAX];
     char root[PATH_MAX];
+    char abs[PATH_MAX];
+    char stage[PATH_MAX];
+    const char* key = in_path;
     size_t n;
+    if (!in_path || !in_path[0]) return -1;
     if (!env || !env[0]) env = "/tmp";
     n = strlen(env);
     if (n + 1 > sizeof(tmp)) return -1;
@@ -538,10 +548,15 @@ static int cc__use_script_cache_dirs(void) {
     if (snprintf(root, sizeof(root), "%s/cc-script-%ld", tmp,
                  (long)getuid()) >= (int)sizeof(root))
         return -1;
+    if (realpath(in_path, abs)) key = abs;
+    if (snprintf(stage, sizeof(stage), "%s/%016llx", root,
+                 (unsigned long long)cc__fnv1a64_str(1469598103934665603ULL, key)) >=
+        (int)sizeof(stage))
+        return -1;
     if (strlen(root) + 1 > sizeof(g_script_cache_root)) return -1;
     memcpy(g_script_cache_root, root, strlen(root) + 1);
-    snprintf(g_out_root, sizeof(g_out_root), "%s/out", root);
-    snprintf(g_bin_root, sizeof(g_bin_root), "%s/bin", root);
+    snprintf(g_out_root, sizeof(g_out_root), "%s/out", stage);
+    snprintf(g_bin_root, sizeof(g_bin_root), "%s/bin", stage);
     snprintf(g_cache_root, sizeof(g_cache_root), "%s/.cc-build", g_out_root);
     return 0;
 }
@@ -1166,10 +1181,8 @@ static int derive_default_obj(const char* in_path, char* out_buf, size_t out_buf
                                  out_buf, out_buf_size);
 }
 
-/* .shcc scripts share a process-wide script cache (`$TMPDIR/cc-script-$UID`).
- * Basename-only stems collide (`make.shcc` in two trees → one `bin/make`), and
- * the warm link skip then keeps the wrong binary. Qualify by abs
- * path hash so each script gets its own product path. */
+/* A .shcc script's bin carries its abs path hash (`make-<hash>`), so a bin
+ * under a stage set up by hand (`--bin-dir`) still names one script. */
 static int cc__script_bin_stem(const char* in_path, char* out, size_t cap) {
     char base[96];
     char abs[PATH_MAX];
@@ -5719,8 +5732,8 @@ static int cc__git_root_walk(char* dir, char* out, size_t cap) {
  * directory the unit was written in, so `tests/x.ccs` cannot name
  * `../core/foo.cch`. The stage lives under the project's `out/`, inside
  * that project's checkout when it has one. A script's stage lives under
- * `$TMPDIR/cc-script-<uid>/out` instead, which also ends in `/out` and is
- * not that project. */
+ * `$TMPDIR/cc-script-<uid>/<hash>/out` instead, which also ends in `/out`
+ * and is not that project. */
 static int cc__project_root_for_unit(const char* in_path, char* out, size_t cap) {
     char abs[PATH_MAX];
     char dir[PATH_MAX];
@@ -8211,7 +8224,7 @@ static int run_build_mode(int argc, char** argv) {
 
     if (!out_dir && !bin_dir && !user_out && pos_count > 0 &&
         cc__input_is_shcc(unit_kind, pos_args[0])) {
-        if (cc__use_script_cache_dirs() == 0)
+        if (cc__use_script_cache_dirs(pos_args[0]) == 0)
             cc_refresh_host_obj_root(cc_bin);
     }
 
@@ -10687,7 +10700,7 @@ int main(int argc, char **argv) {
     cc_set_out_dir(out_dir, bin_dir);
     if (!out_dir && !bin_dir && !user_out && pos_count > 0 &&
         cc__input_is_shcc(unit_kind, pos_args[0]))
-        (void)cc__use_script_cache_dirs();
+        (void)cc__use_script_cache_dirs(pos_args[0]);
     cc_refresh_host_obj_root(cc_bin);
     if (ensure_out_dir() != 0) {
         fprintf(stderr, "cc: failed to create out dirs under: %s\n", g_out_root);
