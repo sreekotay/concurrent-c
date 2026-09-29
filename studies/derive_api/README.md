@@ -219,6 +219,27 @@ What it found:
   (one typeview run failed `typeview_as_ufcs_smoke` once and passed on
   two reruns and standalone).
 
+### Two views on one instance
+
+The factory's view is the instance's unnamed view, so a program that also
+writes `@typeview on Source_int { … }` (or `on Source::[int]`) has two
+views of one name on one type. The rule was already written down: the
+narrowest pattern wins, and equal patterns are ill-formed. It was not
+enforced, for factories or for two views on a plain struct: whichever the
+index read first governed and the other was silently ignored, whether it
+loosened or tightened. The compiler now refuses the second, with the
+first as its note (for a factory's, the note is at
+`<CC_GENERIC_FACTORY(Source) instance Source_int>`). A family glob
+(`Source_*`) under the instance's exact view is still the documented
+narrowest-wins, and a named view (`@typeview Ro on Source::[int]`) is a
+separate facet and still narrows a binding.
+
+Left open: a function the program writes whose first parameter is the
+instance counts as the type's own code, so it can store to `value`
+without the bump (`poke(Source_int*)` changes the value and keeps the
+generation). For a factory's instance, the type's own code could be
+exactly the functions the factory emitted.
+
 ## Costs measured
 
 `gen_bench.c`, gcc -O2, 4 cores, 50M stores per thread, time per store:
