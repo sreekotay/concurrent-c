@@ -1,0 +1,22 @@
+/* `@typeview on Cell::[int]` binds the instance Cell_int: the subject is
+ * written the way the program spells the type, and names the instance it
+ * made. (Kept as written it matched no type, and the store below went
+ * through with no word.) */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+
+CC_GENERIC_FACTORY(Cell, 1) {
+    return @emit(`
+        typedef struct { ${arg(0)} value; unsigned long gen; } ${mangled};
+        static inline void ${mangled}_set(${mangled}* c, ${arg(0)} v) { c->value = v; c->gen++; }
+        static inline ${arg(0)} ${mangled}_get(const ${mangled}* c) { return c->value; }`, arena);
+}
+
+@typeview on Cell::[int] { r: ^value, ^gen; }
+
+int main(void) {
+    Cell::[int] c = {0};
+    c.set(3);
+    c.value = 4;
+    return c.get();
+}

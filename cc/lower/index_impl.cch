@@ -2344,7 +2344,19 @@ static CCSlice cc__hook_subject_text(CcIndex* ix, const CcUnit* u, CcSpan sp) {
         if (sb.len() && t->after_space && t->kind == CC_TK_IDENT) sb.push_char(' ', ix->arena);
         sb.push_slice(t->text, ix->arena);
     }
-    return cc__ix_finish(ix, &sb);
+    {
+        /* `on Source::[size_t]` names the instance `Source_size_t`: the
+         * subject is matched against the instance's name, so the spelling
+         * a program writes takes the name the instance was given. Kept as
+         * written it matched nothing, and the view or hooks bound nothing
+         * without a word. */
+        CCSlice text = cc__ix_finish(ix, &sb);
+        size_t k;
+        for (k = 0; k + 2 < text.len; k++)
+            if (text.ptr[k] == ':' && text.ptr[k + 1] == ':' && text.ptr[k + 2] == '[')
+                return cc__mangle(ix, text);
+        return text;
+    }
 }
 
 static void cc__typehooks_decl(CcIndex* ix, CcUnit* u, CcDecl* d, CcHookEntryList entries) {
