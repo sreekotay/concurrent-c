@@ -14,9 +14,16 @@ You do **not** need `@typehooks` to add a method. Declaring
 lifecycle and for library-owned naming families.
 Methods come from ordinary functions. Naming-policy hooks (including stdlib’s `*`) are how whole families share a convention without the compiler special-casing type names — you can read the hook; it isn’t magic.
 
-Subject may be an exact type (`Box`), a pointer key (`MyRes*`), or a
-trailing-`*` family (`Fam_*`). Same match rule on both forms:
-**narrowest pattern wins**; two equal-score matches are ill-formed.
+Subject may be an exact type (`Box`), a pointer key (`MyRes*`), a
+generic instance as the program spells it (`Vec::[int]`, which names
+`Vec_int`), or a trailing-`*` family (`Fam_*`). Same match rule on both
+forms: **narrowest pattern wins**; two equal-score matches are ill-formed.
+For `@typeview` the compiler refuses the second of two views of one name
+on one subject ("a second @typeview (default) on T", with the first as a
+note). A generic factory that writes `@typeview on ${mangled} { … }` into
+what it emits owns the unnamed view of every instance: a program narrows
+an instance with a named view (`@typeview Ro on Vec::[int]`), not a
+second unnamed one.
 
 ---
 

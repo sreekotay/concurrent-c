@@ -1,0 +1,25 @@
+/* The factory's unnamed view and a program's named view on one instance
+ * are two facets: the named one narrows the bindings that ask for it. */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+
+CC_GENERIC_FACTORY(Cell, 1) {
+    return @emit(`
+        typedef struct { ${arg(0)} value; unsigned long gen; } ${mangled};
+        @typeview on ${mangled} { r: ^value, ^gen; }
+        static inline void ${mangled}_set(${mangled}* c, ${arg(0)} v) { c->value = v; c->gen++; }
+        static inline ${arg(0)} ${mangled}_get(const ${mangled}* c) { return c->value; }`, arena);
+}
+
+@typeview Ro on Cell::[int] { r: get; }
+
+static int peek(@typeview(Ro) Cell::[int]* c) { return c->get(); }
+
+int main(void) {
+    Cell::[int] c = {0};
+    c.set(3);
+    if (peek(&c) != 3) return 1;
+    printf("ok\n");
+    return 0;
+}

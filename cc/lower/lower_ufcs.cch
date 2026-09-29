@@ -1834,6 +1834,8 @@ static void uf_check_restrict(CcLowerer* L, CcDecl* d, CcTypeview tv, CCSlice tn
     }
 }
 
+static void uf_check_dup_view(CcLowerer* L, CcDecl* d, CcTypeview tv);
+
 /* One `@typeview T { as: f, g; }`: each face names a value member, the
  * graph is acyclic, and no type is reachable through two faces. */
 static void uf_check_view(CcLowerer* L, CcDecl* d, CcTypeview tv) {
@@ -1847,6 +1849,7 @@ static void uf_check_view(CcLowerer* L, CcDecl* d, CcTypeview tv) {
     if (!tv.target) return;
     tn = cc__strip_tag(ix->canon(tv.target));
     if (!tn.len) return;
+    uf_check_dup_view(L, d, tv);
     uf_check_dup_items(L, d, tv, tn);                    /* the lists read as one, glob subject or not */
     if (tn.ptr[tn.len - 1] == '*') return;               /* a family glob has no one struct */
     for (i = 0; i < ne; i++) {
@@ -2008,6 +2011,8 @@ static bool uf_subject_matches(CCSlice subj, CCSlice base, size_t* score) {
 typedef struct UfViewEntry {
     CCSlice subj;
     CcTypeview tv;
+    CcDecl* d;             /* the declaration, and the unit it is in */
+    CcUnit* u;
 } UfViewEntry;
 typedef struct UfViewList {
     CcIndex* ix;
@@ -2037,6 +2042,8 @@ static Vec::[UfViewEntry]* uf_views_of(CcIndex* ix) {
             UfViewEntry e;
             if (!uf_decl_typeview(d, &e.tv)) continue;
             e.subj = cc__hook_subject_text(ix, u, d->span);
+            e.d = d;
+            e.u = u;
             g_uf_views.entries.push(e);
         }
     }
@@ -2045,6 +2052,50 @@ static Vec::[UfViewEntry]* uf_views_of(CcIndex* ix) {
     g_uf_views.n_decls = nd;
     g_uf_views.live = true;
     return &g_uf_views.entries;
+}
+
+/* Two views of one name on one subject. The narrowest pattern governs a
+ * binding and equal patterns are ill-formed (docs/typehooks-typeviews.md):
+ * with two, which one applied was whichever the index read first, and the
+ * other said nothing. A factory that declares its instances' view is one
+ * of the two when a program writes another view on the same instance; a
+ * named view (`@typeview Ro on T`) is another facet and is not. The later
+ * declaration is refused, with the earlier one as its note. */
+static void uf_check_dup_view(CcLowerer* L, CcDecl* d, CcTypeview tv) {
+    Vec::[UfViewEntry]* views = uf_views_of(L->ix);
+    size_t n = views->len();
+    size_t self = n;
+    size_t i;
+    CCSlice subj;
+    for (i = 0; i < n; i++)
+        if (views->get_ptr(i)->d == d) { self = i; break; }
+    if (self == n) return;
+    subj = views->get_ptr(self)->subj;
+    if (!subj.len) return;
+    for (i = 0; i < n; i++) {
+        UfViewEntry* e = views->get_ptr(i);
+        CCSlice label = tv.view.len ? tv.view : cstr_slice("(default)");
+        CcLoc at;
+        CcLoc first;
+        CcDiag g;
+        CcDiags* ds = L->ds;
+        if (i == self) continue;
+        /* A later one in this unit is refused when its own turn comes; one
+         * this unit's walk never reaches (a factory's expansion, another
+         * unit) is reported here, or not at all. */
+        if (i > self && e->u == L->unit) continue;
+        if (!slice_eq(e->tv.view, tv.view) || !slice_eq(e->subj, subj)) continue;
+        {
+            CCString m = @string(`a second ${"@"}typeview ${label} on ${subj}: a type has one view of each name; narrow a binding with a named view instead`, L->arena);
+            CCString nm = @string(`the first ${"@"}typeview ${label} on ${subj}`, L->arena);
+            at = L->unit->loc(d->span);
+            first = e->u->loc(e->d->span);
+            g = CcDiag_error(at, cc_string_persist_slice(L->arena, &m));
+            g = CcDiag_with_note_at(g, first, cc_string_persist_slice(L->arena, &nm), L->arena);
+            ds->push(g);
+        }
+        return;
+    }
 }
 
 static bool uf_view_for(CcIndex* ix, CCSlice base, CCSlice view, CcTypeview* out) {

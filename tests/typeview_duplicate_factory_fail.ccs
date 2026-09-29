@@ -1,0 +1,21 @@
+/* A factory that declares its instances' view in what it emits owns the
+ * unnamed view of every instance: a program's second unnamed view on the
+ * same instance, however spelled, is refused (narrow with a named view). */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+
+CC_GENERIC_FACTORY(Cell, 1) {
+    return @emit(`
+        typedef struct { ${arg(0)} value; unsigned long gen; } ${mangled};
+        @typeview on ${mangled} { r: ^value, ^gen; }
+        static inline void ${mangled}_set(${mangled}* c, ${arg(0)} v) { c->value = v; c->gen++; }
+        static inline ${arg(0)} ${mangled}_get(const ${mangled}* c) { return c->value; }`, arena);
+}
+
+@typeview on Cell::[int] { r: *; }
+
+int main(void) {
+    Cell::[int] c = {0};
+    c.set(3);
+    return c.get();
+}

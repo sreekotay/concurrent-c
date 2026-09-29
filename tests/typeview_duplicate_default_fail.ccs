@@ -1,0 +1,14 @@
+/* Two unnamed views on one type: which one governed a binding was the one
+ * the index read first, and the other said nothing. Equal patterns are
+ * ill-formed (the narrowest pattern wins); the second is refused. */
+#include <ccc/std/prelude.cch>
+
+typedef struct { int a; int b; } Two;
+
+@typeview on Two { r: ^a; }
+@typeview on Two { r: ^b; }
+
+int main(void) {
+    Two t = {0};
+    return t.b;
+}
