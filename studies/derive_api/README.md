@@ -112,10 +112,13 @@ What the prototype found:
   storage class. Keeping the pending inputs in the value (one `CCInputs`,
   40 bytes) removed the check type: `stale` returns the slot, `commit()`
   takes nothing.
-- **The fence does not reach factory-generated types.**
-  `fence_on_generic_probe.ccs`: `@typeview on Plain { r: ^value; }`
-  refuses `p.value = 1`; the same view on `Source_size_t`, by exact name
-  or by `Source_*`, lets `s.value = 1` through with no diagnostic.
+- **Withdrawn: "the fence does not reach factory-generated types."**
+  It does. The first probe stored to a fenced plain struct first, and
+  the checker reports one refusal per unit, so the second store's
+  refusal never printed. A view on `Source_size_t`, on `Source_*`, or
+  emitted by the factory itself, refuses the store (see the fifth
+  pass). The one spelling that did bind nothing was
+  `@typeview on Source::[size_t]`; that is fixed in the compiler now.
 - **C-macro families are invisible to the lowerer**: neither UFCS nor a
   fence resolves on a type made by `#define`. The family has to be a
   factory.
@@ -169,9 +172,8 @@ What it found:
 - **The storage is private with no new mechanism.** `r: ^lines` in the
   view refuses `d.lines.ref()` in `main` ("restricted mode '(default)'
   on 'Doc' does not allow field 'lines'"), and `Doc_lines` is a trusted
-  body because its first parameter is a `Doc *`. The deny works here
-  because `Doc` is a user struct; on the factory's own type it still
-  does not (the fence finding above).
+  body because its first parameter is a `Doc *`. The factory's own type
+  is fenced the same way, by the view it emits (fifth pass).
 - **What the shape does not catch.** A missing `commit()` rebuilds on
   every read: slow, never wrong. An input left out of `cc_inputs` gives a
   stale value: wrong. The second is what the execution check exists
@@ -180,6 +182,42 @@ What it found:
   recipe pass held two pointers across `width.set(4)` and saw the
   rebuilt value through both. That is section 2's borrow rule, and a
   checker applying it to this read would refuse the held pointer.
+
+## Fifth pass: each generic declares its own privacy
+
+The factory writes the view into the code it emits, next to the struct:
+
+```c
+typedef struct ${mangled} { ${arg(0)} value; CCGen g; } ${mangled};
+@typeview on ${mangled} { r: ^value, ^g; }
+```
+
+and for `Derived::[T]`, `{ r: ^value, ^at, ^g; }`. Every instance is then
+private without the program writing a view: the only code that touches
+the bytes is the instance's own methods, whose first parameter is the
+instance, so `set()` and `mut()` are the only stores to a source and both
+bump its generation, and nothing outside `stale()` / `commit()` can forge
+a stamp. `fence_probe.sh` builds each case on its own: a store to
+`s.value` is refused, a read of `s.g` is refused, `set()` and `val()`
+build and run.
+
+What it found:
+
+- **The fence was never missing** (the second pass's finding is
+  withdrawn above). Two things made it look missing: the checker's one
+  refusal per unit, and a `#if` meant to pick a case: CC checks the source
+  before the C preprocessor, so every branch is checked and the first
+  refusal in any branch is the one reported. Each case is its own build.
+- **`@typeview on Source::[size_t]` bound nothing, silently.** A view's
+  subject was kept as its source text and matched against the instance's
+  name, `Source_size_t`; the generic spelling never matched and nothing
+  said so. `cc__hook_subject_text` now gives a subject written
+  `Name::[args]` the instance's mangled name (the same recipe that names
+  the instance), which fixes `@typehooks on Name::[args]` too.
+  `tests/typeview_on_generic_spelling_fail.ccs` covers it; the typeview,
+  typehooks, generic and factory slices of the compiler's tests pass
+  (one typeview run failed `typeview_as_ufcs_smoke` once and passed on
+  two reruns and standalone).
 
 ## Costs measured
 

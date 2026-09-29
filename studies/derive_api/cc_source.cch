@@ -10,6 +10,9 @@ CC_GENERIC_FACTORY(Source, 1) {
 #ifndef ${mangled}_DEFINED
 #define ${mangled}_DEFINED
 typedef struct ${mangled} { ${arg(0)} value; CCGen g; } ${mangled};
+/* Only the methods below touch the bytes: a store that skipped set() or
+ * mut() would change the value and keep the generation. */
+@typeview on ${mangled} { r: ^value, ^g; }
 static inline void ${mangled}_set(${mangled}* s, ${arg(0)} v) { s->value = v; cc_gen_bump(&s->g); }
 static inline ${arg(0)}* ${mangled}_mut(${mangled}* s) { cc_gen_bump(&s->g); return &s->value; }
 static inline ${arg(0)} ${mangled}_val(const ${mangled}* s) { return s->value; }
@@ -29,6 +32,9 @@ CC_GENERIC_FACTORY(Derived, 1) {
 #ifndef ${mangled}_DEFINED
 #define ${mangled}_DEFINED
 typedef struct ${mangled} { ${arg(0)} value; CCStamp at; CCGen g; } ${mangled};
+/* The slot is written through stale() and read through ref(); the stamp
+ * and the generation are the type's own. */
+@typeview on ${mangled} { r: ^value, ^at, ^g; }
 static inline ${arg(0)}* ${mangled}_stale(${mangled}* d, CCInputs in) {
     CCStampCheck c = cc_stamp_check(&d->at, in.v, in.n);
     if (!c.stale) return 0;
