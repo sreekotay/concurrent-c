@@ -24,7 +24,7 @@ and a bump with no logged edit; no work on a frame where nothing moved.
 | Piece | Calls | Answers |
 |-------|-------|---------|
 | `CCGen` | `cc_gen_bump`, `cc_gen_get` | has this source changed since |
-| `CCStamp`, `CCStampCheck` | `cc_stamp_check`, `cc_stamp_commit`, `cc_stamp_clear`, `CC_IN(...)` | which inputs moved since the last build, and what they were |
+| `CCStamp`, `CCStampCheck` | `cc_stamp_check`, `cc_stamp_commit`, `cc_stamp_prev`, `cc_stamp_clear`, `CC_IN(...)` | which inputs moved since the last build, and what they were |
 | `CCStateId` | `cc_state_id_new`, `cc_state_id_eq` | is this the same state |
 | `CC_GENLOG_DECL(Name, T, N)` | `Name_push`, `Name_since`, `Name_at` | which edits happened since a generation, or rebuild |
 
@@ -33,7 +33,7 @@ One derivation, lowered:
 ```c
 CCStampCheck c = cc_stamp_check(&d->idx_at, CC_IN(cc_gen_get(&d->text.log.gen), d->width));
 if (c.stale) {
-    ...rebuild, or patch from TextLog_since(&d->text.log, c.prev[0])...
+    ...rebuild, or patch from TextLog_since(&d->text.log, cc_stamp_prev(&c, 0))...
     cc_stamp_commit(&c);        /* only after success */
     cc_gen_bump(&d->idx_gen);   /* for anything derived from idx */
 }
@@ -47,8 +47,8 @@ An effect on change is the same three calls with an effect in the block.
   path then had to read the stamp's array to learn whether `width` had
   moved, and kept its own copy of the text generation it was built at,
   a co-fact inside the API's own example. The check now reports
-  `changed` (a bit per input), `prev` (the inputs at the last build),
-  and `built`.
+  `changed` (a bit per input), the inputs at the last build
+  (`cc_stamp_prev`, read before the commit), and `built`.
 - An edit logged as coordinates cannot be patched out when it is an
   erase: the removed bytes are gone. The example rebuilds. The better
   shape is an edit that carries small facts about the removed content,
@@ -242,6 +242,9 @@ exactly the functions the factory emitted.
 
 ## Sixth pass: the Ruby / Rust `update`, as one loop
 
+(The example this pass describes is superseded by the seventh pass
+below; `git show 98284b9:studies/derive_api/example_record.ccs` has it.)
+
 `example_record.ccs` is the `update` from a thread comparing a Ruby and a
 Rust version of the same method: three columns, a JSON column derived
 from one of them, a keep / clear / set argument, and a partial `UPDATE`.
@@ -313,6 +316,126 @@ it stands, each worked around in the file and worth fixing:
   for `typedef char[:] Text` *is* `Text`'s `eq` method, so `a->eq(b)`
   inside it called itself and spun. That is UFCS as designed; the
   equalities are named `same_*`.
+
+## Seventh pass: a row is one Source
+
+The sixth pass stated the column list twice, needed a same-value
+function per column, and a three-arm `Patch` for keep / clear / set.
+None of that was new information: the row's struct already says what
+the columns are. This pass widens the three nouns already here instead
+of adding any:
+
+| Rule | What it widens |
+|------|----------------|
+| A Source has a stamp per part: a scalar, slice or list is one part, a struct one per field (one level) | `Source::[Row]` (the struct branch of the same factory) |
+| `set` takes the arena the value's bytes live on, and copies only the parts that changed onto it | `set(next, arena)`, which says which fields moved (bit i: field i) |
+| A watermark is as wide as what it watches | `CCStamp::[Row]`: a `CCStamp` with one slot per field; `cc_stamp_check` / `cc_stamp_commit` take any stamp with `n` and `at[]` |
+
+`CCStampCheck` is unchanged in kind; it holds up to 32 inputs, one bit
+of `changed` each, and `prev[]` became `cc_stamp_prev(&c, i)` (read from
+the stamp before the commit), so the check does not carry a second copy.
+
+How a part compares and copies follows from its type, which the factory
+reads by reflection: a scalar by `==`; `char[:]` by its bytes and
+`clone_into`; a struct field by field; a `CCVec::[T]` element by
+element; anything else (a `@variant`) by the type's own `T_eq(T*, T)` and
+`T_clone_into(T*, CCArena)`, which the instance declares.
+
+The record, now:
+
+```c
+typedef struct {
+    char[:]          name;
+    Styles           custom_styles;
+    CCVec::[Setting] settings;
+} Row;
+
+typedef struct {
+    CCArena        keep;
+    Source::[Row]  row;        /* the row, and a stamp per field */
+    CCStamp::[Row] written;    /* the row as last written */
+} Record;
+
+static void !>(CCError) Record_update(Record* r, Row next) {
+    next.check() !>;                     /* a rule on the whole row */
+    r->row.set(next, r->keep) !>;
+    return cc_ok();
+}
+
+static void !>(CCError) Record_flush(Record* r, SqlTable::[Row]* db) {
+    CCStampCheck k = r->row.since(&r->written);
+    if (!k.stale) return cc_ok();
+    db->update(r->row.ref(), k.changed) !>;
+    cc_stamp_commit(&k);
+    return cc_ok();
+}
+
+/* the caller */
+Row next = r.row.val();
+next.name = "beta";
+next.custom_styles = (Styles){ .some = bold };
+save(&r, &db, next);
+```
+
+Keep is "the same value", which moves no stamp; `Patch`, the `same_*`
+functions, `COL_*`, `Record_row()` and the per-bit SET pushes are gone.
+"name cannot be NULL" is the type of `name`. The JSON column is no
+longer a `Derived`: the watermark already builds it only when the
+settings changed and a flush writes them (still one build in the run).
+`sql_standin.cch` is the database stand-in: `SqlTable::[Row]` writes
+the fields a mask names, by reflection, each through its type's
+`T_sql(T*, CCArena)`. The run is the sixth pass's, line for line.
+
+`set()` copies only what changed: after a width edit, the name's bytes
+and the list are the ones already on `keep`; after the first set, all
+three are copies, not the caller's.
+
+What it found:
+
+- **Reflection refused a struct with a `char[:]` or `CCVec::[T]`
+  field**, the whole struct (`cc_reflect_field_count` = -1). Parameter
+  lists already rewrote slice sugar before the member grammar; struct
+  fields did not, and neither rewrote `Name::[args]`. Both now do: a
+  field reflects as `CCSlice name` / `CCVec_Setting settings`, the
+  instance names the lowering produces (`preprocess.c`).
+- **The index read every template of a factory as declaring every
+  instance.** A factory whose branches write different functions, as
+  `Source`'s scalar and struct branches do, gave each instance every
+  branch's declarations, first one wins: `Source::[size_t].set` read as
+  returning a Result, and `example_doc` stopped compiling. The run output
+  of a factory that computes is now indexed over those guesses
+  (`lower_generics.cch`, `index_impl.cch`); the run arrives with its
+  Results lowered, so a `CCResult_V_E` return is read back as `V !>(E)`
+  through the same unmangler that reads `CCVec_int`.
+- **A factory body compiles on its own.** `@comptime` helper functions
+  and file-scope macros are not in its unit, so the struct branch's
+  helpers are macros defined inside the body.
+- **A generated definition cannot see a Result function it declares.**
+  The per-type helpers the factory writes return `bool` with an out
+  parameter; only `set` returns a Result.
+- **A `@variant` does not reflect in a factory** (the lowered-C reflect
+  source is never set), so `Styles` brings its own `eq` and
+  `clone_into`. With it, every one of the sixth pass's `same_*`
+  functions would be generated.
+- **The fence does not follow a field chain.** `r.row.value.width = 9;`
+  builds, and so does `h.n.value = 4;` for a `Source::[size_t]` field;
+  a store through a binding of the instance or a pointer to it is
+  refused (`fence_probe.sh`, `via_field`). That predates this pass, and
+  matters more now that a Source is usually a field.
+- **`val()` shares the row's lists.** A row from `r.row.val()` holds the
+  record's `CCVec`; an in-place edit of it changes the record behind its
+  stamps, and `set()` then sees "the same". The example's edit builds a
+  new list (`settings_put`). A read-only face on `val()`'s result would
+  make that a compile error.
+- **The literal gap reaches variant arms.** `(Styles){ .some = "bold" }`
+  is empty like a `char[:]` field initializer; assignment
+  (`next.name = "beta"`) works.
+- `Table` is an existing family name; the stand-in is `SqlTable`.
+
+Left open: a derivation over one field reads its stamp as
+`r.row.gen(2)`, a field number; a name would be better. And a Source of
+a struct costs 8 bytes per field for the stamps, and each `set()` one
+comparison per field (a list compares element by element).
 
 ## Costs measured
 

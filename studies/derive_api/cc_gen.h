@@ -54,48 +54,64 @@ static inline uint64_t cc_gen_get(const CCGen* g) { return g->v; }
 
 /* ---- a stamp: the inputs a derived value was last built from --------- */
 /* An input is a uint64_t: a source's generation, or a scalar compared by
- * value. n == 0 means never built, so a zeroed stamp is always stale. */
+ * value. n == 0 means never built, so a zeroed stamp is always stale.
+ *
+ * A stamp is any struct with `uint32_t n` and `uint64_t at[W]`: CCStamp is
+ * the one a derivation keeps (W = 4: a derivation with more inputs should
+ * be split), and CCStamp::[T] (cc_source.cch) is one slot per field of T,
+ * the watermark over a Source of a struct. The functions below take any
+ * of them. */
 
 #define CC_STAMP_MAX 4
+#define CC_STAMP_WIDE_MAX 32           /* one bit of `changed` per input */
 
 typedef struct {
     uint32_t n;
     uint64_t at[CC_STAMP_MAX];
 } CCStamp;
 
+#define CC_STAMP_WIDTH(s_) ((uint32_t)(sizeof((s_)->at) / sizeof((s_)->at[0])))
+
 typedef struct {
-    CCStamp* s;
-    uint32_t n;
-    uint64_t in[CC_STAMP_MAX];     /* the inputs now */
-    uint64_t prev[CC_STAMP_MAX];   /* the inputs at the last build; valid when built */
-    uint32_t changed;              /* bit i set: input i moved (all set when !built) */
-    bool     built;                /* there was a previous build to patch from */
-    bool     stale;                /* changed != 0 */
+    uint32_t* sn;                      /* the stamp checked: its count */
+    uint64_t* sat;                     /*   and its slots, the inputs at the last build */
+    uint32_t  n;
+    uint64_t  in[CC_STAMP_WIDE_MAX];   /* the inputs now (the first n) */
+    uint32_t  changed;                 /* bit i set: input i moved (all set when !built) */
+    bool      built;                   /* there was a previous build to patch from */
+    bool      stale;                   /* changed != 0 */
 } CCStampCheck;
 
 #define CC_INPUT(i) (1u << (i))
 
 /* Compare the inputs with the stamp. Nothing is written yet. */
-static inline CCStampCheck cc_stamp_check(CCStamp* s, const uint64_t* in, uint32_t n) {
-    CCStampCheck c = { .s = s, .n = n };
+static inline CCStampCheck cc_stamp_check_at(uint32_t* sn, uint64_t* sat, uint32_t width,
+                                             const uint64_t* in, uint32_t n) {
+    CCStampCheck c = { .sn = sn, .sat = sat, .n = n };
     uint32_t i;
-    if (n > CC_STAMP_MAX) __builtin_trap();     /* split the derivation */
-    c.built = s->n == n;
+    if (n > width || n > CC_STAMP_WIDE_MAX) __builtin_trap();   /* split the derivation */
+    c.built = *sn == n;
     for (i = 0; i < n; i++) {
         c.in[i] = in[i];
-        c.prev[i] = c.built ? s->at[i] : 0;
-        if (!c.built || s->at[i] != in[i]) c.changed |= CC_INPUT(i);
+        if (!c.built || sat[i] != in[i]) c.changed |= CC_INPUT(i);
     }
     c.stale = c.changed != 0;
     return c;
+}
+/* cc_stamp_check(&stamp, in, n), or (&stamp, CC_IN(a, b)) */
+#define cc_stamp_check(s_, ...) cc_stamp_check_at(&(s_)->n, (s_)->at, CC_STAMP_WIDTH(s_), __VA_ARGS__)
+
+/* Input i at the last build (0 when never built): read it before commit. */
+static inline uint64_t cc_stamp_prev(const CCStampCheck* c, uint32_t i) {
+    return c->built ? c->sat[i] : 0;
 }
 
 /* Record the inputs the rebuild used. Call only after the rebuild
  * succeeded; a failed rebuild leaves the stamp stale, so it retries. */
 static inline void cc_stamp_commit(const CCStampCheck* c) {
     uint32_t i;
-    for (i = 0; i < c->n; i++) c->s->at[i] = c->in[i];
-    c->s->n = c->n;
+    for (i = 0; i < c->n; i++) c->sat[i] = c->in[i];
+    *c->sn = c->n;
 }
 
 /* A build is about to run from these inputs: record them in the stamp,
@@ -103,18 +119,19 @@ static inline void cc_stamp_commit(const CCStampCheck* c) {
  * so a build that fails part way (no done) runs again at the next read. */
 #define CC_STAMP_BUILDING 0x80000000u
 
-static inline void cc_stamp_begin(CCStamp* s, const uint64_t* in, uint32_t n) {
+static inline void cc_stamp_begin_at(uint32_t* sn, uint64_t* sat, uint32_t width,
+                                     const uint64_t* in, uint32_t n) {
     uint32_t i;
-    if (n > CC_STAMP_MAX) __builtin_trap();
-    for (i = 0; i < n; i++) s->at[i] = in[i];
-    s->n = n | CC_STAMP_BUILDING;
+    if (n > width) __builtin_trap();
+    for (i = 0; i < n; i++) sat[i] = in[i];
+    *sn = n | CC_STAMP_BUILDING;
 }
-
-static inline void cc_stamp_done(CCStamp* s) { s->n &= ~CC_STAMP_BUILDING; }
+#define cc_stamp_begin(s_, ...) cc_stamp_begin_at(&(s_)->n, (s_)->at, CC_STAMP_WIDTH(s_), __VA_ARGS__)
+#define cc_stamp_done(s_) ((void)((s_)->n &= ~CC_STAMP_BUILDING))
 
 /* Force the next check stale: explicit invalidation, and the test hook
  * for the execution check (clear, rebuild, compare). */
-static inline void cc_stamp_clear(CCStamp* s) { s->n = 0; }
+#define cc_stamp_clear(s_) ((void)((s_)->n = 0))
 
 /* The input list, written once: CC_IN(a, b) expands to (array, count). */
 #define CC_IN(...) (const uint64_t[]){ __VA_ARGS__ }, \

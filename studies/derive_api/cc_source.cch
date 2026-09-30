@@ -3,6 +3,9 @@
 #define CC_SOURCE_CCH
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_instantiate.cch>
+#include <ccc/cc_slice.cch>
+#include <string.h>
+#include <stdio.h>
 #include "cc_gen.h"
 
 /* Source::[T] is a value and its stamp: a generation that moves on every
@@ -10,9 +13,278 @@
  * declared: set() compares with eq and moves the stamp only when the value
  * changed, which an effect (a write, a flush) needs and a cache does not.
  * set() says whether the stamp moved. mut() hands out the bytes and moves
- * the stamp without comparing. */
+ * the stamp without comparing.
+ *
+ * A Source has a stamp per part. A scalar, a slice or a list is one part;
+ * a struct is one part per field, one level deep. For a struct T,
+ * set(next, arena) compares each field, copies the bytes of the fields
+ * that changed onto the arena, moves their stamps, and says which moved
+ * (bit i: field i); since(&w) checks the stamps against a watermark
+ * CCStamp::[T]. How a field compares and copies follows from its type:
+ *
+ *   scalar (a number, an enum, a pointer)   ==, and a copy
+ *   char[:]                                 its bytes; clone_into
+ *   a struct the compiler can see into      field by field, the same rules
+ *   CCVec::[T]                              length, then element by element
+ *   anything else (a @variant, ...)         the type's own T_eq(T*, T) and
+ *                                           T_clone_into(T*, CCArena)
+ */
 CC_GENERIC_FACTORY(Source) {
     if (type_args.len < 1 || !mangled.ptr) return cc_slice_empty();
+    if (type_args.len == 1) {
+        /* A factory body is compiled on its own, so its helpers are
+         * macros local to it. */
+#define PART(ty, el) ({                                                        \
+            static const char* const sc_[] = {                                \
+                "bool", "_Bool", "char", "signed char", "unsigned char",       \
+                "short", "unsigned short", "int", "unsigned", "unsigned int",  \
+                "long", "unsigned long", "long long", "unsigned long long",    \
+                "float", "double", "size_t", "ptrdiff_t", "intptr_t",          \
+                "uintptr_t", "int8_t", "int16_t", "int32_t", "int64_t",        \
+                "uint8_t", "uint16_t", "uint32_t", "uint64_t", 0 };            \
+            int k_ = cc_reflect_kind(ty), p_ = -1, i_;                        \
+            if (k_ == CC_REFLECT_KIND_PRIMITIVE || k_ == CC_REFLECT_KIND_POINTER || \
+                k_ == CC_REFLECT_KIND_ENUM || strchr((ty), '*')) p_ = 0;      \
+            for (i_ = 0; p_ < 0 && sc_[i_]; i_++)                             \
+                if (strcmp((ty), sc_[i_]) == 0) p_ = 0;                       \
+            if (p_ < 0 && strcmp((ty), "CCSlice") == 0) p_ = 1;               \
+            if (p_ < 0 && strncmp((ty), "CCVec_", 6) == 0) {                  \
+                snprintf((el), 128, "%s", (ty) + 6);                          \
+                p_ = 3;                                                       \
+            }                                                                 \
+            if (p_ < 0 && cc_reflect_field_count(ty) > 0) p_ = 2;             \
+            if (p_ < 0) p_ = 4;                                               \
+            p_; })
+#define SAME(ty, x, y, out) do {                                               \
+            char el_[128];                                                    \
+            switch (PART(ty, el_)) {                                          \
+            case 0: snprintf((out), sizeof(out), "((%s) == (%s))", (x), (y)); break; \
+            case 1: snprintf((out), sizeof(out), "cc__slice_eq(%s, %s)", (x), (y)); break; \
+            case 4: snprintf((out), sizeof(out), "%s_eq((%s*)&(%s), %s)", (ty), (ty), (x), (y)); break; \
+            default: snprintf((out), sizeof(out), "cc__same_%s(%s, %s)", (ty), (x), (y)); \
+            } } while (0)
+/* "dst is src, its bytes on the arena `a`"; on failure run fail_e (with
+ * the CCError e in scope) or fail_oom. The helpers this calls return bool:
+ * a generated definition cannot yet see a Result function it declares. */
+/* A type the Source cannot see into brings T_eq and T_clone_into; the
+ * instance declares them, since it may come before their definitions. */
+#define OWN_NOTE(ty) do {                                                      \
+            char el_[128], pb_[512];                                          \
+            int q_, n_;                                                       \
+            if (PART(ty, el_) != 4) break;                                    \
+            for (q_ = 0; q_ < nown; q_++) if (strcmp(owned[q_], (ty)) == 0) break; \
+            if (q_ < nown || nown >= 16) break;                               \
+            snprintf(owned[nown++], 128, "%s", (ty));                         \
+            n_ = snprintf(pb_, sizeof(pb_),                                   \
+                "\nstatic bool %s_eq(%s* a, %s b);"                           \
+                "\nstatic %s !>(CCError) %s_clone_into(%s* v, CCArena a);",   \
+                (ty), (ty), (ty), (ty), (ty), (ty));                          \
+            cc_string_push_buffer(&protos, pb_, (size_t)n_, arena);           \
+            } while (0)
+#define KEEP(ty, dst, src, fail_e, fail_oom, out) do {                         \
+            char el_[128];                                                    \
+            switch (PART(ty, el_)) {                                          \
+            case 0: snprintf((out), sizeof(out), "%s = %s;", (dst), (src)); break; \
+            case 1: snprintf((out), sizeof(out),                              \
+                        "%s = cc_slice_clone_into(&(%s), a) !>(e) { %s; };",  \
+                        (dst), (src), (fail_e)); break;                       \
+            case 4: snprintf((out), sizeof(out),                              \
+                        "%s = %s_clone_into(&(%s), a) !>(e) { %s; };",        \
+                        (dst), (ty), (src), (fail_e)); break;                 \
+            default: snprintf((out), sizeof(out),                             \
+                        "if (!cc__keep_%s(%s, &(%s), a)) { %s; }",            \
+                        (ty), (src), (dst), (fail_oom));                      \
+            } } while (0)
+        char t[128], el[128];
+        int tl = (int)type_args.items[0].len;
+        if (tl > 127) tl = 127;
+        memcpy(t, (char*)type_args.items[0].ptr, (size_t)tl);
+        t[tl] = '\0';
+        if (PART(t, el) == 2) {
+            /* The structs and lists inside t, inner first (a depth-first
+             * walk with its own stack): each gets cc__same_X and cc__keep_X. */
+            char stk[32][128], order[32][128];
+            int seen_kids[32], sp = 0, no = 0, i, j, nf;
+            char same[512], keep[512], stamp[256];
+            const char* sargs[1];
+            CCString out = cc_string_new(), diffs = cc_string_new(),
+                     keeps = cc_string_new(), bumps = cc_string_new(),
+                     protos = cc_string_new();
+            char owned[16][128];
+            int nown = 0;
+            snprintf(stk[sp], 128, "%s", t); seen_kids[sp++] = 0;
+            while (sp > 0) {
+                char* top = stk[sp - 1];
+                char e2[128];
+                int part = PART(top, e2);
+                if (!seen_kids[sp - 1]) {
+                    seen_kids[sp - 1] = 1;
+                    if (part == 3) {
+                        char e3[128];
+                        int ep = PART(e2, e3);
+                        if ((ep == 2 || ep == 3) && sp < 32) {
+                            snprintf(stk[sp], 128, "%s", e2); seen_kids[sp++] = 0;
+                        }
+                    } else if (part == 2) {
+                        int n2 = cc_reflect_field_count(top);
+                        for (j = 0; j < n2 && sp < 32; j++) {
+                            CCReflectField f;
+                            char e3[128];
+                            int fp;
+                            if (cc_reflect_field_at(top, j, &f) != 0) continue;
+                            fp = PART(f.type, e3);
+                            if (fp == 2 || fp == 3) {
+                                snprintf(stk[sp], 128, "%s", f.type); seen_kids[sp++] = 0;
+                            }
+                        }
+                    }
+                    continue;
+                }
+                sp--;
+                for (j = 0; j < no; j++) if (strcmp(order[j], stk[sp]) == 0) break;
+                if (j == no && no < 32 && sp > 0) snprintf(order[no++], 128, "%s", stk[sp]);
+            }
+            for (i = 0; i < no; i++) {
+                char* x = order[i];
+                char ex[128];
+                if (PART(x, ex) == 3) {
+                    OWN_NOTE(ex);
+                    SAME(ex, "ea", "eb", same);
+                    KEEP(ex, "dst", "src", "(void)e; return false", "return false", keep);
+                    cc_string_push(&out, @emit(`
+static bool cc__same_${x}(${x} a, ${x} b);
+static bool cc__keep_${x}(${x} v, ${x}* out, CCArena a);
+#ifndef CC__SAME_${x}
+#define CC__SAME_${x}
+static bool cc__same_${x}(${x} a, ${x} b) {
+    size_t i;
+    if (a.len != b.len) return false;
+    for (i = 0; i < a.len; i++) {
+        ${ex} ea = *${x}_get(&a, i), eb = *${x}_get(&b, i);
+        if (!${same}) return false;
+    }
+    return true;
+}
+static bool cc__keep_${x}(${x} v, ${x}* out, CCArena a) {
+    size_t i;
+    *out = ${x}_init(a, v.len);
+    for (i = 0; i < v.len; i++) {
+        ${ex} src = *${x}_get(&v, i), dst;
+        ${keep}
+        if (${x}_push(out, dst) != 0) return false;
+    }
+    return true;
+}
+#endif
+`, arena), arena);
+                } else {
+                    CCString ss = cc_string_new(), ks = cc_string_new();
+                    int n2 = cc_reflect_field_count(x);
+                    for (j = 0; j < n2; j++) {
+                        CCReflectField f;
+                        char fa[192], fb[192];
+                        if (cc_reflect_field_at(x, j, &f) != 0) continue;
+                        OWN_NOTE(f.type);
+                        snprintf(fa, sizeof(fa), "a.%s", f.name);
+                        snprintf(fb, sizeof(fb), "b.%s", f.name);
+                        SAME(f.type, fa, fb, same);
+                        cc_string_push(&ss, @emit(` && ${same}`, arena), arena);
+                        snprintf(fa, sizeof(fa), "out->%s", f.name);
+                        snprintf(fb, sizeof(fb), "v.%s", f.name);
+                        KEEP(f.type, fa, fb, "(void)e; return false", "return false", keep);
+                        cc_string_push(&ks, @emit(`
+    ${keep}`, arena), arena);
+                    }
+                    CCSlice ss_s = cc__string_persist_slice(arena, &ss);
+                    CCSlice ks_s = cc__string_persist_slice(arena, &ks);
+                    cc_string_push(&out, @emit(`
+static bool cc__same_${x}(${x} a, ${x} b);
+static bool cc__keep_${x}(${x} v, ${x}* out, CCArena a);
+#ifndef CC__SAME_${x}
+#define CC__SAME_${x}
+static bool cc__same_${x}(${x} a, ${x} b) { return 1${ss_s}; }
+static bool cc__keep_${x}(${x} v, ${x}* out, CCArena a) {
+    *out = v;${ks_s}
+    return true;
+}
+#endif
+`, arena), arena);
+                }
+            }
+            /* The row itself: a stamp per field, and its watermark type. */
+            nf = cc_reflect_field_count(t);
+            if (nf > 32) {
+                cc_emit_error("Source::[T]: T has more fields than a watermark has bits (32)");
+                return cc_slice_empty();
+            }
+            sargs[0] = t;
+            cc_canonical_name("CCStamp", sargs, 1, stamp, (int)sizeof(stamp));
+            for (i = 0; i < nf; i++) {
+                CCReflectField f;
+                char fs[192], fn[192], fd[192];
+                if (cc_reflect_field_at(t, i, &f) != 0) continue;
+                OWN_NOTE(f.type);
+                snprintf(fs, sizeof(fs), "s->value.%s", f.name);
+                snprintf(fn, sizeof(fn), "next.%s", f.name);
+                SAME(f.type, fs, fn, same);
+                cc_string_push(&diffs, @emit(`
+    if (!${same}) moved |= CC_INPUT(${i});`, arena), arena);
+                snprintf(fd, sizeof(fd), "kept.%s", f.name);
+                KEEP(f.type, fd, fn, "return cc_err(e)", "return cc_err(CC_ERR_OUT_OF_MEMORY, \"Source set\")", keep);
+                cc_string_push(&keeps, @emit(`
+    if (moved & CC_INPUT(${i})) { ${keep} }`, arena), arena);
+                cc_string_push(&bumps, @emit(`
+    if (moved & CC_INPUT(${i})) s->g[${i}] = cc_gen_next();`, arena), arena);
+            }
+            CCSlice diffs_s = cc__string_persist_slice(arena, &diffs);
+            CCSlice keeps_s = cc__string_persist_slice(arena, &keeps);
+            CCSlice bumps_s = cc__string_persist_slice(arena, &bumps);
+            cc_string_push(&out, @emit(`
+#ifndef ${stamp}_DEFINED
+#define ${stamp}_DEFINED
+typedef struct ${stamp} { uint32_t n; uint64_t at[${nf}]; } ${stamp};
+#endif
+#ifndef ${mangled}_DEFINED
+#define ${mangled}_DEFINED
+typedef struct ${mangled} { ${t} value; uint64_t g[${nf}]; } ${mangled};
+/* Only the methods below touch the bytes or the stamps. */
+@typeview on ${mangled} { r: ^value, ^g; }
+/* Which fields next changes: bit i, field i. */
+static inline uint32_t ${mangled}_diff(const ${mangled}* s, ${t} next) {
+    uint32_t moved = 0;${diffs_s}
+    return moved;
+}
+/* Store next and say which fields moved. The changed fields' bytes are
+ * copied onto a first, so a failed copy stores nothing; then those
+ * fields' stamps move. */
+static uint32_t !>(CCError) ${mangled}_set(${mangled}* s, ${t} next, CCArena a) {
+    uint32_t moved = ${mangled}_diff(s, next);
+    ${t} kept = s->value;
+    if (!moved) return cc_ok(moved);${keeps_s}
+    s->value = kept;${bumps_s}
+    return cc_ok(moved);
+}
+static inline ${t} ${mangled}_val(const ${mangled}* s) { return s->value; }
+static inline const ${t}* ${mangled}_ref(const ${mangled}* s) { return &s->value; }
+/* One field's stamp, for a derivation that reads only that field. */
+static inline uint64_t ${mangled}_gen(const ${mangled}* s, uint32_t field) { return s->g[field]; }
+/* The fields whose stamps moved since the watermark w. */
+static inline CCStampCheck ${mangled}_since(const ${mangled}* s, ${stamp}* w) {
+    return cc_stamp_check(w, s->g, ${nf});
+}
+#endif
+`, arena), arena);
+            {
+                CCSlice out_s = cc__string_persist_slice(arena, &out);
+                cc_string_push(&protos, out_s, arena);
+                return cc__string_persist_slice(arena, &protos);
+            }
+        }
+#undef OWN_NOTE
+#undef PART
+#undef SAME
+#undef KEEP
+    }
     if (type_args.len >= 2) return @emit(`
 #ifndef ${mangled}_DEFINED
 #define ${mangled}_DEFINED
@@ -43,6 +315,31 @@ static inline ${arg(0)}* ${mangled}_mut(${mangled}* s) { cc_gen_bump(&s->g); ret
 static inline ${arg(0)} ${mangled}_val(const ${mangled}* s) { return s->value; }
 static inline const ${arg(0)}* ${mangled}_ref(const ${mangled}* s) { return &s->value; }
 static inline uint64_t ${mangled}_gen(const ${mangled}* s) { return cc_gen_get(&s->g); }
+#endif
+`, arena);
+}
+
+/* CCStamp::[T]: a watermark over a Source of the struct T, one slot per
+ * field. Its layout is a CCStamp's with a wider `at`. (Source::[T] emits
+ * the same definition, so either can come first.) */
+CC_GENERIC_FACTORY(CCStamp, 1) {
+    char t[128], name[256];
+    const char* sargs[1];
+    int nf, tl = (int)type_args.items[0].len;
+    if (tl > 127) tl = 127;
+    memcpy(t, (char*)type_args.items[0].ptr, (size_t)tl);
+    t[tl] = '\0';
+    nf = cc_reflect_field_count(t);
+    if (nf <= 0 || nf > 32) {
+        cc_emit_error("CCStamp::[T]: T is a struct the compiler can see into, with at most 32 fields");
+        return cc_slice_empty();
+    }
+    sargs[0] = t;
+    cc_canonical_name("CCStamp", sargs, 1, name, (int)sizeof(name));
+    return @emit(`
+#ifndef ${name}_DEFINED
+#define ${name}_DEFINED
+typedef struct ${name} { uint32_t n; uint64_t at[${nf}]; } ${name};
 #endif
 `, arena);
 }

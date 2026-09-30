@@ -5,6 +5,8 @@
 # its own methods still write it. One build per case: the checker reports
 # the first refusal in a unit and stays quiet after it, and it reads the
 # source before the C preprocessor, so #if cannot pick a case.
+# via_field is the gap: a store through a field chain (h.n.value) is not
+# checked, and builds.
 #   ./fence_probe.sh [ccc]
 C=${1:-ccc}
 here=$(cd "$(dirname "$0")" && pwd)
@@ -31,3 +33,4 @@ C
 probe store 's.value = 1;'
 probe read_gen '(void)s.g.v;'
 probe methods ''
+probe via_field 'struct { Source::[size_t] n; } h = {0}; h.n.value = 1; (void)h;'

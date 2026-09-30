@@ -1,0 +1,105 @@
+/* A stand-in for a database library: SqlTable::[Row] writes the fields of a
+ * row a mask names as one UPDATE. It prints the statement and its bound
+ * values, and can be told to fail.
+ *
+ * It is not part of the pattern. What it takes from the pattern is the
+ * changed mask (bit i: field i of Row); what it takes from the row is its
+ * fields, by reflection, and each field type's column value:
+ *
+ *     SqlValue T_sql(T* v, CCArena a)
+ *
+ * Text is here; a program brings the rest (a nullable column, a list
+ * stored as JSON). */
+#ifndef SQL_STANDIN_CCH
+#define SQL_STANDIN_CCH
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/stdio.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* A column's value: its text, or NULL. */
+typedef struct { char[:] text; bool null; } SqlValue;
+
+static SqlValue CCSlice_sql(CCSlice* s, CCArena a) {
+    (void)a;
+    return (SqlValue){ .text = *s };
+}
+
+/* One UPDATE being built: its SET list and its bound values. */
+typedef struct {
+    CCArena  a;
+    CCString cols;
+    CCString vals;
+    int      n;
+} SqlUpdate;
+
+static SqlUpdate sql_update(const char* table, CCArena a) {
+    SqlUpdate u = { .a = a, .cols = cc_string_new(), .vals = cc_string_new() };
+    u.cols.push_cstr("UPDATE ", a);
+    u.cols.push_cstr(table, a);
+    u.cols.push_cstr(" SET ", a);
+    return u;
+}
+
+static void sql_set(SqlUpdate* u, const char* col, SqlValue v) {
+    char num[16];
+    u->n++;
+    if (u->n > 1) {
+        u->cols.push_cstr(", ", u->a);
+        u->vals.push_cstr(", ", u->a);
+    }
+    snprintf(num, sizeof(num), " = ?%d", u->n);
+    u->cols.push_cstr(col, u->a);
+    u->cols.push_cstr(num, u->a);
+    if (v.null) {
+        u->vals.push_cstr("NULL", u->a);
+    } else {
+        u->vals.push_cstr("'", u->a);
+        u->vals.push_slice(v.text, u->a);
+        u->vals.push_cstr("'", u->a);
+    }
+}
+
+static void !>(CCError) sql_run(SqlUpdate* u, bool fail) {
+    if (fail) return cc_err(CC_ERR_IO, "disk full");
+    println(@string(`    ${u->cols} WHERE id = 1   [${u->vals}]`, @scratch));
+    return cc_ok();
+}
+
+/* SqlTable::[Row]: update(&row, changed) writes the fields `changed` names. */
+CC_GENERIC_FACTORY(SqlTable, 1) {
+    char t[128];
+    int tl = (int)type_args.items[0].len, nf, i;
+    CCString sets = cc_string_new(), decls = cc_string_new();
+    if (tl > 127) tl = 127;
+    memcpy(t, (char*)type_args.items[0].ptr, (size_t)tl);
+    t[tl] = '\0';
+    nf = cc_reflect_field_count(t);
+    if (nf <= 0) {
+        cc_emit_error("SqlTable::[T]: T is a struct the compiler can see into");
+        return cc_slice_empty();
+    }
+    for (i = 0; i < nf; i++) {
+        CCReflectField f;
+        if (cc_reflect_field_at(t, i, &f) != 0) continue;
+        /* declared here: the instance may come before the definition */
+        cc_string_push(&decls, @emit(`
+static SqlValue ${f.type}_sql(${f.type}* v, CCArena a);`, arena), arena);
+        cc_string_push(&sets, @emit(`
+    if (changed & (1u << ${i})) sql_set(&u, "${f.name}", ${f.type}_sql((${f.type}*)&w->${f.name}, a));`,
+                                    arena), arena);
+    }
+    CCSlice sets_s = cc__string_persist_slice(arena, &sets);
+    CCSlice decls_s = cc__string_persist_slice(arena, &decls);
+    return @emit(`${decls_s}
+typedef struct ${mangled} { const char* name; bool fail; } ${mangled};
+static void !>(CCError) ${mangled}_update(${mangled}* tb, const ${t}* w, uint32_t changed) {
+    cc_arena_stack(a, 1024);
+    SqlUpdate u = sql_update(tb->name, a);${sets_s}
+    return sql_run(&u, tb->fail);
+}
+`, arena);
+}
+
+#endif

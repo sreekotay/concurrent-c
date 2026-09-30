@@ -1,247 +1,169 @@
 /* The Ruby / Rust `update` from the thread, as stamps and watermarks.
  *
- * The original does four jobs in one function: it applies the caller's
- * intent to an in-memory copy of a row, keeps a JSON rendering of the
- * settings in step, works out which columns changed, and hands those to
- * an UPDATE. Here each job is where its fact is stated once:
+ * The row is one struct of plain values. A Source of it keeps a stamp per
+ * field, and set() moves only the stamps of the fields that changed. The
+ * row as last written is a watermark over those stamps, and a flush
+ * writes the fields whose stamps moved since it.
  *
- *   - each column is a value with its stamp, and the stamp is the precise
- *     one (it moves only when the value changes), chosen where the column
- *     is declared;
- *   - the JSON is a slot with a watermark over the settings' stamp, built
- *     when it is read;
- *   - the row as last written is a watermark with no slot, and the UPDATE
- *     is the columns whose stamps moved since it;
- *   - update() only states intent, and does its failing step first.
+ * So update() takes a whole row. The caller starts from the current one
+ * and changes what it means to change: a field it leaves alone is the
+ * same value, and the same value moves no stamp. There is no keep / clear
+ * / set encoding, and "name cannot be NULL" is the type of `name`.
  *
- * The record's bytes live on the arena it keeps. The database is a
- * stand-in that prints the statement and its bound values, and can be
- * told to fail. */
+ * The record's bytes live on the arena it keeps; a caller's row lives
+ * wherever the caller built it, and set() copies the changed fields over.
+ * The database is a stand-in (sql_standin.cch). */
 #include <ccc/std/prelude.cch>
 #include <ccc/stdio.cch>
 #define CC_GEN_IMPL                      /* this unit defines the counter */
 #include "cc_source.cch"
+#include "sql_standin.cch"
 
-/* ---- the column values ------------------------------------------------ */
+/* ---- the row ------------------------------------------------------------ */
 
 typedef struct { char[:] k; char[:] v; } Setting;
 
-/* a nullable column */
-@variant Styles { none: void; some: char[:]; };
+@variant Styles { none: void; some: char[:]; };     /* a nullable column */
 
-/* keep / clear / set, stated rather than encoded as UNSET or
- * Option<Option<&str>> */
-@variant Patch { keep: void; clear: void; to: char[:]; };
+typedef struct {
+    char[:]          name;
+    Styles           custom_styles;
+    CCVec::[Setting] settings;
+} Row;
 
-/* The equalities that make each column's stamp precise. */
-static bool same_text(char[:] a, char[:] b) { return a.eq(b); }
-
-static bool same_styles(Styles a, Styles b) {
-    char[:] none = "";
-    @switch (a) {
-        case .none: return b.kind == .none;
-        case .some(t): {
-            char[:] u = b.some ?> none;
-            return b.kind == .some && same_text(t, u);
+/* What a row must be: a rule on the whole row, checked before it is
+ * stored. */
+static void !>(CCError) Row_check(Row* w) {
+    @for (s in w->settings) {
+        if (s.k.eq("tab_width")) {
+            @for (c in s.v)
+                if (c < '0' || c > '9') return cc_err(CC_ERR_INVALID_ARG, "tab_width is not a number");
+        } else if (!s.k.eq("theme") && !s.k.eq("font")) {
+            return cc_err(CC_ERR_INVALID_ARG, "unknown setting");
         }
+    }
+    return cc_ok();
+}
+
+/* The settings with kv set: a new list on `a`. (A row from r.row.val()
+ * shares its lists with the record; an edit builds a new one.) */
+static CCVec::[Setting] settings_put(CCVec::[Setting] cur, Setting kv, CCArena a) {
+    CCVec::[Setting] out = cc_vec_new::[Setting](a);
+    bool found = false;
+    @for (s in cur) {
+        bool same = s.k.eq(kv.k);
+        (void)out.push(same ? kv : s);
+        found = found || same;
+    }
+    if (!found) (void)out.push(kv);
+    return out;
+}
+
+/* A @variant is a type the Source cannot see into, so it brings its own
+ * equality and copy. */
+static bool Styles_eq(Styles* a, Styles b) {
+    char[:] none = "";
+    @switch (*a) {
+        case .none: return b.kind == .none;
+        case .some(t): return b.kind == .some && t.eq(b.some ?> none);
     }
     return false;
 }
 
-static bool same_settings(CCVec::[Setting] a, CCVec::[Setting] b) {
-    @errhandler(CCError e) {
-        (void)e;
-        return false;                    /* the zip met different lengths */
+static Styles !>(CCError) Styles_clone_into(Styles* s, CCArena a) {
+    @switch (*s) {
+        case .none: return cc_ok(*s);
+        case .some(t): {
+            char[:] kept = t.clone_into(a) !>(e) { return cc_err(e); };
+            return cc_ok((Styles){ .some = kept });
+        }
     }
-    @for (x, y in a, b) {
-        if (!same_text(x.k, y.k) || !same_text(x.v, y.v)) return false;
-    } !>;
-    return true;
+    return cc_ok(*s);
 }
 
-/* ---- the record -------------------------------------------------------- */
+/* ---- the record ---------------------------------------------------------- */
 
 typedef struct {
-    CCArena                                   keep;           /* where the record's bytes live */
-    Source::[char[:], same_text]              name;
-    Source::[Styles, same_styles]             custom_styles;
-    Source::[CCVec::[Setting], same_settings] settings;
-    Derived::[CCString]                       settings_json;  /* storage; r.settings_json() is the read */
-    CCStamp                                   written;        /* the row as last written */
-    int                                       json_builds;
+    CCArena        keep;       /* where the record's bytes live */
+    Source::[Row]  row;        /* the row, and a stamp per field */
+    CCStamp::[Row] written;    /* the row as last written */
 } Record;
 
-@typeview on Record { r: ^settings_json, ^written; }
+@typeview on Record { r: ^written; }
 
-/* A record's bytes live on `keep`, the arena it is opened on. */
 static Record Record_open(CCArena keep) {
     Record r = { .keep = keep };
     return r;
 }
 
-/* The derived column: rebuilt into its own storage when the settings'
- * stamp moved, on read. */
-static char[:] Record_settings_json(Record* r) {
-    CCString* out = r->settings_json.stale(cc_inputs(r->settings.gen()));
-    if (out) {
-        CCVec::[Setting] st = r->settings.val();
-        out->clear();
-        out->push_cstr("{", r->keep);
-        @for (i, kv in st) {
-            CCString item = @string(`"${kv.k}":"${kv.v}"`, @scratch);
-            if (i) out->push_cstr(",", r->keep);
-            out->push_slice(item.as_slice(), r->keep);
-        }
-        out->push_cstr("}", r->keep);
-        r->settings_json.commit();
-        r->json_builds++;
-    }
-    return r->settings_json.ref()->as_slice();
-}
-
-/* settings.assign(values): `cur` with `kv` applied, into `next` (a new
- * list, its bytes on `keep`): a known key, and a tab width that is a
- * number. */
-static void !>(CCError) settings_assign(CCVec::[Setting]* next, CCVec::[Setting] cur,
-                                        CCVec::[Setting] kv, CCArena keep) {
+/* The caller's intent: a checked row, stored. */
+static void !>(CCError) Record_update(Record* r, Row next) {
     @errhandler(CCError e) {
         return cc_err(e);
     }
-    @for (s in cur)
-        if (next->push(s) != 0) return cc_err(CC_ERR_OUT_OF_MEMORY, "settings");
-    @for (s in kv) {
-        bool found = false;
-        if (!s.k.eq("theme") && !s.k.eq("font") && !s.k.eq("tab_width"))
-            return cc_err(CC_ERR_INVALID_ARG, "unknown setting");
-        if (s.k.eq("tab_width"))
-            @for (c in s.v)
-                if (c < '0' || c > '9') return cc_err(CC_ERR_INVALID_ARG, "tab_width is not a number");
-        char[:] k = s.k.clone_into(keep) !>;
-        char[:] v = s.v.clone_into(keep) !>;
-        Setting kept = { .k = k, .v = v };
-        @for (&e in *next) {
-            if (same_text(e.k, kept.k)) {
-                e = kept;
-                found = true;
-            }
-        } !>;
-        if (!found && next->push(kept) != 0) return cc_err(CC_ERR_OUT_OF_MEMORY, "settings");
-    }
+    next.check() !>;                     /* fails before anything moves */
+    r->row.set(next, r->keep) !>;
     return cc_ok();
-}
-
-/* The caller's intent. The step that can fail runs first, into new
- * storage, so a failure leaves every column as it was. Then each set()
- * moves a stamp only if the value changed. No column list, no JSON, no
- * SQL here. */
-static void !>(CCError) Record_update(Record* r, Patch name, Patch styles, CCVec::[Setting] kv) {
-    @errhandler(CCError e) {
-        return cc_err(e);
-    }
-    CCVec::[Setting] next = cc_vec_new::[Setting](r->keep);
-    if (kv.len()) settings_assign(&next, r->settings.val(), kv, r->keep) !>;
-    @switch (name) {
-        case .keep: break;
-        case .clear: return cc_err(CC_ERR_INVALID_ARG, "name cannot be NULL");
-        case .to(t): {
-            char[:] kept = t.clone_into(r->keep) !>;
-            r->name.set(kept);
-            break;
-        }
-    }
-    @switch (styles) {
-        case .keep: break;
-        case .clear: r->custom_styles.set((Styles){ .none = {} }); break;
-        case .to(t): {
-            char[:] kept = t.clone_into(r->keep) !>;
-            r->custom_styles.set((Styles){ .some = kept });
-            break;
-        }
-    }
-    if (kv.len()) r->settings.set(next);
-    return cc_ok();
-}
-
-/* ---- the database -------------------------------------------------------- */
-
-/* One SET: a column and its bound value (a missing value is NULL). */
-typedef struct { char[:] col; char[:] val; bool null; } Set;
-
-typedef struct { bool fail; } Tx;
-
-static void !>(CCError) Tx_update(Tx* tx, CCVec::[Set] sets) {
-    cc_arena_stack(sql, 512);
-    CCString cols = @string(`UPDATE record SET `, sql);
-    CCString vals = @string(``, sql);
-    if (tx->fail) return cc_err(CC_ERR_IO, "disk full");
-    @for (i, s in sets) {
-        CCString col = @string(`${s.col} = ?${i + 1}`, @scratch);
-        CCString val = s.null ? @string(`NULL`, @scratch) : @string(`'${s.val}'`, @scratch);
-        if (i) {
-            cols.push_cstr(", ", sql);
-            vals.push_cstr(", ", sql);
-        }
-        cols.push_slice(col.as_slice(), sql);
-        vals.push_slice(val.as_slice(), sql);
-    }
-    println(@string(`    ${cols} WHERE id = 1   [${vals}]`, @scratch));
-    return cc_ok();
-}
-
-/* The row's columns, once: the stamps the written watermark is over, in
- * the order the sets below name by bit. */
-enum { COL_NAME, COL_STYLES, COL_SETTINGS };
-
-static CCInputs Record_row(Record* r) {
-    return cc_inputs(r->name.gen(), r->custom_styles.gen(), r->settings.gen());
 }
 
 /* The row as last written, marked when a row is loaded. */
 static void Record_loaded(Record* r) {
-    CCInputs row = Record_row(r);
-    CCStampCheck k = cc_stamp_check(&r->written, row.v, row.n);
+    CCStampCheck k = r->row.since(&r->written);
     cc_stamp_commit(&k);
 }
 
-/* The effect: the columns whose stamps moved since the row was last
- * written, and the watermark recorded only after the write succeeded. */
-static void !>(CCError) Record_flush(Record* r, Tx* tx) {
+/* The effect: the fields whose stamps moved since the row was last
+ * written; the watermark is recorded only after the write succeeds. */
+static void !>(CCError) Record_flush(Record* r, SqlTable::[Row]* db) {
     @errhandler(CCError e) {
-        return cc_err(e);                /* the watermark is not recorded */
+        return cc_err(e);
     }
-    CCInputs row = Record_row(r);
-    CCStampCheck k = cc_stamp_check(&r->written, row.v, row.n);
+    CCStampCheck k = r->row.since(&r->written);
     if (!k.stale) {
         println("    (nothing to write)");
         return cc_ok();
     }
-    /* (a literal in a char[:] field initializer is silently empty today:
-     * literal_field_probe.ccs; the names go through locals) */
-    char[:] c_name = "name", c_styles = "custom_styles", c_settings = "settings", none = "";
-    cc_arena_stack(scratch, 512);
-    CCVec::[Set] sets = cc_vec_new::[Set](scratch);
-    if (k.changed & CC_INPUT(COL_NAME))
-        sets.push((Set){ .col = c_name, .val = r->name.val() });
-    if (k.changed & CC_INPUT(COL_STYLES)) {
-        Styles cs = r->custom_styles.val();
-        sets.push((Set){ .col = c_styles, .val = cs.some ?> none, .null = cs.kind == .none });
-    }
-    if (k.changed & CC_INPUT(COL_SETTINGS))
-        sets.push((Set){ .col = c_settings, .val = r->settings_json() });
-    tx->update(sets) !>;
+    db->update(r->row.ref(), k.changed) !>;
     cc_stamp_commit(&k);
     return cc_ok();
 }
 
+/* ---- the columns ---------------------------------------------------------- */
+
+static SqlValue Styles_sql(Styles* s, CCArena a) {
+    (void)a;
+    @switch (*s) {
+        case .none: return (SqlValue){ .null = true };
+        case .some(t): return (SqlValue){ .text = t };
+    }
+    return (SqlValue){ .null = true };
+}
+
+static int json_builds;
+
+/* The settings as JSON: built when the settings column is written, which
+ * is when its stamp moved. */
+static SqlValue CCVec_Setting_sql(CCVec::[Setting]* st, CCArena a) {
+    CCVec::[Setting] list = *st;
+    CCString out = @string(`{`, a);
+    @for (i, kv in list) {
+        CCString item = @string(`"${kv.k}":"${kv.v}"`, @scratch);
+        if (i) out.push_cstr(",", a);
+        out.push_slice(item.as_slice(), a);
+    }
+    out.push_cstr("}", a);
+    json_builds++;
+    return (SqlValue){ .text = out.as_slice() };
+}
+
 /* ---- a session ------------------------------------------------------------ */
 
-static void step(Record* r, Tx* tx, char[:] what, Patch name, Patch styles, CCVec::[Setting] kv) {
-    println(what);
-    r->update(name, styles, kv) !>(e) {
-        println(@string(`    update refused: ${e.message}; name is still '${r->name.val()}'`, @scratch));
+static void save(Record* r, SqlTable::[Row]* db, Row next) {
+    r->update(next) !>(e) {
+        println(@string(`    update refused: ${e.message}; name is still '${r->row.val().name}'`, @scratch));
         return;
     };
-    r->flush(tx) !>(e) {
+    r->flush(db) !>(e) {
         println(@string(`    write failed: ${e.message}; the row stays unwritten`, @scratch));
     };
 }
@@ -252,36 +174,61 @@ int main(void) {
         return 1;
     }
     CCArena keep = cc_arena_heap(kilobytes(8)) @destroy;
+    CCArena scratch = cc_arena_heap(kilobytes(8)) @destroy;   /* the caller's rows */
     Record r = Record_open(keep);
-    Tx tx = { .fail = false };
-    Patch keep_it = { .keep = {} };
-    char[:] theme = "theme", dark_v = "dark", font = "font", mono_v = "mono";
-    char[:] tab = "tab_width", four = "four";
-    char[:] alpha = "alpha", beta = "beta", gamma = "gamma", bold = "bold";
-    CCVec::[Setting] none = cc_vec_new::[Setting](keep);
-    CCVec::[Setting] dark = cc_vec_new::[Setting](keep);
-    CCVec::[Setting] mono = cc_vec_new::[Setting](keep);
-    CCVec::[Setting] bad = cc_vec_new::[Setting](keep);
-    if (dark.push((Setting){ .k = theme, .v = dark_v }) != 0 ||
-        mono.push((Setting){ .k = font, .v = mono_v }) != 0 ||
-        bad.push((Setting){ .k = tab, .v = four }) != 0)
-        return 1;
+    SqlTable::[Row] db = { .name = "record" };
+    Setting dark, mono, four;            /* (a literal in a char[:] field or */
+    char[:] bold = "bold";               /*  arm initializer is empty today) */
+    Row next;
+
+    dark.k = "theme";     dark.v = "dark";
+    mono.k = "font";      mono.v = "mono";
+    four.k = "tab_width"; four.v = "four";
 
     /* a row as loaded from the database */
-    r.update((Patch){ .to = alpha }, keep_it, dark) !>;
-    Record_loaded(&r);
+    next = r.row.val();
+    next.name = "alpha";
+    next.settings = settings_put(next.settings, dark, scratch);
+    r.update(next) !>;
+    r.loaded();
 
-    step(&r, &tx, "the same name again", (Patch){ .to = alpha }, keep_it, none);
-    step(&r, &tx, "a new name and styles", (Patch){ .to = beta }, (Patch){ .to = bold }, none);
-    step(&r, &tx, "a font", keep_it, keep_it, mono);
-    step(&r, &tx, "the same font again", keep_it, keep_it, mono);
-    step(&r, &tx, "a name with a bad setting", (Patch){ .to = gamma }, keep_it, bad);
-    tx.fail = true;
-    step(&r, &tx, "clear the styles, and the write fails", keep_it, (Patch){ .clear = {} }, none);
-    tx.fail = false;
+    println("the same name again");
+    next = r.row.val();
+    next.name = "alpha";
+    save(&r, &db, next);
+
+    println("a new name and styles");
+    next = r.row.val();
+    next.name = "beta";
+    next.custom_styles = (Styles){ .some = bold };
+    save(&r, &db, next);
+
+    println("a font");
+    next = r.row.val();
+    next.settings = settings_put(next.settings, mono, scratch);
+    save(&r, &db, next);
+
+    println("the same font again");
+    next = r.row.val();
+    next.settings = settings_put(next.settings, mono, scratch);
+    save(&r, &db, next);
+
+    println("a name with a bad setting");
+    next = r.row.val();
+    next.name = "gamma";
+    next.settings = settings_put(next.settings, four, scratch);
+    save(&r, &db, next);
+
+    println("clear the styles, and the write fails");
+    db.fail = true;
+    next = r.row.val();
+    next.custom_styles = (Styles){ .none = {} };
+    save(&r, &db, next);
+    db.fail = false;
+
     println("the next flush");
-    r.flush(&tx) !>(e) { println("    write failed again"); };
+    r.flush(&db) !>(e) { println("    write failed again"); };
 
-    println(@string(`settings JSON built ${r.json_builds} time(s)`, @scratch));
+    println(@string(`settings JSON built ${json_builds} time(s)`, @scratch));
     return 0;
 }

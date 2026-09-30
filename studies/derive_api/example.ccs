@@ -55,7 +55,7 @@ static void idx_build(Doc* d) {
 static const LineIndex* doc_idx(Doc* d) {
     CCStampCheck c = cc_stamp_check(&d->idx_at, CC_IN(cc_gen_get(&d->text.log.gen), d->width));
     if (c.stale) {
-        CCSince s = TextLog_since(&d->text.log, c.prev[0]);    /* edits since the last build */
+        CCSince s = TextLog_since(&d->text.log, cc_stamp_prev(&c, 0));    /* edits since the last build */
         if (c.built && !(c.changed & CC_INPUT(1)) && s.kind == CC_SINCE_EDITS) {
             for (uint32_t i = 0; i < s.n; i++) {       /* patch: an erase cannot be undone */
                 const Edit* e = TextLog_at(&d->text.log, s, i);   /* from coordinates alone, */

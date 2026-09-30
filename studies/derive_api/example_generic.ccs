@@ -49,7 +49,7 @@ typedef struct {
 static const LineIndex* Doc_idx(Doc* d) {
     DerIdx_Check k = DerIdx_check(&d->idx, CC_IN(Text_gen(&d->text), SrcSize_gen(&d->width)));
     if (k.stale) {
-        CCSince s = TextLog_since(&d->text.log, k.c.prev[0]);
+        CCSince s = TextLog_since(&d->text.log, cc_stamp_prev(&k.c, 0));
         if (k.c.built && !(k.c.changed & CC_INPUT(1)) && s.kind == CC_SINCE_EDITS) {
             for (uint32_t i = 0; i < s.n; i++) {
                 const Edit* e = TextLog_at(&d->text.log, s, i);
