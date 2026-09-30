@@ -11,15 +11,16 @@ gives one rule for which place a fact belongs in.
 
 | Place | Holds | Why there |
 |-------|-------|-----------|
-| **the struct declaration** | fields, and any fact that adds bytes: a primary's generation, a cached derivation and its stamps, an edit ring | layout is one fact per type, the same in every translation unit |
+| **the struct declaration** | fields, and any fact that adds bytes: a value's stamp (`Source::[T]`), a consumer's watermark and slot (`Derived::[T]`), an edit ring | layout is one fact per type, the same in every translation unit |
 | **the view** (`@typeview`) | admission (`r:`, `w:`, `rw:`), faces (`as:`), field-shaped reads that store nothing (`d:`) | erased; adds no bytes; everyday syntax |
 | **hooks** (`@typehooks`) | lifecycle: create, destroy, validate, extent | advanced; how a value comes to be and ends |
-| **declaration suffixes** | how this binding behaves: `@destroy`, `@detach`, `@derive` | local, where the logic is |
+| **declaration suffixes** | how this binding behaves: `@destroy`, `@detach` | local, where the logic is |
 
 The earlier section 4 draft put versions and caches in the view (`v:`,
-`c:`). That breaks the view's one guarantee, that it adds no bytes.
-Moving them to the struct declaration, as member suffixes, keeps views
-erased and keeps nothing new in hooks.
+`c:`), which breaks the view's one guarantee, that it adds no bytes, and
+a later draft made them member suffixes (`@primary`, `@derive`). Both are
+withdrawn for two generics in the struct: stamps and watermarks are
+ordinary fields, and each generic declares its own view.
 
 ## The surface, in one list
 
@@ -37,18 +38,21 @@ erased and keeps nothing new in hooks.
 | `@parallel (h) below (n) {…}` as a `bool` | 4.2 item 1 | proposed |
 | `@variant` for a tag beside a payload | 4.2 item 5 | shipped construct, new use |
 | `d: name` in a view: a field-shaped read that stores nothing | 4.2 item 3 | proposed |
-| `T f @primary;` member suffix: stores bump the field's generation | 4.2 item 4 | proposed; replaces `v:` and `@version` |
-| `T x = expr @derive;` and `T x @derive {…};` | 4.2 derivations | proposed; replaces `c:` and `from` |
-| `[name = expr]` init-captures on `@derive` for probes and clocks | 4.2 derivations | proposed; syntax already exists for closures |
-| `@derive_gen(x)`: the generation of a primary or a derivation, `uint64_t`; settles a derivation first | 4.2 derivations | proposed; replaces `@settle` and `fresh()` |
-| `T f @primary log(N);` and `@patch (T.edit e) {…}` | 4.2 deltas | proposed, deferred: one specimen |
+| `Source::[T] f;` a value and its stamp; `set()`, `mut()` the only stores | 4.2 the loop | proposed; the study's factory, today's generics |
+| `Derived::[T] f;` a slot and its watermark; `stale(cc_inputs(…))` returns the slot or NULL, `commit()` after the act succeeds | 4.2 the loop | proposed; the same |
+| the read is the method named like the field: `d.lines()` beside `Derived::[LineIndex] lines` | 4.2 the loop | a convention; UFCS already resolves it |
+| a watermark alone, for consumers that are not a slot (a flush, a dirty flag) | 4.2 the loop | open: a generic, or the lowered `CCStamp` |
+| stamp precision: generation, equal-store-skipping, identity, probe | 4.2 the loop | proposed; one choice per value |
+| a log of edits since a watermark, for patching instead of rebuilding | 4.4 | deferred: one specimen |
 | `.validate` hook; sealed construction | 4.2 item 6 | proposed |
 | `&` of a non-writable field refused | 4.2 item 8 | proposed, no syntax |
 | `const` on a member read by the lowering as frozen | census | proposed, no new syntax |
 
 Withdrawn along the way: `@since`, `@settle`, `fresh()`, `@version`, `@log(x, e)`, `v:` and `c:`
-view groups, `c: idx from …` edge lists, validation on every assignment,
-a transaction scope, per-instance validators, a subscriber graph.
+view groups, `c: idx from …` edge lists, `@primary`, `@derive`,
+`@derive_gen`, init-captures on a derivation, `Derived::[T, Recipe]`,
+validation on every assignment, a transaction scope, per-instance
+validators, a subscriber graph.
 
 ## Worked examples
 
@@ -60,92 +64,54 @@ as a one-entry edit log with no lag check.
 
 ```c
 typedef struct {
-    RtxPieceTree tree  @primary;          /* a store bumps tree's generation */
-    size_t       width @primary;
-    size_t       hl_from, hl_to;          /* the visible window */
-
-    LineIndex idx @derive {               /* edges: tree, width */
-        idx.build(&tree, width);
-    };
-    Markup hl @derive {                   /* edges: idx, tree, hl_from, hl_to */
-        hl.scan(&tree, &idx, hl_from, hl_to);
-    };
+    Source::[RtxPieceTree] tree;          /* edits go through its verbs, which bump it */
+    Source::[size_t]       width;
+    size_t                 hl_from, hl_to; /* the visible window, compared by value */
+    Derived::[LineIndex]   idx;
+    Derived::[Markup]      hl;
 } RtxDoc;
 
-@typeview on RtxDoc {
-    r: *;                                 /* stores only in RtxDoc* bodies */
-    d: line_count;                        /* = rtx_doc_line_count(d): stores nothing */
-};
+@typeview on RtxDoc { r: ^idx, ^hl; }     /* the slots are read through their methods */
+
+static const LineIndex* RtxDoc_idx(RtxDoc* d) {
+    LineIndex* out = d->idx.stale(cc_inputs(d->tree.gen(), d->width.gen()));
+    if (out) { out->build(d->tree.ref(), d->width.val()); d->idx.commit(); }
+    return d->idx.ref();
+}
+
+static const Markup* RtxDoc_hl(RtxDoc* d) {
+    Markup* out = d->hl.stale(cc_inputs(d->idx.gen(), d->tree.gen(), d->hl_from, d->hl_to));
+    if (out) { out->scan(d->tree.ref(), d->idx(), d->hl_from, d->hl_to); d->hl.commit(); }
+    return d->hl.ref();
+}
 ```
 
-Use sites: `draw(&d->hl)` checks `hl`'s stamps, which checks `idx`'s,
-and rebuilds what is stale in that order. No invalidation call remains at
-any edit site; the edit verbs store to `tree`, which bumps it.
-
-Rules this example fixes:
-- A member derivation's body names its siblings directly, and its edges
-  are the sibling fields it reads. An edge outside the object means the
-  derivation belongs on the object that holds both, or in a local.
-- An edge must be a field declared `@primary`, a `const` field, or a
-  value compared by value. Reading any other mutable field is refused:
-  "edge `hl_from` is not a primary; add `@primary` or make it a value
-  capture". Here `hl_from` and `hl_to` are compared by value, since
-  their stamp would be the value itself.
-- `typeof(d->idx)` is `const LineIndex`. A read settles, then loads; a
-  store is refused by C's own `const` rule; the body alone may write it.
-  A copy is an ordinary value, which is a pinned snapshot. `&d->idx`
-  settles and yields a `const LineIndex *`, a borrow that ends at the
-  next store to an edge, which section 2's borrow rule already checks.
-
-With deltas, later and only if the one-specimen case holds up:
-
-```c
-    RtxPieceTree tree @primary log(8);
-    LineIndex idx @derive { idx.build(&tree, width); }
-                  @patch (RtxPieceTree.edit e) {
-                      @switch (e) {
-                      case .insert(off, len): idx.insert(off, len);
-                      case .erase(off, n):    idx.erase(off, n);
-                      default:                @rebuild;
-                      }
-                  };
-```
+`draw(d.hl())` settles `hl`, whose inputs name `idx`'s generation, so
+`idx` settles first when `hl` rebuilds; the order comes from the reads.
+No invalidation call remains at any edit site: the edit verbs store to
+`tree`, which moves its stamp. A value such as `hl_from` is its own
+stamp. A pointer from `d.hl()` is a borrow that ends at the next store
+to an input.
 
 ### 2. cctext: the session snapshot, written three times today
 
 `rtx_ws_safe_note` copies 20 fields, `rtx_ws_safe_stale` compares them,
-and `rtx_ws_safe_sig` hashes them.
+and `rtx_ws_safe_sig` hashes them. It is a flush: a consumer with a
+watermark and no slot.
 
 ```c
-typedef struct {
-    RtxDoc     doc;
-    size_t     top @primary, left_col @primary, seek_off @primary;
-    RtxLayout  layout @primary;
-    ...
-    RtxSafeCam cam @derive {              /* pure: builds the snapshot, writes nothing else */
-        cam = rtx_safe_cam(&doc, top, left_col, seek_off, &layout);
-    };
-    uint64_t   cam_written;               /* the generation last flushed */
-} RtxBuf;
-
-/* the frame loop: the effect is written where it runs */
-uint64_t g = @derive_gen(b->cam);         /* settles cam, returns its generation */
-if (g != b->cam_written) {
-    rtx_ws_flush(&b->cam) !>;
-    b->cam_written = g;                   /* recorded only after the flush succeeds */
+/* the frame loop: act when an input moved, remember after the write */
+CCStampCheck k = cc_stamp_check(&b->flushed, CC_IN(b->doc.tree.gen(), b->top.gen(),
+                                                   b->left_col.gen(), b->layout.gen()));
+if (k.stale) {
+    rtx_ws_flush(b) !>;
+    cc_stamp_commit(&k);                  /* only after the write succeeded */
 }
 ```
 
-A derivation writes only its own cache, so the execution check can
-rebuild it from scratch without repeating an effect. An effect on change
-is an ordinary `if` on a remembered generation. Early cut-off carries
-through: `cam` gets a new generation only when its value changes. The
-three hand-kept lists become the body's reads, and `cam_written` is one
-word recording a different fact, what was last written.
-
-A generation answers "has this changed since", and may over-report.
-It is not a state identity: dirty tracking needs ids that undo
-restores, and stays the program's own fact.
+The three hand-kept lists become one input list, and a field added to
+the camera is added in one place. The flush wants the precise stamp:
+a store of an equal value should not rewrite the session file.
 
 ### 3. staticd: a file cache with a probe and a clock
 
@@ -153,21 +119,22 @@ Today: a 1-second revalidation stamp `checked`, a stat copied into
 `FileHold`, a separate block cache comparing mtime and size.
 
 ```c
-StatStamp st @derive [sec = now_s()] {    /* at most one stat per second */
-    st = cc_stat_stamp(path) !>;
-};
-FileHold hold @derive {                   /* edge: st */
-    hold = file_open_hold(path, st) !>;
-};
+static const FileHold* !>(CCIoError) File_hold(File* f) {
+    FileHold* out = f->hold.stale(cc_inputs(cc_stat_stamp(f->path), now_s()));
+    if (out) {
+        *out = file_open_hold(f->path) !>;   /* a failure leaves the watermark unrecorded */
+        f->hold.commit();
+    }
+    return cc_ok(f->hold.ref());
+}
 
 /* a request pins the version it serves */
-FileHold h = c->hold;                     /* a plain copy: Content-Length matches the bytes sent */
+FileHold h = *(f.hold() !>);              /* a plain copy: Content-Length matches the bytes sent */
 ```
 
-An init-capture is compared by value on each read, so `[sec = now_s()]`
-is a time bucket and a probe is an init-capture of the probe. The clock
-and the filesystem have no version to bump; their cost is in the text.
-A pinned snapshot is simply not a derivation.
+The file system has no stamp to bump, so its stamp is a probe, and the
+clock bucket bounds how often the probe runs. Their cost is in the
+text. A pinned snapshot is a copy, not a consumer.
 
 ### 4. pigz: the rsyncable segments, and the two schedules
 
@@ -244,11 +211,11 @@ operation under the set's own lock.
 
 | Overlap | Spellings that competed | Resolution |
 |---------|------------------------|------------|
-| where a dependency edge is stated | `c: idx from pos, len`; a capture list; the body's free names | free names; a list only for init-captures and value compares |
-| where a generation lives | `v:` in the view; hand-declared `pos_v` fields; `@version`, `@tracked` | `@primary` on the member; the counter is part of the member's lowering, `uint64_t` so it never wraps on a 32-bit target |
-| where a cache lives | `c:` in the view; `@derive` suffix | `@derive` on the member or the local |
-| bringing state up to date | `@settle`; `fresh()`; a read | a read; `@derive_gen(x)` where an effect needs to know whether anything changed |
-| deltas | `@since` switch; `@log` in verbs | `@primary log(N)` and `@patch`; deferred |
+| where an input is stated | `c: idx from pos, len`; a capture list; the body's free names; a recipe type argument | `cc_inputs(…)` on the consumer's first line |
+| where a stamp lives | `v:` in the view; hand-declared `pos_v` fields; `@version`; `@primary` | `Source::[T]`, a field in the struct; `uint64_t`, from per-thread blocks of one counter |
+| where a cache lives | `c:` in the view; `@derive` suffix | `Derived::[T]`, a field in the struct, read through the method of its name |
+| bringing state up to date | `@settle`; `fresh()`; `@derive_gen`; a read | a read; an effect keeps its own watermark |
+| deltas | `@since` switch; `@log` in verbs; `log(N)` / `@patch` | a log of edits since a watermark; deferred |
 | a derived field vs a method | `d:`; a method | both: `d:` where call sites read a field today |
 | a named owner | section 2's annotation; section 3's `h@(a)`; `create_*` | `@detach(owner)` |
 | a cap on a set | `@parallel(h, below: n)`; library verbs | `below (n)`, a contextual word like `seq` and `cache` |
@@ -257,10 +224,11 @@ operation under the set's own lock.
 
 ## Open choices
 
-- Bare sibling names inside a member derivation, or `self->`.
 - Whether `@parallel (h) below (n) {…}` returns `bool`, which makes the
   dest-attach an expression; today it is a statement.
 - `@detach(owner)` widens `@detach`'s meaning from "the caller" to "this
   owner".
-- Whether `@derive_gen` stays a compound or a shorter spelling is found.
+- Whether the watermark alone is a generic (`Seen`) or stays the lowered
+  `CCStamp` for flushes and dirty flags.
+- The precise stamp's spelling (a `set` that skips an equal store).
 - Whether `d:` earns its place, or methods suffice.

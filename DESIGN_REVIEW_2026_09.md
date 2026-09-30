@@ -880,12 +880,14 @@ nothing, holds no subscriber list, and pushes nothing.
    walk subject: readable at ordinary sites as a field, not storable. A
    named read hook on a type lowers `d->find.done` to a call and refuses
    the store. Call sites do not change.
-4. **An expensive derivation is a cache with a stamp.** A primary that
-   has caches carries a version; a store to it bumps the version; the
-   cache stores its sources' versions beside its value and a read
-   compares. This is `edit_gen` and `safe_gen` with the language holding
-   the pattern. Auto-tracking, recovering the sources by watching the
-   derivation run, is reconstruction; the derivation names them.
+4. **A derivation, a flush and a dirty flag are one loop.** A value
+   carries a stamp; a consumer keeps a watermark, the stamps it last
+   acted on; it acts when they differ and records after the act
+   succeeds. A cache, a write to disk or a database, a redraw and a
+   dirty flag differ only in the act. This is `edit_gen` and `safe_gen`
+   with the language holding the pattern; the consumer names its
+   inputs, since recovering them by watching the act run is
+   reconstruction.
 5. **A tag beside a payload is a variant.** `disk_valid` and its three
    fields are one arm.
 6. **Validation is at the seams.** Where a primary enters from outside,
@@ -904,49 +906,11 @@ nothing, holds no subscriber list, and pushes nothing.
    already refuses `&v` on a binder. One condition in the allow-list
    check.
 
-**Authoring.** Three groups in the type's unnamed view, and ordinary
-functions for the rest. The view already holds two kinds of group:
-faces, which change how a use lowers, and allow-lists, which decide
-what a site may do. Bindings are a third kind, of the first sort: they
-say what a use of a field means, everywhere, including trusted bodies,
-as a face does. The trusted-body exemption is an admission rule and
-does not touch them. Named modes narrow admission and may list derived
-names; they do not bind, so a version is one fact per type. The view
-adds no bytes: the author declares the counter and stamp fields, and
-the binding finds them by name.
-
-```c
-typedef struct {
-    size_t pos;      uint32_t pos_v;      /* the primary and its version */
-    size_t len;      uint32_t len_v;
-    size_t *offs;
-    RtxLineIndex idx; uint32_t idx_v;     /* a cache and its stamp */
-} RtxFind;
-
-@typeview on RtxFind {
-    r: *;                            /* stores only in RtxFind* bodies */
-    v: pos, len;                     /* a store also stamps pos_v from the counter */
-    d: done, truncated, scan_off;    /* read like a field; resolve as UFCS; store refused */
-    c: idx from pos, len;            /* read compares idx_v to the sources; rtx_find_idx rebuilds */
-};
-```
-
-Use sites do not change. `d->find.done` reads, `d->find.done = 1` is
-refused, `d->find.pos = v` stamps, `d->find.idx` checks and rebuilds.
-A derived name is a function of the object alone; one that needs an
-argument is a method. A cache whose builder is `!>(E)` makes its read
-a Result site, and that is the one place a use site changes. Derived
-of derived is a call; cache of cache is a check chain; several sources
-are several stamps; an aggregate store re-stamps every versioned field;
-zero-init is stale, so designated init and serdes carry no versions; a
-cache's storage is a part of the object and dies in its walk.
-Hooks stay what they are, lifecycle and library naming.
-
-The lifetime order of section 2 applies unchanged: a cached derivation
-holds views of its sources, so a source outlives every derivation of
-it, and the primary has the set's longest lifetime. That is why the
-per-wave dest of section 3 grew a second `done` beside it, and why the
-job-lifetime dest is the fix.
+**Authoring.** The view keeps what it is for, admission and faces:
+`r:` confines stores to the type's own bodies, and `d:` makes a cheap
+derivation read like a field while storing nothing (items 2 and 3). The
+view adds no bytes. Stamps and watermarks are bytes, so they are in the
+struct, as ordinary generic fields (below), not view groups.
 
 Not proposed: a transaction scope, since single storage removes the
 intermediate states it would allow and the hold covers the residue; a
@@ -1002,96 +966,81 @@ construction; the push rows need a flush at the end of the write to
 avoid running an effect on a half-updated diamond, and both libraries
 have one.
 
-**Derivations with stated edges.** A derivation is a declaration
-suffix, the way `@destroy` is: it says how the binding behaves. The
-initializer or the block is a closure, and like every CC closure it
-captures by free name. So its free names are its edges, stated once,
-inline, where the logic is.
+**The loop.** Every derivation, flush and dirty flag in the specimens
+is the same four lines:
 
 ```c
-/* expression: the initializer is the derivation */
-size_t nlines = rtx_count_lines(&doc->tree) @derive;
-
-/* block: the body updates the declared name in place, as @destroy { } names it */
-LineIndex idx @derive {
-    idx.clear();
-    @for (p in doc->tree.pieces) idx.add(p, width);
-};
-
-/* optional list: narrow the edges, or compare a value instead of a version */
-Markup hl @derive [&idx, window] { ... };
+if (what I depend on moved since I last acted) {
+    act;                        /* rebuild, write, flush, redraw */
+    remember what I acted on;   /* only after the act succeeded */
+}
 ```
+
+Two nouns carry it. A *stamp* is a cheap answer to "which state is this
+value in". A *watermark* is the stamps a consumer last acted on, one
+per input; "changed" is a stamp that differs from its watermark, and
+the per-input difference is the delta (the columns an `UPDATE` sets,
+the fields a snapshot flushes). A stamp and a watermark are one
+generation-sized word each, and the lowered form is the pair
+`CCGen` / `CCStamp`, with nothing else in the pattern.
+
+One rule: **remember only after the act succeeds.** A watermark
+recorded before a failing act, or a value stored before a failing step
+of the same update, reports "same" for a state nothing acted on, which
+is the loss direction.
+
+One knob, per value: **how precise its stamp is.**
+
+| Stamp | Moves | Costs | For |
+|-------|-------|-------|-----|
+| generation | on every store | one bump | caches: a spurious rebuild is only time |
+| generation, skipped on an equal store | when the value changes | a compare per store | effects: a spurious write, flush or `UPDATE` is not free |
+| identity | to a new id per state; undo restores the old one | an id per state | dirty and "may this save be skipped": a false "same" loses data |
+| probe | when an outside fact is observed to differ | the probe (`stat`, a clock bucket) | facts the program does not own |
+
+Over-reporting is safe for a cache and costly for an effect, and
+under-reporting is loss for both; the knob picks the stamp the
+consumer needs. Freshness and identity are both stamps, of different
+precision: cctext's `hist.head != saved_head` used a position, which is
+neither, and a divergent edit then read as clean.
+
+The surface is two generics and a convention:
 
 ```c
-if (idx.tree_v != doc->tree.v || idx.width != width) { rebuild_idx(); idx.v = ++cc_gen; }
-if (hl.idx_v != idx.v || hl.win != window)            { rebuild_hl();  hl.v  = ++cc_gen; }
+typedef struct {
+    Source::[size_t]     text_len, width;   /* a value with its stamp */
+    Derived::[LineIndex] lines;             /* a slot with its watermark */
+} Doc;
+
+static const LineIndex* Doc_lines(Doc* d) {          /* d.lines() is the read */
+    LineIndex* out = d->lines.stale(cc_inputs(d->text_len.gen(), d->width.gen()));
+    if (out) { ...build *out...; d->lines.commit(); }
+    return d->lines.ref();
+}
 ```
 
-JS also knows a closure's free names; what it cannot know is which
-reactive cells the body reaches, because cells are runtime values. Here
-the edges are names of versioned storage, so the lexical free-name set
-is the edge set, and the finest edge is the field path the body reads:
-reading `doc->tree` makes the tree's version the edge, not `doc`'s. A
-free name that is a function, a constant, or a comptime value is not an
-edge; only mutable storage is. The dependency graph therefore lives in
-the compiler, and bringing derived state up to date lowers to the
-straight-line compares above with no graph at run time.
+`Source::[T]` is a value and its stamp; `set()` and `mut()` are its only
+stores, each factory instance's own view refuses any other, and its
+precision is chosen once. `Derived::[T]` is the common consumer: a
+watermark whose act fills a slot, read through the method of the
+field's name. Any other consumer holds the watermark alone and does its
+own act: a flush remembers the generations it last wrote, and a dirty
+flag the identity it last saved. The inputs are stated on the method's
+first line, where the logic is; a read brings the value up to date, so
+the order comes from the reads and no graph exists at run time.
 
-A read brings a derivation up to date, and a read of `hl` checks `idx`
-first, so the order comes from the edges. Reading the value is where the
-rebuild cost lands. A captured scalar is its own version: the stamp
-stores the value. A rebuild that produces the same value does not bump,
-so early cut-off is free. The block form runs against the existing
-value, so the body can reuse its storage or patch it. A named function
-is not required and not excluded: `LineIndex idx =
-rtx_line_index(&doc->tree, width) @derive;` is the expression form.
+Three boundaries. An input left out of the list is the one wrong
+answer the shape cannot refuse; the execution check below is its net.
+A deep tree with sparse change (stylo's eight `dirty` sites) favours
+marking, and stays a library with a graph. A read that may rebuild is a
+write: two fibers reading one unsettled value race, so the value is
+settled before it is shared and the fibers read the result.
 
-What it removes, in the specimens:
-
-| Hand-kept today | Where | With a stated edge |
-|-----------------|-------|--------------------|
-| one snapshot of 20 fields written three times: copied in `rtx_ws_safe_note`, compared in `rtx_ws_safe_stale`, hashed in `rtx_ws_safe_sig` | cctext `workspace.ccs` | one capture list; the copy and the compare are generated; a body reading an uncaptured field is refused |
-| push invalidation: every edit path must clear `hl_full`, zero `hl_win_stamp`, or call `analysis_reset` | cctext `document.ccs`, four sites | the edit bumps the tree's version; the writer no longer needs to know its readers |
-| `edit_gen` beside `safe_gen`, dirty as their inequality | cctext | the pattern named once |
-
-Four boundaries. A call inside the body can hide an edge: the free names
-are lexical, and a callee that reads state it was not handed is not. An
-attribute stating that a function reads only its parameters closes that
-at compile time where it is written; it is an option, not the price of
-the construct. This is make's missing
-header, and `gcc -MD`, which records what the compiler opened, is the
-legitimate reconstruction for it. Over-capture is safe and costs only a
-recompute. A facts-you-do-not-own source, such as a file checked by
-`stat`, has an observed version rather than a bumped one, so its capture
-takes a probe in place of a counter. And a deep tree with sparse change
-favors marking: stylo sets `dirty` at eight sites and propagates it by
-hand, and per-node stamps checked from the root would compare every node
-on every restyle. That case stays a library with an explicit graph.
-And data-dependent reach is coarse: a body that walks a collection has
-one edge, the collection's version, which any element store bumps when
-element stores go through the collection's verbs.
-
-Freshness is not identity. A stamp answers "has this source changed
-since I read it", and it may over-report: a rebuild with nothing new
-costs time and nothing else. A version drawn from one monotonic counter
-answers that correctly. A second question looks the same and is not:
-"is this the same state as that one", which decides whether a document
-is dirty and whether a save may be skipped. It must never under-report,
-because a false "same" loses data, and a monotonic counter over-reports
-it, because undoing back to the saved state should read as clean. So an
-identity is a different fact from a version: each state gets an id when
-it is created, and a move back to an earlier state restores that
-state's id. cctext compares history positions, `hist.head !=
-saved_head`, and a position is reused after the redo branch is dropped;
-a divergent edit then reads as clean and the save is skipped. Positions
-are neither versions nor identities, and a language that names both
-facts removes the third, wrong one.
-
-The relation `cache == body(captures)` is stated by the declaration and
-checked by execution. A harness rebuilds each derivation from scratch
-after each settle and compares it with the cached value. A mismatch at
-equal stamps means an edge is missing from the capture list, which is
-exactly the failure the compiler cannot see through a call. The check is
+The relation `cache == act(inputs)` is stated by the input list and
+checked by execution. A harness clears each watermark after a settle,
+acts again from scratch and compares with the cached value. A mismatch
+at equal stamps means an input is missing from the list, which is
+exactly the failure the compiler cannot see. The check is
 the net under the one hole in the idea, it is a test and not a build
 mode, and the law costs the author nothing to write. Comparing needs an
 equality on the derived type: structural where comptime can generate it,
@@ -1102,8 +1051,9 @@ incrementality by hand: the cache comes back as a field of the state,
 with its stamps, and Lean's language server and rust-analyzer's Salsa
 are the machinery that results. Salsa is the nearest precedent here,
 with versioned inputs, memoized queries, and early cut-off, but it
-records dependencies at run time. Stated edges, imperative bodies, and
-no run-time tracking together are, as far as this review found, new.
+records dependencies at run time. Stated inputs, imperative acts, one
+loop for caches and effects alike, and no run-time tracking together
+are, as far as this review found, new.
 
 ### 4.3 Cost
 
@@ -1111,11 +1061,11 @@ no run-time tracking together are, as far as this review found, new.
 |------|---------------|--------|
 | 1 count as a read | removes a CAS and two atomics per spawn | one field fewer |
 | 2, 3 read hooks | the derivation's compares on each read; nothing stored | fields removed |
-| 4 versioned primary | one increment per store; one compare per cached read | one version per primary, one stamp per source per cache |
+| 4 stamp | one bump per store (thread-local; a compare too for the precise stamp) | one word per value |
 | 5 variant | none | often less: one tag replaces several ints |
 | 6 seam validation | one call per annotated store at a seam; nothing elsewhere | none |
 | 8 address refusal | none | none |
-| derivations | one compare per captured source at each settle or read; nothing per store beyond the version increment | one stamp per captured source per derivation |
+| 4 watermark | one compare per input per read or flush | one word per input per consumer |
 | the execution check | a from-scratch rebuild and compare per settle, in the test harness only | none in the program |
 
 A versioned primary read across fibers is a seqlock, version then value
@@ -1126,7 +1076,11 @@ counter and a width question, or per-primary counters and rare reuse.
 
 ### 4.4 Open
 
-- Whether the version is per primary or drawn from one counter.
+- Whether the watermark is a user-facing generic of its own, for
+  consumers that are not a slot (a flush, a dirty flag), or stays the
+  lowered `CCStamp` with `Derived::[T]` the only composite.
+- The precise stamp's spelling: a `set` that skips an equal store needs
+  an equality on `T`, the same one the execution check needs.
 - The projection protocol for the three tagged-data dialects, and
   comptime naming arms, so exhaustiveness is not forfeited to a hole.
 - Whether trust through embedding should stop at the field.
@@ -1143,10 +1097,9 @@ counter and a width question, or per-primary counters and rare reuse.
 - `seq (cond)` is never compared in pigz, and parallel_storm keeps four
   hand copies of one recursion. Making the comparison automatic is the
   first place to apply a stated relation checked by execution.
-- A version says whether a source changed, not what changed. Patching a
-  cache in place after an edit needs the edit, a delta. cctext keeps an
-  edit journal, so the shape is a source that carries a version and a
-  log since a given version; its spelling is open.
+- A stamp says whether a value changed, not how. Patching a cache in
+  place after an edit needs the edit: a log of edits since a watermark.
+  cctext keeps an edit journal; its spelling is open.
 - The cctext chain of line index, highlight, find, and layout is the
   specimen to write this against first, to measure how many hand-kept
   `valid`, `gen`, and invalidation sites disappear and how often a body
