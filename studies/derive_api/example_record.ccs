@@ -62,13 +62,13 @@ static bool same_settings(CCVec::[Setting] a, CCVec::[Setting] b) {
 /* ---- the record -------------------------------------------------------- */
 
 typedef struct {
-    CCArena keep;                                     /* where the record's bytes live */
-    Source::[char[:], same_text]         name;
-    Source::[Styles, same_styles]     custom_styles;
-    Source::[CCVec::[Setting], same_settings]   settings;
-    Derived::[CCString]               settings_json;   /* storage; r.settings_json() is the read */
-    CCStamp                           written;         /* the row as last written */
-    int json_builds;
+    CCArena                                   keep;           /* where the record's bytes live */
+    Source::[char[:], same_text]              name;
+    Source::[Styles, same_styles]             custom_styles;
+    Source::[CCVec::[Setting], same_settings] settings;
+    Derived::[CCString]                       settings_json;  /* storage; r.settings_json() is the read */
+    CCStamp                                   written;        /* the row as last written */
+    int                                       json_builds;
 } Record;
 
 @typeview on Record { r: ^settings_json, ^written; }
