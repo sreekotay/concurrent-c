@@ -860,10 +860,13 @@ static int cc__compile_one_factory_handler(const char* handler_name, const char*
     CCComptimeHookSpec spec = {0};
     const void* fn_ptr = NULL;
     void* owner = NULL;
-    const char* def;
+    char* def;
+    int rc;
     if (*fn_out) return 0;
-    def = cc_comptime_fn_registry_lookup_def(handler_name);
+    /* the handler and the `@comptime` helpers it calls */
+    def = cc_comptime_fn_registry_closure_def(handler_name);
     if (!def || !def[0]) {
+        free(def);
         if (err_buf && err_sz)
             snprintf(err_buf, err_sz, "factory handler '%s' not found in registry",
                      handler_name);
@@ -873,9 +876,10 @@ static int cc__compile_one_factory_handler(const char* handler_name, const char*
     spec.kind = CC_COMPTIME_TYPE_HOOK_GENERIC_FACTORY;
     spec.entry_name = entry_name;
     spec.handler_name = handler_name;
-    if (cc_comptime_compile_type_hooks_tu_ex(input_path, def, &spec, 1, &owner, &fn_ptr,
-                                             err_buf, err_sz) != 0)
-        return -1;
+    rc = cc_comptime_compile_type_hooks_tu_ex(input_path, def, &spec, 1, &owner, &fn_ptr,
+                                              err_buf, err_sz);
+    free(def);
+    if (rc != 0) return -1;
     *fn_out = fn_ptr;
     *owner_out = owner;
     return 0;
@@ -1687,6 +1691,9 @@ static int cc__reflect_fields_hdrs(const char* type_name, CCCtField** out, size_
 static int cc__reflect_enum_hdrs(const char* type_name, CCCtEnumMember** out, size_t* out_n);
 
 static int cc__reflect_fields_any(const char* type_name, CCCtField** out, size_t* out_n) {
+    if (cc_ct_reflect_variant_arms(cc__reflect_src, cc__reflect_src_len,
+                                   type_name, out, out_n))
+        return 1;
     if (cc_ct_reflect_struct_fields(cc__reflect_src, cc__reflect_src_len,
                                     type_name, out, out_n))
         return 1;

@@ -20752,6 +20752,146 @@ static int cc__harvest_factories_from(const char* src, size_t n, const char* pat
  * then let the normal registry/executor path compile them. File-scope typedef
  * and enum declarations from those headers are installed as the comptime
  * executor prelude so call-site @comptime blocks can name the helper types. */
+/* The `@comptime` function definitions of one `.cch` into `out`, each under
+ * a `#line` naming it, and the file-scope typedef / enum declarations before
+ * the first of them into `prelude`. 1 when it had any. */
+static int cc__harvest_comptime_fns_from(const char* src, size_t n, const char* path,
+                                         char** out, size_t* out_len, size_t* out_cap,
+                                         char** prelude, size_t* prelude_len, size_t* prelude_cap) {
+    size_t i = 0;
+    int has_comptime_fn = 0;
+    int any = 0;
+    CCScannerState scan;
+    /* Only harvest helper types from headers that define a real @comptime
+     * function — skip comments/strings, and ignore @comptime {/if/for. */
+    i = 0;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        char c = src[i];
+        if (c == '@' && cc_match_ident_kw(src, n, i + 1, "comptime")) {
+            size_t p = cc_skip_ws_and_comments(src, n, i + 1 + strlen("comptime"));
+            if (p < n && src[p] != '{' &&
+                !cc_match_ident_kw(src, n, p, "if") &&
+                !cc_match_ident_kw(src, n, p, "for")) {
+                has_comptime_fn = 1;
+                break;
+            }
+        }
+        i++;
+    }
+    if (!has_comptime_fn) return 0;
+    /* Pass 1: typedef / enum helpers for the executor prelude only.
+     * Restrict to this header's own helper surface — skip nested includes'
+     * transitive types by only accepting declarations before the first
+     * @comptime function. */
+    i = 0;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        char c = src[i];
+        if (c == '@' && cc_match_ident_kw(src, n, i + 1, "comptime")) break;
+        if ((cc_match_ident_kw(src, n, i, "typedef") ||
+             cc_match_ident_kw(src, n, i, "enum")) &&
+            (i == 0 || !cc_is_ident_char(src[i - 1]))) {
+            size_t start = i;
+            size_t p = i;
+            int depth = 0;
+            CCScannerState pscan;
+            cc_scanner_init(&pscan);
+            while (p < n) {
+                if (cc_scanner_skip_non_code(&pscan, src, n, &p)) continue;
+                char d = src[p];
+                if (d == '{') { depth++; p++; continue; }
+                if (d == '}') { if (depth) depth--; p++; continue; }
+                if (d == ';' && depth == 0) {
+                    cc_sb_append(prelude, prelude_len, prelude_cap,
+                                 src + start, p + 1 - start);
+                    cc_sb_append_cstr(prelude, prelude_len, prelude_cap, "\n");
+                    i = p + 1;
+                    break;
+                }
+                p++;
+            }
+            if (p >= n) break;
+            continue;
+        }
+        i++;
+    }
+    /* Pass 2: @comptime function definitions into the TU buffer. */
+    i = 0;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        char c = src[i];
+        if (c == '@' && cc_match_ident_kw(src, n, i + 1, "comptime")) {
+            size_t start = i;
+            size_t p = cc_skip_ws_and_comments(src, n, i + 1 + strlen("comptime"));
+            size_t lparen = 0, rparen = 0, body_r = 0;
+            if (p >= n || src[p] == '{' ||
+                cc_match_ident_kw(src, n, p, "if") ||
+                cc_match_ident_kw(src, n, p, "for")) {
+                i++;
+                continue;
+            }
+            {
+                size_t semi_q = cc_find_char_top_level(src, p, n, ';');
+                size_t brace_q = cc_find_char_top_level(src, p, n, '{');
+                size_t paren_q = cc_find_char_top_level(src, p, n, '(');
+                if (paren_q < n && paren_q < semi_q && paren_q < brace_q)
+                    lparen = paren_q;
+            }
+            if (!lparen || !cc_find_matching_paren(src, n, lparen, &rparen)) {
+                i++;
+                continue;
+            }
+            p = cc_skip_ws_and_comments(src, n, rparen + 1);
+            if (p >= n || src[p] != '{' ||
+                !cc_find_matching_brace(src, n, p, &body_r)) {
+                i++;
+                continue;
+            }
+            {
+                int line = 1;
+                char ld[PATH_MAX + 64];
+                for (size_t k = 0; k < start; k++) if (src[k] == '\n') line++;
+                /* No leading blank — see factory harvest above. */
+                snprintf(ld, sizeof(ld), "#line %d \"%s\"\n", line, path);
+                if (*out_len > 0 && (*out)[*out_len - 1] != '\n')
+                    cc_sb_append_cstr(out, out_len, out_cap, "\n");
+                cc_sb_append_cstr(out, out_len, out_cap, ld);
+                {
+                    /* the body's quoted includes, beside this face */
+                    size_t rn = 0;
+                    char* rw = cc_comptime_resolve_quoted_includes(src + start, body_r + 1 - start, path, &rn);
+                    if (rw) cc_sb_append(out, out_len, out_cap, rw, rn);
+                    else cc_sb_append(out, out_len, out_cap, src + start, body_r + 1 - start);
+                    free(rw);
+                }
+                cc_sb_append_cstr(out, out_len, out_cap, "\n");
+            }
+            any = 1;
+            i = body_r + 1;
+            continue;
+        }
+        i++;
+    }
+    return any;
+}
+
+char* cc_ct_unit_comptime_functions(const char* src, size_t n, const char* path, char** prelude_out) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    char* prelude = NULL;
+    size_t prelude_len = 0, prelude_cap = 0;
+    int any = src && n ? cc__harvest_comptime_fns_from(src, n, path ? path : "<header>", &out, &out_len, &out_cap,
+                                                       &prelude, &prelude_len, &prelude_cap) : 0;
+    if (prelude_out) *prelude_out = prelude;
+    else free(prelude);
+    if (!any) { free(out); return NULL; }
+    return out;
+}
+
 char* cc_harvest_header_comptime_functions(void) {
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
@@ -20761,124 +20901,10 @@ char* cc_harvest_header_comptime_functions(void) {
     for (size_t h = 0; h < g_included_cch_source_count; h++) {
         const char* path = g_included_cch_sources[h];
         char* src = NULL;
-        size_t n = 0, i = 0;
-        int has_comptime_fn = 0;
-        CCScannerState scan;
+        size_t n = 0;
         if (!path || cc__read_file_text(path, &src, &n) != 0) continue;
-        /* Only harvest helper types from headers that define a real @comptime
-         * function — skip comments/strings, and ignore @comptime {/if/for. */
-        i = 0;
-        cc_scanner_init(&scan);
-        while (i < n) {
-            if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
-            char c = src[i];
-            if (c == '@' && cc_match_ident_kw(src, n, i + 1, "comptime")) {
-                size_t p = cc_skip_ws_and_comments(src, n, i + 1 + strlen("comptime"));
-                if (p < n && src[p] != '{' &&
-                    !cc_match_ident_kw(src, n, p, "if") &&
-                    !cc_match_ident_kw(src, n, p, "for")) {
-                    has_comptime_fn = 1;
-                    break;
-                }
-            }
-            i++;
-        }
-        if (!has_comptime_fn) { free(src); continue; }
-        /* Pass 1: typedef / enum helpers for the executor prelude only.
-         * Restrict to this header's own helper surface — skip nested includes'
-         * transitive types by only accepting declarations before the first
-         * @comptime function. */
-        i = 0;
-        cc_scanner_init(&scan);
-        while (i < n) {
-            if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
-            char c = src[i];
-            if (c == '@' && cc_match_ident_kw(src, n, i + 1, "comptime")) break;
-            if ((cc_match_ident_kw(src, n, i, "typedef") ||
-                 cc_match_ident_kw(src, n, i, "enum")) &&
-                (i == 0 || !cc_is_ident_char(src[i - 1]))) {
-                size_t start = i;
-                size_t p = i;
-                int depth = 0;
-                CCScannerState pscan;
-                cc_scanner_init(&pscan);
-                while (p < n) {
-                    if (cc_scanner_skip_non_code(&pscan, src, n, &p)) continue;
-                    char d = src[p];
-                    if (d == '{') { depth++; p++; continue; }
-                    if (d == '}') { if (depth) depth--; p++; continue; }
-                    if (d == ';' && depth == 0) {
-                        cc_sb_append(&prelude, &prelude_len, &prelude_cap,
-                                     src + start, p + 1 - start);
-                        cc_sb_append_cstr(&prelude, &prelude_len, &prelude_cap, "\n");
-                        i = p + 1;
-                        break;
-                    }
-                    p++;
-                }
-                if (p >= n) break;
-                continue;
-            }
-            i++;
-        }
-        /* Pass 2: @comptime function definitions into the TU buffer. */
-        i = 0;
-        cc_scanner_init(&scan);
-        while (i < n) {
-            if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
-            char c = src[i];
-            if (c == '@' && cc_match_ident_kw(src, n, i + 1, "comptime")) {
-                size_t start = i;
-                size_t p = cc_skip_ws_and_comments(src, n, i + 1 + strlen("comptime"));
-                size_t lparen = 0, rparen = 0, body_r = 0;
-                if (p >= n || src[p] == '{' ||
-                    cc_match_ident_kw(src, n, p, "if") ||
-                    cc_match_ident_kw(src, n, p, "for")) {
-                    i++;
-                    continue;
-                }
-                {
-                    size_t semi_q = cc_find_char_top_level(src, p, n, ';');
-                    size_t brace_q = cc_find_char_top_level(src, p, n, '{');
-                    size_t paren_q = cc_find_char_top_level(src, p, n, '(');
-                    if (paren_q < n && paren_q < semi_q && paren_q < brace_q)
-                        lparen = paren_q;
-                }
-                if (!lparen || !cc_find_matching_paren(src, n, lparen, &rparen)) {
-                    i++;
-                    continue;
-                }
-                p = cc_skip_ws_and_comments(src, n, rparen + 1);
-                if (p >= n || src[p] != '{' ||
-                    !cc_find_matching_brace(src, n, p, &body_r)) {
-                    i++;
-                    continue;
-                }
-                {
-                    int line = 1;
-                    char ld[PATH_MAX + 64];
-                    for (size_t k = 0; k < start; k++) if (src[k] == '\n') line++;
-                    /* No leading blank — see factory harvest above. */
-                    snprintf(ld, sizeof(ld), "#line %d \"%s\"\n", line, path);
-                    if (out_len > 0 && out[out_len - 1] != '\n')
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, ld);
-                    {
-                        /* the body's quoted includes, beside this face */
-                        size_t rn = 0;
-                        char* rw = cc_comptime_resolve_quoted_includes(src + start, body_r + 1 - start, path, &rn);
-                        if (rw) cc_sb_append(&out, &out_len, &out_cap, rw, rn);
-                        else cc_sb_append(&out, &out_len, &out_cap, src + start, body_r + 1 - start);
-                        free(rw);
-                    }
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
-                }
-                any = 1;
-                i = body_r + 1;
-                continue;
-            }
-            i++;
-        }
+        any |= cc__harvest_comptime_fns_from(src, n, path, &out, &out_len, &out_cap,
+                                             &prelude, &prelude_len, &prelude_cap);
         free(src);
     }
     cc_comptime_fn_registry_set_prelude(prelude);
@@ -22281,6 +22307,134 @@ char* cc_ct_extract_type_decls_prelude(const char* src, size_t n) {
         if (c == '}') { if (depth) depth--; i++; continue; }
         if (depth != 0) { i++; continue; }
         if (i > 0 && cc_is_ident_char(src[i - 1])) { i++; continue; }
+        /* A spliced vec instance declares its type through a macro: the
+         * invocation is the definition, in the arm the preprocessor picks
+         * (typed view when the element's slice is declared).  It is closed
+         * with a redeclaration of the name so it reads as a piece that
+         * declares it. */
+        if (i + 18 <= n && memcmp(src + i, "CC_VEC_DECL_ARENA", 17) == 0 &&
+            (src[i + 17] == '(' || memcmp(src + i + 17, "_TSLICE(", 8) == 0)) {
+            int tslice = src[i + 17] == '_';
+            size_t lp = i + (tslice ? 24 : 17);
+            size_t rp;
+            if (cc_find_matching_paren(src, n, lp, &rp)) {
+                char args[3][128];
+                int na = 0;
+                size_t a = lp + 1, k;
+                for (k = lp + 1; k <= rp && na < 3; k++) {
+                    if (k == rp || src[k] == ',') {
+                        size_t s0 = a, e0 = k;
+                        while (s0 < e0 && (src[s0] == ' ' || src[s0] == '\t')) s0++;
+                        while (e0 > s0 && (src[e0 - 1] == ' ' || src[e0 - 1] == '\t')) e0--;
+                        if (e0 - s0 >= sizeof(args[0])) { na = -1; break; }
+                        memcpy(args[na], src + s0, e0 - s0);
+                        args[na][e0 - s0] = 0;
+                        na++;
+                        a = k + 1;
+                    }
+                }
+                if (na >= 2 && out && strstr(out, args[1]) &&
+                    (tslice || na == 2)) {
+                    /* a later arm of an instance already taken */
+                    char key[160];
+                    snprintf(key, sizeof(key), "typedef %s %s;", args[1], args[1]);
+                    if (strstr(out, key)) { i = rp + 1; continue; }
+                }
+                if ((tslice && na == 3) || (!tslice && na == 2)) {
+                    char piece[768];
+                    if (tslice)
+                        snprintf(piece, sizeof(piece),
+                                 "\n#ifdef CC_HAS_CCSLICE_%s\nCC_VEC_DECL_ARENA_TSLICE(%s, %s, %s)\n"
+                                 "#else\nCC_VEC_DECL_ARENA(%s, %s)\n#endif\ntypedef %s %s;\n",
+                                 args[2] + (strncmp(args[2], "CCSlice_", 8) == 0 ? 8 : 0),
+                                 args[0], args[1], args[2], args[0], args[1], args[1], args[1]);
+                    else
+                        snprintf(piece, sizeof(piece),
+                                 "\nCC_VEC_DECL_ARENA(%s, %s)\ntypedef %s %s;\n",
+                                 args[0], args[1], args[1], args[1]);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, piece);
+                }
+                i = rp + 1;
+                continue;
+            }
+        }
+        /* A spliced map instance: the macro invocation, with the key hash /
+         * equality names it is passed, which the `#ifdef CC_MAP_HASH_<K>`
+         * block after the instance banner defines. */
+        {
+            size_t ml = 0;
+            if (i + 18 <= n && memcmp(src + i, "CC_MAP_DECL_ARENA(", 18) == 0) ml = 17;
+            else if (i + 18 <= n && memcmp(src + i, "CC_ARRAY_MAP_DECL(", 18) == 0) ml = 17;
+            if (ml) {
+                size_t rp;
+                if (cc_find_matching_paren(src, n, i + ml, &rp)) {
+                    char name[128];
+                    int na = 0;
+                    size_t a = i + ml + 1, k;
+                    name[0] = 0;
+                    for (k = i + ml + 1; k <= rp; k++) {
+                        if (k == rp || src[k] == ',') {
+                            if (na == 2) {
+                                size_t s0 = a, e0 = k;
+                                while (s0 < e0 && (src[s0] == ' ' || src[s0] == '\t')) s0++;
+                                while (e0 > s0 && (src[e0 - 1] == ' ' || src[e0 - 1] == '\t')) e0--;
+                                if (e0 > s0 && e0 - s0 < sizeof(name)) {
+                                    memcpy(name, src + s0, e0 - s0);
+                                    name[e0 - s0] = 0;
+                                }
+                            }
+                            na++;
+                            a = k + 1;
+                        }
+                    }
+                    /* a factory template spells the call with `${...}` slots:
+                     * that is not an instance */
+                    for (k = 0; name[k]; k++)
+                        if (!cc_is_ident_char(name[k])) { name[0] = 0; break; }
+                    if (name[0]) {
+                        char guard[192];
+                        size_t from = i, b = i, lim = i > 2048 ? i - 2048 : 0;
+                        int ifs = 0, endifs = 0;
+                        /* the defines block, between this instance's banner and the call */
+                        while (b > lim && !(b + 11 <= i && memcmp(src + b, "/* generic ", 11) == 0)) b--;
+                        if (!(b + 11 <= i && memcmp(src + b, "/* generic ", 11) == 0)) b = i;
+                        for (k = b; k + 19 <= i; k++) {
+                            if (memcmp(src + k, "#ifdef CC_MAP_HASH_", 19) == 0) { from = k; break; }
+                        }
+                        for (k = from; k + 3 <= i; k++) {
+                            if (src[k] != '#') continue;
+                            if (memcmp(src + k, "#if", 3) == 0) ifs++;
+                            else if (k + 6 <= i && memcmp(src + k, "#endif", 6) == 0) endifs++;
+                        }
+                        if (ifs != endifs) from = i;
+                        snprintf(guard, sizeof(guard), "typedef %s %s;", name, name);
+                        if (!out || !strstr(out, guard)) {
+                            /* One piece, named by its closing typedef: the
+                             * pieces are cut at top-level `;`, so the block's
+                             * prototypes stay out of it. */
+                            size_t ls = from;
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+                            while (ls <= rp) {
+                                size_t le = ls;
+                                size_t ks;
+                                int semi = 0;
+                                while (le <= rp && src[le] != '\n') le++;
+                                for (ks = ls; ks < le; ks++) if (src[ks] == ';') semi = 1;
+                                if (!semi) {
+                                    cc_sb_append(&out, &out_len, &out_cap, src + ls, le - ls);
+                                    cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+                                }
+                                ls = le + 1;
+                            }
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, guard);
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+                        }
+                    }
+                    i = rp + 1;
+                    continue;
+                }
+            }
+        }
         size_t kwlen = 0;
         int is_typedef = 0;
         if (i + 7 <= n && memcmp(src + i, "typedef", 7) == 0 &&
@@ -22561,6 +22715,98 @@ static int cc__ct_push_field(CCCtField** fs, size_t* fn, size_t* fc,
     (*fs)[*fn - 1].is_as = 0;
     (*fs)[*fn - 1].params = NULL;
     (*fs)[*fn - 1].member = NULL;
+    return 1;
+}
+
+/* Locate the `{...}` body of `@variant NAME { ... }`.  Sets [*bo,*bc] to
+ * the brace offsets and returns 1; 0 if the source declares no such
+ * variant. */
+static int cc__ct_find_variant_body(const char* src, size_t n,
+                                    const char* tname, size_t tlen,
+                                    size_t* bo, size_t* bc) {
+    CCScannerState scan; cc_scanner_init(&scan);
+    size_t i = 0;
+    while (i < n) {
+        size_t p, ns;
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (src[i] != '@' || i + 8 > n || memcmp(src + i, "@variant", 8) != 0 ||
+            (i + 8 < n && cc_is_ident_char(src[i + 8]))) { i++; continue; }
+        p = cc_skip_ws_and_comments(src, n, i + 8);
+        ns = p;
+        while (p < n && cc_is_ident_char(src[p])) p++;
+        if (p - ns == tlen && memcmp(src + ns, tname, tlen) == 0) {
+            size_t b = cc_skip_ws_and_comments(src, n, p);
+            size_t b2;
+            if (b < n && src[b] == '{' && cc_find_matching_brace(src, n, b, &b2)) {
+                *bo = b; *bc = b2; return 1;
+            }
+        }
+        i = p > i ? p : i + 1;
+    }
+    return 0;
+}
+
+static int cc__ct_variant_body_any(const char* src, size_t n, const char* tname,
+                                   const char** out_src, size_t* bo, size_t* bc) {
+    size_t tl = strlen(tname);
+    if (src && cc__ct_find_variant_body(src, n, tname, tl, bo, bc)) { *out_src = src; return 1; }
+    for (size_t h = 0; h < g_included_cch_source_count; h++) {
+        size_t fn = 0;
+        const char* fsrc = cc__included_cch_text(h, &fn);
+        if (fsrc && cc__ct_find_variant_body(fsrc, fn, tname, tl, bo, bc)) { *out_src = fsrc; return 1; }
+    }
+    return 0;
+}
+
+char* cc_ct_slice_sugar_rewrite(const char* decl);
+static char* cc__ct_generic_sugar_rewrite(const char* decl);
+
+/* The arms of `@variant NAME { arm: T; ... }`, in declaration order: one
+ * field per arm, named for the arm, typed with its payload (`void` for an
+ * arm that carries none), sugar spelled as the instance it lowers to.
+ * Returns 1 with *out set (free with cc_ct_free_fields); 0 when the source
+ * declares no such variant or an arm is not `name: type;`. */
+int cc_ct_reflect_variant_arms(const char* src, size_t len, const char* type_name,
+                               CCCtField** out, size_t* out_n) {
+    const char* vs = NULL;
+    size_t bo, bc, i;
+    CCCtField* fs = NULL; size_t fn = 0, fc = 0;
+    *out = NULL; *out_n = 0;
+    if (!type_name || !type_name[0]) return 0;
+    if (!cc__ct_variant_body_any(src, len, type_name, &vs, &bo, &bc)) return 0;
+    i = bo + 1;
+    while (i < bc) {
+        size_t ns, ne, colon, ts, te, semi;
+        char* ty;
+        char* rw;
+        ns = cc_skip_ws_and_comments(vs, bc, i);
+        if (ns >= bc) break;
+        ne = ns;
+        while (ne < bc && cc_is_ident_char(vs[ne])) ne++;
+        if (ne == ns) { cc__ct_free_fields(fs, fn); return 0; }
+        colon = cc_skip_ws_and_comments(vs, bc, ne);
+        if (colon >= bc || vs[colon] != ':') { cc__ct_free_fields(fs, fn); return 0; }
+        semi = colon + 1;
+        while (semi < bc && vs[semi] != ';') semi++;
+        if (semi >= bc) { cc__ct_free_fields(fs, fn); return 0; }
+        ts = cc_skip_ws_and_comments(vs, semi, colon + 1);
+        te = cc_rskip_ws_and_comments(vs, semi);
+        if (te <= ts) { cc__ct_free_fields(fs, fn); return 0; }
+        ty = (char*)malloc(te - ts + 1);
+        if (!ty) { cc__ct_free_fields(fs, fn); return 0; }
+        memcpy(ty, vs + ts, te - ts);
+        ty[te - ts] = 0;
+        rw = cc__ct_generic_sugar_rewrite(ty);
+        if (rw) { free(ty); ty = rw; }
+        rw = cc_ct_slice_sugar_rewrite(ty);
+        if (rw) { free(ty); ty = rw; }
+        if (!cc__ct_push_field(&fs, &fn, &fc, vs + ns, ne - ns, ty)) {
+            free(ty); cc__ct_free_fields(fs, fn); return 0;
+        }
+        free(ty);
+        i = semi + 1;
+    }
+    *out = fs; *out_n = fn;
     return 1;
 }
 
@@ -23002,6 +23248,53 @@ char* cc_ct_slice_sugar_rewrite(const char* decl) {
     return out;
 }
 
+/* `Fam::[args] name` in a reflected spelling: the instance name the
+ * lowering produces, `CCVec_<T>` for the vec family and `Fam_<args>` for
+ * any other (`Map_<K>_<V>*`, `ArrayMap_<K>_<V>*`: those families are
+ * pointers).  Returns a malloc'd rewrite, or NULL when `decl` carries no
+ * `::[`. */
+static char* cc__ct_generic_sugar_rewrite(const char* decl) {
+    const char* at;
+    const char* fs;
+    const char* close;
+    char fam[64];
+    char orig[8][128];
+    char mang[8][128];
+    char head[512];
+    int nargs, depth = 0, ho;
+    size_t fl;
+    char* out;
+    if (!decl) return NULL;
+    at = strstr(decl, "::[");
+    if (!at) return NULL;
+    fs = at;
+    while (fs > decl && cc_is_ident_char(fs[-1])) fs--;
+    fl = (size_t)(at - fs);
+    if (fl == 0 || fl >= sizeof(fam)) return NULL;
+    memcpy(fam, fs, fl);
+    fam[fl] = 0;
+    for (close = at + 2; *close; close++) {
+        if (*close == '[') depth++;
+        else if (*close == ']') { if (--depth == 0) break; }
+    }
+    if (!*close) return NULL;
+    nargs = cc__split_type_args(at + 3, (size_t)(close - (at + 3)), orig, mang, 8);
+    if (nargs <= 0) return NULL;
+    if (strcmp(fam, "Vec") == 0) snprintf(fam, sizeof(fam), "CCVec");
+    ho = snprintf(head, sizeof(head), "%s", fam);
+    for (int a = 0; a < nargs && ho > 0 && (size_t)ho < sizeof(head); a++)
+        ho += snprintf(head + ho, sizeof(head) - (size_t)ho, "_%s", mang[a]);
+    if (ho <= 0 || (size_t)ho >= sizeof(head) - 2) return NULL;
+    if (strcmp(fam, "Map") == 0 || strcmp(fam, "ArrayMap") == 0) strcat(head, "*");
+    out = (char*)malloc((size_t)(fs - decl) + strlen(head) + strlen(close + 1) + 1);
+    if (!out) return NULL;
+    memcpy(out, decl, (size_t)(fs - decl));
+    out[fs - decl] = 0;
+    strcat(out, head);
+    strcat(out, close + 1);
+    return out;
+}
+
 static int cc__ct_parse_param_list(const char* src, size_t lp, size_t rp,
                                    CCCtField** out, size_t* out_n) {
     CCCtField* fs = NULL; size_t fn = 0, fc = 0;
@@ -23123,7 +23416,25 @@ static int cc__ct_parse_fields_from_body(const char* src, size_t bo, size_t bc,
                     member_is_as = 1; break;
                 }
             }
-            m = cc__ct_member_normalize(src, ms, me);
+            /* Container and slice sugar name the instance the lowering
+             * produces; `[:]` would read as a bitfield to the member
+             * grammar, so the raw span is rewritten first. */
+            {
+                char* raw = (char*)malloc(me - ms + 1);
+                char* rw = NULL;
+                if (raw) {
+                    memcpy(raw, src + ms, me - ms);
+                    raw[me - ms] = '\0';
+                    rw = cc__ct_generic_sugar_rewrite(raw);
+                    if (rw) { free(raw); raw = rw; }
+                    rw = cc_ct_slice_sugar_rewrite(raw);
+                    if (rw) { free(raw); raw = rw; }
+                    m = cc__ct_member_normalize(raw, 0, strlen(raw));
+                    free(raw);
+                } else {
+                    m = NULL;
+                }
+            }
             if (!m) { cc__ct_free_fields(fs, fn); return 0; }
             if (member_is_as) {
                 /* The marker is an attribute on the member, not part of its
@@ -24660,6 +24971,11 @@ int cc_ct_reflect_type_kind(const char* src, size_t len, const char* type_name) 
         size_t h;
         if (nl >= sizeof(nm)) return CC_REFLECT_KIND_UNKNOWN;
         memcpy(nm, type_name + s, nl); nm[nl] = 0;
+        {
+            const char* vs = NULL;
+            if (cc__ct_variant_body_any(src, len, nm, &vs, &bo, &bc))
+                return CC_REFLECT_KIND_VARIANT;
+        }
         if (cc__ct_find_enum_body(src, len, nm, nl, &bo, &bc))
             return CC_REFLECT_KIND_ENUM;
         if (cc__ct_find_struct_body(src, len, nm, nl, &bo, &bc))

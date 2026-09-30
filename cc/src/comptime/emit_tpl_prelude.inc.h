@@ -117,7 +117,8 @@
     "extern int cc_reflect_tagged_count(const char* tag);\n" \
     "extern int cc_reflect_tagged_name(const char* tag, int idx, char* buf, int buf_sz);\n" \
     "enum { CC_REFLECT_KIND_UNKNOWN=0, CC_REFLECT_KIND_PRIMITIVE=1," \
-    " CC_REFLECT_KIND_POINTER=2, CC_REFLECT_KIND_STRUCT=3, CC_REFLECT_KIND_ENUM=4 };\n" \
+    " CC_REFLECT_KIND_POINTER=2, CC_REFLECT_KIND_STRUCT=3, CC_REFLECT_KIND_ENUM=4," \
+    " CC_REFLECT_KIND_VARIANT=5 };\n" \
     "typedef struct CCReflectField { char name[128]; char type[128]; int index; int is_as; } CCReflectField;\n" \
     "static inline int cc_reflect_field_at(const char* type_name, int idx, CCReflectField* out) {\n" \
     "  int as;\n" \

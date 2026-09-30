@@ -262,13 +262,18 @@ static CcStmt* sl_decl_init(SStep* st, CcDecl* d, CcVarDecl v) {
     CcInit* in = v.init;
     CcSpan sp = d->span;
     CCSlice instance;
+    CcType* vt = v.type;
     if (!in) return NULL;
-    if (!sl_type_is_slice(v.type)) {
+    if (!sl_type_is_slice(vt) && st->w) {
+        CcType* ut = unalias_declared(st->w, unalias_local(st->w, vt));
+        if (sl_type_is_slice(ut)) vt = ut;
+    }
+    if (!sl_type_is_slice(vt)) {
         /* an array OF slices: the list's elements are the destinations */
-        if (sl_type_is_slice(sl_array_elem(v.type))) sl_lit_items(L, in);
+        if (sl_type_is_slice(sl_array_elem(vt))) sl_lit_items(L, in);
         return NULL;
     }
-    instance = ix->canon(v.type);
+    instance = ix->canon(vt);
     if (in->expr && sl_is_string(in->expr)) {
         in->expr = sl_lit_call(L, in->expr);
         return NULL;
@@ -279,7 +284,7 @@ static CcStmt* sl_decl_init(SStep* st, CcDecl* d, CcVarDecl v) {
     if (sl_init_names_fields(in)) return NULL;
     {
         /* the braced list is the array; the slice is a view of it */
-        CcType* elem = sl_elem_of(v.type);
+        CcType* elem = sl_elem_of(vt);
         CCSlice name = v.name;
         CCString an = @string(`__cc_sl_${name}`, L->arena);
         CCSlice arr = lw_keep(L, &an);
@@ -313,17 +318,38 @@ static CcStmt* sl_decl_init(SStep* st, CcDecl* d, CcVarDecl v) {
     }
 }
 
-/* The parameter types of a called function, when the callee is a name the
- * index knows. */
+/* A type as the call sees it: typedefs local or declared resolved, and a
+ * pointer to a function read as the function. */
+static CcType* sl_callable(Walker* w, CcType* t) {
+    t = peel(unalias_declared(w, peel(unalias_local(w, peel(t)))));
+    if (t && t->k.kind == CcTypeK_pointer) {
+        CcType* p = NULL;
+        @switch (t->k) {
+            case .pointer(pt): p = pt.pointee; break;
+            default: break;
+        }
+        t = peel(unalias_declared(w, peel(unalias_local(w, peel(p)))));
+    }
+    return t;
+}
+
+/* The parameter types of a called function: the function a name the index
+ * knows declares, or else the function type of the callee expression -- a
+ * function-pointer local, typedef or field takes its slice parameters
+ * from the pointer's type. */
 static bool sl_callee_params(SStep* st, CcExpr* callee, CcParamList* out) {
-    CcIndex* ix = st->w->ix;
+    Walker* w = st->w;
+    CcIndex* ix = w->ix;
     CCSlice nm;
-    CcSym* sym;
-    if (!expr_ident(strip_parens_expr(callee), &nm) || !nm.len) return false;
-    sym = sym_any(ix, nm);
-    while (sym && sym->kind != CC_SYM_FUNC) sym = sym->same_name;
-    if (!sym || !sym->type) return false;
-    @switch (sym->type->k) {
+    CcSym* sym = NULL;
+    CcType* t;
+    if (expr_ident(strip_parens_expr(callee), &nm) && nm.len) {
+        sym = sym_any(ix, nm);
+        while (sym && sym->kind != CC_SYM_FUNC) sym = sym->same_name;
+    }
+    t = (sym && sym->type) ? sym->type : sl_callable(w, type_of_expr(w, callee));
+    if (!t) return false;
+    @switch (t->k) {
         case .func(ft): *out = ft.params; return true;
         default: return false;
     }
@@ -362,16 +388,12 @@ static CcExpr* sl_bytes_of(CcLowerer* L, CCSlice instance, CcExpr* a, CcSpan sp)
  * converted where the callee's declaration provably takes the erased one.
  * Erasing anything else would turn a typed borrow into a byte marshal that
  * still compiles. */
-static void sl_call_args(SStep* st, CcCall cl) {
+static void sl_args_to_params(SStep* st, CcParamList params, CcExprList* args) {
     Walker* w = st->w;
     CcIndex* ix = w->ix;
-    CcParamList params;
-    CcExprList* args = &cl.args;
     size_t n = args->len();
-    size_t np;
+    size_t np = params.len();
     size_t i;
-    if (!sl_callee_params(st, cl.callee, &params)) return;
-    np = params.len();
     for (i = 0; i < n && i < np; i++) {
         CcExpr* a = *args->get_ptr(i);
         CcParam* p = params.get_ptr(i);
@@ -403,8 +425,44 @@ static void sl_call_args(SStep* st, CcCall cl) {
 
 static void sl_on_call(Walker* w, CcExpr* e, CcCall cl) {
     SStep* st = (SStep*)w->env;
+    CcParamList params;
     (void)e;
-    sl_call_args(st, cl);
+    if (sl_callee_params(st, cl.callee, &params)) sl_args_to_params(st, params, &cl.args);
+}
+
+/* `o.fn("...")` / `p->fn("...")` through a function-pointer field: the
+ * field's function type says which arguments are slices. The site is a
+ * UFCS node, which prints as the text written; one whose arguments this
+ * step converted becomes the plain C call it is, so they print. */
+static void sl_on_field_call(Walker* w, CcExpr* e, CcUfcs uf, CcType* ft) {
+    SStep* st = (SStep*)w->env;
+    CcLowerer* L = st->L;
+    CcType* t = sl_callable(w, ft);
+    CcParamList params;
+    CcCall call;
+    size_t n = uf.args.len();
+    size_t i;
+    bool changed = false;
+    if (!t) return;
+    @switch (t->k) {
+        case .func(fn): params = fn.params; break;
+        default: return;
+    }
+    {
+        CcExprList before = vec_new::[CcExprRef](L->arena);
+        for (i = 0; i < n; i++) before.push(*uf.args.get_ptr(i));
+        sl_args_to_params(st, params, &uf.args);
+        for (i = 0; i < n; i++)
+            if (*uf.args.get_ptr(i) != *before.get_ptr(i)) changed = true;
+    }
+    if (!changed) return;
+    {
+        CcExprList args = vec_new::[CcExprRef](L->arena);
+        for (i = 0; i < n; i++) args.push(*uf.args.get_ptr(i));
+        call.callee = cc_expr_member(uf.recv, uf.method, uf.arrow, e->span, L->arena);
+        call.args = args;
+    }
+    e->k = { .call = call };
 }
 
 static bool sl_expr_visit(CcExpr* e, void* env) {
@@ -623,6 +681,7 @@ void CcLowerer_slice_args(CcLowerer* L) {
     w.ix = L->ix;
     w.unit = L->unit;
     w.on_call = sl_on_call;
+    w.on_field_call = sl_on_field_call;
     w.env = &st;
     tw_unit(&w);
 }

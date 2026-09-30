@@ -19,7 +19,7 @@
 
 #include <ccc/cc_arena.h>
 
-#define CC_COMPTIME_FN_MAX 32
+#define CC_COMPTIME_FN_MAX 128
 #define CC_COMPTIME_FN_NAME_MAX 64
 
 typedef struct CCComptimeFnEntry {
@@ -417,6 +417,98 @@ const char* cc_comptime_fn_registry_lookup_file(const char* name) {
         if (strcmp(cc__comptime_fns[i].name, name) == 0)
             return cc__comptime_fns[i].def_file;
     return NULL;
+}
+
+static int cc__comptime_fn_index(const char* name, size_t n) {
+    for (size_t i = 0; i < cc__comptime_fn_count; i++)
+        if (strlen(cc__comptime_fns[i].name) == n && memcmp(cc__comptime_fns[i].name, name, n) == 0)
+            return (int)i;
+    return -1;
+}
+
+/* Mark every registered function `def` names, outside comments and
+ * literals. */
+static void cc__comptime_fn_mark_callees(const char* def, size_t len, unsigned char* mark) {
+    size_t i = 0;
+    while (i < len) {
+        char c = def[i];
+        char c2 = i + 1 < len ? def[i + 1] : 0;
+        if (c == '/' && c2 == '/') { while (i < len && def[i] != '\n') i++; continue; }
+        if (c == '/' && c2 == '*') {
+            i += 2;
+            while (i + 1 < len && !(def[i] == '*' && def[i + 1] == '/')) i++;
+            i += 2;
+            continue;
+        }
+        if (c == '"' || c == '\'' || c == '`') {
+            i++;
+            while (i < len && def[i] != c) i += def[i] == '\\' ? 2 : 1;
+            i++;
+            continue;
+        }
+        if (cc_is_ident_char(c) && !(c >= '0' && c <= '9')) {
+            size_t s = i;
+            while (i < len && cc_is_ident_char(def[i])) i++;
+            int k = cc__comptime_fn_index(def + s, i - s);
+            if (k >= 0) mark[k] = 1;
+            continue;
+        }
+        if (c >= '0' && c <= '9') { while (i < len && cc_is_ident_char(def[i])) i++; continue; }
+        i++;
+    }
+}
+
+char* cc_comptime_fn_registry_closure_def(const char* name) {
+    unsigned char mark[CC_COMPTIME_FN_MAX] = {0};
+    unsigned char done[CC_COMPTIME_FN_MAX] = {0};
+    int root = name ? cc__comptime_fn_index(name, strlen(name)) : -1;
+    size_t nhelpers = 0;
+    size_t cap = 1, len = 0;
+    char* out;
+    int again = 1;
+    if (root < 0) return NULL;
+    mark[root] = 1;
+    while (again) {
+        again = 0;
+        for (size_t i = 0; i < cc__comptime_fn_count; i++) {
+            if (!mark[i] || done[i]) continue;
+            done[i] = 1;
+            again = 1;
+            cc__comptime_fn_mark_callees(cc__comptime_fns[i].def, cc__comptime_fns[i].def_len, mark);
+        }
+    }
+    for (size_t i = 0; i < cc__comptime_fn_count; i++)
+        if (mark[i] && (int)i != root) nhelpers++;
+    if (!nhelpers) return strdup(cc__comptime_fns[root].def);
+    /* prelude, a prototype for each helper (they may call one another in
+     * any order), the handler, then the helpers under their own `#line` */
+    if (cc__comptime_fn_prelude) cap += strlen(cc__comptime_fn_prelude) + 1;
+    for (size_t i = 0; i < cc__comptime_fn_count; i++)
+        if (mark[i])
+            cap += 2 * cc__comptime_fns[i].def_len + 64 +
+                   (cc__comptime_fns[i].def_file ? strlen(cc__comptime_fns[i].def_file) : 0);
+    out = (char*)malloc(cap);
+    if (!out) return NULL;
+    out[0] = '\0';
+    if (cc__comptime_fn_prelude && cc__comptime_fn_prelude[0])
+        len += (size_t)snprintf(out + len, cap - len, "%s\n", cc__comptime_fn_prelude);
+    for (size_t i = 0; i < cc__comptime_fn_count; i++) {
+        const CCComptimeFnEntry* e = &cc__comptime_fns[i];
+        size_t lp = 0, rp = 0;
+        if (!mark[i] || (int)i == root) continue;
+        while (lp < e->def_len && e->def[lp] != '(') lp++;
+        if (lp >= e->def_len || !cc_find_matching_paren(e->def, e->def_len, lp, &rp)) continue;
+        len += (size_t)snprintf(out + len, cap - len, "%.*s;\n", (int)(rp + 1), e->def);
+    }
+    len += (size_t)snprintf(out + len, cap - len, "%s\n", cc__comptime_fns[root].def);
+    for (size_t i = 0; i < cc__comptime_fn_count; i++) {
+        const CCComptimeFnEntry* e = &cc__comptime_fns[i];
+        if (!mark[i] || (int)i == root) continue;
+        if (e->def_file && e->def_file[0] && e->def_line > 0)
+            len += (size_t)snprintf(out + len, cap - len, "#line %d \"%s\"\n", e->def_line, e->def_file);
+        len += (size_t)snprintf(out + len, cap - len, "%s\n", e->def);
+    }
+    return out;
 }
 
 const char* cc_comptime_fn_registry_scan_error(void) {

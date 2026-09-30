@@ -1,0 +1,363 @@
+#ifndef CC_STD_FIELD_CCH
+#define CC_STD_FIELD_CCH
+
+/* Field-wise equality and clone, written from reflection.
+ *
+ *   typedef FieldEq::[Doc] DocEq;         // d.eq(&e)       -> bool
+ *   typedef FieldClone::[Doc] DocClone;   // d.clone(arena) -> Doc
+ *
+ * The instance declares `Doc_eq(const Doc*, const Doc*)` /
+ * `Doc_clone(const Doc*, CCArena)` and writes their bodies by walking the
+ * type's fields, recursing through what the fields are:
+ *
+ *   scalar, enum        compared by value, copied
+ *   pointer             compared by identity, copied (the pointee is not
+ *                       the struct's to deep-copy)
+ *   char[:]             compared by bytes, copied into the arena
+ *   T[:], CCVec::[T]    compared and copied element by element
+ *   struct              recursed into, field by field
+ *   @variant            same arm and equal payload; the payload copied
+ *
+ * A field of any other kind (an array, a union, a type reflection cannot
+ * see) is an error at the instance, naming the field: equality that skips
+ * a field would say two different values are the same. A struct reached
+ * through a field needs no instance of its own; one written later shares
+ * the same helpers.
+ *
+ * Clone allocates from `arena`; running out of it aborts with a message,
+ * since a clone that came back short would look like a whole one. */
+
+#include <stdarg.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_slice.cch>
+
+static inline void* cc__field_alloc(CCArena arena, size_t n, size_t align) {
+    void* p;
+    if (!n) return NULL;
+    p = cc_arena_alloc(arena, n, align);
+    if (!p) {
+        fprintf(stderr, "FieldClone: arena exhausted copying %zu bytes\n", n);
+        abort();
+    }
+    return p;
+}
+
+/* What a generation run has written, and what it has already started. */
+typedef struct CCFieldGen {
+    char out[65536];
+    int n;
+    char seen[64][128];
+    int nseen;
+    int failed;
+    char why[320];
+} CCFieldGen;
+
+@comptime void cc_field_put(CCFieldGen* g, const char* fmt, ...) {
+    va_list ap;
+    int w;
+    if (g->failed) return;
+    va_start(ap, fmt);
+    w = vsnprintf(g->out + g->n, sizeof(g->out) - (size_t)g->n, fmt, ap);
+    va_end(ap);
+    if (w < 0 || g->n + w >= (int)sizeof(g->out)) {
+        g->failed = 1;
+        snprintf(g->why, sizeof(g->why), "field: generated code exceeds %d bytes", (int)sizeof(g->out));
+        return;
+    }
+    g->n += w;
+}
+
+@comptime void cc_field_fail(CCFieldGen* g, const char* what, const char* owner,
+                             const char* field, const char* type) {
+    if (g->failed) return;
+    g->failed = 1;
+    snprintf(g->why, sizeof(g->why), "%s: field '%s' of '%s' has type '%s', which has no field-wise %s",
+             what, field, owner, type, what[5] == 'E' ? "equality" : "copy");
+}
+
+/* 1 when `kind:name` was already started in this run; otherwise marks it. */
+@comptime int cc_field_seen(CCFieldGen* g, const char* kind, const char* name) {
+    char key[128];
+    int i;
+    snprintf(key, sizeof(key), "%s:%s", kind, name);
+    for (i = 0; i < g->nseen; i++)
+        if (strcmp(g->seen[i], key) == 0) return 1;
+    if (g->nseen < 64) snprintf(g->seen[g->nseen++], sizeof(g->seen[0]), "%s", key);
+    return 0;
+}
+
+/* The element of a `CCSlice_<T>` / `CCVec_<T>` instance, when `prefix`
+ * names its family. */
+@comptime int cc_field_elem(const char* ty, const char* prefix, char* out, int cap) {
+    size_t pl = strlen(prefix);
+    if (strncmp(ty, prefix, pl) != 0 || !ty[pl]) return 0;
+    snprintf(out, (size_t)cap, "%s", ty + pl);
+    return 1;
+}
+
+/* A type whose fields or arms can be walked. */
+@comptime int cc_field_walkable(const char* ty) {
+    int k = cc_reflect_kind(ty);
+    return (k == CC_REFLECT_KIND_STRUCT || k == CC_REFLECT_KIND_VARIANT) && cc_reflect_field_count(ty) > 0;
+}
+
+@comptime int cc_field_leaf(const char* ty) {
+    int k = cc_reflect_kind(ty);
+    if (strchr(ty, '[')) return 0;
+    return k == CC_REFLECT_KIND_PRIMITIVE || k == CC_REFLECT_KIND_ENUM || k == CC_REFLECT_KIND_POINTER;
+}
+
+/* A C expression: true when the values `a` and `b` of type `ty` are equal.
+ * Helpers it calls are written first. */
+@comptime void cc_field_eq_expr(CCFieldGen* g, const char* owner, const char* field,
+                                const char* ty, const char* a, const char* b,
+                                char* out, int cap) {
+    char el[128];
+    if (strcmp(ty, "void") == 0) { snprintf(out, (size_t)cap, "true"); return; }
+    if (strcmp(ty, "CCSlice") == 0) {
+        snprintf(out, (size_t)cap,
+                 "((%s).len == (%s).len && ((%s).len == 0 || memcmp((%s).ptr, (%s).ptr, (%s).len) == 0))",
+                 a, b, a, a, b, a);
+        return;
+    }
+    if (cc_field_elem(ty, "CCSlice_", el, sizeof(el)) || cc_field_elem(ty, "CCVec_", el, sizeof(el))) {
+        int is_vec = strncmp(ty, "CCVec_", 6) == 0;
+        if (!cc_field_leaf(el) && !cc_field_walkable(el) && strcmp(el, "CCSlice") != 0 &&
+            strncmp(el, "CCSlice_", 8) != 0 && strncmp(el, "CCVec_", 6) != 0) {
+            cc_field_fail(g, "FieldEq", owner, field, ty);
+            return;
+        }
+        if (!cc_field_seen(g, "eq", ty)) {
+            char ex[1024];
+            cc_field_eq_expr(g, ty, "element", el, "ea[i]", "eb[i]", ex, sizeof(ex));
+            if (g->failed) return;
+            cc_field_put(g,
+                "#ifndef CC_FIELD_EQ_DEF_%s\n#define CC_FIELD_EQ_DEF_%s\n"
+                "static bool cc__field_eq_%s(const %s* a, const %s* b) {\n"
+                "    size_t n = %s, i;\n"
+                "    const %s* ea = (const %s*)%s;\n"
+                "    const %s* eb = (const %s*)%s;\n"
+                "    if (n != %s) return false;\n"
+                "    for (i = 0; i < n; i++) if (!(%s)) return false;\n"
+                "    return true;\n}\n#endif\n",
+                ty, ty, ty, ty, ty,
+                is_vec ? "a->len" : "a->base.len",
+                el, el, is_vec ? "a->data" : "a->base.ptr",
+                el, el, is_vec ? "b->data" : "b->base.ptr",
+                is_vec ? "b->len" : "b->base.len", ex);
+        }
+        snprintf(out, (size_t)cap, "cc__field_eq_%s(&(%s), &(%s))", ty, a, b);
+        return;
+    }
+    if (cc_field_leaf(ty)) { snprintf(out, (size_t)cap, "((%s) == (%s))", a, b); return; }
+    if (cc_field_walkable(ty)) {
+        /* `cc__field_eq_<ty>`: every field equal, or the same arm with
+         * equal payloads. */
+        if (!cc_field_seen(g, "eq", ty)) {
+            char body[16384];
+            int bn = 0;
+            int nf = cc_reflect_field_count(ty);
+            int variant = cc_reflect_kind(ty) == CC_REFLECT_KIND_VARIANT;
+            int i;
+            cc_field_put(g, "static bool cc__field_eq_%s(const %s* a, const %s* b);\n", ty, ty, ty);
+            body[0] = 0;
+            if (variant)
+                bn += snprintf(body + bn, sizeof(body) - (size_t)bn,
+                               "    if (a->kind != b->kind) return false;\n");
+            for (i = 0; i < nf && !g->failed; i++) {
+                char fn[128], ft[128], la[192], lb[192], ex[2048];
+                cc_reflect_field_name(ty, i, fn, sizeof(fn));
+                cc_reflect_field_type(ty, i, ft, sizeof(ft));
+                snprintf(la, sizeof(la), variant ? "xa" : "a->%s", fn);
+                snprintf(lb, sizeof(lb), variant ? "xb" : "b->%s", fn);
+                cc_field_eq_expr(g, ty, fn, ft, la, lb, ex, sizeof(ex));
+                if (g->failed) return;
+                if (variant && strcmp(ft, "void") == 0)
+                    bn += snprintf(body + bn, sizeof(body) - (size_t)bn, "    if (a->kind == %s_%s) return true;\n", ty, fn);
+                else if (variant)
+                    bn += snprintf(body + bn, sizeof(body) - (size_t)bn,
+                                   "    if (a->kind == %s_%s) { if (b->kind == %s_%s) { %s xa = a->%s; %s xb = b->%s; return %s; } }\n",
+                                   ty, fn, ty, fn, ft, fn, ft, fn, ex);
+                else
+                    bn += snprintf(body + bn, sizeof(body) - (size_t)bn, "    if (!(%s)) return false;\n", ex);
+                if (bn >= (int)sizeof(body)) {
+                    g->failed = 1;
+                    snprintf(g->why, sizeof(g->why), "FieldEq: '%s' has too many fields", ty);
+                    return;
+                }
+            }
+            cc_field_put(g,
+                "#ifndef CC_FIELD_EQ_DEF_%s\n#define CC_FIELD_EQ_DEF_%s\n"
+                "static bool cc__field_eq_%s(const %s* a, const %s* b) {\n%s    return %s;\n}\n#endif\n",
+                ty, ty, ty, ty, ty, body, variant ? "false" : "true");
+        }
+        snprintf(out, (size_t)cap, "cc__field_eq_%s(&(%s), &(%s))", ty, a, b);
+        return;
+    }
+    cc_field_fail(g, "FieldEq", owner, field, ty);
+}
+
+/* C statements: `dst` becomes a copy of `src` (type `ty`) whose storage
+ * comes from `arena`. Helpers it calls are written first. */
+@comptime void cc_field_clone_stmt(CCFieldGen* g, const char* owner, const char* field,
+                                   const char* ty, const char* dst, const char* src,
+                                   char* out, int cap) {
+    char el[128];
+    if (strcmp(ty, "void") == 0) { out[0] = 0; return; }
+    if (strcmp(ty, "CCSlice") == 0) {
+        snprintf(out, (size_t)cap,
+                 "{ char* cp = (char*)cc__field_alloc(arena, (%s).len, 1);"
+                 " if (cp) memcpy(cp, (%s).ptr, (%s).len);"
+                 " %s = cc_slice_from_buffer(cp, (%s).len); }",
+                 src, src, src, dst, src);
+        return;
+    }
+    if (cc_field_elem(ty, "CCSlice_", el, sizeof(el)) || cc_field_elem(ty, "CCVec_", el, sizeof(el))) {
+        int is_vec = strncmp(ty, "CCVec_", 6) == 0;
+        if (!cc_field_leaf(el) && !cc_field_walkable(el) && strcmp(el, "CCSlice") != 0 &&
+            strncmp(el, "CCSlice_", 8) != 0 && strncmp(el, "CCVec_", 6) != 0) {
+            cc_field_fail(g, "FieldClone", owner, field, ty);
+            return;
+        }
+        if (!cc_field_seen(g, "clone", ty)) {
+            char st[1024];
+            cc_field_clone_stmt(g, ty, "element", el, "e", "es[i]", st, sizeof(st));
+            if (g->failed) return;
+            if (is_vec)
+                cc_field_put(g,
+                    "#ifndef CC_FIELD_CLONE_DEF_%s\n#define CC_FIELD_CLONE_DEF_%s\n"
+                    "static %s cc__field_clone_%s(const %s* s, CCArena arena) {\n"
+                    "    size_t n = s->len, i;\n"
+                    "    const %s* es = (const %s*)s->data;\n"
+                    "    %s r = %s_init(arena, n);\n"
+                    "    for (i = 0; i < n; i++) {\n"
+                    "        %s e = es[i];\n"
+                    "        %s\n"
+                    "        if (%s_push(&r, e) != 0) { fprintf(stderr, \"FieldClone: arena exhausted growing a %s\\n\"); abort(); }\n"
+                    "    }\n    return r;\n}\n#endif\n",
+                    ty, ty, ty, ty, ty, el, el, ty, ty, el, st, ty, ty);
+            else
+                cc_field_put(g,
+                    "#ifndef CC_FIELD_CLONE_DEF_%s\n#define CC_FIELD_CLONE_DEF_%s\n"
+                    "static %s cc__field_clone_%s(const %s* s, CCArena arena) {\n"
+                    "    size_t n = s->base.len, i;\n"
+                    "    const %s* es = (const %s*)s->base.ptr;\n"
+                    "    %s* p = (%s*)cc__field_alloc(arena, n * sizeof(%s), _Alignof(%s));\n"
+                    "    for (i = 0; i < n; i++) {\n"
+                    "        %s e = es[i];\n"
+                    "        %s\n"
+                    "        p[i] = e;\n"
+                    "    }\n    return %s_from_buffer(p, n);\n}\n#endif\n",
+                    ty, ty, ty, ty, ty, el, el, el, el, el, el, el, st, ty);
+        }
+        snprintf(out, (size_t)cap, "%s = cc__field_clone_%s(&(%s), arena);", dst, ty, src);
+        return;
+    }
+    if (cc_field_leaf(ty)) { snprintf(out, (size_t)cap, "%s = %s;", dst, src); return; }
+    if (cc_field_walkable(ty)) {
+        /* `cc__field_clone_<ty>`: the value with every field (or the live
+         * arm's payload) copied. */
+        if (!cc_field_seen(g, "clone", ty)) {
+            char body[16384];
+            int bn = 0;
+            int nf = cc_reflect_field_count(ty);
+            int variant = cc_reflect_kind(ty) == CC_REFLECT_KIND_VARIANT;
+            int i;
+            cc_field_put(g, "static %s cc__field_clone_%s(const %s* s, CCArena arena);\n", ty, ty, ty);
+            body[0] = 0;
+            for (i = 0; i < nf && !g->failed; i++) {
+                char fn[128], ft[128], d[192], sv[192], st[2048];
+                cc_reflect_field_name(ty, i, fn, sizeof(fn));
+                cc_reflect_field_type(ty, i, ft, sizeof(ft));
+                snprintf(d, sizeof(d), variant ? "cv" : "r.%s", fn);
+                snprintf(sv, sizeof(sv), variant ? "cv" : "s->%s", fn);
+                cc_field_clone_stmt(g, ty, fn, ft, d, sv, st, sizeof(st));
+                if (g->failed) return;
+                if (variant && st[0])
+                    bn += snprintf(body + bn, sizeof(body) - (size_t)bn,
+                                   "    if (s->kind == %s_%s) { %s cv = s->%s; %s r = { .%s = cv }; }\n",
+                                   ty, fn, ft, fn, st, fn);
+                else if (st[0])
+                    bn += snprintf(body + bn, sizeof(body) - (size_t)bn, "    %s\n", st);
+                if (bn >= (int)sizeof(body)) {
+                    g->failed = 1;
+                    snprintf(g->why, sizeof(g->why), "FieldClone: '%s' has too many fields", ty);
+                    return;
+                }
+            }
+            cc_field_put(g,
+                "#ifndef CC_FIELD_CLONE_DEF_%s\n#define CC_FIELD_CLONE_DEF_%s\n"
+                "static %s cc__field_clone_%s(const %s* s, CCArena arena) {\n"
+                "    %s r = *s;\n    (void)arena;\n%s    return r;\n}\n#endif\n",
+                ty, ty, ty, ty, ty, ty, body);
+        }
+        snprintf(out, (size_t)cap, "%s = cc__field_clone_%s(&(%s), arena);", dst, ty, src);
+        return;
+    }
+    cc_field_fail(g, "FieldClone", owner, field, ty);
+}
+
+@comptime void cc_field_arg(CCSliceArray type_args, char* out, int cap) {
+    int tl = (int)type_args.items[0].len;
+    if (tl > cap - 1) tl = cap - 1;
+    memcpy(out, (char*)type_args.items[0].ptr, (size_t)tl);
+    out[tl] = 0;
+}
+
+/* `FieldEq::[T]`: `T_eq(const T* a, const T* b)`, true when every field is
+ * equal. The body is written from reflection by the extension below. */
+CC_GENERIC_FACTORY(FieldEq, 1) {
+    return @emit(`typedef struct { char _; } ${mangled};
+static bool cc__field_eq_${arg_mangled(0)}(const ${arg(0)}* a, const ${arg(0)}* b);
+static inline bool ${arg(0)}_eq(const ${arg(0)}* a, const ${arg(0)}* b) { return cc__field_eq_${arg_mangled(0)}(a, b); }`, arena);
+}
+
+CC_GENERIC_FACTORY_EXTEND(FieldEq, 1) {
+    static CCFieldGen g;
+    char t[128];
+    memset(&g, 0, sizeof(g));
+    cc_field_arg(type_args, t, sizeof(t));
+    if (!cc_field_walkable(t)) {
+        snprintf(g.why, sizeof(g.why), "FieldEq: '%s' is not a struct or @variant reflection can walk", t);
+        cc_emit_error(g.why);
+        return cc_slice_empty();
+    }
+    {
+        char ex[256];
+        cc_field_eq_expr(&g, t, "", t, "a", "b", ex, sizeof(ex));
+    }
+    if (g.failed) { cc_emit_error(g.why); return cc_slice_empty(); }
+    return cc_slice_from_parts(g.out, (size_t)g.n, CC_SLICE_ID_UNTRACKED);
+}
+
+/* `FieldClone::[T]`: `T_clone(const T* s, CCArena arena)`, a copy whose
+ * storage comes from `arena`. */
+CC_GENERIC_FACTORY(FieldClone, 1) {
+    return @emit(`typedef struct { char _; } ${mangled};
+static ${arg(0)} cc__field_clone_${arg_mangled(0)}(const ${arg(0)}* s, CCArena arena);
+static inline ${arg(0)} ${arg(0)}_clone(const ${arg(0)}* s, CCArena arena) { return cc__field_clone_${arg_mangled(0)}(s, arena); }`, arena);
+}
+
+CC_GENERIC_FACTORY_EXTEND(FieldClone, 1) {
+    static CCFieldGen g;
+    char t[128];
+    memset(&g, 0, sizeof(g));
+    cc_field_arg(type_args, t, sizeof(t));
+    if (!cc_field_walkable(t)) {
+        snprintf(g.why, sizeof(g.why), "FieldClone: '%s' is not a struct or @variant reflection can walk", t);
+        cc_emit_error(g.why);
+        return cc_slice_empty();
+    }
+    {
+        char st[256];
+        cc_field_clone_stmt(&g, t, "", t, "r", "s", st, sizeof(st));
+    }
+    if (g.failed) { cc_emit_error(g.why); return cc_slice_empty(); }
+    return cc_slice_from_parts(g.out, (size_t)g.n, CC_SLICE_ID_UNTRACKED);
+}
+
+#endif

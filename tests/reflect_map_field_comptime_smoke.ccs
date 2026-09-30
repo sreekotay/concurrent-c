@@ -1,0 +1,36 @@
+/* A struct holding map instances compiles beside a `@comptime` block, and
+ * its map fields reflect as the pointer types they lower to. */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct {
+    Map::[int, int] m;
+    ArrayMap::[int, int] am;
+    int n;
+} HasMaps;
+
+@comptime {
+    char line[256];
+    int n = 0;
+    int nf = cc_reflect_field_count("HasMaps");
+    for (int i = 0; i < nf; i++) {
+        char nm[64];
+        char ty[128];
+        cc_reflect_field_name("HasMaps", i, nm, sizeof(nm));
+        cc_reflect_field_type("HasMaps", i, ty, sizeof(ty));
+        n += snprintf(line + n, sizeof(line) - (size_t)n, "%s%s:%s", i ? " " : "", nm, ty);
+    }
+    @emit(CC_EMIT_AT_COMPTIME_SITE, `static const char* k_fields = "${line}";`);
+}
+
+int main(void) {
+    const char* want = "m:Map_int_int* am:ArrayMap_int_int* n:int";
+    if (strcmp(k_fields, want) != 0) {
+        printf("FAIL: %s\n", k_fields);
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}

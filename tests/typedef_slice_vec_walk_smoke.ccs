@@ -1,0 +1,26 @@
+// A typedef of a vec or a slice is that vec or slice: it walks, it has
+// `.len`, and a braced list initializes it.
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct { int k; int v; } Setting;
+typedef CCVec::[Setting] Settings;
+typedef int[:] Ints;
+
+int main(void) {
+    CCArena a = cc_arena_create(4096);
+    Settings s = cc_vec_new::[Setting](a);
+    s.push((Setting){1, 2});
+    s.push((Setting){3, 4});
+    int sum = 0;
+    @for (x in s) sum += x.v;
+    Ints is = { 1, 2, 3 };
+    @for (y in is) sum += y;
+    if (sum != 12 || is.len != 3 || s.len() != 2) {
+        printf("FAIL sum=%d len=%zu\n", sum, is.len);
+        return 1;
+    }
+    printf("ok\n");
+    cc_arena_destroy(&a);
+    return 0;
+}

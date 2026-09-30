@@ -1,0 +1,9 @@
+/* A field FieldEq cannot compare is an error naming it: equality that
+ * skipped `xs` would call two different values the same. */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/field.cch>
+
+typedef struct { int xs[4]; int n; } Bad;
+typedef FieldEq::[Bad] BadEq;
+
+int main(void) { return 0; }

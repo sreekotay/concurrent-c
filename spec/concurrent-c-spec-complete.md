@@ -7687,6 +7687,10 @@ defined"*). An *extension* may return the empty slice to emit nothing, which is
 the supported way to specialize conditionally (e.g. emit `_inverse` only when
 `R == C`).
 
+**Rule (factory helpers):** A factory body may call the `@comptime` functions of its unit and of the `.cch` header that declares the factory, and name that header's file-scope typedefs and enums that precede its first `@comptime` function. A factory is compiled with the helpers it reaches through calls, so helpers may call one another, recursively and in any order.
+
+**Rule (a factory's own error):** A factory that calls `cc_emit_error` fails the instantiation at the use site, whatever text it returns, and an extension's error fails it as the base's would. Its message names what is wrong; the use-site diagnostic names the instance and the factory.
+
 **Rule:** Each `${expr}` slot in `@emit(\`...\`, arena)` lowers to `cc_emit_tpl_append_slot(...)`, which uses C11 `_Generic` on the expression type to pick the append helper (`CCSlice`, integers, floating-point, or C string). Slot dispatch does not depend on variable names.
 
 A factory compiles in-process on the libtcc comptime evaluator on first use (the same evaluator that runs `@comptime` blocks). First-use lowering is in the millisecond range. The relocated factory code stays resident for the remainder of the compile; if libtcc is unavailable the compiler falls back to a host-compiled shared object.
@@ -7711,7 +7715,14 @@ type_of(T).nfields     // field count (in `@comptime {}`, the host reflect count
 type_of(T).name        // const char* display spelling
 ```
 
-Reflection reads the unit's own declarations and those of the quoted `.cch` headers it includes. A `@variant` reflects as the struct it lowers to: a tag and the union of its arms.
+Reflection reads the unit's own declarations and those of the quoted `.cch` headers it includes.
+
+A `@variant` reflects as its arms: `cc_reflect_kind` reports `CC_REFLECT_KIND_VARIANT`, and each arm is one field, in declaration order, whose name is the arm and whose `type` is its payload — `void` for an arm that carries none. Code that walks a variant this way reads the live arm through a kind check (`if (v->kind == V_arm)`) and projects it as `v->arm`; the tag and union it lowers to are not part of its reflected shape.
+
+```c
+@variant Shape { circle: double; rect: Setting; none: void; };
+// fields: circle / double, rect / Setting, none / void
+```
 
 `@comptime for` unrolls a body once per declared field of a struct `T`:
 
@@ -7779,6 +7790,11 @@ Putting a token-valued member in a slot (`${m.params}`) is ill-formed — a para
 | Array (incl. multi-dim) | `char buf[16];` · `int g[2][3];` | `buf` / `char[16]` · `g` / `int[2][3]` |
 | Function pointer | `int (*cb)(int, int);` | `cb` / `int (*)(int, int)` |
 | Named bitfield | `unsigned f : 4;` | `f` / `unsigned` (width is validated, not exposed) |
+| Slice | `char[:] name;` · `Setting[:] ps;` | `name` / `CCSlice` · `ps` / `CCSlice_Setting` |
+| Vector | `CCVec::[Setting] items;` | `items` / `CCVec_Setting` |
+| Map | `Map::[int, int] m;` · `ArrayMap::[int, int] am;` | `m` / `Map_int_int*` · `am` / `ArrayMap_int_int*` |
+
+A slice, vector or map field reflects as the C type it lowers to, the name a factory spells in the code it writes.
 
 For the array and function-pointer forms the `type` spelling carries the extent / signature, so it is exact for `sizeof` and `t.f` access but is **not** usable as a declaration prefix (`${f.type} x;`).
 
@@ -7817,6 +7833,38 @@ For the array and function-pointer forms the `type` spelling carries the extent 
 **Rule:** Every declared parameter is reported, in order, with the receiver at index 0 — being the first parameter is what makes the function a method, so it is a fact reflection states rather than hides. `()` and `(void)` are the empty list and unroll zero times.
 
 **Rule:** A declaration list reflects under the same all-or-nothing discipline as struct fields, through the same declarator parser. An entry that is unnamed, or spelled in a form the parser cannot model exactly, is a compile-time error naming the list — never a dropped entry, which would leave `p.index` naming a different position than the source does.
+
+#### Field-wise equality and clone (`<ccc/std/field.cch>`)
+
+`FieldEq::[T]` and `FieldClone::[T]` write a struct's or variant's equality and deep copy from its reflected fields:
+
+```c
+#include <ccc/std/field.cch>
+
+typedef FieldEq::[Doc] DocEq;         // bool Doc_eq(const Doc* a, const Doc* b)
+typedef FieldClone::[Doc] DocClone;   // Doc  Doc_clone(const Doc* s, CCArena arena)
+
+if (!a.eq(&b)) { ... }
+Doc c = a.clone(arena);
+```
+
+Each walks `T`'s fields and recurses through what they are:
+
+| Field type | Equality | Clone |
+|---|---|---|
+| Scalar, enum | `==` | copied |
+| Pointer | identity | copied; the pointee is not the struct's to copy |
+| `char[:]` | length and bytes | bytes copied into `arena` |
+| `T[:]` | length, then element-wise | elements cloned into an array in `arena` |
+| `CCVec::[T]` | length, then element-wise | a vector in `arena` of cloned elements |
+| Struct | field-wise | field-wise |
+| `@variant` | same arm and equal payload | the live arm's payload cloned |
+
+**Rule:** A field of any other kind — an array, a union, a type reflection cannot walk — is a compile-time error at the instance naming the field and its type. Neither operation skips a field: an equality that skipped one would report two different values equal.
+
+**Rule:** A struct or variant reached through a field needs no instance of its own; its helpers are written once per unit, shared by every instance that reaches it, and a recursive type reaches itself through the same helper.
+
+**Rule:** Clone takes every byte it writes from `arena`. Running out aborts the program with a message: a clone that returned short would be indistinguishable from a whole one.
 
 The compiler routes `@comptime if` predicate evaluation and `@comptime for` field loading through the libtcc comptime executor when `CC_COMPTIME_UNIFIED_EXEC=1` (default). When `CC_COMPTIME_UNIFIED_EXEC=0`, predicate evaluation and field loading use the structural text resolver. Both `@string` and `@emit` share one backtick `${...}` scanner (`preprocess/template_scan.c`). `@emit` slot values are appended via type-driven `_Generic` dispatch in `cc_emit_tpl.cch`, not name heuristics.
 

@@ -45,6 +45,11 @@ const char* cc_comptime_fn_registry_defs(void);
 char* cc_comptime_resolve_quoted_includes(const char* text, size_t len, const char* base_file,
                                           size_t* out_len);
 const char* cc_comptime_fn_registry_lookup_def(const char* name);
+/* `name`'s definition with every registered `@comptime` function it reaches
+ * through calls, compilable on its own: when it reaches any, the prelude and
+ * a prototype for each come first. malloc'd; NULL when `name` is not
+ * registered. */
+char* cc_comptime_fn_registry_closure_def(const char* name);
 int cc_comptime_fn_registry_lookup_line(const char* name);
 /* #line-resolved source file of a registered @comptime fn, or NULL if no
  * `#line` directive preceded it (then lookup_line is a buffer-relative line). */

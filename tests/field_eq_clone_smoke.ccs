@@ -1,0 +1,81 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/std/field.cch>
+#include <assert.h>
+#include <stdio.h>
+
+typedef struct {
+    char[:] key;
+    int value;
+} Setting;
+
+@variant Shape {
+    circle: double;
+    rect: Setting;
+    none: void;
+};
+
+typedef enum { DOC_DRAFT, DOC_FINAL } DocState;
+
+typedef struct {
+    char[:] name;
+    DocState state;
+    Shape shape;
+    Setting[:] pinned;
+    CCVec::[Setting] items;
+} Doc;
+
+typedef FieldEq::[Doc] DocEq;
+typedef FieldClone::[Doc] DocClone;
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+
+    char kbuf[8] = "alpha";
+    Setting pins[2] = { { "p0", 1 }, { "p1", 2 } };
+
+    Doc a;
+    memset(&a, 0, sizeof(a));
+    a.name = "report";
+    a.state = DOC_FINAL;
+    Shape w3 = { .rect = (Setting){ "w", 3 } };
+    a.shape = w3;
+    Setting[:] ps = { pins[0], pins[1] };
+    a.pinned = ps;
+    a.items = cc_vec_new::[Setting](arena);
+    char[:] kv = cc_slice_from_buffer(kbuf, 5);
+    a.items.push((Setting){ kv, 10 });
+    a.items.push((Setting){ "beta", 20 });
+
+    Doc b = a.clone(arena);
+    assert(a.eq(&b));
+
+    /* The clone owns its bytes: mutating the source leaves it unchanged. */
+    kbuf[0] = 'A';
+    assert(!a.eq(&b));
+    kbuf[0] = 'a';
+    assert(a.eq(&b));
+    assert(b.items.get(0)->key.ptr != a.items.get(0)->key.ptr);
+
+    Doc c = a.clone(arena);
+    Shape circ = { .circle = 1.5 };
+    c.shape = circ;
+    assert(!a.eq(&c));
+    Shape w4 = { .rect = (Setting){ "w", 4 } };
+    c.shape = w4;
+    assert(!a.eq(&c));
+    c.shape = w3;
+    assert(a.eq(&c));
+
+    c.items.push((Setting){ "gamma", 30 });
+    assert(!a.eq(&c));
+
+    Doc d = a.clone(arena);
+    Shape none = { .none = {} };
+    d.shape = none;
+    Doc e = d.clone(arena);
+    assert(d.eq(&e));
+    assert(!d.eq(&a));
+
+    printf("ok\n");
+    return 0;
+}

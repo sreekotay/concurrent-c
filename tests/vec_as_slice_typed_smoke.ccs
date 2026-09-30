@@ -1,8 +1,8 @@
 /* Typed-vec slice views: `as_slice` on a CCVec whose element has a
  * declared slice instance returns that instance (CCVec_double →
  * CCSlice_double, element-count len), so instance methods and the
- * scaled `as:` erasure compose. Elements without a spec (structs)
- * keep the erased CCSlice view. */
+ * scaled `as:` erasure compose. A struct element's instance comes
+ * with its vec. */
 #include <ccc/std/prelude.cch>
 #include <assert.h>
 #include <stdio.h>
@@ -36,14 +36,16 @@ int main(void) {
      * appears in this file). */
     assert(take_erased(s) == 3 * sizeof(double));
 
-    /* Struct element: no slice spec, as_slice stays erased with
-     * element-count len. */
+    /* Struct element: the vec instantiates the element's slice, so the
+     * view is typed too and erases scaled like any other. */
     {
         CCVec::[Pt] pv = cc_vec_new::[Pt](arena);
         Pt p = {1, 2};
         pv.push(p);
-        CCSlice es = pv.as_slice();
-        assert(es.len == 1);
+        Pt[:] ps = pv.as_slice();
+        assert(ps.len == 1);
+        assert(ps.at(0).y == 2);
+        assert(take_erased(ps) == sizeof(Pt));
     }
 
     printf("ok\n");

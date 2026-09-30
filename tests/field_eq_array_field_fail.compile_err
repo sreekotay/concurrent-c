@@ -1,0 +1,1 @@
+field 'xs' of 'Bad' has type 'int[4]', which has no field-wise equality

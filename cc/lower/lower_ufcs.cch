@@ -1713,7 +1713,15 @@ static void uf_member(Walker* w, CcExpr* e, CcMember mb, CcType* rt) {
     owner = cc__strip_tag(ix_canon_of(w, rt));
     if (!owner.len) return;
     path = vec_new::[CCSlice](L->arena);
-    if (!uf_field_path(L, owner, mb.name, &path, &found, 0)) { uf_field_miss(L, e, mb, owner); return; }
+    if (!uf_field_path(L, owner, mb.name, &path, &found, 0)) {
+        CcType* ut = unalias_declared(w, peel(unalias_local(w, peel(rt))));
+        CCSlice uo = ut ? cc__strip_tag(L->ix->canon(ut)) : cc_slice_empty();
+        if (!uo.len || slice_eq(uo, owner)) { uf_field_miss(L, e, mb, owner); return; }
+        found = 0;
+        path = vec_new::[CCSlice](L->arena);
+        if (!uf_field_path(L, uo, mb.name, &path, &found, 0)) { uf_field_miss(L, e, mb, owner); return; }
+        owner = uo;
+    }
     if (found > 1) {
         CCSlice f = mb.name;
         CCString m = @string(`type: ambiguous field '${f}' on '${owner}': two ${"@"}typeview as: embeds reach it`, L->arena);

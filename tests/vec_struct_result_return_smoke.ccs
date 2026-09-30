@@ -1,0 +1,36 @@
+// A vec of structs has a typed slice view, and a function may return
+// that vec through a Result: the Result's spec follows the vec's type.
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct { int k; int v; } Setting;
+typedef CCVec::[Setting] Settings;
+
+static CCVec::[Setting] !>(CCError) load(CCArena a) {
+    CCVec::[Setting] s = cc_vec_new::[Setting](a);
+    s.push((Setting){1, 2});
+    s.push((Setting){3, 4});
+    return cc_ok(s);
+}
+
+static Settings !>(CCError) load_named(CCArena a) {
+    Settings s = cc_vec_new::[Setting](a);
+    s.push((Setting){5, 6});
+    return cc_ok(s);
+}
+
+int main(void) {
+    CCArena a = cc_arena_create(4096);
+    CCVec::[Setting] s = load(a) !> { return 1; };
+    Settings t = load_named(a) !> { return 1; };
+    Setting[:] v = s.as_slice();
+    int sum = 0;
+    @for (x in v) sum += x.v;
+    if (v.len != 2 || sum != 6 || v.at(1).k != 3 || t.len() != 1) {
+        printf("FAIL len=%zu sum=%d\n", v.len, sum);
+        return 1;
+    }
+    printf("ok\n");
+    cc_arena_destroy(&a);
+    return 0;
+}

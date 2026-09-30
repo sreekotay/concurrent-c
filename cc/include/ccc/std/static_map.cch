@@ -75,6 +75,29 @@ typedef struct CCStaticMapLeaf {
     size_t off = 0;
     int max_align = 1;
     int i;
+    if (cc_reflect_kind(type) == CC_REFLECT_KIND_VARIANT) {
+        /* a variant value whose arms carry nothing is its tag */
+        for (i = 0; i < nf; i++) {
+            char pt[128];
+            if (cc_reflect_field_type(type, i, pt, (int)sizeof(pt)) < 0 || strcmp(pt, "void") != 0) {
+                snprintf(emsg, emsg_cap, "static_map: value variant '%s' has an arm with a payload", type);
+                return 0;
+            }
+        }
+        if (nf <= 0 || *n >= max) {
+            snprintf(emsg, emsg_cap, "static_map: value variant '%s' does not reflect", type);
+            return 0;
+        }
+        leaves[*n].off = (int)base_off;
+        leaves[*n].size = 4;
+        leaves[*n].sign = 1;
+        leaves[*n].open = 0;
+        leaves[*n].close = 0;
+        (*n)++;
+        *out_size = 4;
+        *out_align = 4;
+        return 1;
+    }
     if (nf <= 0) {
         snprintf(emsg, emsg_cap, "static_map: value type '%s' is not a reflectable POD struct", type);
         return 0;
@@ -116,6 +139,36 @@ typedef struct CCStaticMapLeaf {
         else if (!strcmp(t, "int64_t"))                                { sz = 8; al = 8; uns = 0; ok = 1; }
         else if (!strcmp(t, "uint64_t") || !strcmp(t, "size_t"))       { sz = 8; al = 8; uns = 1; ok = 1; }
         else if (cc_reflect_kind(t) == CC_REFLECT_KIND_ENUM)           { sz = 4; al = 4; uns = 0; ok = 1; }
+        else if (cc_reflect_kind(t) == CC_REFLECT_KIND_VARIANT) {
+            /* a variant whose arms carry nothing is its tag, braced */
+            int na = cc_reflect_field_count(t);
+            int a;
+            if (na <= 0) {
+                snprintf(emsg, emsg_cap, "static_map: value field '%s' of variant type '%s' does not reflect", fname, fty);
+                return 0;
+            }
+            for (a = 0; a < na; a++) {
+                char pt[128];
+                if (cc_reflect_field_type(t, a, pt, (int)sizeof(pt)) < 0 || strcmp(pt, "void") != 0) {
+                    snprintf(emsg, emsg_cap, "static_map: value field '%s' of variant type '%s' has an arm with a payload", fname, fty);
+                    return 0;
+                }
+            }
+            if (*n >= max) {
+                snprintf(emsg, emsg_cap, "static_map: value type '%s' has too many fields", type);
+                return 0;
+            }
+            off = (off + 3) & ~(size_t)3;
+            leaves[*n].off = (int)(base_off + off);
+            leaves[*n].size = 4;
+            leaves[*n].sign = 1;
+            leaves[*n].open = 1;
+            leaves[*n].close = 1;
+            (*n)++;
+            off += 4;
+            if (4 > max_align) max_align = 4;
+            continue;
+        }
         else if (cc_reflect_kind(t) == CC_REFLECT_KIND_STRUCT) {
             /* a nested POD struct: its leaves, braced as one initializer */
             size_t sub_size = 0;

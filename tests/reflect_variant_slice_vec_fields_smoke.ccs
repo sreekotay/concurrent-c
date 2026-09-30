@@ -1,0 +1,53 @@
+/* A @variant reflects as its arms: kind VARIANT, one field per arm named
+ * for it, typed by its payload (`void` for none). Struct fields spelled
+ * `char[:]`, `T[:]` and `CCVec::[T]` reflect as the types they lower to. */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct { int k; int v; } Setting;
+@variant Shape { circle: double; rect: Setting; none: void; };
+typedef struct {
+    char[:] name;
+    Shape shape;
+    Setting[:] pinned;
+    CCVec::[Setting] items;
+} Doc;
+
+@comptime {
+    const char* tys[2] = { "Shape", "Doc" };
+    for (int t = 0; t < 2; t++) {
+        char line[512];
+        int n = snprintf(line, sizeof(line), "%s kind=%d:", tys[t], cc_reflect_kind(tys[t]));
+        int nf = cc_reflect_field_count(tys[t]);
+        for (int i = 0; i < nf; i++) {
+            char nm[128];
+            char ty[128];
+            cc_reflect_field_name(tys[t], i, nm, sizeof(nm));
+            cc_reflect_field_type(tys[t], i, ty, sizeof(ty));
+            n += snprintf(line + n, sizeof(line) - (size_t)n, " %s:%s", nm, ty);
+        }
+        @emit(CC_EMIT_AT_COMPTIME_SITE, `static const char* k_reflect_${tys[t]} = "${line}";`);
+    }
+}
+
+int main(void) {
+    char want_shape[64];
+    snprintf(want_shape, sizeof(want_shape), "Shape kind=%d: circle:double rect:Setting none:void",
+             CC_REFLECT_KIND_VARIANT);
+    if (strcmp(k_reflect_Shape, want_shape) != 0) {
+        printf("FAIL shape: %s\n", k_reflect_Shape);
+        return 1;
+    }
+    char want_doc[128];
+    snprintf(want_doc, sizeof(want_doc),
+             "Doc kind=%d: name:CCSlice shape:Shape pinned:CCSlice_Setting items:CCVec_Setting",
+             CC_REFLECT_KIND_STRUCT);
+    if (strcmp(k_reflect_Doc, want_doc) != 0) {
+        printf("FAIL doc: %s\n", k_reflect_Doc);
+        return 2;
+    }
+    printf("ok\n");
+    return 0;
+}

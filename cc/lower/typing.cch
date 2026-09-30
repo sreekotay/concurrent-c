@@ -45,12 +45,17 @@ typedef struct Walker {
     void (*on_field)(struct Walker* w, CcExpr* e, CcMember mb, CcType* rt);
     /* called at every plain call, after its arguments are walked */
     void (*on_call)(struct Walker* w, CcExpr* e, CcCall cl);
+    /* called at every `x.f(...)` / `p->f(...)` that is a C call through a
+     * field of function or function-pointer type, with the field's type */
+    void (*on_field_call)(struct Walker* w, CcExpr* e, CcUfcs uf, CcType* ft);
     /* called at every closure, with the enclosing scope still in hand */
     void (*on_closure)(struct Walker* w, CcExpr* e, CcClosure cl);
     void* env;
     /* the variant a `@switch` in view is over, so an arm binder in its body
      * can be declared at the payload type the arm names; empty outside one */
     CCSlice vswitch;
+    /* the function whose body is being walked; empty at file scope */
+    CCSlice fn_name;
 } Walker;
 
 static void sc_push(Walker* w) {
@@ -346,7 +351,35 @@ static CcMethod* resolve_site(Walker* w, CcType* recv_type, CCSlice method, CCSl
     info = ix->type_get(*type_name);
     {
         CcMethod* !>(CcDiag) r = ix->method_recv(info, method, recv_shape_of(w, recv_type), w->arena);
-        if (r.is_ok()) return r.value();
+        if (r.is_ok()) {
+            CcMethod* m = r.value();
+            /* `text_eq` is `Text`'s `eq`: inside it, `a.eq(b)` on a `Text`
+             * that aliases a type with its own `eq` means that one, the
+             * nearest along the typedef chain. Calling the method being
+             * defined is spelled by name. */
+            if (m && w->fn_name.len && slice_eq(m->callee, w->fn_name)) {
+                CcType* at = t;
+                int depth = 0;
+                CCSlice nm;
+                while (at && type_named_name(at, &nm) && nm.len && depth++ < 8) {
+                    CcSym* sym = sym_any(ix, nm);
+                    CCSlice un;
+                    while (sym && sym->kind != CC_SYM_TYPE) sym = sym->same_name;
+                    if (!sym || !sym->type || sym->type == at) break;
+                    at = peel(sym->type);
+                    if (!at) break;
+                    un = ix->canon(at);
+                    {
+                        CcMethod* !>(CcDiag) r2 = ix->method_recv(ix->type_get(un), method, recv_shape_of(w, recv_type), w->arena);
+                        if (r2.is_ok() && r2.value() && !slice_eq(r2.value()->callee, w->fn_name)) {
+                            *type_name = un;
+                            return r2.value();
+                        }
+                    }
+                }
+            }
+            return m;
+        }
         {
             CcDiag d = r.error();
             *reason = d.msg;
@@ -655,7 +688,10 @@ static void visit_ufcs(Walker* w, CcExpr* e, CcUfcs uf) {
     }
     rt = type_of_expr(w, uf.recv);
     /* the C-member-first rule: `x.cb()` where `cb` is a field is a C call */
-    if (rt && field_is_callable(w, rt, uf.method)) return;
+    if (rt && field_is_callable(w, rt, uf.method)) {
+        if (w->on_field_call) w->on_field_call(w, e, uf, field_type(w, rt, uf.method));
+        return;
+    }
     if (rt) m = resolve_site(w, rt, uf.method, &tn, &reason);
     if (w->on_ufcs) w->on_ufcs(w, e, uf, rt, m, tn, reason);
 }
@@ -665,7 +701,10 @@ static void visit_ufcs(Walker* w, CcExpr* e, CcUfcs uf) {
 static void visit_ufcs_maybe_field(Walker* w, CcExpr* e, CcUfcs uf) {
     if (uf.arrow && uf.recv && uf.method.len) {
         CcType* rt = type_of_expr(w, uf.recv);
-        if (rt && field_is_callable(w, rt, uf.method)) return;
+        if (rt && field_is_callable(w, rt, uf.method)) {
+            if (w->on_field_call) w->on_field_call(w, e, uf, field_type(w, rt, uf.method));
+            return;
+        }
     }
     visit_ufcs(w, e, uf);
 }
@@ -1198,6 +1237,8 @@ static void tw_stmt(Walker* w, CcStmt* s) {
 }
 
 static void tw_func_decl(Walker* w, CcFuncDecl f) {
+    CCSlice fsave = w->fn_name;
+    w->fn_name = f.name;
     sc_push(w);
     if (f.type) {
         @switch (f.type->k) {
@@ -1216,6 +1257,7 @@ static void tw_func_decl(Walker* w, CcFuncDecl f) {
     }
     tw_stmt(w, f.body);
     sc_pop(w);
+    w->fn_name = fsave;
 }
 
 static void tw_entries(Walker* w, CcHookEntryList entries) {

@@ -135,6 +135,19 @@ static void gn_note(GStep* st, CcTypeInfo* info, int depth, CcSpan sp) {
         CcTypeInfo* ai = ix->type_get(an);
         gn_note(st, ai, depth + 1, at ? at->span : sp);
     }
+    /* a vec's `as_slice` is the element's typed view when that instance is
+     * declared ahead of it; without it a struct element's view is erased */
+    if (n == 1 && cc_slice_eq_cstr(&info->family, "Vec")) {
+        CcType* at = *targv->get_ptr(0);
+        CcType* slt = cc_type_named(CC_SLICE_LIT("?"), sp, st->L->arena);
+        CcSliceType sl;
+        sl.elem = at;
+        sl.fixed = NULL;
+        sl.unique = false;
+        sl.sentinel = false;
+        slt->k = { .slice = sl };
+        if (at) gn_note(st, ix->type_get(ix->canon(slt)), depth + 1, sp);
+    }
     st->order.push(info->name);
     st->sites.push(sp);
 }
@@ -858,6 +871,29 @@ static bool gn_factories_ready(CcLowerer* L, CcSpan sp) {
         CCString all = cc_string_new();
         cc_string_push_slice(&all, usrc, L->arena);
         cc_string_push_cstr(&all, "\n", L->arena);
+        /* A factory declared in a header calls that header's `@comptime`
+         * helpers, which are in its unit, not this one. */
+        for (f = 0; f < nf; f++) {
+            CcUnit* hu = *funitv->get_ptr(f);
+            size_t g;
+            bool dup = hu == L->unit;
+            for (g = 0; g < f && !dup; g++) dup = *funitv->get_ptr(g) == hu;
+            if (dup) continue;
+            {
+                CCSlice hsrc = hu->tape.src;
+                CCSlice hpath = hu->tape.path;
+                CCString hp = @string(`${hpath}`, L->arena);
+                char* hpre = NULL;
+                char* fns = cc_ct_unit_comptime_functions(hsrc.ptr, hsrc.len, hp.cstr(L->arena), &hpre);
+                if (hpre) cc_comptime_fn_registry_append_prelude(hpre);
+                free(hpre);
+                if (fns) {
+                    cc_string_push_cstr(&all, fns, L->arena);
+                    cc_string_push_cstr(&all, "\n", L->arena);
+                    free(fns);
+                }
+            }
+        }
         cc_string_push_cstr(&all, expanded, L->arena);
         {
             CCSlice a = all.as_slice();
@@ -992,6 +1028,7 @@ static CCString gn_run_factory(CcLowerer* L, CcTypeInfo* info, CcSpan sp, bool* 
         CCSlice usrc = L->unit->tape.src;
         CCString mangled = @string(`${info->name}`, L->arena);
         const char* mz = mangled.cstr(L->arena);
+        (void)cc_emit_plan_take_exec_error();
         rc = cc_emit_plan_produce_generic_def(gn_family_cstr(L, info), mz,
                                               args, (int)nt,
                                               usrc.ptr, usrc.len, gn_unit_path(L, sp),
@@ -1004,6 +1041,16 @@ static CCString gn_run_factory(CcLowerer* L, CcTypeInfo* info, CcSpan sp, bool* 
         CCString m = @string(`type: compiled generic factory '${fam}' failed to compile '${nm}': ${why}`, L->arena);
         CCSlice note = gn_factory_note(L, fam);
         gn_error_note(L, sp, m, note);
+        return out;
+    }
+    /* the factory said what is wrong itself; text it returned anyway is
+     * not an instance */
+    if (cc_emit_plan_take_exec_error()) {
+        CCSlice fam2 = info->family;
+        CCSlice nm2 = info->name;
+        CCString m2 = @string(`type: compiled generic factory '${fam2}' reported an error for '${nm2}'`, L->arena);
+        CCSlice note2 = gn_factory_note(L, fam2);
+        gn_error_note(L, sp, m2, note2);
         return out;
     }
     cc_string_push_cstr(&out, def, L->arena);
@@ -1054,7 +1101,8 @@ static CCString gn_instance_text(CcLowerer* L, CcTypeInfo* info, CcSpan sp, bool
         if (cc__factory_is_extend(d) != want_extend) continue;
         if (want_extend) matched_ext++; else matched_base++;
         t = gn_emit_template(fu, d);
-        if (!t) continue;
+        /* a body with no template computes what it writes */
+        if (!t) { if (cc__factory_body(d)) needs_run = true; taken++; continue; }
         binds = vec_new::[CcSlotBind](L->arena);
         cc__factory_bindings(ix, fu, cc__factory_body(d), &binds);
         computed = gn_computed_slot(L, t, &binds, &args);
@@ -1421,10 +1469,23 @@ static bool gn_ident_char(int c) {
 
 /* A lowered declaration is C text by the time a later step asks what it
  * defines (a variant becomes its typedefs): `typedef struct NAME {`,
- * `struct NAME {` and `} NAME;` in that text define NAME. */
+ * `struct NAME {` and `} NAME;` in that text define NAME, and so does a
+ * spliced instance under its `generic NAME` banner, whose type may come
+ * from a declaration macro that spells none of those. */
 static bool gn_raw_defines(CCSlice text, CCSlice name) {
     size_t i = 0;
     if (!name.len || text.len < name.len) return false;
+    {
+        const char* pre = "/" "* generic ";
+        size_t pl = strlen(pre);
+        size_t j;
+        for (j = 0; j + pl + name.len + 3 <= text.len; j++) {
+            if (memcmp(text.ptr + j, pre, pl) == 0 &&
+                memcmp(text.ptr + j + pl, name.ptr, name.len) == 0 &&
+                memcmp(text.ptr + j + pl + name.len, " *" "/", 3) == 0)
+                return true;
+        }
+    }
     while (i + name.len <= text.len) {
         if (memcmp(text.ptr + i, name.ptr, name.len) == 0 &&
             (i == 0 || !gn_ident_char((unsigned char)text.ptr[i - 1])) &&

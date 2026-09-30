@@ -194,6 +194,9 @@ static inline CCSlice cc_slice_from_buffer(void *p, size_t n) {
 #define CC_SLICE_ID_SUBSLICE 0ULL
 #endif
 #endif
+#ifndef CC_HAS_CCSLICE_${arg_mangled(0)}
+#define CC_HAS_CCSLICE_${arg_mangled(0)} 1
+#endif
 typedef struct ${mangled} {
     CCSlice base;
 } ${mangled};

@@ -132,6 +132,13 @@ extern void cc_emit_plan_register_generic_factory_extend(const char* name,
  * handler, an extension included, whose handler symbol carries a sequence
  * number only the rewrite knows. */
 extern void cc_emit_plan_collect_comptime_emits(const char* src, size_t len);
+/* A header's `@comptime` functions, for a factory declared in it: the
+ * header is not the unit, so the unit's own scan never sees them. The
+ * definitions come back as text to scan with the rest; the typedefs they
+ * name come back in `*prelude_out`, for the registry's prelude. Both are
+ * malloc'd; NULL when the header has none. */
+extern char* cc_ct_unit_comptime_functions(const char* src, size_t n, const char* path, char** prelude_out);
+extern void cc_comptime_fn_registry_append_prelude(const char* text);
 extern void cc_emit_plan_clear_comptime_fragments(void);
 
 /* 0 ok; 1 the factory did not compile; 2 it ran and produced nothing.

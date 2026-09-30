@@ -1,0 +1,36 @@
+// A string `@switch` over a typedef of `char[:]`, as a local and as a
+// field, switches like the slice it names.
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef char[:] Text;
+typedef struct { Text method; } Req;
+
+static int by_local(Text m) {
+    @switch (m) {
+        case "GET": return 1;
+        case "POST": return 2;
+        default: return 0;
+    }
+}
+
+static int by_field(Req* q) {
+    @switch (q->method) {
+        case "GET": return 1;
+        case "POST": return 2;
+        default: return 0;
+    }
+}
+
+int main(void) {
+    Text g = "GET";
+    Text p = "POST";
+    Text x = "PUT";
+    Req q = { p };
+    if (by_local(g) != 1 || by_local(p) != 2 || by_local(x) != 0 || by_field(&q) != 2) {
+        printf("FAIL\n");
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}

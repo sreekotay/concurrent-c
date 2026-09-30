@@ -48,6 +48,11 @@ int cc_ct_reflect_param_list(const char* params, CCCtField** out, size_t* out_n)
  * (`CCSlice_<elem>`; char family plain `CCSlice`).  Malloc'd, or NULL when
  * no sugar is present. */
 char* cc_ct_slice_sugar_rewrite(const char* decl);
+/* The arms of `@variant type_name`, one field per arm in declaration order:
+ * `name` the arm, `type` its payload (`void` when it carries none).  0 when
+ * the source declares no such variant or an arm is not `name: type;`. */
+int cc_ct_reflect_variant_arms(const char* src, size_t len, const char* type_name,
+                               CCCtField** out, size_t* out_n);
 /* Default literal for params[idx] (`pad = 1` → `"1"`).  0 = none; -1 = bad. */
 int cc_ct_reflect_param_default(const char* params, int idx, char* buf, int buf_sz);
 void cc_ct_free_fields(CCCtField* fields, size_t n);
@@ -86,6 +91,7 @@ typedef enum CCReflectKind {
     CC_REFLECT_KIND_POINTER   = 2,
     CC_REFLECT_KIND_STRUCT    = 3,  /* struct/union/typedef-aggregate */
     CC_REFLECT_KIND_ENUM      = 4,
+    CC_REFLECT_KIND_VARIANT   = 5,  /* `@variant`: its fields are its arms */
 } CCReflectKind;
 int cc_ct_reflect_type_kind(const char* src, size_t len, const char* type_name);
 
@@ -360,6 +366,11 @@ const char* cc_lowered_local_header_path(size_t i);
 
 char* cc_harvest_local_header_factories(void);
 char* cc_harvest_header_comptime_functions(void);
+/* One unit's `@comptime` function definitions, each under a `#line` naming
+ * `path`; its file-scope typedef / enum helpers before the first of them
+ * into `*prelude_out` (malloc'd, NULL when none). NULL when it defines no
+ * `@comptime` function. */
+char* cc_ct_unit_comptime_functions(const char* src, size_t n, const char* path, char** prelude_out);
 char* cc_harvest_local_header_comptime_blocks(void);
 
 // Shared header-safe type-syntax lowering used by both preprocessing and

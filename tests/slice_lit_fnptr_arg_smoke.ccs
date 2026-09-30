@@ -1,0 +1,32 @@
+// A string literal passed to a `char[:]` parameter converts at every call
+// shape, not only in an initializer: direct, function-pointer local,
+// typedef'd function pointer, and function-pointer fields via `.` and `->`.
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static size_t cnt(char[:] s) { return s.len; }
+
+typedef size_t (*CntFn)(char[:]);
+typedef struct { size_t (*fn)(char[:]); CntFn tfn; } Ops;
+
+int main(void) {
+    size_t (*fp)(char[:]) = cnt;
+    CntFn tf = cnt;
+    Ops o = { cnt, cnt };
+    Ops* p = &o;
+    size_t direct = cnt("hello");
+    size_t local = fp("hello");
+    size_t tdef = tf("hello");
+    size_t dot = o.fn("hello");
+    size_t arrow = p->fn("hello");
+    size_t tdot = o.tfn("hello");
+    size_t tarrow = p->tfn("hello");
+    if (direct != 5 || local != 5 || tdef != 5 || dot != 5 ||
+        arrow != 5 || tdot != 5 || tarrow != 5) {
+        printf("FAIL %zu %zu %zu %zu %zu %zu %zu\n",
+               direct, local, tdef, dot, arrow, tdot, tarrow);
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}

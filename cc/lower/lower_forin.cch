@@ -712,6 +712,12 @@ static bool fi_subj(FStep* st, FSubj* out, CcExpr* e, CCSlice bind, bool mut,
             return false;
         }
     }
+    {
+        CcType* ut = unalias_declared(w, unalias_local(w, rt));
+        CCSlice uc;
+        CcHookReg* h = fi_hooks_of(L, rt, &uc);
+        if (ut && ut != rt && !fi_type_is_array(rt) && (!h || !h->has_len)) rt = ut;
+    }
     out->type = rt;
     if (fi_type_is_array(rt)) {
         is_array = true;

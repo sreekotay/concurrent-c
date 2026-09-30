@@ -160,6 +160,22 @@ static void sw_switch(SwStep* st, CcStmt* s, CcSwitch sw) {
         subj_known = t != NULL;
         if (t) cn = L->ix->canon(t);
         subj_slice = subj_known && sw_canon_is_slice(cn);
+        if (subj_known && !subj_slice) {
+            /* a typedef of a slice is the slice: the nearest link along
+             * its chain decides, before the slice itself resolves to the
+             * struct it is */
+            CcType* at = unalias_local(w, t);
+            CCSlice nm;
+            int depth = 0;
+            if (at != t && sw_canon_is_slice(L->ix->canon(at))) { cn = L->ix->canon(at); subj_slice = true; }
+            while (!subj_slice && at && type_named_name(at, &nm) && nm.len && depth++ < 8) {
+                CcSym* sym = sym_any(L->ix, nm);
+                while (sym && sym->kind != CC_SYM_TYPE) sym = sym->same_name;
+                if (!sym || !sym->type || sym->type == at) break;
+                at = sym->type;
+                if (sw_canon_is_slice(L->ix->canon(at))) { cn = L->ix->canon(at); subj_slice = true; }
+            }
+        }
     }
     /* A slice subject has no integer to switch on even with no labels at
      * all: `switch (k) { default: ... }` is C the host rejects. */
