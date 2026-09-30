@@ -1,0 +1,43 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* A factory whose branches write different functions for one method
+ * name: `Pick::[int].get` returns an int, `Pick::[Pair].get` a Result.
+ * Each instance has the declarations its own run wrote, not the first
+ * template's in the factory. */
+
+typedef struct { int a; int b; } Pair;
+
+CC_GENERIC_FACTORY(Pick, 1) {
+    char t[64];
+    int tl = (int)type_args.items[0].len;
+    if (tl > 63) tl = 63;
+    memcpy(t, (char*)type_args.items[0].ptr, (size_t)tl);
+    t[tl] = '\0';
+    if (cc_reflect_field_count(t) > 0) return @emit(`
+typedef struct ${mangled} { ${arg(0)} v; } ${mangled};
+static int !>(CCError) ${mangled}_get(${mangled}* p) {
+    if (p->v.a < 0) return cc_err(CC_ERR_INVALID_ARG, "negative");
+    return cc_ok(p->v.a + p->v.b);
+}
+`, arena);
+    return @emit(`
+typedef struct ${mangled} { ${arg(0)} v; } ${mangled};
+static inline int ${mangled}_get(${mangled}* p) { return (int)p->v; }
+`, arena);
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        (void)e;
+        return 1;
+    }
+    Pick::[int] i = { .v = 4 };
+    Pick::[Pair] p = { .v = { 1, 2 } };
+    int x = i.get();
+    int y = p.get() !>;
+    printf("generic_factory_branch_signatures_smoke %d %d\n", x, y);
+    return 0;
+}

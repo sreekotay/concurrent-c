@@ -23002,6 +23002,79 @@ char* cc_ct_slice_sugar_rewrite(const char* decl) {
     return out;
 }
 
+/* `Name::[args]` in a reflected spelling: the instance name the lowering
+ * produces (cc_ct_canonical_name), innermost first, so a field declared
+ * `CCVec::[Setting] v;` reflects as `CCVec_Setting v`, as the slice sugar
+ * reflects as its instance. Returns a malloc'd rewrite, or NULL when `decl`
+ * carries no generic spelling or one it cannot split. */
+static char* cc_ct_generic_spelling_rewrite(const char* decl) {
+    char* cur;
+    if (!decl || !strstr(decl, "::[")) return NULL;
+    cur = strdup(decl);
+    while (cur) {
+        char* sep = NULL;
+        char* p = cur;
+        char* bs;
+        char* close;
+        char base[128], mangled[512];
+        char argbuf[8][256];
+        const char* args[8];
+        int nargs = 0, depth = 0;
+        size_t bl;
+        char* a0;
+        char* out;
+        while ((p = strstr(p, "::[")) != NULL) { sep = p; p += 3; }
+        if (!sep) break;
+        bs = sep;
+        while (bs > cur && cc_is_ident_char(bs[-1])) bs--;
+        bl = (size_t)(sep - bs);
+        if (bl == 0 || bl >= sizeof(base)) { free(cur); return NULL; }
+        memcpy(base, bs, bl);
+        base[bl] = 0;
+        a0 = sep + 3;
+        for (close = a0; *close; close++) {
+            if (*close == '[' || *close == '(') depth++;
+            else if ((*close == ']' || *close == ')') && depth) depth--;
+            else if (*close == ']') break;
+        }
+        if (!*close) { free(cur); return NULL; }
+        {
+            char* q = a0;
+            char* start = a0;
+            depth = 0;
+            for (; q <= close; q++) {
+                if (q < close && (*q == '[' || *q == '(')) { depth++; continue; }
+                if (q < close && (*q == ']' || *q == ')')) { depth--; continue; }
+                if (q == close || (*q == ',' && depth == 0)) {
+                    size_t al;
+                    while (start < q && (*start == ' ' || *start == '\t')) start++;
+                    al = (size_t)(q - start);
+                    while (al && (start[al - 1] == ' ' || start[al - 1] == '\t')) al--;
+                    if (nargs >= 8 || al >= sizeof(argbuf[0])) { free(cur); return NULL; }
+                    memcpy(argbuf[nargs], start, al);
+                    argbuf[nargs][al] = 0;
+                    args[nargs] = argbuf[nargs];
+                    nargs++;
+                    start = q + 1;
+                }
+            }
+        }
+        if (cc_ct_canonical_name(base, args, nargs, mangled, sizeof(mangled)) < 0) {
+            free(cur);
+            return NULL;
+        }
+        out = (char*)malloc((size_t)(bs - cur) + strlen(mangled) + strlen(close + 1) + 1);
+        if (!out) { free(cur); return NULL; }
+        memcpy(out, cur, (size_t)(bs - cur));
+        strcpy(out + (bs - cur), mangled);
+        strcat(out, close + 1);
+        free(cur);
+        cur = out;
+        if (!strstr(cur, "::[")) break;
+    }
+    return cur;
+}
+
 static int cc__ct_parse_param_list(const char* src, size_t lp, size_t rp,
                                    CCCtField** out, size_t* out_n) {
     CCCtField* fs = NULL; size_t fn = 0, fc = 0;
@@ -23123,7 +23196,26 @@ static int cc__ct_parse_fields_from_body(const char* src, size_t bo, size_t bc,
                     member_is_as = 1; break;
                 }
             }
-            m = cc__ct_member_normalize(src, ms, me);
+            /* Slice sugar and generic spellings rewrite BEFORE
+             * normalization, as for parameters: `[:]` reads as a bitfield
+             * and `::[` as nothing the member grammar models, so the raw
+             * span becomes the lowered instance names first. */
+            {
+                char* raw = (char*)malloc(me - ms + 1);
+                char* rw = NULL;
+                if (raw) {
+                    memcpy(raw, src + ms, me - ms);
+                    raw[me - ms] = '\0';
+                    rw = cc_ct_generic_spelling_rewrite(raw);
+                    if (rw) { free(raw); raw = rw; }
+                    rw = cc_ct_slice_sugar_rewrite(raw);
+                    if (rw) { free(raw); raw = rw; }
+                    m = cc__ct_member_normalize(raw, 0, strlen(raw));
+                    free(raw);
+                } else {
+                    m = cc__ct_member_normalize(src, ms, me);
+                }
+            }
             if (!m) { cc__ct_free_fields(fs, fn); return 0; }
             if (member_is_as) {
                 /* The marker is an attribute on the member, not part of its

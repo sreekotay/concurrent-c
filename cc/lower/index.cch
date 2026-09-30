@@ -227,6 +227,9 @@ typedef struct CcIndex {
     Vec::[CCSlice] peer_names;
     Vec::[CCSlice] peer_paths;
     int expansion_depth;        /* nesting of macro / factory expansions being indexed */
+    /* Set while a factory's run output is indexed: what the instance is
+     * replaces what the index guessed from the factory's templates. */
+    bool expansion_overrides;
     uint32_t n_expansions;
     uint32_t n_expansion_errors;    /* parse errors inside expansions (not reported as diagnostics) */
     /* `@typeview` `as:` faces, built once per declaration count. A method

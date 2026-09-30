@@ -1,0 +1,41 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* A struct with a slice field and a generic-instance field reflects whole:
+ * the fields read as the instance names the lowering produces, `CCSlice`
+ * for `char[:]` and `CCVec_int` for `CCVec::[int]`, as a parameter list
+ * already did. Before, either field made the whole struct reflect -1. */
+
+typedef struct {
+    char[:]      name;
+    int          n;
+    CCVec::[int] xs;
+} Row;
+
+CC_GENERIC_FACTORY(Fields, 1) {
+    char t[64], t0[64], t2[64], n2[64];
+    int tl = (int)type_args.items[0].len, nf;
+    if (tl > 63) tl = 63;
+    memcpy(t, (char*)type_args.items[0].ptr, (size_t)tl);
+    t[tl] = '\0';
+    nf = cc_reflect_field_count(t);
+    t0[0] = t2[0] = n2[0] = '\0';
+    if (nf == 3) {
+        cc_reflect_field_type(t, 0, t0, (int)sizeof(t0));
+        cc_reflect_field_type(t, 2, t2, (int)sizeof(t2));
+        cc_reflect_field_name(t, 2, n2, (int)sizeof(n2));
+    }
+    return @emit(`
+typedef struct ${mangled} { int nf; } ${mangled};
+static const char* ${mangled}_desc = "${nf} ${t0} ${n2}:${t2}";
+`, arena);
+}
+
+int main(void) {
+    Fields::[Row] f = { 0 };
+    (void)f;
+    printf("%s\n", Fields_Row_desc);
+    return 0;
+}

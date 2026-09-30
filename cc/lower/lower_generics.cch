@@ -1118,6 +1118,17 @@ static CCString gn_instance_text(CcLowerer* L, CcTypeInfo* info, CcSpan sp, bool
         }
         def = gn_run_factory(L, info, sp, &ran);
         if (!ran) { *ok = false; return whole; }
+        /* The index took this instance's declarations from every template
+         * in the factory, which for a factory that computes is a guess:
+         * each branch's template reads as a declaration of every instance.
+         * What the run wrote is the instance; it replaces the guess. */
+        {
+            bool was = ix->expansion_overrides;
+            ix->expansion_overrides = true;
+            cc__index_expansion(ix, cc__instance_label(ix, "<CC_GENERIC_FACTORY(", info->family, ") run ", info->name),
+                                cc__ix_copy(ix, def.as_slice()), false);
+            ix->expansion_overrides = was;
+        }
         cc_string_push_slice(&whole, def.as_slice(), L->arena);
         cc_string_push_cstr(&whole, "\n#endif\n", L->arena);
         return whole;

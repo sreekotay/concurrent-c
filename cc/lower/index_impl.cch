@@ -238,6 +238,8 @@ static CcSym* cc__callee_sym(const CcIndex* ix, CCSlice name) {
     return NULL;
 }
 
+static CcType* cc__unlower_result_ret(CcIndex* ix, CcType* type);
+
 static CcSym* cc__sym_add(CcIndex* ix, CCSlice name, CcSymKind kind, CcDecl* decl, CcUnit* u,
                           CcType* type, bool is_header, bool is_definition) {
     CcSym* s = cc__sym_find_kind(ix, name, (int)kind);
@@ -245,7 +247,18 @@ static CcSym* cc__sym_add(CcIndex* ix, CCSlice name, CcSymKind kind, CcDecl* dec
     if (s) {
         /* A later declaration wins only when it carries more information:
          * a definition after a prototype, a struct body after a forward
-         * declaration. */
+         * declaration -- or when it is what a factory run wrote, over what
+         * the index read out of that factory's templates (a factory that
+         * computes may write any of them, or none, for a given instance). */
+        if (ix->expansion_overrides && s->unit &&
+            cc__has_prefix(s->unit->tape.path, "<CC_GENERIC_FACTORY")) {
+            s->decl = decl;
+            s->unit = u;
+            s->type = cc__unlower_result_ret(ix, type);
+            s->is_header = is_header;
+            s->is_definition = is_definition;
+            return s;
+        }
         if (is_definition && !s->is_definition) {
             s->decl = decl;
             s->unit = u;
@@ -754,6 +767,47 @@ static CcType* cc__type_from_text(CcIndex* ix, CCSlice text) {
         t->k = { .named = nt };
     }
     return t;
+}
+
+static bool cc__split_args(CcIndex* ix, CCSlice rest, size_t arity, CcTypeList* out, int depth);
+
+/* A factory run writes its instance after its Results are lowered:
+ * `CCResult_V_E f(...)` where the factory said `V !>(E) f(...)`. A return
+ * type so spelled reads back as the Result it is, when the index knows
+ * that box. */
+static CcType* cc__unlower_result_ret(CcIndex* ix, CcType* type) {
+    CcFuncType ft;
+    bool is_fn = false;
+    CCSlice nm = cc_slice_empty();
+    CcTypeInfo* ti;
+    CcType* value;
+    CcType* out;
+    if (!type) return type;
+    @switch (type->k) {
+        case .func(f): ft = f; is_fn = true; break;
+        default: break;
+    }
+    if (!is_fn || !ft.ret) return type;
+    @switch (ft.ret->k) {
+        case .named(n): nm = n.name; break;
+        default: break;
+    }
+    if (!cc__has_prefix(nm, "CCResult_")) return type;
+    ti = cc__type_find(ix, nm);
+    if (!ti || !ti->is_result || !ti->result_err) {
+        /* a box the index has not seen spelled: read its arguments back
+         * out of the name, as for any instance spelled mangled */
+        CcTypeList parts = vec_new::[CcTypeRef](ix->arena);
+        if (!cc__split_args(ix, cc__ix_dupn(ix, nm.ptr + 9, nm.len - 9), 2, &parts, 0)) return type;
+        ti = CcIndex_result(ix, *parts.get_ptr(0), *parts.get_ptr(1), false);
+        if (!ti || !ti->result_err) return type;
+    }
+    value = ti->result_value ? ti->result_value : cc_type_named(cc__ix_s("void"), ft.ret->span, ix->arena);
+    ft.ret = cc_type_result(value, ti->result_err, ti->result_optional, ft.ret->span, ix->arena);
+    out = cc_arena_alloc(ix->arena, sizeof(CcType), _Alignof(CcType));
+    *out = *type;
+    out->k = { .func = ft };
+    return out;
 }
 
 static void cc__result_declared(CcIndex* ix, CcUnit* u, CcDecl* d, bool is_header, CCSlice name,
