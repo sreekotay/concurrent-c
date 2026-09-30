@@ -240,6 +240,54 @@ without the bump (`poke(Source_int*)` changes the value and keeps the
 generation). For a factory's instance, the type's own code could be
 exactly the functions the factory emitted.
 
+## Sixth pass: the Ruby / Rust `update`, as one loop
+
+`example_record.ccs` is the `update` from a thread comparing a Ruby and a
+Rust version of the same method: three columns, a JSON column derived
+from one of them, a keep / clear / set argument, and a partial `UPDATE`.
+The original does four jobs in one function; here each is where its fact
+is stated once:
+
+| Job | Original | Here |
+|-----|----------|------|
+| did this column change | `name != @name` before each store | `Source::[Text, Text_eq]`: the precise stamp, chosen at the declaration; `set()` moves it only on a real change |
+| keep the JSON in step | `if @settings_json.nil? \|\| updated != original` inside `update` | `Derived::[Json]` read as `r.settings_json()`, built when the flush first needs it |
+| which columns to write | `sets << [...]` inside `update` | a watermark with no slot, `CCStamp written`; the per-input changed bits are the SET list |
+| keep / clear / set | `UNSET` sentinel, `Option<Option<&str>>` | `@variant Patch { keep; clear; to: Text; }` |
+
+`update()` states intent only, and does its one failing step (assigning
+settings) first, on a copy. The original assigns `name` and
+`custom_styles` to the object before that step, so a failure there left
+the object ahead of the database. The flush records the watermark only
+after the write succeeds, so a failed write is retried at the next
+flush. The run:
+
+```
+the same name again                      (nothing to write)
+a new name and styles                    UPDATE record SET name='beta', custom_styles='bold'
+a font                                   UPDATE record SET settings='{"theme":"dark","font":"mono"}'
+the same font again                      (nothing to write)
+a name with a bad setting                update refused; name is still 'beta'
+clear the styles, and the write fails    the row stays unwritten
+the next flush                           UPDATE record SET custom_styles=NULL
+settings JSON built 1 time(s)
+```
+
+What it found:
+
+- **The precise stamp belongs in the declaration.** `Source::[T, eq]`
+  makes `set()` compare, once for the value, rather than a `set_eq` at
+  each call. The factory declares `eq`'s typed prototype itself, so the
+  equality can be defined anywhere in the unit.
+- **The column list is still stated twice**: once as the struct's
+  fields and once as `Record_row()` with the SET clause per bit. A
+  comptime pass over the struct's `Source_*` fields could write both
+  from the struct alone; that is the next thing this example asks for.
+- **The in-memory copy is still trusted as the database.** Nothing
+  here reads the row's own version, so another writer's change is
+  invisible to the watermark; a real store would put the row's version
+  (or an `updated_at`) among the inputs it checks before writing.
+
 ## Costs measured
 
 `gen_bench.c`, gcc -O2, 4 cores, 50M stores per thread, time per store:

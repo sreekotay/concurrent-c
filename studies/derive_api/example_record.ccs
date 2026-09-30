@@ -1,0 +1,225 @@
+/* The Ruby / Rust `update` from the thread, as stamps and watermarks.
+ *
+ * The original does four jobs in one function: it applies the caller's
+ * intent to an in-memory copy of a row, keeps a JSON rendering of the
+ * settings in step, works out which columns changed, and hands those to
+ * an UPDATE. Here each job is where its fact is stated once:
+ *
+ *   - each column is a value with its stamp, and the stamp is the precise
+ *     one (it moves only when the value changes), chosen where the column
+ *     is declared;
+ *   - the JSON is a slot with a watermark over the settings' stamp, built
+ *     when it is read;
+ *   - the row as last written is a watermark with no slot, and the UPDATE
+ *     is the columns whose stamps moved since it;
+ *   - update() only states intent, and does its failing step first.
+ *
+ * The database is a stand-in that prints its SQL and can be told to fail. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+#define CC_GEN_IMPL                      /* this unit defines the counter */
+#include "cc_source.cch"
+
+/* ---- the column values ------------------------------------------------ */
+
+typedef struct { char s[64]; } Text;
+typedef struct { bool some; Text t; } OptText;          /* a nullable column */
+typedef struct { Text k, v; } Setting;
+typedef struct { int n; Setting kv[8]; } Settings;
+typedef struct { char s[512]; } Json;
+
+static Text text(const char* s) {
+    Text t = {0};
+    snprintf(t.s, sizeof t.s, "%s", s);
+    return t;
+}
+
+/* The equalities that make each column's stamp precise. */
+static bool Text_eq(const Text* a, const Text* b) { return strcmp(a->s, b->s) == 0; }
+
+static bool OptText_eq(const OptText* a, const OptText* b) {
+    return a->some == b->some && (!a->some || Text_eq(&a->t, &b->t));
+}
+
+static bool Settings_eq(const Settings* a, const Settings* b) {
+    int i;
+    if (a->n != b->n) return false;
+    for (i = 0; i < a->n; i++)
+        if (!Text_eq(&a->kv[i].k, &b->kv[i].k) || !Text_eq(&a->kv[i].v, &b->kv[i].v))
+            return false;
+    return true;
+}
+
+/* keep / clear / set, stated rather than encoded as UNSET or
+ * Option<Option<&str>> */
+@variant Patch { keep: void; clear: void; to: Text; };
+
+/* ---- the record -------------------------------------------------------- */
+
+typedef struct {
+    Source::[Text, Text_eq]         name;
+    Source::[OptText, OptText_eq]   custom_styles;
+    Source::[Settings, Settings_eq] settings;
+    Derived::[Json]                 settings_json;   /* storage; r.settings_json() is the read */
+    CCStamp                         written;         /* the row as last written */
+    int json_builds;
+} Record;
+
+@typeview on Record { r: ^settings_json, ^written; }
+
+/* The derived column: rebuilt when the settings' stamp moved, on read. */
+static const Json* Record_settings_json(Record* r) {
+    Json* out = r->settings_json.stale(cc_inputs(r->settings.gen()));
+    if (out) {
+        const Settings* st = r->settings.ref();
+        size_t o = 0;
+        int i;
+        o += (size_t)snprintf(out->s + o, sizeof out->s - o, "{");
+        for (i = 0; i < st->n; i++)
+            o += (size_t)snprintf(out->s + o, sizeof out->s - o, "%s\"%s\":\"%s\"",
+                                  i ? "," : "", st->kv[i].k.s, st->kv[i].v.s);
+        snprintf(out->s + o, sizeof out->s - o, "}");
+        r->settings_json.commit();
+        r->json_builds++;
+    }
+    return r->settings_json.ref();
+}
+
+/* settings.assign(values): a known key, and a tab width that is a number. */
+static bool settings_assign(Settings* st, const Setting* kv, int n) {
+    int i, j;
+    for (i = 0; i < n; i++) {
+        const char* k = kv[i].k.s;
+        if (strcmp(k, "theme") && strcmp(k, "font") && strcmp(k, "tab_width")) return false;
+        if (!strcmp(k, "tab_width") && strspn(kv[i].v.s, "0123456789") != strlen(kv[i].v.s))
+            return false;
+        for (j = 0; j < st->n && !Text_eq(&st->kv[j].k, &kv[i].k); j++) {
+        }
+        if (j == st->n) {
+            if (st->n == 8) return false;
+            st->n++;
+        }
+        st->kv[j] = kv[i];
+    }
+    return true;
+}
+
+/* The caller's intent. The step that can fail runs first, on a copy, so a
+ * failure leaves every column as it was. Then each set() moves a stamp only
+ * if the value changed. No column list, no JSON, no SQL here. */
+static void !>(CCError) Record_update(Record* r, const char* name, Patch styles,
+                                      const Setting* kv, int n) {
+    Settings next = r->settings.val();
+    if (kv && !settings_assign(&next, kv, n))
+        return cc_err(CC_ERR_INVALID_ARG, "unknown setting or bad value");
+    if (name) r->name.set(text(name));
+    @switch (styles) {
+        case .keep: break;
+        case .clear: r->custom_styles.set((OptText){ .some = false }); break;
+        case .to(t): r->custom_styles.set((OptText){ .some = true, .t = t }); break;
+    }
+    if (kv) r->settings.set(next);
+    return cc_ok();
+}
+
+/* ---- the database -------------------------------------------------------- */
+
+typedef struct { bool fail; } Tx;
+
+static void !>(CCError) Tx_exec(Tx* tx, const char* sql) {
+    if (tx->fail) return cc_err(CC_ERR_IO, "disk full");
+    printf("    SQL: %s\n", sql);
+    return cc_ok();
+}
+
+/* The row's columns, once: the stamps the written watermark is over, in
+ * the order the SET clauses below name by bit. */
+enum { COL_NAME, COL_STYLES, COL_SETTINGS };
+
+static CCInputs Record_row(Record* r) {
+    return cc_inputs(r->name.gen(), r->custom_styles.gen(), r->settings.gen());
+}
+
+/* The row as last written, marked when a row is loaded. */
+static void Record_loaded(Record* r) {
+    CCInputs row = Record_row(r);
+    CCStampCheck k = cc_stamp_check(&r->written, row.v, row.n);
+    cc_stamp_commit(&k);
+}
+
+/* The effect: the columns whose stamps moved since the row was last
+ * written, and the watermark recorded only after the write succeeded. */
+static void !>(CCError) Record_flush(Record* r, Tx* tx) {
+    char sql[1024];
+    size_t o = 0;
+    CCInputs row = Record_row(r);
+    CCStampCheck k = cc_stamp_check(&r->written, row.v, row.n);
+    @errhandler(CCError e) {
+        return cc_err(e);                /* the watermark is not recorded */
+    }
+    if (!k.stale) {
+        printf("    (nothing to write)\n");
+        return cc_ok();
+    }
+    o += (size_t)snprintf(sql + o, sizeof sql - o, "UPDATE record SET");
+    if (k.changed & CC_INPUT(COL_NAME))
+        o += (size_t)snprintf(sql + o, sizeof sql - o, " name='%s',", r->name.ref()->s);
+    if (k.changed & CC_INPUT(COL_STYLES)) {
+        const OptText* cs = r->custom_styles.ref();
+        if (cs->some)
+            o += (size_t)snprintf(sql + o, sizeof sql - o, " custom_styles='%s',", cs->t.s);
+        else
+            o += (size_t)snprintf(sql + o, sizeof sql - o, " custom_styles=NULL,");
+    }
+    if (k.changed & CC_INPUT(COL_SETTINGS))
+        o += (size_t)snprintf(sql + o, sizeof sql - o, " settings='%s',",
+                              r->settings_json()->s);
+    sql[o - 1] = ' ';
+    snprintf(sql + o, sizeof sql - o, "WHERE id=1");
+    tx->exec(sql) !>;
+    cc_stamp_commit(&k);
+    return cc_ok();
+}
+
+/* ---- a session ------------------------------------------------------------ */
+
+static void step(Record* r, Tx* tx, const char* what, const char* name, Patch styles,
+                 const Setting* kv, int n) {
+    printf("%s\n", what);
+    r->update(name, styles, kv, n) !>(e) {
+        printf("    update refused: %s; name is still '%s'\n", e.message ? e.message : "?",
+               r->name.ref()->s);
+        return;
+    };
+    r->flush(tx) !>(e) {
+        printf("    write failed: %s; the row stays unwritten\n", e.message ? e.message : "?");
+    };
+}
+
+int main(void) {
+    static Record r;
+    Tx tx = { .fail = false };
+    Setting dark[] = { { text("theme"), text("dark") } };
+    Setting mono[] = { { text("font"), text("mono") } };
+    Setting bad[] = { { text("tab_width"), text("four") } };
+
+    /* a row as loaded from the database */
+    r.name.set(text("alpha"));
+    r.settings.set((Settings){ .n = 1, .kv = { dark[0] } });
+    Record_loaded(&r);
+
+    step(&r, &tx, "the same name again", "alpha", (Patch){ .keep = {} }, NULL, 0);
+    step(&r, &tx, "a new name and styles", "beta", (Patch){ .to = text("bold") }, NULL, 0);
+    step(&r, &tx, "a font", NULL, (Patch){ .keep = {} }, mono, 1);
+    step(&r, &tx, "the same font again", NULL, (Patch){ .keep = {} }, mono, 1);
+    step(&r, &tx, "a name with a bad setting", "gamma", (Patch){ .keep = {} }, bad, 1);
+    tx.fail = true;
+    step(&r, &tx, "clear the styles, and the write fails", NULL, (Patch){ .clear = {} }, NULL, 0);
+    tx.fail = false;
+    printf("the next flush\n");
+    r.flush(&tx) !>(e) { printf("    write failed again\n"); };
+
+    printf("settings JSON built %d time(s)\n", r.json_builds);
+    return 0;
+}

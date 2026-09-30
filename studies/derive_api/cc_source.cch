@@ -5,7 +5,32 @@
 #include <ccc/cc_instantiate.cch>
 #include "cc_gen.h"
 
-CC_GENERIC_FACTORY(Source, 1) {
+/* Source::[T] is a value and its stamp: a generation that moves on every
+ * store. Source::[T, eq] chooses the precise stamp once, where the value is
+ * declared: set() compares with eq and moves the stamp only when the value
+ * changed, which an effect (a write, a flush) needs and a cache does not.
+ * set() says whether the stamp moved. mut() hands out the bytes and moves
+ * the stamp without comparing. */
+CC_GENERIC_FACTORY(Source) {
+    if (type_args.len < 1 || !mangled.ptr) return cc_slice_empty();
+    if (type_args.len >= 2) return @emit(`
+#ifndef ${mangled}_DEFINED
+#define ${mangled}_DEFINED
+typedef struct ${mangled} { ${arg(0)} value; CCGen g; } ${mangled};
+@typeview on ${mangled} { r: ^value, ^g; }
+static bool ${arg(1)}(const ${arg(0)}* a, const ${arg(0)}* b);
+static inline bool ${mangled}_set(${mangled}* s, ${arg(0)} v) {
+    if (${arg(1)}(&s->value, &v)) return false;
+    s->value = v;
+    cc_gen_bump(&s->g);
+    return true;
+}
+static inline ${arg(0)}* ${mangled}_mut(${mangled}* s) { cc_gen_bump(&s->g); return &s->value; }
+static inline ${arg(0)} ${mangled}_val(const ${mangled}* s) { return s->value; }
+static inline const ${arg(0)}* ${mangled}_ref(const ${mangled}* s) { return &s->value; }
+static inline uint64_t ${mangled}_gen(const ${mangled}* s) { return cc_gen_get(&s->g); }
+#endif
+`, arena);
     return @emit(`
 #ifndef ${mangled}_DEFINED
 #define ${mangled}_DEFINED
@@ -13,7 +38,7 @@ typedef struct ${mangled} { ${arg(0)} value; CCGen g; } ${mangled};
 /* Only the methods below touch the bytes: a store that skipped set() or
  * mut() would change the value and keep the generation. */
 @typeview on ${mangled} { r: ^value, ^g; }
-static inline void ${mangled}_set(${mangled}* s, ${arg(0)} v) { s->value = v; cc_gen_bump(&s->g); }
+static inline bool ${mangled}_set(${mangled}* s, ${arg(0)} v) { s->value = v; cc_gen_bump(&s->g); return true; }
 static inline ${arg(0)}* ${mangled}_mut(${mangled}* s) { cc_gen_bump(&s->g); return &s->value; }
 static inline ${arg(0)} ${mangled}_val(const ${mangled}* s) { return s->value; }
 static inline const ${arg(0)}* ${mangled}_ref(const ${mangled}* s) { return &s->value; }
