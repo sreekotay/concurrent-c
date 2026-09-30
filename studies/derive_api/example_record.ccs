@@ -14,127 +14,182 @@
  *     is the columns whose stamps moved since it;
  *   - update() only states intent, and does its failing step first.
  *
- * The database is a stand-in that prints its SQL and can be told to fail. */
+ * The record's bytes live on the arena it keeps. The database is a
+ * stand-in that prints the statement and its bound values, and can be
+ * told to fail. */
 #include <ccc/std/prelude.cch>
-#include <stdio.h>
-#include <string.h>
+#include <ccc/stdio.cch>
 #define CC_GEN_IMPL                      /* this unit defines the counter */
 #include "cc_source.cch"
 
 /* ---- the column values ------------------------------------------------ */
 
-typedef struct { char s[64]; } Text;
-typedef struct { bool some; Text t; } OptText;          /* a nullable column */
-typedef struct { Text k, v; } Setting;
-typedef struct { int n; Setting kv[8]; } Settings;
-typedef struct { char s[512]; } Json;
+typedef struct { char[:] k; char[:] v; } Setting;
 
-static Text text(const char* s) {
-    Text t = {0};
-    snprintf(t.s, sizeof t.s, "%s", s);
-    return t;
-}
-
-/* The equalities that make each column's stamp precise. */
-static bool Text_eq(const Text* a, const Text* b) { return strcmp(a->s, b->s) == 0; }
-
-static bool OptText_eq(const OptText* a, const OptText* b) {
-    return a->some == b->some && (!a->some || Text_eq(&a->t, &b->t));
-}
-
-static bool Settings_eq(const Settings* a, const Settings* b) {
-    int i;
-    if (a->n != b->n) return false;
-    for (i = 0; i < a->n; i++)
-        if (!Text_eq(&a->kv[i].k, &b->kv[i].k) || !Text_eq(&a->kv[i].v, &b->kv[i].v))
-            return false;
-    return true;
-}
+/* a nullable column */
+@variant Styles { none: void; some: char[:]; };
 
 /* keep / clear / set, stated rather than encoded as UNSET or
  * Option<Option<&str>> */
-@variant Patch { keep: void; clear: void; to: Text; };
+@variant Patch { keep: void; clear: void; to: char[:]; };
+
+/* The equalities that make each column's stamp precise. */
+static bool same_text(char[:] a, char[:] b) { return a.eq(b); }
+
+static bool same_styles(Styles a, Styles b) {
+    char[:] none = "";
+    @switch (a) {
+        case .none: return b.kind == .none;
+        case .some(t): {
+            char[:] u = b.some ?> none;
+            return b.kind == .some && same_text(t, u);
+        }
+    }
+    return false;
+}
+
+static bool same_settings(CCVec::[Setting] a, CCVec::[Setting] b) {
+    @errhandler(CCError e) {
+        (void)e;
+        return false;                    /* the zip met different lengths */
+    }
+    @for (x, y in a, b) {
+        if (!same_text(x.k, y.k) || !same_text(x.v, y.v)) return false;
+    } !>;
+    return true;
+}
 
 /* ---- the record -------------------------------------------------------- */
 
 typedef struct {
-    Source::[Text, Text_eq]         name;
-    Source::[OptText, OptText_eq]   custom_styles;
-    Source::[Settings, Settings_eq] settings;
-    Derived::[Json]                 settings_json;   /* storage; r.settings_json() is the read */
-    CCStamp                         written;         /* the row as last written */
+    CCArena keep;                                     /* where the record's bytes live */
+    Source::[char[:], same_text]         name;
+    Source::[Styles, same_styles]     custom_styles;
+    Source::[CCVec::[Setting], same_settings]   settings;
+    Derived::[CCString]               settings_json;   /* storage; r.settings_json() is the read */
+    CCStamp                           written;         /* the row as last written */
     int json_builds;
 } Record;
 
 @typeview on Record { r: ^settings_json, ^written; }
 
-/* The derived column: rebuilt when the settings' stamp moved, on read. */
-static const Json* Record_settings_json(Record* r) {
-    Json* out = r->settings_json.stale(cc_inputs(r->settings.gen()));
+/* A record's bytes live on `keep`, the arena it is opened on. */
+static Record Record_open(CCArena keep) {
+    Record r = { .keep = keep };
+    return r;
+}
+
+/* The derived column: rebuilt into its own storage when the settings'
+ * stamp moved, on read. */
+static char[:] Record_settings_json(Record* r) {
+    CCString* out = r->settings_json.stale(cc_inputs(r->settings.gen()));
     if (out) {
-        const Settings* st = r->settings.ref();
-        size_t o = 0;
-        int i;
-        o += (size_t)snprintf(out->s + o, sizeof out->s - o, "{");
-        for (i = 0; i < st->n; i++)
-            o += (size_t)snprintf(out->s + o, sizeof out->s - o, "%s\"%s\":\"%s\"",
-                                  i ? "," : "", st->kv[i].k.s, st->kv[i].v.s);
-        snprintf(out->s + o, sizeof out->s - o, "}");
+        CCVec::[Setting] st = r->settings.val();
+        out->clear();
+        out->push_cstr("{", r->keep);
+        @for (i, kv in st) {
+            CCString item = @string(`"${kv.k}":"${kv.v}"`, @scratch);
+            if (i) out->push_cstr(",", r->keep);
+            out->push_slice(item.as_slice(), r->keep);
+        }
+        out->push_cstr("}", r->keep);
         r->settings_json.commit();
         r->json_builds++;
     }
-    return r->settings_json.ref();
+    return r->settings_json.ref()->as_slice();
 }
 
-/* settings.assign(values): a known key, and a tab width that is a number. */
-static bool settings_assign(Settings* st, const Setting* kv, int n) {
-    int i, j;
-    for (i = 0; i < n; i++) {
-        const char* k = kv[i].k.s;
-        if (strcmp(k, "theme") && strcmp(k, "font") && strcmp(k, "tab_width")) return false;
-        if (!strcmp(k, "tab_width") && strspn(kv[i].v.s, "0123456789") != strlen(kv[i].v.s))
-            return false;
-        for (j = 0; j < st->n && !Text_eq(&st->kv[j].k, &kv[i].k); j++) {
-        }
-        if (j == st->n) {
-            if (st->n == 8) return false;
-            st->n++;
-        }
-        st->kv[j] = kv[i];
+/* settings.assign(values): `cur` with `kv` applied, into `next` (a new
+ * list, its bytes on `keep`): a known key, and a tab width that is a
+ * number. */
+static void !>(CCError) settings_assign(CCVec::[Setting]* next, CCVec::[Setting] cur,
+                                        CCVec::[Setting] kv, CCArena keep) {
+    @errhandler(CCError e) {
+        return cc_err(e);
     }
-    return true;
+    @for (s in cur)
+        if (next->push(s) != 0) return cc_err(CC_ERR_OUT_OF_MEMORY, "settings");
+    @for (s in kv) {
+        bool found = false;
+        if (!s.k.eq("theme") && !s.k.eq("font") && !s.k.eq("tab_width"))
+            return cc_err(CC_ERR_INVALID_ARG, "unknown setting");
+        if (s.k.eq("tab_width"))
+            @for (c in s.v)
+                if (c < '0' || c > '9') return cc_err(CC_ERR_INVALID_ARG, "tab_width is not a number");
+        char[:] k = s.k.clone_into(keep) !>;
+        char[:] v = s.v.clone_into(keep) !>;
+        Setting kept = { .k = k, .v = v };
+        @for (&e in *next) {
+            if (same_text(e.k, kept.k)) {
+                e = kept;
+                found = true;
+            }
+        } !>;
+        if (!found && next->push(kept) != 0) return cc_err(CC_ERR_OUT_OF_MEMORY, "settings");
+    }
+    return cc_ok();
 }
 
-/* The caller's intent. The step that can fail runs first, on a copy, so a
- * failure leaves every column as it was. Then each set() moves a stamp only
- * if the value changed. No column list, no JSON, no SQL here. */
-static void !>(CCError) Record_update(Record* r, const char* name, Patch styles,
-                                      const Setting* kv, int n) {
-    Settings next = r->settings.val();
-    if (kv && !settings_assign(&next, kv, n))
-        return cc_err(CC_ERR_INVALID_ARG, "unknown setting or bad value");
-    if (name) r->name.set(text(name));
+/* The caller's intent. The step that can fail runs first, into new
+ * storage, so a failure leaves every column as it was. Then each set()
+ * moves a stamp only if the value changed. No column list, no JSON, no
+ * SQL here. */
+static void !>(CCError) Record_update(Record* r, Patch name, Patch styles, CCVec::[Setting] kv) {
+    @errhandler(CCError e) {
+        return cc_err(e);
+    }
+    CCVec::[Setting] next = cc_vec_new::[Setting](r->keep);
+    if (kv.len()) settings_assign(&next, r->settings.val(), kv, r->keep) !>;
+    @switch (name) {
+        case .keep: break;
+        case .clear: return cc_err(CC_ERR_INVALID_ARG, "name cannot be NULL");
+        case .to(t): {
+            char[:] kept = t.clone_into(r->keep) !>;
+            r->name.set(kept);
+            break;
+        }
+    }
     @switch (styles) {
         case .keep: break;
-        case .clear: r->custom_styles.set((OptText){ .some = false }); break;
-        case .to(t): r->custom_styles.set((OptText){ .some = true, .t = t }); break;
+        case .clear: r->custom_styles.set((Styles){ .none = {} }); break;
+        case .to(t): {
+            char[:] kept = t.clone_into(r->keep) !>;
+            r->custom_styles.set((Styles){ .some = kept });
+            break;
+        }
     }
-    if (kv) r->settings.set(next);
+    if (kv.len()) r->settings.set(next);
     return cc_ok();
 }
 
 /* ---- the database -------------------------------------------------------- */
 
+/* One SET: a column and its bound value (a missing value is NULL). */
+typedef struct { char[:] col; char[:] val; bool null; } Set;
+
 typedef struct { bool fail; } Tx;
 
-static void !>(CCError) Tx_exec(Tx* tx, const char* sql) {
+static void !>(CCError) Tx_update(Tx* tx, CCVec::[Set] sets) {
+    cc_arena_stack(sql, 512);
+    CCString cols = @string(`UPDATE record SET `, sql);
+    CCString vals = @string(``, sql);
     if (tx->fail) return cc_err(CC_ERR_IO, "disk full");
-    printf("    SQL: %s\n", sql);
+    @for (i, s in sets) {
+        CCString col = @string(`${s.col} = ?${i + 1}`, @scratch);
+        CCString val = s.null ? @string(`NULL`, @scratch) : @string(`'${s.val}'`, @scratch);
+        if (i) {
+            cols.push_cstr(", ", sql);
+            vals.push_cstr(", ", sql);
+        }
+        cols.push_slice(col.as_slice(), sql);
+        vals.push_slice(val.as_slice(), sql);
+    }
+    println(@string(`    ${cols} WHERE id = 1   [${vals}]`, @scratch));
     return cc_ok();
 }
 
 /* The row's columns, once: the stamps the written watermark is over, in
- * the order the SET clauses below name by bit. */
+ * the order the sets below name by bit. */
 enum { COL_NAME, COL_STYLES, COL_SETTINGS };
 
 static CCInputs Record_row(Record* r) {
@@ -151,75 +206,82 @@ static void Record_loaded(Record* r) {
 /* The effect: the columns whose stamps moved since the row was last
  * written, and the watermark recorded only after the write succeeded. */
 static void !>(CCError) Record_flush(Record* r, Tx* tx) {
-    char sql[1024];
-    size_t o = 0;
-    CCInputs row = Record_row(r);
-    CCStampCheck k = cc_stamp_check(&r->written, row.v, row.n);
     @errhandler(CCError e) {
         return cc_err(e);                /* the watermark is not recorded */
     }
+    CCInputs row = Record_row(r);
+    CCStampCheck k = cc_stamp_check(&r->written, row.v, row.n);
     if (!k.stale) {
-        printf("    (nothing to write)\n");
+        println("    (nothing to write)");
         return cc_ok();
     }
-    o += (size_t)snprintf(sql + o, sizeof sql - o, "UPDATE record SET");
+    /* (a literal in a char[:] field initializer is silently empty today:
+     * literal_field_probe.ccs; the names go through locals) */
+    char[:] c_name = "name", c_styles = "custom_styles", c_settings = "settings", none = "";
+    cc_arena_stack(scratch, 512);
+    CCVec::[Set] sets = cc_vec_new::[Set](scratch);
     if (k.changed & CC_INPUT(COL_NAME))
-        o += (size_t)snprintf(sql + o, sizeof sql - o, " name='%s',", r->name.ref()->s);
+        sets.push((Set){ .col = c_name, .val = r->name.val() });
     if (k.changed & CC_INPUT(COL_STYLES)) {
-        const OptText* cs = r->custom_styles.ref();
-        if (cs->some)
-            o += (size_t)snprintf(sql + o, sizeof sql - o, " custom_styles='%s',", cs->t.s);
-        else
-            o += (size_t)snprintf(sql + o, sizeof sql - o, " custom_styles=NULL,");
+        Styles cs = r->custom_styles.val();
+        sets.push((Set){ .col = c_styles, .val = cs.some ?> none, .null = cs.kind == .none });
     }
     if (k.changed & CC_INPUT(COL_SETTINGS))
-        o += (size_t)snprintf(sql + o, sizeof sql - o, " settings='%s',",
-                              r->settings_json()->s);
-    sql[o - 1] = ' ';
-    snprintf(sql + o, sizeof sql - o, "WHERE id=1");
-    tx->exec(sql) !>;
+        sets.push((Set){ .col = c_settings, .val = r->settings_json() });
+    tx->update(sets) !>;
     cc_stamp_commit(&k);
     return cc_ok();
 }
 
 /* ---- a session ------------------------------------------------------------ */
 
-static void step(Record* r, Tx* tx, const char* what, const char* name, Patch styles,
-                 const Setting* kv, int n) {
-    printf("%s\n", what);
-    r->update(name, styles, kv, n) !>(e) {
-        printf("    update refused: %s; name is still '%s'\n", e.message ? e.message : "?",
-               r->name.ref()->s);
+static void step(Record* r, Tx* tx, char[:] what, Patch name, Patch styles, CCVec::[Setting] kv) {
+    println(what);
+    r->update(name, styles, kv) !>(e) {
+        println(@string(`    update refused: ${e.message}; name is still '${r->name.val()}'`, @scratch));
         return;
     };
     r->flush(tx) !>(e) {
-        printf("    write failed: %s; the row stays unwritten\n", e.message ? e.message : "?");
+        println(@string(`    write failed: ${e.message}; the row stays unwritten`, @scratch));
     };
 }
 
 int main(void) {
-    static Record r;
+    @errhandler(CCError e) {
+        cc_error_log(e);
+        return 1;
+    }
+    CCArena keep = cc_arena_heap(kilobytes(8)) @destroy;
+    Record r = Record_open(keep);
     Tx tx = { .fail = false };
-    Setting dark[] = { { text("theme"), text("dark") } };
-    Setting mono[] = { { text("font"), text("mono") } };
-    Setting bad[] = { { text("tab_width"), text("four") } };
+    Patch keep_it = { .keep = {} };
+    char[:] theme = "theme", dark_v = "dark", font = "font", mono_v = "mono";
+    char[:] tab = "tab_width", four = "four";
+    char[:] alpha = "alpha", beta = "beta", gamma = "gamma", bold = "bold";
+    CCVec::[Setting] none = cc_vec_new::[Setting](keep);
+    CCVec::[Setting] dark = cc_vec_new::[Setting](keep);
+    CCVec::[Setting] mono = cc_vec_new::[Setting](keep);
+    CCVec::[Setting] bad = cc_vec_new::[Setting](keep);
+    if (dark.push((Setting){ .k = theme, .v = dark_v }) != 0 ||
+        mono.push((Setting){ .k = font, .v = mono_v }) != 0 ||
+        bad.push((Setting){ .k = tab, .v = four }) != 0)
+        return 1;
 
     /* a row as loaded from the database */
-    r.name.set(text("alpha"));
-    r.settings.set((Settings){ .n = 1, .kv = { dark[0] } });
+    r.update((Patch){ .to = alpha }, keep_it, dark) !>;
     Record_loaded(&r);
 
-    step(&r, &tx, "the same name again", "alpha", (Patch){ .keep = {} }, NULL, 0);
-    step(&r, &tx, "a new name and styles", "beta", (Patch){ .to = text("bold") }, NULL, 0);
-    step(&r, &tx, "a font", NULL, (Patch){ .keep = {} }, mono, 1);
-    step(&r, &tx, "the same font again", NULL, (Patch){ .keep = {} }, mono, 1);
-    step(&r, &tx, "a name with a bad setting", "gamma", (Patch){ .keep = {} }, bad, 1);
+    step(&r, &tx, "the same name again", (Patch){ .to = alpha }, keep_it, none);
+    step(&r, &tx, "a new name and styles", (Patch){ .to = beta }, (Patch){ .to = bold }, none);
+    step(&r, &tx, "a font", keep_it, keep_it, mono);
+    step(&r, &tx, "the same font again", keep_it, keep_it, mono);
+    step(&r, &tx, "a name with a bad setting", (Patch){ .to = gamma }, keep_it, bad);
     tx.fail = true;
-    step(&r, &tx, "clear the styles, and the write fails", NULL, (Patch){ .clear = {} }, NULL, 0);
+    step(&r, &tx, "clear the styles, and the write fails", keep_it, (Patch){ .clear = {} }, none);
     tx.fail = false;
-    printf("the next flush\n");
-    r.flush(&tx) !>(e) { printf("    write failed again\n"); };
+    println("the next flush");
+    r.flush(&tx) !>(e) { println("    write failed again"); };
 
-    printf("settings JSON built %d time(s)\n", r.json_builds);
+    println(@string(`settings JSON built ${r.json_builds} time(s)`, @scratch));
     return 0;
 }

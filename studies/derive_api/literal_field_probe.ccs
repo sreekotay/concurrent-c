@@ -1,0 +1,13 @@
+/* A string literal initializing a char[:] struct field is silently empty
+ * (seed 0.4.0-419): decl=[] compound=[] via-local=[name]. No diagnostic. */
+#include <ccc/std/prelude.cch>
+#include <ccc/stdio.cch>
+typedef struct { char[:] col; } Set;
+int main(void) {
+    char[:] name = "name";
+    Set a = { .col = "name" };
+    Set b = (Set){ .col = "name" };
+    Set c = (Set){ .col = name };
+    println(@string(`decl=[${a.col}] compound=[${b.col}] via-local=[${c.col}]`, @scratch));
+    return 0;
+}

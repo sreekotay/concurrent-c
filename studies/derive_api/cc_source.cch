@@ -18,9 +18,9 @@ CC_GENERIC_FACTORY(Source) {
 #define ${mangled}_DEFINED
 typedef struct ${mangled} { ${arg(0)} value; CCGen g; } ${mangled};
 @typeview on ${mangled} { r: ^value, ^g; }
-static bool ${arg(1)}(const ${arg(0)}* a, const ${arg(0)}* b);
+static bool ${arg(1)}(${arg(0)} a, ${arg(0)} b);
 static inline bool ${mangled}_set(${mangled}* s, ${arg(0)} v) {
-    if (${arg(1)}(&s->value, &v)) return false;
+    if (${arg(1)}(s->value, v)) return false;
     s->value = v;
     cc_gen_bump(&s->g);
     return true;

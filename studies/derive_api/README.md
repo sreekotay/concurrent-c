@@ -253,23 +253,24 @@ is stated once:
 | did this column change | `name != @name` before each store | `Source::[Text, Text_eq]`: the precise stamp, chosen at the declaration; `set()` moves it only on a real change |
 | keep the JSON in step | `if @settings_json.nil? \|\| updated != original` inside `update` | `Derived::[Json]` read as `r.settings_json()`, built when the flush first needs it |
 | which columns to write | `sets << [...]` inside `update` | a watermark with no slot, `CCStamp written`; the per-input changed bits are the SET list |
-| keep / clear / set | `UNSET` sentinel, `Option<Option<&str>>` | `@variant Patch { keep; clear; to: Text; }` |
+| keep / clear / set | `UNSET` sentinel, `Option<Option<&str>>` | `@variant Patch { keep; clear; to: char[:]; }` |
 
 `update()` states intent only, and does its one failing step (assigning
 settings) first, on a copy. The original assigns `name` and
 `custom_styles` to the object before that step, so a failure there left
 the object ahead of the database. The flush records the watermark only
 after the write succeeds, so a failed write is retried at the next
-flush. The run:
+flush. The database stand-in takes the SET list as bound parameters,
+as the Rust version's `Box<dyn ToSql>` does. The run:
 
 ```
 the same name again                      (nothing to write)
-a new name and styles                    UPDATE record SET name='beta', custom_styles='bold'
-a font                                   UPDATE record SET settings='{"theme":"dark","font":"mono"}'
+a new name and styles                    UPDATE record SET name = ?1, custom_styles = ?2   ['beta', 'bold']
+a font                                   UPDATE record SET settings = ?1   ['{"theme":"dark","font":"mono"}']
 the same font again                      (nothing to write)
-a name with a bad setting                update refused; name is still 'beta'
-clear the styles, and the write fails    the row stays unwritten
-the next flush                           UPDATE record SET custom_styles=NULL
+a name with a bad setting                update refused: tab_width is not a number; name is still 'beta'
+clear the styles, and the write fails    write failed: disk full; the row stays unwritten
+the next flush                           UPDATE record SET custom_styles = ?1   [NULL]
 settings JSON built 1 time(s)
 ```
 
@@ -277,16 +278,41 @@ What it found:
 
 - **The precise stamp belongs in the declaration.** `Source::[T, eq]`
   makes `set()` compare, once for the value, rather than a `set_eq` at
-  each call. The factory declares `eq`'s typed prototype itself, so the
-  equality can be defined anywhere in the unit.
+  each call. The factory declares `eq`'s prototype itself, taking the
+  values by value (slices and variants are small headers, and a pointer
+  prototype met `const char[:]*`, where `const` binds to the element).
 - **The column list is still stated twice**: once as the struct's
-  fields and once as `Record_row()` with the SET clause per bit. A
-  comptime pass over the struct's `Source_*` fields could write both
-  from the struct alone; that is the next thing this example asks for.
+  fields and once as `Record_row()` with a SET per bit. A comptime pass
+  over the struct's `Source_*` fields could write both from the struct
+  alone; that is the next thing this example asks for.
 - **The in-memory copy is still trusted as the database.** Nothing
   here reads the row's own version, so another writer's change is
   invisible to the watermark; a real store would put the row's version
   (or an `updated_at`) among the inputs it checks before writing.
+
+Writing it in idiomatic CC (`@for`, template strings, arena-kept
+`char[:]`, `CCVec`, bound parameters) met five gaps in the language as
+it stands, each worked around in the file and worth fixing:
+
+- **A string literal in a `char[:]` struct field is silently empty.**
+  `Set a = { .col = "name" };` and `(Set){ .col = "name" }` both leave
+  `.col` empty, with no diagnostic; only a `char[:]` variable works
+  (`literal_field_probe.ccs`: `decl=[] compound=[] via-local=[name]`).
+  The first run of this example printed `SET  = ?1` and a blank name.
+  This is the one that returns a wrong value.
+- **A typedef of an extent does not walk.** `typedef char[:] Text;` and
+  `typedef CCVec::[Setting] Settings;` both lose the `.len` hook, so
+  `@for (c in text)` is refused; the example spells the types out.
+- **A `CCVec` of structs has no slice view.** `Setting[:] s = v;` works
+  for `int` and `char` vecs and emits a call to an undeclared
+  `CCVec_Setting_as_slice` for a struct element.
+- **`CCVec::[Setting] !>(CCError)` is refused** because its Result is
+  generated before the vec instance's type; the example fills a vec the
+  caller made (a destination parameter) instead of returning one.
+- **A method-shaped name hijacks UFCS.** An equality called `text_eq`
+  for `typedef char[:] Text` *is* `Text`'s `eq` method, so `a->eq(b)`
+  inside it called itself and spun. That is UFCS as designed; the
+  equalities are named `same_*`.
 
 ## Costs measured
 
