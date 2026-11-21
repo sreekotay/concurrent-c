@@ -5310,7 +5310,7 @@ state guarded by the held names: owning the result happens inside the
 builder, before release. `arena` is passed through to the builder for owning
 copies of the result; it may be `NULL` when the builder does not allocate.
 
-**Rule (idempotent release):** `g.release()` is idempotent. After the first release, the guard's entry pointer is cleared to `NULL`; a second `release()` or `destroy()` on the same guard is a local no-op and does not touch the lock word. This is intentional so end-of-hold cleanup does not read as a double-unlock bug in review.
+**Rule (idempotent release):** `g.release()` is idempotent. After the first release, the guard's entry pointer is cleared to `NULL`; a second `release()` or `destroy()` on the same guard is a local no-op and does not touch the lock word.
 
 `g.destroy()` and bodyless `@destroy` on a guard are aliases for `g.release()`.
 `CCExclHold` is the same: `h.release()` / `h.destroy()` / `@destroy` are
@@ -8749,7 +8749,7 @@ For bidi protocols, the default rule SHOULD be:
 - Teardown happens exactly once, in one place, and each blocking operation is
   bounded by an API that accepts the current deadline
 
-This avoids “both sides race to close” bugs and makes shutdown reviewable.
+This avoids “both sides race to close” bugs.
 
 ---
 
