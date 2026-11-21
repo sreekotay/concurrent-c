@@ -35,15 +35,18 @@ typedef struct {
     int64_t value;
 } Counter;
 
+/* The domain owns the data. Each Counter is reached only through a view
+ * taken while its guard is held; the view is dead after g.release(). */
 static CCExclusive g_excl;
-static Counter g_shared;                 /* guarded by name=1 */
-static Counter g_private[NUM_WORKERS];   /* each guarded by name=100+id */
+static Counter g_shared;               /* owned for name=1 */
+static Counter g_private[NUM_WORKERS]; /* owned for name=100+id */
 
 static void bump_shared(int iters) {
     CCExclusiveMutex m = g_excl.mutex(1); /* resolve once per worker */
     for (int i = 0; i < iters; i++) {
         CCExclusiveGuard g = m.acquire();
-        g_shared.value++;
+        Counter* v = &g_shared;           /* view: lives until g.release() */
+        v->value++;
         g.release();
     }
 }
@@ -52,7 +55,8 @@ static void bump_private(int worker_id, int iters) {
     CCExclusiveMutex m = g_excl.mutex((uint64_t)(100 + worker_id));
     for (int i = 0; i < iters; i++) {
         CCExclusiveGuard g = m.acquire();
-        g_private[worker_id].value++;
+        Counter* v = &g_private[worker_id]; /* view: lives until g.release() */
+        v->value++;
         g.release();
     }
 }

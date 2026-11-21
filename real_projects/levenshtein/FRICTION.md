@@ -5,6 +5,8 @@ What the port surfaced, in the order it drew blood. Gaps are data
 
 ## Compiler bug: `double !>(CCError)` module method broke the build
 
+**Tag:** bug · fixed
+
 The first fallible `double` method died in the parser pass with
 `',' expected (got 'r')` pointing at generated code. `CCResult_double_CCError`
 is stdlib-predeclared (string.cch/slice.cch own its definition), so the emit
@@ -19,6 +21,8 @@ py_module TU using a predeclared Result type without its owning header.
 
 ## Scanners read string-literal content as code
 
+**Tag:** bug · open (workaround in place; the three scanners do not yet use template-mode)
+
 The regression test first embedded the module source in a backtick template
 (write-to-file-then-build). The include scan, result-spec scan, and factory
 scan all read the template's *content*: `#include <ccc/script/py.cch>` inside
@@ -30,6 +34,8 @@ for this case yet.
 
 ## Fixed: semicolon in a leading comment broke `@destroy` on `.shcc`
 
+**Tag:** bug · fixed
+
 A header comment containing `;` made `CCArena a = … @destroy` die with
 `';' expected (got '@')`. The emit-plan insert story was a misread —
 prelude insert already skips block comments. The real hole was the
@@ -40,6 +46,8 @@ became the anchor and the rewrite skipped the site. Pinned by
 
 ## Keyword-only (`*`) still unspelled
 
+**Tag:** open question
+
 Defaults are spelled as C++-style literals on parameters
 (`long long pad = 1`): reflection sees them, lowering strips them for
 host C, and `py_module` fills missing kwargs from the literal. Upstream
@@ -49,6 +57,8 @@ not exported yet.
 
 ## Text as `CCPyStr`, not UTF-8 `CCSlice`
 
+**Tag:** design cost
+
 Methods that want Unicode scalars take `CCPyStr` (call-scoped borrow of
 the Python `str`) and call `s.codepoints(arena)` — Stable-ABI UCS4 fill,
 no UTF-8 round-trip. `CCSlice` remains the UTF-8 byte view when that is
@@ -56,12 +66,16 @@ what the API wants.
 
 ## `name__helper` statics were mistaken for grammar tape
 
+**Tag:** bug · fixed
+
 Any identifier containing `__` was classified as a grammar-engine static
 and emitted as opaque tape — so UFCS inside `lev__prep` never rewrote.
 Tightened to `Name__r_` / `__m_` / `__b_` / `__fill` / `__s__*` only;
 `tests/ufcs_dunder_helper_smoke.ccs` pins it.
 
 ## Upstream semantics live in the implementation, not the docs
+
+**Tag:** design cost
 
 Two behaviors only empirical probing settled: transposition counts halve
 with *integer* division (an odd mismatch count rounds down), and
